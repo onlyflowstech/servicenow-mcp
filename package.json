@@ -1,0 +1,54 @@
+{
+  "name": "@onlyflows/servicenow-mcp",
+  "version": "1.0.0",
+  "description": "The most comprehensive ServiceNow MCP server. 17 tools for full CRUD, CMDB graph traversal, background scripts, ATF testing, and more.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "servicenow-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "servicenow",
+    "mcp",
+    "model-context-protocol",
+    "itsm",
+    "itom",
+    "cmdb",
+    "claude",
+    "cursor",
+    "windsurf",
+    "ai-tools"
+  ],
+  "author": "OnlyFlows <support@onlyflows.tech> (https://onlyflows.tech)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/onlyflowstech/servicenow-mcp"
+  },
+  "homepage": "https://github.com/onlyflowstech/servicenow-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/onlyflowstech/servicenow-mcp/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ]
+}
