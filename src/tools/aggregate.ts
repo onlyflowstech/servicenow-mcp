@@ -35,6 +35,10 @@ export const definition = {
         type: "string",
         description: "Display values mode: true, false, or all",
       },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
+      },
     },
     required: ["table", "type"],
   },
@@ -47,6 +51,7 @@ export const schema = z.object({
   field: z.string().optional(),
   group_by: z.string().optional(),
   display_value: z.string().optional(),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 export async function handler(

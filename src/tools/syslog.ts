@@ -39,6 +39,10 @@ export const definition = {
         type: "string",
         description: "Fields to return (default: sys_id,level,source,message,sys_created_on)",
       },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
+      },
     },
     required: [],
   },
@@ -52,6 +56,7 @@ export const schema = z.object({
   limit: z.number().optional().default(25),
   since: z.number().optional().default(60),
   fields: z.string().optional(),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 export async function handler(

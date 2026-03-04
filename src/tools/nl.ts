@@ -27,6 +27,10 @@ export const definition = {
         type: "boolean",
         description: "Required for bulk deletes (in addition to confirm)",
       },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
+      },
     },
     required: ["text"],
   },
@@ -37,6 +41,7 @@ export const schema = z.object({
   execute: z.boolean().optional().default(false),
   confirm: z.boolean().optional().default(false),
   force: z.boolean().optional().default(false),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 // ── Table aliases ──────────────────────────────────────────────────

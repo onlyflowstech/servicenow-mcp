@@ -51,6 +51,10 @@ export const definition = {
         type: "number",
         description: "Max wait time in seconds (default 120 for tests, 300 for suites)",
       },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
+      },
     },
     required: ["action"],
   },
@@ -67,6 +71,7 @@ export const schema = z.object({
   limit: z.number().optional().default(20),
   wait: z.boolean().optional().default(true),
   timeout: z.number().optional(),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 function sleep(ms: number): Promise<void> {
