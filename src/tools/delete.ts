@@ -22,6 +22,10 @@ export const definition = {
         type: "boolean",
         description: "Must be true to execute the deletion. Safety measure to prevent accidental deletes.",
       },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
+      },
     },
     required: ["table", "sys_id", "confirm"],
   },
@@ -31,6 +35,7 @@ export const schema = z.object({
   table: z.string(),
   sys_id: z.string(),
   confirm: z.boolean(),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 export async function handler(

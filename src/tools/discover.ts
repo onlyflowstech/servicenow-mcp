@@ -27,6 +27,10 @@ export const definition = {
         type: "string",
         description: "Filter by active status: true or false (apps and plugins only)",
       },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
+      },
     },
     required: ["type"],
   },
@@ -37,6 +41,7 @@ export const schema = z.object({
   query: z.string().optional(),
   limit: z.number().optional().default(20),
   active: z.string().optional(),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 export async function handler(

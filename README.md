@@ -3,12 +3,84 @@
 <!-- Logo placeholder -->
 <!-- ![ServiceNow MCP Server](banner.png) -->
 
-**The most comprehensive ServiceNow MCP server.** 17 tools for full CRUD, CMDB graph traversal, background scripts, ATF testing, and more.
+**The most comprehensive ServiceNow MCP server.** 18 tools for full CRUD, CMDB graph traversal, background scripts, ATF testing, multi-instance profiles, and more.
 
 Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](https://github.com/onlyflowstech)
 
 [![npm version](https://img.shields.io/npm/v/@onlyflows/servicenow-mcp)](https://www.npmjs.com/package/@onlyflows/servicenow-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
+---
+
+## Multi-Instance Profiles
+
+Manage multiple ServiceNow instances (dev, test, prod, PDI) with named profiles. Switch between them per-tool-call or for the entire session — no more restarting to change instances.
+
+### Setup
+
+Create `~/.servicenow-mcp/config.json`:
+
+```json
+{
+  "version": 1,
+  "default_profile": "dev",
+  "profiles": {
+    "dev": {
+      "instance": "https://mydev.service-now.com",
+      "username": "admin",
+      "credential": "env:SN_PASSWORD_DEV",
+      "description": "Development instance"
+    },
+    "prod": {
+      "instance": "https://myprod.service-now.com",
+      "username": "api.user",
+      "credential": "env:SN_PASSWORD_PROD",
+      "description": "Production instance"
+    }
+  }
+}
+```
+
+Then pass the credential environment variables in your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "servicenow": {
+      "command": "npx",
+      "args": ["-y", "@onlyflows/servicenow-mcp"],
+      "env": {
+        "SN_PASSWORD_DEV": "your-dev-password",
+        "SN_PASSWORD_PROD": "your-prod-password"
+      }
+    }
+  }
+}
+```
+
+### Credential Options
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| `env:VAR_NAME` | `"env:SN_PASSWORD_DEV"` | Read from environment variable (recommended) |
+| Plain string | `"mypassword"` | Stored directly in config (not recommended, warns on startup) |
+
+### Using Profiles
+
+With natural language:
+- *"list all profiles"* — shows all configured profiles and which is active
+- *"switch to prod"* — changes the active profile for the session
+- *"which instance am I connected to?"* — shows active profile details
+- *"show me the dev profile info"* — inspect a specific profile's config
+- *"add a new profile called staging at https://staging.service-now.com with user admin and credential env:SN_PASSWORD_STAGING"* — add a new profile (persisted to config file)
+
+With the `profile` parameter on any tool:
+- *"query incidents on prod"* — uses the prod profile for this call only
+- *"get incident INC0010001 on dev"* — uses dev regardless of active profile
+
+### Backward Compatibility
+
+If no config file exists, the server falls back to environment variables (`SN_INSTANCE`, `SN_USER`, `SN_PASSWORD`) exactly as before. No changes needed for existing setups.
 
 ---
 
@@ -34,7 +106,8 @@ Most ServiceNow MCP integrations are **read-only** and support a handful of tabl
 | ATF test execution | ❌ | ✅ |
 | Natural language interface | ❌ | ✅ |
 | Background scripts | ❌ | ✅ (with Playwright) |
-| **Total tools** | **1–3** | **17** |
+| Multi-instance profiles | ❌ | ✅ (named profiles, per-call override) |
+| **Total tools** | **1–3** | **18** |
 
 ---
 
@@ -161,17 +234,27 @@ Add to `.vscode/mcp.json`:
 | `sn_nl` | Natural language → ServiceNow API calls |
 | `sn_script` | Execute background scripts (requires Playwright) |
 
+### Profile Management
+
+| Tool | Description |
+|------|-------------|
+| `sn_profile` | List, switch, inspect, and add instance profiles |
+
 ---
 
 ## Environment Variables
 
+> **Note:** If using [multi-instance profiles](#multi-instance-profiles), these env vars are only needed as a fallback when no config file exists.
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SN_INSTANCE` | ✅ | — | Instance URL (e.g. `https://yourinstance.service-now.com`) |
-| `SN_USER` | ✅ | — | ServiceNow username |
-| `SN_PASSWORD` | ✅ | — | ServiceNow password |
+| `SN_INSTANCE` | ✅* | — | Instance URL (e.g. `https://yourinstance.service-now.com`) |
+| `SN_USER` | ✅* | — | ServiceNow username |
+| `SN_PASSWORD` | ✅* | — | ServiceNow password |
 | `SN_DISPLAY_VALUE` | ❌ | `true` | Default display value mode (`true`, `false`, `all`) |
 | `SN_REL_DEPTH` | ❌ | `3` | Default CMDB relationship traversal depth |
+
+*Not required when using `~/.servicenow-mcp/config.json` profiles.
 
 ---
 
@@ -202,6 +285,10 @@ Once connected, your AI assistant can:
 
 **ATF testing:**
 > "Run ATF test suite abc123 and wait for results"
+
+**Profile management:**
+> "Switch to the prod profile"
+> "Query incidents on dev" (per-call profile override)
 
 ---
 

@@ -18,6 +18,10 @@ export const definition = {
         type: "boolean",
         description: "If true, return only a sorted list of field names",
       },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
+      },
     },
     required: ["table"],
   },
@@ -26,6 +30,7 @@ export const definition = {
 export const schema = z.object({
   table: z.string(),
   fields_only: z.boolean().optional().default(false),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 export async function handler(

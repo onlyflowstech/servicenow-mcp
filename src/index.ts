@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 /**
- * @onlyflows/servicenow-mcp — The most comprehensive ServiceNow MCP server.
+ * @onlyflows/servicenow-mcp -- The most comprehensive ServiceNow MCP server.
  *
- * 17 tools for full CRUD, CMDB graph traversal, background scripts,
- * ATF testing, and more.
+ * Supports multi-instance profiles: configure named profiles via environment
+ * variables (SN_PROFILES JSON or SN_PROFILE_<name>_* vars) and select them
+ * per-tool-call with the `profile` parameter, or use `sn_profile` to
+ * list / switch / inspect profiles at runtime.
  *
  * Published by OnlyFlows (https://onlyflows.tech)
  *
@@ -18,20 +20,18 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { loadConfig } from "./config.js";
-import { ServiceNowClient } from "./client.js";
+import { ProfileManager } from "./profile-manager.js";
 import { getToolDefinitions, executeTool } from "./tools/index.js";
 
 async function main() {
-  // Load configuration
-  const config = loadConfig();
-  const client = new ServiceNowClient(config);
+  // Initialise profile manager (loads all profiles from env)
+  const profileManager = new ProfileManager();
 
   // Create MCP server
   const server = new Server(
     {
       name: "@onlyflows/servicenow-mcp",
-      version: "1.0.0",
+      version: "1.1.0",
     },
     {
       capabilities: {
@@ -48,7 +48,7 @@ async function main() {
   // Register tool execution handler
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    return executeTool(name, args ?? {}, client, config);
+    return executeTool(name, args ?? {}, profileManager);
   });
 
   // Connect via stdio transport
@@ -56,8 +56,15 @@ async function main() {
   await server.connect(transport);
 
   // Log to stderr (stdout is reserved for MCP protocol)
+  const activeProfile = profileManager.getActiveProfileName();
+  const activeConfig = profileManager.getConfig();
+  const profileNames = profileManager.listProfiles();
+  const profileInfo =
+    profileNames.length > 1
+      ? ` [${profileNames.length} profiles, active: ${activeProfile}]`
+      : "";
   console.error(
-    `@onlyflows/servicenow-mcp v1.0.0 started — ${config.instance} (${getToolDefinitions().length} tools)`
+    `@onlyflows/servicenow-mcp v1.1.0 started -- ${activeConfig.instance} (${getToolDefinitions().length} tools)${profileInfo}`
   );
 }
 

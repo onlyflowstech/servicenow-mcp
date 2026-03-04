@@ -37,6 +37,10 @@ export const definition = {
         type: "boolean",
         description: "Set to true to actually execute. Default is dry-run.",
       },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
+      },
     },
     required: ["table", "query", "action"],
   },
@@ -49,6 +53,7 @@ export const schema = z.object({
   fields: z.record(z.unknown()).optional(),
   limit: z.number().optional().default(200),
   confirm: z.boolean().optional().default(false),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 export async function handler(
