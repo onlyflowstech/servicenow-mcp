@@ -27,6 +27,10 @@ export const definition = {
         description:
           "Required for scripts containing destructive keywords (deleteRecord, deleteMultiple, setWorkflow(false))",
       },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
+      },
     },
     required: ["code"],
   },
@@ -37,6 +41,7 @@ export const schema = z.object({
   scope: z.string().optional().default("global"),
   timeout: z.number().optional().default(30),
   confirm: z.boolean().optional().default(false),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 export async function handler(

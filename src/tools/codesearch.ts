@@ -27,6 +27,10 @@ export const definition = {
         type: "number",
         description: "Max total results (default 20)",
       },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
+      },
     },
     required: ["search_term"],
   },
@@ -37,6 +41,7 @@ export const schema = z.object({
   table: z.string().optional(),
   field: z.string().optional(),
   limit: z.number().optional().default(20),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 interface SearchTarget {

@@ -20,6 +20,10 @@ export const definition = {
           'JSON object of field name/value pairs (e.g. {"short_description":"Server down","urgency":"1"})',
         additionalProperties: true,
       },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
+      },
     },
     required: ["table", "fields"],
   },
@@ -28,6 +32,7 @@ export const definition = {
 export const schema = z.object({
   table: z.string(),
   fields: z.record(z.unknown()),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 export async function handler(

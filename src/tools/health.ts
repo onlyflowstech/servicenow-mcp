@@ -15,6 +15,10 @@ export const definition = {
         enum: ["all", "version", "nodes", "jobs", "semaphores", "stats"],
         description: "Which health check to run (default: all)",
       },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
+      },
     },
     required: [],
   },
@@ -25,6 +29,7 @@ export const schema = z.object({
     .enum(["all", "version", "nodes", "jobs", "semaphores", "stats"])
     .optional()
     .default("all"),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 async function safeGet(

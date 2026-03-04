@@ -37,7 +37,11 @@ export const definition = {
       },
       impact: {
         type: "boolean",
-        description: "Impact analysis mode — walks upstream only",
+        description: "Impact analysis mode -- walks upstream only",
+      },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
       },
     },
     required: [],
@@ -52,6 +56,7 @@ export const schema = z.object({
   type: z.string().optional(),
   class: z.string().optional(),
   impact: z.boolean().optional().default(false),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 interface RelNode {

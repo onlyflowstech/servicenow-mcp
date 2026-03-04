@@ -41,6 +41,10 @@ export const definition = {
         type: "string",
         description: "MIME type for upload (default: application/octet-stream)",
       },
+      profile: {
+        type: "string",
+        description: "Named profile to use. Defaults to active profile.",
+      },
     },
     required: ["action"],
   },
@@ -54,6 +58,7 @@ export const schema = z.object({
   output_path: z.string().optional(),
   file_path: z.string().optional(),
   content_type: z.string().optional(),
+  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
 export async function handler(
