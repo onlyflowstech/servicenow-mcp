@@ -7,6 +7,15 @@ export const definition = {
   name: "sn_delete",
   description:
     "Delete a ServiceNow record by sys_id. Requires the confirm flag set to true as a safety measure.",
+  annotations: {
+    title: "Delete record",
+    readOnlyHint: false,
+    destructiveHint: true,
+    // Repeating a successful delete errors (404) but has no further
+    // effect on the instance, matching HTTP DELETE semantics.
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

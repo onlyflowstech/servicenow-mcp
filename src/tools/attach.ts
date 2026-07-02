@@ -9,6 +9,15 @@ export const definition = {
   name: "sn_attach",
   description:
     "Manage attachments on ServiceNow records. List, download, or upload attachments.",
+  annotations: {
+    title: "Manage attachments",
+    // upload POSTs new attachments (list/download are reads); there is no
+    // delete action, and re-uploading duplicates rather than replaces.
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

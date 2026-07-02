@@ -7,6 +7,13 @@ export const definition = {
   name: "sn_aggregate",
   description:
     "Run aggregate queries (COUNT, AVG, MIN, MAX, SUM) on a ServiceNow table with optional grouping.",
+  annotations: {
+    title: "Aggregate records",
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

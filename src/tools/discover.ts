@@ -7,6 +7,13 @@ export const definition = {
   name: "sn_discover",
   description:
     "Discover tables, applications, and plugins installed on the ServiceNow instance.",
+  annotations: {
+    title: "Discover tables, apps, and plugins",
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

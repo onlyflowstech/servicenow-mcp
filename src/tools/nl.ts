@@ -8,6 +8,17 @@ export const definition = {
   name: "sn_nl",
   description:
     "Natural language interface for ServiceNow. Translates plain English into ServiceNow API calls. Supports queries, aggregates, schema lookups, creates, updates, and batch operations. Read operations execute immediately; write operations require execute=true.",
+  annotations: {
+    title: "Natural language interface",
+    // The CREATE intent POSTs records with execute=true, and the BATCH
+    // intent PATCHes/DELETEs matching records with execute+confirm(+force),
+    // so this tool can perform destructive bulk writes despite its
+    // read-mostly default (dry-run) behavior.
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

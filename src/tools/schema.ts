@@ -7,6 +7,13 @@ export const definition = {
   name: "sn_schema",
   description:
     "Get the schema (field definitions) for a ServiceNow table. Returns field names, types, max lengths, mandatory flags, and reference targets.",
+  annotations: {
+    title: "Get table schema",
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

@@ -23,6 +23,13 @@ export const definition = {
     "response_format=\"detailed\" returns the full record (same as " +
     "fields=\"all\"). Records larger than max_response_bytes get their longest " +
     "field values shortened with per-field truncation markers.",
+  annotations: {
+    title: "Get record",
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

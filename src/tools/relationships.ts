@@ -7,6 +7,13 @@ export const definition = {
   name: "sn_relationships",
   description:
     "Traverse CMDB CI relationships (graph walk). Supports upstream, downstream, or both directions with configurable depth. Use for impact analysis and dependency mapping.",
+  annotations: {
+    title: "Traverse CI relationships",
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

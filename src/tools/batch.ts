@@ -7,6 +7,15 @@ export const definition = {
   name: "sn_batch",
   description:
     "Bulk update or delete records matching a query. Runs in dry-run mode by default — set confirm to true to execute. Safety cap at 10,000 records.",
+  annotations: {
+    title: "Bulk update/delete records",
+    readOnlyHint: false,
+    destructiveHint: true,
+    // The matched record set is re-queried on every run, so repeats can
+    // touch different records.
+    idempotentHint: false,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

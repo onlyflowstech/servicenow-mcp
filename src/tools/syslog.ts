@@ -23,6 +23,13 @@ export const definition = {
   description:
     "Query ServiceNow system logs (syslog table) with severity, source, and time-based filters. " +
     "Results ordered newest first, with pagination metadata (record_count, total, has_more, next_offset).",
+  annotations: {
+    title: "Query system logs",
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

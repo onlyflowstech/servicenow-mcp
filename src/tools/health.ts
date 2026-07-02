@@ -7,6 +7,13 @@ export const definition = {
   name: "sn_health",
   description:
     "Check ServiceNow instance health: version, cluster nodes, stuck jobs, semaphores, and key stats (active incidents, P1s, changes, problems).",
+  annotations: {
+    title: "Check instance health",
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

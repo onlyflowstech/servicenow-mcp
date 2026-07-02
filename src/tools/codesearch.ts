@@ -7,6 +7,13 @@ export const definition = {
   name: "sn_codesearch",
   description:
     "Search across ServiceNow code artifacts — business rules, script includes, UI scripts, client scripts, and scripted REST operations. Returns matching records with code snippets.",
+  annotations: {
+    title: "Search code artifacts",
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

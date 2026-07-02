@@ -56,6 +56,85 @@ describe("getToolDefinitions", () => {
   });
 });
 
+describe("tool annotations", () => {
+  const definitions = getToolDefinitions();
+
+  /** Names of tools whose annotations declare a given boolean hint value. */
+  function namesWhere(
+    hint: "readOnlyHint" | "destructiveHint" | "idempotentHint" | "openWorldHint",
+    value: boolean
+  ): string[] {
+    return definitions
+      .filter((d) => d.annotations[hint] === value)
+      .map((d) => d.name)
+      .sort();
+  }
+
+  it("gives every tool a complete annotations object (all five hints defined)", () => {
+    for (const def of definitions) {
+      expect(def.annotations, def.name).toBeTypeOf("object");
+      expect(typeof def.annotations.title, `${def.name} title`).toBe("string");
+      expect(def.annotations.title.length, `${def.name} title`).toBeGreaterThan(0);
+      expect(typeof def.annotations.readOnlyHint, `${def.name} readOnlyHint`).toBe("boolean");
+      expect(typeof def.annotations.destructiveHint, `${def.name} destructiveHint`).toBe("boolean");
+      expect(typeof def.annotations.idempotentHint, `${def.name} idempotentHint`).toBe("boolean");
+      expect(typeof def.annotations.openWorldHint, `${def.name} openWorldHint`).toBe("boolean");
+    }
+  });
+
+  it("gives every tool a human-friendly display title distinct from its name", () => {
+    const titles = definitions.map((d) => d.annotations.title);
+    expect(new Set(titles).size).toBe(titles.length);
+    for (const def of definitions) {
+      expect(def.annotations.title, def.name).not.toMatch(/^sn_/);
+    }
+  });
+
+  it("marks exactly the pure-GET tools as read-only", () => {
+    expect(namesWhere("readOnlyHint", true)).toEqual(
+      [
+        "sn_aggregate",
+        "sn_codesearch",
+        "sn_discover",
+        "sn_get",
+        "sn_health",
+        "sn_query",
+        "sn_relationships",
+        "sn_schema",
+        "sn_syslog",
+      ].sort()
+    );
+  });
+
+  it("marks exactly delete, batch, script, and nl as destructive", () => {
+    // sn_nl is destructive because its BATCH intent executes PATCH/DELETE
+    // against matching records when execute+confirm(+force) are set.
+    expect(namesWhere("destructiveHint", true)).toEqual(
+      ["sn_batch", "sn_delete", "sn_nl", "sn_script"].sort()
+    );
+  });
+
+  it("never marks a read-only tool as destructive", () => {
+    for (const def of definitions) {
+      if (def.annotations.readOnlyHint) {
+        expect(def.annotations.destructiveHint, def.name).toBe(false);
+      }
+    }
+  });
+
+  it("marks sn_atf as mutating (it executes tests) but not destructive", () => {
+    const atf = definitions.find((d) => d.name === "sn_atf")!;
+    expect(atf.annotations.readOnlyHint).toBe(false);
+    expect(atf.annotations.destructiveHint).toBe(false);
+  });
+
+  it("marks only sn_profile as closed-world (mutates local config, no instance calls)", () => {
+    expect(namesWhere("openWorldHint", false)).toEqual(["sn_profile"]);
+    const profileDef = definitions.find((d) => d.name === "sn_profile")!;
+    expect(profileDef.annotations.readOnlyHint).toBe(false);
+  });
+});
+
 describe("executeTool", () => {
   it("returns isError for an unknown tool without touching profiles", async () => {
     const pm = untouchableProfileManager();

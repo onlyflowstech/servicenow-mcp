@@ -11,6 +11,16 @@ export const definition = {
     "background scripts; execution requires UI-endpoint (sys.scripts.do) session authentication, " +
     "which is tracked as separate work (SNS-39). Use sn_query/sn_get/sn_aggregate to read data " +
     "and sn_update/sn_batch to modify records instead.",
+  annotations: {
+    title: "Run background script (unavailable)",
+    // Arbitrary server-side code execution by design: keep the destructive
+    // hint even while the handler is a stub that always errors, so clients
+    // gate it correctly if/when SNS-39 lands.
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

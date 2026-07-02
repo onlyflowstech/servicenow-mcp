@@ -24,6 +24,13 @@ export const definition = {
     "response_format=\"detailed\" returns full records (same as " +
     "fields=\"all\"). Responses larger than max_response_bytes are truncated " +
     "by dropping whole records from the tail, with a hint for fetching the rest.",
+  annotations: {
+    title: "Query records",
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

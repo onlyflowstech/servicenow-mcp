@@ -8,6 +8,8 @@
  * @module tools
  */
 
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
 import { ProfileManager } from "../profile-manager.js";
@@ -31,10 +33,19 @@ import * as nl from "./nl.js";
 import * as script from "./script.js";
 import * as profile from "./profile.js";
 
+/**
+ * MCP ToolAnnotations with every hint made mandatory: each tool must state
+ * its title and read-only/destructive/idempotent/open-world hints explicitly
+ * rather than relying on the spec's implicit defaults. `Required<>` over the
+ * SDK type keeps us in sync with the fields tools/list actually transports.
+ */
+export type RequiredToolAnnotations = Required<ToolAnnotations>;
+
 export interface ToolModule {
   definition: {
     name: string;
     description: string;
+    annotations: RequiredToolAnnotations;
     inputSchema: Record<string, unknown>;
   };
   schema: import("zod").ZodType;
@@ -56,6 +67,7 @@ export interface ProfileToolModule {
   definition: {
     name: string;
     description: string;
+    annotations: RequiredToolAnnotations;
     inputSchema: Record<string, unknown>;
   };
   schema: import("zod").ZodType;

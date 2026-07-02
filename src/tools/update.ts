@@ -8,6 +8,15 @@ export const definition = {
   description:
     "Update an existing ServiceNow record. Pass the sys_id and field values to change. " +
     "Returns sys_id and the updated record (empty fields stripped) under record.",
+  annotations: {
+    title: "Update record",
+    readOnlyHint: false,
+    // PATCHes existing data in place (recoverable via audit history) and
+    // repeating the same field values yields the same record state.
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

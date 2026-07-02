@@ -7,6 +7,16 @@ export const definition = {
   name: "sn_atf",
   description:
     "Automated Test Framework — list, run, and get results for ATF tests and test suites.",
+  annotations: {
+    title: "Run ATF tests",
+    // run/run-suite EXECUTE tests on the instance and create test-result
+    // records (list/suites/results are reads), so this is not read-only;
+    // ATF runs roll themselves back, so nothing is destroyed.
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

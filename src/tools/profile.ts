@@ -23,6 +23,16 @@ export const definition = {
     'oauth: {action:"add", name:"dev", instance:"https://dev.service-now.com", auth_type:"oauth", client_id:"<client_id>", client_secret:"env:SN_CLIENT_SECRET_DEV"} (grant_type "password" additionally needs username + credential); ' +
     'apikey: {action:"add", name:"dev", instance:"https://dev.service-now.com", auth_type:"apikey", api_key:"env:SN_API_KEY_DEV"}. ' +
     "Secrets (credential, client_secret, api_key) must be env:VAR_NAME references to variables set in the server's environment -- plain-text secrets are rejected.",
+  annotations: {
+    title: "Manage instance profiles",
+    // switch/add mutate the local config file only -- no ServiceNow call is
+    // ever made, hence the closed world. add overwrites on re-add and
+    // switch/list/active/info repeat safely, so repeats are idempotent.
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {

@@ -8,6 +8,14 @@ export const definition = {
   description:
     "Create a new record on any ServiceNow table. Pass field values as a JSON object. " +
     "Returns sys_id, number, table, and the created record (empty fields stripped) under record.",
+  annotations: {
+    title: "Create record",
+    readOnlyHint: false,
+    destructiveHint: false,
+    // Every call inserts a new record, so repeats are NOT idempotent.
+    idempotentHint: false,
+    openWorldHint: true,
+  },
   inputSchema: {
     type: "object" as const,
     properties: {
