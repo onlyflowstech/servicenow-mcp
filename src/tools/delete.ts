@@ -50,19 +50,15 @@ export async function handler(
       );
     }
 
-    const resp = await client.delete(
-      `/api/now/table/${args.table}/${args.sys_id}`
-    );
+    // client.delete throws on any failure status, so reaching this point
+    // means the deletion succeeded (ServiceNow returns 204 No Content).
+    await client.delete(`/api/now/table/${args.table}/${args.sys_id}`);
 
-    if (resp.status === 204 || resp.status === 200) {
-      return ok({
-        status: "deleted",
-        sys_id: args.sys_id,
-        table: args.table,
-      });
-    }
-
-    return err(`Delete failed with HTTP ${resp.status}`);
+    return ok({
+      status: "deleted",
+      sys_id: args.sys_id,
+      table: args.table,
+    });
   } catch (error) {
     return err(formatError(error));
   }

@@ -1,12 +1,16 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err } from "../utils.js";
+import { err } from "../utils.js";
 
 export const definition = {
   name: "sn_script",
   description:
-    "Execute a background script on the ServiceNow instance. Runs server-side GlideRecord/GlideSystem JavaScript and returns output from gs.print() calls. Requires admin role. NOTE: This tool requires the optional Playwright dependency.",
+    "NOT YET SUPPORTED: background script execution is not implemented in this release and every " +
+    "call returns an error without executing anything. ServiceNow exposes no REST API for " +
+    "background scripts; execution requires UI-endpoint (sys.scripts.do) session authentication, " +
+    "which is tracked as separate work (SNS-39). Use sn_query/sn_get/sn_aggregate to read data " +
+    "and sn_update/sn_batch to modify records instead.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -49,15 +53,11 @@ export async function handler(
   _client: ServiceNowClient,
   _config: ServiceNowConfig
 ) {
-  return ok({
-    status: "unavailable",
-    message:
-      "sn_script requires the optional Playwright dependency for browser-based script execution.\n\n" +
-      "ServiceNow does not expose a REST API for background scripts — execution requires\n" +
-      "automating the sys.scripts.do page via a headless browser.\n\n" +
-      "To enable this tool, install Playwright:\n" +
-      "  npm install playwright\n" +
-      "  npx playwright install chromium\n\n" +
-      "This will be fully implemented in a future release (SNS-39).",
-  });
+  return err(
+    "sn_script is not yet supported -- no script was executed. ServiceNow has no REST API for " +
+      "background scripts; execution requires automating the sys.scripts.do UI endpoint with " +
+      "session authentication, which is a separate work item (SNS-39). Alternatives: read data " +
+      "with sn_query/sn_get/sn_aggregate; modify records with sn_update or sn_batch (dry-run by " +
+      "default)."
+  );
 }

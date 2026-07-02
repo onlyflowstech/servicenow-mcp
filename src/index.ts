@@ -3,10 +3,11 @@
 /**
  * @onlyflows/servicenow-mcp -- The most comprehensive ServiceNow MCP server.
  *
- * Supports multi-instance profiles: configure named profiles via environment
- * variables (SN_PROFILES JSON or SN_PROFILE_<name>_* vars) and select them
- * per-tool-call with the `profile` parameter, or use `sn_profile` to
- * list / switch / inspect profiles at runtime.
+ * Supports multi-instance profiles: configure named profiles in
+ * ~/.servicenow-mcp/config.json (falling back to the SN_* environment
+ * variables for a single default profile) and select them per-tool-call
+ * with the `profile` parameter, or use `sn_profile` to list / switch /
+ * inspect profiles at runtime.
  *
  * Published by OnlyFlows (https://onlyflows.tech)
  *
@@ -22,6 +23,7 @@ import {
 
 import { ProfileManager } from "./profile-manager.js";
 import { getToolDefinitions, executeTool } from "./tools/index.js";
+import { VERSION } from "./version.js";
 
 async function main() {
   // Initialise profile manager (loads all profiles from env)
@@ -43,7 +45,7 @@ async function main() {
   const server = new Server(
     {
       name: "@onlyflows/servicenow-mcp",
-      version: "1.1.0",
+      version: VERSION,
     },
     {
       capabilities: {
@@ -76,7 +78,7 @@ async function main() {
       ? ` [${profileNames.length} profiles, active: ${activeProfile}]`
       : "";
   console.error(
-    `@onlyflows/servicenow-mcp v1.1.0 started -- ${activeConfig.instance} (${getToolDefinitions().length} tools)${profileInfo}`
+    `@onlyflows/servicenow-mcp v${VERSION} started -- ${activeConfig.instance} (${getToolDefinitions().length} tools)${profileInfo}`
   );
 }
 

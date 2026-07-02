@@ -3,7 +3,7 @@
 <!-- Logo placeholder -->
 <!-- ![ServiceNow MCP Server](banner.png) -->
 
-**The most comprehensive ServiceNow MCP server.** 18 tools for full CRUD, CMDB graph traversal, background scripts, ATF testing, multi-instance profiles, and more.
+**The most comprehensive ServiceNow MCP server.** 18 tools for full CRUD, CMDB graph traversal, ATF testing, multi-instance profiles, and more.
 
 Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](https://github.com/onlyflowstech)
 
@@ -180,7 +180,7 @@ Most ServiceNow MCP integrations are **read-only** and support a handful of tabl
 | Table/app/plugin discovery | ❌ | ✅ |
 | ATF test execution | ❌ | ✅ |
 | Natural language interface | ❌ | ✅ |
-| Background scripts | ❌ | ✅ (with Playwright) |
+| Background scripts | ❌ | 🚧 on the [roadmap](#roadmap) (SNS-39) |
 | Multi-instance profiles | ❌ | ✅ (named profiles, per-call override) |
 | **Total tools** | **1–3** | **18** |
 
@@ -307,7 +307,7 @@ Add to `.vscode/mcp.json`:
 |------|-------------|
 | `sn_atf` | Run ATF tests and suites, get results |
 | `sn_nl` | Natural language → ServiceNow API calls |
-| `sn_script` | Execute background scripts (requires Playwright) |
+| `sn_script` | Background script execution — **not yet supported**; returns an explanatory error pointing to `sn_query`/`sn_batch` alternatives (see [Roadmap](#roadmap)) |
 
 ### Profile Management
 
@@ -381,8 +381,8 @@ This server is designed for production use with multiple safety layers:
 - **Delete operations** require explicit `confirm: true`
 - **Batch operations** run in dry-run mode by default — shows match count without making changes
 - **Bulk deletes** require both `confirm` and `force` flags
-- **Background scripts** require `confirm` for destructive keywords (`deleteRecord`, `deleteMultiple`, etc.)
 - **Natural language writes** require `execute: true` (reads execute immediately)
+- **User input is neutralized** before interpolation into encoded queries (`^` is stripped from filter values — ServiceNow's query syntax has no escape sequence)
 
 ---
 
@@ -419,7 +419,7 @@ npx @modelcontextprotocol/inspector node dist/index.js
 
 - [ ] **SSE transport** for remote hosting
 - [x] **OAuth 2.0** authentication support (client_credentials + password grants, API keys)
-- [ ] **sn_script** full implementation with Playwright (SNS-39)
+- [ ] **sn_script** background-script execution (SNS-39) — requires automating the `sys.scripts.do` UI endpoint with session auth; the tool currently returns an explanatory error without executing anything
 - [ ] **Streaming** for large result sets
 - [ ] **Caching** for schema and relationship lookups
 

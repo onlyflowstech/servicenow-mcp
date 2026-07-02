@@ -1,7 +1,7 @@
 {
   "name": "@onlyflows/servicenow-mcp",
-  "version": "1.0.0",
-  "description": "The most comprehensive ServiceNow MCP server. 17 tools for full CRUD, CMDB graph traversal, background scripts, ATF testing, and more.",
+  "version": "1.2.0",
+  "description": "The most comprehensive ServiceNow MCP server. 18 tools for full CRUD, CMDB graph traversal, ATF testing, multi-instance profiles, and more.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
