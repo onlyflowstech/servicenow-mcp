@@ -131,3 +131,20 @@ export function truncate(str: string, maxLen: number): string {
   if (str.length <= maxLen) return str;
   return str.slice(0, maxLen) + "...";
 }
+
+/**
+ * Bounds for the max_response_bytes guard shared by sn_query / sn_get.
+ * Referenced from both the hand-written JSON schemas and the zod schemas
+ * so the two cannot drift.
+ */
+export const MAX_RESPONSE_BYTES_DEFAULT = 100000;
+export const MAX_RESPONSE_BYTES_MIN = 1000;
+export const MAX_RESPONSE_BYTES_MAX = 1000000;
+
+/**
+ * UTF-8 byte length of a value's compact-JSON serialization -- the exact
+ * size `ok()` would emit for it.
+ */
+export function serializedBytes(data: unknown): number {
+  return Buffer.byteLength(JSON.stringify(data), "utf8");
+}

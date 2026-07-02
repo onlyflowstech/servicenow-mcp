@@ -11,9 +11,14 @@ function issueString(result: { success: boolean; error?: { issues: Array<{ path:
 }
 
 describe("sn_query schema", () => {
-  it("parses minimal valid input and applies the default limit", () => {
+  it("parses minimal valid input and applies the defaults", () => {
     const parsed = querySchema.parse({ table: "incident" });
-    expect(parsed).toEqual({ table: "incident", limit: 20 });
+    expect(parsed).toEqual({
+      table: "incident",
+      limit: 20,
+      response_format: "concise",
+      max_response_bytes: 100000,
+    });
   });
 
   it("parses full valid input", () => {
