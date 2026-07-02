@@ -129,6 +129,12 @@ export async function handler(
           warnings.push(`sys_store_app: ${formatError(error)}`);
         }
 
+        // Both app tables failed: that is a failure, not "no apps
+        // installed" -- an empty success here would misread as none.
+        if (warnings.length === 2) {
+          return err(`both app tables failed:\n${warnings.join("\n")}`);
+        }
+
         allApps = allApps.slice(0, args.limit);
         return ok(withWarnings(allApps, warnings));
       }

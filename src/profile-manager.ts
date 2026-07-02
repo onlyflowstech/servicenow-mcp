@@ -259,15 +259,21 @@ export class ProfileManager {
       authType,
       grantType,
       clientId: profile.clientId,
-      clientSecret: profile.clientSecret
-        ? this.resolveSecret(
-            profile.clientSecret,
-            `Profile "${profileName}" clientSecret`
-          )
-        : undefined,
-      apiKey: profile.apiKey
-        ? this.resolveSecret(profile.apiKey, `Profile "${profileName}" apiKey`)
-        : undefined,
+      // Only resolve the secrets the chosen auth scheme actually uses: a
+      // stray reference for another scheme (e.g. apiKey on an oauth
+      // profile) pointing at an unset env var must not break auth that
+      // never needed it.
+      clientSecret:
+        authType === "oauth" && profile.clientSecret
+          ? this.resolveSecret(
+              profile.clientSecret,
+              `Profile "${profileName}" clientSecret`
+            )
+          : undefined,
+      apiKey:
+        authType === "apikey" && profile.apiKey
+          ? this.resolveSecret(profile.apiKey, `Profile "${profileName}" apiKey`)
+          : undefined,
       apiKeyHeader: profile.apiKeyHeader,
       timeoutMs: profile.timeoutMs ?? parseTimeoutMs(process.env.SN_TIMEOUT_MS),
     };
@@ -280,6 +286,18 @@ export class ProfileManager {
   addProfile(name: string, profile: Profile): void {
     if (!name || typeof name !== "string") {
       throw new Error("Profile name must be a non-empty string");
+    }
+
+    // A profile binds secret env-var references (SN_PASSWORD, SN_CLIENT_
+    // SECRET, SN_API_KEY, ...) to an instance URL: on the next call the
+    // resolved secret is TRANSMITTED to that host. Runtime-added profiles
+    // may therefore only target ServiceNow domains (or hosts the operator
+    // explicitly allowlisted via SN_ALLOWED_INSTANCE_HOSTS) -- otherwise a
+    // prompt-injected add + switch would silently exfiltrate a real secret
+    // to an attacker-controlled host.
+    const hostProblem = instanceHostError(profile.instance);
+    if (hostProblem) {
+      throw new Error(hostProblem);
     }
 
     // Never persist plain-text secrets: everything addProfile writes to
@@ -468,6 +486,72 @@ function requireEnvIndirection(value: string | undefined, field: string): void {
         `environment variable and pass e.g. "env:SN_PASSWORD_MYINSTANCE".`
     );
   }
+}
+
+/**
+ * Hostname suffixes runtime-added profiles may target without operator
+ * opt-in: ServiceNow's commercial and government SaaS domains.
+ */
+const ALLOWED_INSTANCE_SUFFIXES = [".service-now.com", ".servicenowservices.com"];
+
+/**
+ * Validate the instance URL of a profile that is being added at runtime
+ * (sn_profile add). Returns an error message, or undefined when the URL
+ * is acceptable.
+ *
+ * Secrets configured for one instance must not be redirectable to an
+ * arbitrary host: a profile stores env-var REFERENCES, and the resolved
+ * secret is sent to the profile's instance on the next authenticated
+ * call. So runtime adds require https and a *.service-now.com /
+ * *.servicenowservices.com host. Self-hosted or custom-domain instances
+ * are supported via the SN_ALLOWED_INSTANCE_HOSTS environment variable
+ * (comma-separated hostnames; a "*.example.com" entry allows any
+ * subdomain) -- set by the operator, never by the model.
+ *
+ * Profiles hand-written into config.json are not affected: the operator
+ * edits that file directly and this check only runs in addProfile.
+ */
+export function instanceHostError(instance: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(normalizeInstanceUrl(instance));
+  } catch {
+    return `instance "${instance}" is not a valid URL`;
+  }
+
+  if (url.protocol !== "https:") {
+    return (
+      `instance must use https:// (got "${url.protocol}//") -- credentials ` +
+      `are transmitted with every request`
+    );
+  }
+
+  const host = url.hostname.toLowerCase();
+  if (ALLOWED_INSTANCE_SUFFIXES.some((suffix) => host.endsWith(suffix))) {
+    return undefined;
+  }
+
+  const allowlist = (process.env.SN_ALLOWED_INSTANCE_HOSTS ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0);
+  for (const entry of allowlist) {
+    if (entry.startsWith("*.")) {
+      if (host.endsWith(entry.slice(1))) return undefined;
+    } else if (host === entry) {
+      return undefined;
+    }
+  }
+
+  return (
+    `instance host "${host}" is not a ServiceNow domain ` +
+    `(*.service-now.com, *.servicenowservices.com). Profiles bind secret ` +
+    `environment-variable references to an instance, so runtime-added ` +
+    `profiles may only target allowlisted hosts. For a self-hosted or ` +
+    `custom-domain instance, set SN_ALLOWED_INSTANCE_HOSTS in the MCP ` +
+    `server's environment (comma-separated hostnames; "*.corp.example.com" ` +
+    `wildcards allowed).`
+  );
 }
 
 /**

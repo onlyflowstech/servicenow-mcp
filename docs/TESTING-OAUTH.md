@@ -50,7 +50,7 @@ Use a **PDI or sub-prod instance**. Every test below states **What it verifies â
 ```bash
 cd ~/Development/servicenow-mcp-test        # clean clone, already created
 git log --oneline -1                        # expect 3e9a7bd or later
-npm ci && npm run build && npm test         # expect: Tests 127 passed
+npm ci && npm run build && npm test         # expect: build clean, ALL tests pass, 0 failed (exact count grows with the suite)
 ```
 
 ## Part C â€” Onboard the OAuth profile

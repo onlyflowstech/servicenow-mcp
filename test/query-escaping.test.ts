@@ -131,6 +131,40 @@ describe("encoded-query injection is neutralized", () => {
     expect(result.isError).toBe(true); // suite not found
   });
 
+  // ServiceNow evaluates values that START with "javascript:" server-side
+  // (the mechanism sn_syslog itself uses via gs.minutesAgoStart) -- an
+  // interpolated filter value must never opt into evaluation.
+  it("sn_relationships ci_name with a javascript: prefix is matched literally", async () => {
+    const { client, get } = getClient();
+    await relationshipsHandler(
+      relationshipsSchema.parse({ ci_name: "javascript:gs.getUserID()" }),
+      client,
+      config
+    );
+    expect(queryOfCall(get)).toBe("name=gs.getUserID()");
+  });
+
+  it("sn_syslog message filter with a javascript: prefix is matched literally", async () => {
+    const getWithMeta = vi.fn(async () => ({
+      data: { result: [] },
+      status: 200,
+      headers: new Headers(),
+    }));
+    const client = { getWithMeta } as unknown as ServiceNowClient;
+    await syslogHandler(
+      syslogSchema.parse({ message: "javascript:gs.now()" }),
+      client,
+      config
+    );
+    const params = getWithMeta.mock.calls[0][1] as Record<string, string>;
+    expect(params.sysparm_query).toContain("messageLIKEgs.now()");
+    expect(params.sysparm_query).not.toContain("messageLIKEjavascript:");
+    // The tool's own deliberate time-window expression must remain.
+    expect(params.sysparm_query).toContain(
+      "sys_created_on>=javascript:gs.minutesAgoStart(60)"
+    );
+  });
+
   it("sn_atf results execution_id fan-out query", async () => {
     // First call (direct get) returns no record, second call runs the query.
     const get = vi.fn(async () => ({ result: [] }));

@@ -108,6 +108,15 @@ export async function handler(
       }
     }
 
+    // Every sub-search failed: that is a failure, not "no matches" --
+    // an empty success here would read as "nothing references this".
+    if (warnings.length === targets.length) {
+      return err(
+        `all ${targets.length} code table search${targets.length === 1 ? "" : "es"} failed:\n` +
+          warnings.join("\n")
+      );
+    }
+
     // Trim to requested limit
     allResults = allResults.slice(0, args.limit);
 

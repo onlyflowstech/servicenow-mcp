@@ -4,19 +4,23 @@ import { ServiceNowConfig } from "../config.js";
 import { ok, err, escapeQueryValue, formatError, truncate } from "../utils.js";
 
 /**
- * syslog.level stores NUMERIC severities, not the labels the UI shows:
- * 0=error, 1=warn, 2=info, 3=debug. Filtering on a label (level=error)
- * matches zero rows, so level names are mapped to their numeric values;
- * numeric input ("0".."3") is passed through unchanged.
+ * syslog.level stores NUMERIC severities, not the labels the UI shows.
+ * The out-of-box scale (matching the "System Log > Errors" module filter
+ * and the sys_choice values for syslog.level) is:
+ *   -1=debug, 0=information, 1=warning, 2=error.
+ * Filtering on a label (level=error) matches zero rows, so level names
+ * are mapped to their numeric values; numeric input ("-1".."2") is
+ * passed through unchanged. Instances with custom levels can filter on
+ * them via the raw `query` parameter.
  */
 const SYSLOG_LEVEL_VALUES: Record<string, string> = {
-  error: "0",
+  debug: "-1",
+  info: "0",
   warning: "1",
-  info: "2",
-  debug: "3",
+  error: "2",
 };
 
-const LEVEL_ENUM = ["error", "warning", "info", "debug", "0", "1", "2", "3"] as const;
+const LEVEL_ENUM = ["error", "warning", "info", "debug", "-1", "0", "1", "2"] as const;
 
 export const definition = {
   name: "sn_syslog",
@@ -35,10 +39,10 @@ export const definition = {
     properties: {
       level: {
         type: "string",
-        enum: ["error", "warning", "info", "debug", "0", "1", "2", "3"],
+        enum: ["error", "warning", "info", "debug", "-1", "0", "1", "2"],
         description:
           "Filter by severity level: a name (error, warning, info, debug) or the numeric value " +
-          "syslog stores (0=error, 1=warn, 2=info, 3=debug)",
+          "syslog stores (-1=debug, 0=info, 1=warning, 2=error)",
       },
       source: {
         type: "string",

@@ -28,19 +28,30 @@ async function queryFor(args: Record<string, unknown>): Promise<string> {
 }
 
 describe("sn_syslog level filter", () => {
-  // syslog.level stores numeric severities: 0=error, 1=warn, 2=info, 3=debug.
+  // syslog.level stores numeric severities on the OUT-OF-BOX scale:
+  // -1=debug, 0=information, 1=warning, 2=error (the "System Log >
+  // Errors" module filters on level=2). An earlier revision shipped the
+  // inverted map (error->0, info->2, debug->3), which silently returned
+  // informational rows for level=error -- these expectations lock in the
+  // corrected direction.
   it.each([
-    ["error", "0"],
+    ["debug", "-1"],
+    ["info", "0"],
     ["warning", "1"],
-    ["info", "2"],
-    ["debug", "3"],
+    ["error", "2"],
   ])("maps level name %s to its numeric value %s", async (name, numeric) => {
     const query = await queryFor({ level: name });
     expect(query).toContain(`level=${numeric}`);
     expect(query).not.toContain(`level=${name}`);
   });
 
-  it.each(["0", "1", "2", "3"])(
+  it("maps level=error to level=2, never the informational level 0", async () => {
+    const query = await queryFor({ level: "error" });
+    expect(query).toContain("level=2");
+    expect(query).not.toContain("level=0");
+  });
+
+  it.each(["-1", "0", "1", "2"])(
     "passes numeric level %s through unchanged",
     async (numeric) => {
       const query = await queryFor({ level: numeric });
@@ -50,8 +61,14 @@ describe("sn_syslog level filter", () => {
 
   it("rejects unknown level values in the zod schema", () => {
     expect(schema.safeParse({ level: "fatal" }).success).toBe(false);
+    expect(schema.safeParse({ level: "3" }).success).toBe(false);
     expect(schema.safeParse({ level: "4" }).success).toBe(false);
     expect(schema.safeParse({ level: 2 }).success).toBe(false);
+  });
+
+  it("keeps the JSON-schema enum in sync with the zod enum", async () => {
+    const { definition } = await import("../src/tools/syslog.js");
+    expect(definition.inputSchema.properties.level.enum).toEqual([...schema.shape.level.unwrap().options]);
   });
 
   it("leaves a raw encoded query untouched (no level mapping)", async () => {

@@ -80,7 +80,9 @@ describe("sn_discover apps warnings", () => {
     expect(parsed.results[0].source).toBe("store");
   });
 
-  it("warns for both tables when both are forbidden, still succeeding", async () => {
+  // Behavior change (review fix): a TOTAL failure is an error, not an
+  // empty success -- `results: []` would misread as "no apps installed".
+  it("returns isError when BOTH app tables are forbidden", async () => {
     const get = vi.fn(async () => {
       throw FORBIDDEN;
     });
@@ -91,13 +93,10 @@ describe("sn_discover apps warnings", () => {
       client,
       config
     );
-    expect(result.isError).toBeUndefined();
-    const parsed = parseText(result);
-    expect(parsed.results).toEqual([]);
-    expect(parsed.warnings).toEqual([
-      `sys_app: ${FORBIDDEN_TEXT}`,
-      `sys_store_app: ${FORBIDDEN_TEXT}`,
-    ]);
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain(`sys_app: ${FORBIDDEN_TEXT}`);
+    expect(text).toContain(`sys_store_app: ${FORBIDDEN_TEXT}`);
   });
 
   it("keeps the bare-array shape (no warnings) when both tables succeed", async () => {
@@ -150,6 +149,48 @@ describe("sn_codesearch warnings", () => {
       )
     );
     expect(Array.isArray(parsed)).toBe(true);
+  });
+
+  // Regression (review fix): every table failing (expired credentials,
+  // no ACLs anywhere) must be isError -- `results: []` would misread as
+  // "no code references this term".
+  it("returns isError when ALL code tables fail", async () => {
+    const get = vi.fn(async () => {
+      throw FORBIDDEN;
+    });
+    const client = { get } as unknown as ServiceNowClient;
+
+    const result = await codesearchHandler(
+      codesearchSchema.parse({ search_term: "getUser" }),
+      client,
+      config
+    );
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    for (const table of [
+      "sys_script",
+      "sys_script_include",
+      "sys_ui_script",
+      "sys_script_client",
+      "sys_ws_operation",
+    ]) {
+      expect(text).toContain(`${table}: ${FORBIDDEN_TEXT}`);
+    }
+  });
+
+  it("returns isError when the single requested table fails", async () => {
+    const get = vi.fn(async () => {
+      throw FORBIDDEN;
+    });
+    const client = { get } as unknown as ServiceNowClient;
+
+    const result = await codesearchHandler(
+      codesearchSchema.parse({ search_term: "getUser", table: "sys_script" }),
+      client,
+      config
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain(`sys_script: ${FORBIDDEN_TEXT}`);
   });
 });
 
@@ -227,6 +268,37 @@ describe("sn_health warnings", () => {
       await healthHandler(healthSchema.parse({}), client, config)
     );
     expect(parsed.warnings).toBeUndefined();
+  });
+
+  // Regression (review fix): a fully broken connection must be isError,
+  // not a healthy-looking envelope of instance + timestamp + placeholders.
+  it("returns isError when EVERY sub-request fails (check=all)", async () => {
+    const get = vi.fn(async () => {
+      throw FORBIDDEN;
+    });
+    const client = { get } as unknown as ServiceNowClient;
+
+    const result = await healthHandler(healthSchema.parse({}), client, config);
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain("no health data could be retrieved");
+    expect(text).toContain(`sys_cluster_state: ${FORBIDDEN_TEXT}`);
+    expect(text).toContain(`sys_trigger: ${FORBIDDEN_TEXT}`);
+  });
+
+  it("returns isError when a single-section check fails entirely", async () => {
+    const get = vi.fn(async () => {
+      throw FORBIDDEN;
+    });
+    const client = { get } as unknown as ServiceNowClient;
+
+    const result = await healthHandler(
+      healthSchema.parse({ check: "nodes" }),
+      client,
+      config
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain(`sys_cluster_state: ${FORBIDDEN_TEXT}`);
   });
 });
 

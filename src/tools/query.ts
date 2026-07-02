@@ -154,9 +154,18 @@ function enforceByteBudget(
       `Response truncated to fit max_response_bytes=${maxBytes}: dropped ` +
       `${dropped} of ${fetched} fetched records` +
       (total !== undefined ? ` (${total} total match)` : "") +
-      `. Fetch the rest with offset=${offset + keep} and ` +
-      `limit=${Math.max(keep, 1)}, shrink records with ${shrinkAdvice}, ` +
-      `or raise max_response_bytes (max ${MAX_RESPONSE_BYTES_MAX}).`;
+      (keep === 0
+        ? // Nothing kept: the record at this offset alone exceeds the
+          // budget, so re-fetching the same window can never make
+          // progress -- only shrinking the record (or the budget) can.
+          `. The record at offset=${offset} alone exceeds the budget, so ` +
+          `retrying with the same arguments cannot make progress. Shrink it ` +
+          `with ${shrinkAdvice}, raise max_response_bytes (max ` +
+          `${MAX_RESPONSE_BYTES_MAX}), or fetch that record via sn_get ` +
+          `(which shortens oversized field values instead of dropping records).`
+        : `. Fetch the rest with offset=${offset + keep} and ` +
+          `limit=${keep}, shrink records with ${shrinkAdvice}, ` +
+          `or raise max_response_bytes (max ${MAX_RESPONSE_BYTES_MAX}).`);
     out.results = results.slice(0, keep);
     return out;
   };

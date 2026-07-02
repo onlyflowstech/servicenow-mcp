@@ -26,6 +26,7 @@ const ENV_KEYS = [
   "SN_TIMEOUT_MS",
   "SN_DISPLAY_VALUE",
   "SN_REL_DEPTH",
+  "SN_ALLOWED_INSTANCE_HOSTS",
   // Test-only variables referenced by sn_profile add round-trip tests
   "SN_TEST_USER_PW",
   "SN_TEST_CLIENT_SECRET",
@@ -541,6 +542,254 @@ describe("sn_profile add auth types", () => {
     expect(payload.warnings[0]).toContain("not set");
     // Profile persisted despite the warning.
     expect(fs.readFileSync(pm.getConfigPath(), "utf-8")).toContain("env:SN_TEST_CLIENT_SECRET");
+  });
+});
+
+describe("sn_profile add instance host allowlist", () => {
+  // Regression (review fix): a profile binds secret env-var references to
+  // an instance, and the resolved secret is transmitted to that host on
+  // the next call. add {instance:"https://evil.example", api_key:"env:
+  // SN_API_KEY"} previously succeeded -- a secret-exfiltration path.
+  it("rejects a non-ServiceNow host and persists nothing", async () => {
+    process.env.SN_TEST_API_KEY = "fake-api-key";
+    const pm = new ProfileManager();
+    const result = await profileHandler(
+      {
+        action: "add",
+        name: "x",
+        instance: "https://evil.example",
+        auth_type: "apikey",
+        api_key: "env:SN_TEST_API_KEY",
+      },
+      pm
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('"evil.example"');
+    expect(result.content[0].text).toContain("SN_ALLOWED_INSTANCE_HOSTS");
+    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
+  });
+
+  it("rejects lookalike domains that merely end in service-now.com", async () => {
+    const pm = new ProfileManager();
+    const result = await profileHandler(
+      {
+        action: "add",
+        name: "x",
+        instance: "https://evilservice-now.com",
+        username: "admin",
+        credential: "env:SN_TEST_USER_PW",
+      },
+      pm
+    );
+    expect(result.isError).toBe(true);
+    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
+  });
+
+  it("rejects plain http even for a ServiceNow host", async () => {
+    const pm = new ProfileManager();
+    const result = await profileHandler(
+      {
+        action: "add",
+        name: "x",
+        instance: "http://dev.service-now.com",
+        username: "admin",
+        credential: "env:SN_TEST_USER_PW",
+      },
+      pm
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("https://");
+    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
+  });
+
+  it("accepts *.service-now.com and *.servicenowservices.com hosts", async () => {
+    const pm = new ProfileManager();
+    for (const [name, instance] of [
+      ["dev", "https://dev12345.service-now.com"],
+      ["gov", "https://agency.servicenowservices.com"],
+    ] as const) {
+      const result = await profileHandler(
+        { action: "add", name, instance, username: "admin", credential: "env:SN_TEST_USER_PW" },
+        pm
+      );
+      expect(result.isError).toBeUndefined();
+    }
+  });
+
+  it("accepts a custom host the operator allowlisted via SN_ALLOWED_INSTANCE_HOSTS", async () => {
+    process.env.SN_ALLOWED_INSTANCE_HOSTS = "sn.corp.example.com, *.snow.example.org";
+    const pm = new ProfileManager();
+
+    const exact = await profileHandler(
+      {
+        action: "add",
+        name: "corp",
+        instance: "https://sn.corp.example.com",
+        username: "admin",
+        credential: "env:SN_TEST_USER_PW",
+      },
+      pm
+    );
+    expect(exact.isError).toBeUndefined();
+
+    const wildcard = await profileHandler(
+      {
+        action: "add",
+        name: "wild",
+        instance: "https://eu1.snow.example.org",
+        username: "admin",
+        credential: "env:SN_TEST_USER_PW",
+      },
+      pm
+    );
+    expect(wildcard.isError).toBeUndefined();
+
+    // The allowlist is exact/wildcard-scoped -- other hosts stay rejected.
+    const other = await profileHandler(
+      {
+        action: "add",
+        name: "other",
+        instance: "https://other.example.com",
+        username: "admin",
+        credential: "env:SN_TEST_USER_PW",
+      },
+      pm
+    );
+    expect(other.isError).toBe(true);
+  });
+});
+
+describe("sn_profile add rejects params foreign to the auth type", () => {
+  // Regression (review fix): a stray api_key on an oauth profile was
+  // persisted and later resolved unconditionally -- an unset env var then
+  // failed EVERY call on the otherwise-valid profile.
+  it("rejects api_key on an oauth profile and persists nothing", async () => {
+    process.env.SN_TEST_CLIENT_SECRET = "fake-oauth-secret";
+    const pm = new ProfileManager();
+    const result = await profileHandler(
+      {
+        action: "add",
+        name: "oauth-dev",
+        instance: "https://oauth-dev.service-now.com",
+        auth_type: "oauth",
+        client_id: "dev-client-id",
+        client_secret: "env:SN_TEST_CLIENT_SECRET",
+        api_key: "env:SN_UNSET_API_KEY",
+      },
+      pm
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("api_key");
+    expect(result.content[0].text).toContain('"oauth"');
+    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
+  });
+
+  it("rejects oauth params on a basic profile, naming every stray param", async () => {
+    const pm = new ProfileManager();
+    const result = await profileHandler(
+      {
+        action: "add",
+        name: "dev",
+        instance: "https://dev.service-now.com",
+        username: "admin",
+        credential: "env:SN_TEST_USER_PW",
+        client_id: "stray-id",
+        client_secret: "env:SN_TEST_CLIENT_SECRET",
+        grant_type: "password",
+      },
+      pm
+    );
+    expect(result.isError).toBe(true);
+    for (const param of ["client_id", "client_secret", "grant_type"]) {
+      expect(result.content[0].text).toContain(param);
+    }
+    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
+  });
+
+  it("rejects api_key_header on a basic profile", async () => {
+    const pm = new ProfileManager();
+    const result = await profileHandler(
+      {
+        action: "add",
+        name: "dev",
+        instance: "https://dev.service-now.com",
+        username: "admin",
+        credential: "env:SN_TEST_USER_PW",
+        api_key_header: "x-custom-key",
+      },
+      pm
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("api_key_header");
+  });
+});
+
+describe("getConfig resolves only the secrets the auth scheme uses", () => {
+  // Regression (review fix): a hand-written oauth profile with a stray
+  // apiKey pointing at an unset env var must not brick getConfig.
+  it("ignores a stray apiKey on an oauth profile", () => {
+    writeConfigFile({
+      version: 1,
+      default_profile: "dev",
+      profiles: {
+        dev: {
+          instance: "https://dev.service-now.com",
+          authType: "oauth",
+          clientId: "dev-client-id",
+          clientSecret: "env:SN_CLIENT_SECRET",
+          apiKey: "env:SN_UNSET_STRAY_KEY",
+        },
+      },
+    });
+    process.env.SN_CLIENT_SECRET = "fake-secret-from-env";
+
+    const config = new ProfileManager().getConfig();
+    expect(config.authType).toBe("oauth");
+    expect(config.clientSecret).toBe("fake-secret-from-env");
+    expect(config.apiKey).toBeUndefined();
+  });
+
+  it("ignores a stray clientSecret on an apikey profile", () => {
+    writeConfigFile({
+      version: 1,
+      default_profile: "dev",
+      profiles: {
+        dev: {
+          instance: "https://dev.service-now.com",
+          authType: "apikey",
+          apiKey: "env:SN_API_KEY",
+          clientSecret: "env:SN_UNSET_STRAY_SECRET",
+        },
+      },
+    });
+    process.env.SN_API_KEY = "fake-api-key-from-env";
+
+    const config = new ProfileManager().getConfig();
+    expect(config.authType).toBe("apikey");
+    expect(config.apiKey).toBe("fake-api-key-from-env");
+    expect(config.clientSecret).toBeUndefined();
+  });
+
+  it("ignores clientSecret and apiKey entirely on a basic profile", () => {
+    writeConfigFile({
+      version: 1,
+      default_profile: "dev",
+      profiles: {
+        dev: {
+          instance: "https://dev.service-now.com",
+          username: "admin",
+          credential: "env:SN_PASSWORD",
+          clientSecret: "env:SN_UNSET_A",
+          apiKey: "env:SN_UNSET_B",
+        },
+      },
+    });
+    process.env.SN_PASSWORD = "fake-password";
+
+    const config = new ProfileManager().getConfig();
+    expect(config.authType).toBe("basic");
+    expect(config.clientSecret).toBeUndefined();
+    expect(config.apiKey).toBeUndefined();
   });
 });
 

@@ -48,7 +48,10 @@ export const definition = {
       },
       instance: {
         type: "string",
-        description: "ServiceNow instance URL (required for add action, e.g. https://myinstance.service-now.com)",
+        description:
+          "ServiceNow instance URL (required for add action, e.g. https://myinstance.service-now.com). " +
+          "Must be https and a *.service-now.com / *.servicenowservices.com host; other hosts are " +
+          "rejected unless the operator allowlisted them via the SN_ALLOWED_INSTANCE_HOSTS environment variable.",
       },
       username: {
         type: "string",
@@ -182,6 +185,30 @@ export async function handler(
         }
 
         const authType = args.auth_type ?? "basic";
+
+        // Reject params that the chosen auth_type never uses. Persisting a
+        // stray secret reference (e.g. api_key on an oauth profile) would
+        // make ProfileManager resolve an env var the scheme never needs,
+        // and an unset one would brick every call on an otherwise-valid
+        // profile.
+        const strayParams: string[] = [];
+        if (authType !== "oauth") {
+          if (args.client_id !== undefined) strayParams.push("client_id");
+          if (args.client_secret !== undefined) strayParams.push("client_secret");
+          if (args.grant_type !== undefined) strayParams.push("grant_type");
+        }
+        if (authType !== "apikey") {
+          if (args.api_key !== undefined) strayParams.push("api_key");
+          if (args.api_key_header !== undefined) strayParams.push("api_key_header");
+        }
+        if (strayParams.length > 0) {
+          return err(
+            `${strayParams.join(", ")} do${strayParams.length === 1 ? "es" : ""} not apply to ` +
+              `auth_type "${authType}" and will not be persisted -- remove ` +
+              `${strayParams.length === 1 ? "it" : "them"}. client_id/client_secret/grant_type ` +
+              `require auth_type:"oauth"; api_key/api_key_header require auth_type:"apikey".`
+          );
+        }
 
         // Per-auth-type required parameters (mirrors ProfileManager.getConfig,
         // which only resolves a user credential for basic auth and the OAuth

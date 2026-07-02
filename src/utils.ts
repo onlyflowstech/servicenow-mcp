@@ -117,11 +117,25 @@ export function buildTableParams(opts: {
  * of "x^ORactive=false" becomes the harmless literal "xORactive=false"),
  * at the cost that field values genuinely containing `^` cannot be
  * matched through the convenience filters -- a platform limitation, not
- * a tool one. Raw `query` parameters that accept a full encoded query
- * are intentionally passed through untouched.
+ * a tool one.
+ *
+ * ServiceNow additionally EVALUATES a value that starts with
+ * "javascript:" server-side (the same mechanism the tools use
+ * deliberately, e.g. sys_created_on>=javascript:gs.minutesAgoStart()),
+ * so a leading javascript: prefix would let an interpolated value alter
+ * query semantics without any `^`. No legitimate literal field-value
+ * filter starts with it, so the prefix is stripped (repeatedly, to
+ * defeat javascript:javascript: nesting) -- also fail-closed.
+ *
+ * Raw `query` parameters that accept a full encoded query are
+ * intentionally passed through untouched.
  */
 export function escapeQueryValue(value: string): string {
-  return value.replace(/\^/g, "");
+  let v = value.replace(/\^/g, "");
+  while (/^\s*javascript:/i.test(v)) {
+    v = v.replace(/^\s*javascript:/i, "");
+  }
+  return v;
 }
 
 /**

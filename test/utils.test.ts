@@ -168,6 +168,28 @@ describe("escapeQueryValue", () => {
     expect(escapeQueryValue("has spaces & symbols =!<>")).toBe("has spaces & symbols =!<>");
     expect(escapeQueryValue("")).toBe("");
   });
+
+  // ServiceNow evaluates a leading "javascript:" on the value side of a
+  // condition server-side -- a value must never opt into evaluation.
+  it("strips a leading javascript: prefix so values are matched literally", () => {
+    expect(escapeQueryValue("javascript:gs.getUserID()")).toBe("gs.getUserID()");
+  });
+
+  it("strips the prefix case-insensitively and when nested", () => {
+    expect(escapeQueryValue("JavaScript:gs.getUserID()")).toBe("gs.getUserID()");
+    expect(escapeQueryValue("javascript:javascript:gs.now()")).toBe("gs.now()");
+    expect(escapeQueryValue("  javascript:gs.now()")).toBe("gs.now()");
+  });
+
+  it("strips a javascript: prefix revealed by ^ removal", () => {
+    expect(escapeQueryValue("java^script:gs.now()")).toBe("gs.now()");
+  });
+
+  it("leaves javascript: intact when it is not a prefix", () => {
+    expect(escapeQueryValue("about javascript: the language")).toBe(
+      "about javascript: the language"
+    );
+  });
 });
 
 describe("truncate", () => {

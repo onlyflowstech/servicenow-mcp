@@ -211,6 +211,35 @@ describe("sn_query max_response_bytes truncation", () => {
     expect(textBytes(result)).toBeLessThanOrEqual(1000);
   });
 
+  // Regression (review fix): with keep=0 the old hint said "Fetch the
+  // rest with offset=<same offset> and limit=1" -- following it verbatim
+  // refetches the identical over-budget record forever. The hint must
+  // instead say the record itself exceeds the budget and route to
+  // fields/budget/sn_get, never to a same-window refetch.
+  it("keep=0 hint never suggests re-fetching the same window", async () => {
+    const records = [{ sys_id: "big", description: "y".repeat(5000) }];
+    const { client } = metaClient(records, { "X-Total-Count": "9" });
+    const result = await queryHandler(
+      querySchema.parse({
+        table: "incident",
+        limit: 1,
+        offset: 4,
+        max_response_bytes: 1000,
+      }),
+      client,
+      config
+    );
+    const payload = parseText(result);
+    expect(payload.record_count).toBe(0);
+    expect(payload.next_offset).toBe(4); // still true: nothing was delivered
+    expect(payload.hint).not.toContain("Fetch the rest");
+    expect(payload.hint).toContain("cannot make progress");
+    expect(payload.hint).toContain("offset=4 alone exceeds the budget");
+    expect(payload.hint).toContain("sn_get");
+    expect(payload.hint).toContain("max_response_bytes");
+    expect(payload.hint).toContain('fields="');
+  });
+
   it("leaves responses under the default budget byte-identical (no guard keys)", async () => {
     const { client } = metaClient(
       [{ sys_id: "a" }, { sys_id: "b" }],
