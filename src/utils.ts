@@ -87,6 +87,25 @@ export function buildTableParams(opts: {
 }
 
 /**
+ * Neutralize encoded-query metacharacters in a user-supplied VALUE that
+ * is interpolated into a sysparm_query string.
+ *
+ * ServiceNow's encoded-query syntax has NO escape sequence: `^` always
+ * terminates the current condition, and `^OR` / `^NQ` / `^EQ` chain new
+ * ones, so a literal `^` inside a value cannot be represented at all.
+ * The only fail-closed strategy is to strip `^` before interpolation:
+ * a stripped value can no longer inject extra conditions (e.g. a ci_name
+ * of "x^ORactive=false" becomes the harmless literal "xORactive=false"),
+ * at the cost that field values genuinely containing `^` cannot be
+ * matched through the convenience filters -- a platform limitation, not
+ * a tool one. Raw `query` parameters that accept a full encoded query
+ * are intentionally passed through untouched.
+ */
+export function escapeQueryValue(value: string): string {
+  return value.replace(/\^/g, "");
+}
+
+/**
  * Truncate a string if it exceeds maxLen, appending "...".
  */
 export function truncate(str: string, maxLen: number): string {

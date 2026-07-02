@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError } from "../utils.js";
+import { ok, err, escapeQueryValue, formatError } from "../utils.js";
 
 export const definition = {
   name: "sn_atf",
@@ -96,7 +96,7 @@ export async function handler(
           const suiteResp = await client.get(
             "/api/now/table/sys_atf_test_suite",
             {
-              sysparm_query: `name=${args.suite_name}`,
+              sysparm_query: `name=${escapeQueryValue(args.suite_name)}`,
               sysparm_fields: "sys_id,name",
               sysparm_limit: "1",
             }
@@ -108,7 +108,7 @@ export async function handler(
           const m2mResp = await client.get(
             "/api/now/table/sys_atf_test_suite_test",
             {
-              sysparm_query: `test_suite=${suiteId}`,
+              sysparm_query: `test_suite=${escapeQueryValue(suiteId)}`,
               sysparm_fields: "test",
               sysparm_limit: "500",
             }
@@ -265,7 +265,7 @@ export async function handler(
         const resultsResp = await client.get(
           "/api/now/table/sys_atf_test_result",
           {
-            sysparm_query: `test_suite=${args.suite_sys_id}^ORDERBYDESCsys_created_on`,
+            sysparm_query: `test_suite=${escapeQueryValue(args.suite_sys_id)}^ORDERBYDESCsys_created_on`,
             sysparm_fields:
               "sys_id,test,status,output,duration,start_time,end_time",
             sysparm_display_value: "true",
@@ -326,7 +326,8 @@ export async function handler(
           // Not found by direct ID — try query
         }
 
-        const query = `execution=${args.execution_id}^ORparent=${args.execution_id}^ORtest_suite=${args.execution_id}`;
+        const executionId = escapeQueryValue(args.execution_id);
+        const query = `execution=${executionId}^ORparent=${executionId}^ORtest_suite=${executionId}`;
         const resp = await client.get("/api/now/table/sys_atf_test_result", {
           sysparm_query: query,
           sysparm_fields: fields,
@@ -399,7 +400,7 @@ async function pollTestResult(
       // Poll by test sys_id
       try {
         const resp = await client.get("/api/now/table/sys_atf_test_result", {
-          sysparm_query: `test=${testId}^ORDERBYDESCsys_created_on`,
+          sysparm_query: `test=${escapeQueryValue(testId)}^ORDERBYDESCsys_created_on`,
           sysparm_fields:
             "sys_id,test,status,output,duration,start_time,end_time",
           sysparm_display_value: "true",

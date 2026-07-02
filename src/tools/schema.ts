@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError } from "../utils.js";
+import { ok, err, escapeQueryValue, formatError } from "../utils.js";
 
 export const definition = {
   name: "sn_schema",
@@ -40,7 +40,7 @@ export async function handler(
 ) {
   try {
     const resp = await client.get("/api/now/table/sys_dictionary", {
-      sysparm_query: `name=${args.table}^internal_type!=collection`,
+      sysparm_query: `name=${escapeQueryValue(args.table)}^internal_type!=collection`,
       sysparm_fields: "element,column_label,internal_type,max_length,mandatory,reference",
       sysparm_limit: "500",
       sysparm_display_value: "true",

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError } from "../utils.js";
+import { ok, err, escapeQueryValue, formatError } from "../utils.js";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -73,7 +73,7 @@ export async function handler(
           return err("table and sys_id are required for listing attachments");
         }
         const resp = await client.get("/api/now/attachment", {
-          sysparm_query: `table_name=${args.table}^table_sys_id=${args.sys_id}`,
+          sysparm_query: `table_name=${escapeQueryValue(args.table)}^table_sys_id=${escapeQueryValue(args.sys_id)}`,
         });
         const attachments = (resp.result || []).map(
           (a: Record<string, string>) => ({

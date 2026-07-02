@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError } from "../utils.js";
+import { ok, err, escapeQueryValue, formatError } from "../utils.js";
 
 export const definition = {
   name: "sn_discover",
@@ -54,7 +54,8 @@ export async function handler(
       case "tables": {
         let sysparmQuery = "";
         if (args.query) {
-          sysparmQuery = `nameLIKE${args.query}^ORlabelLIKE${args.query}`;
+          const q = escapeQueryValue(args.query);
+          sysparmQuery = `nameLIKE${q}^ORlabelLIKE${q}`;
         }
 
         const resp = await client.get("/api/now/table/sys_db_object", {
@@ -82,7 +83,7 @@ export async function handler(
 
         // Scoped apps (sys_app)
         const appQuery: string[] = [];
-        if (args.query) appQuery.push(`nameLIKE${args.query}`);
+        if (args.query) appQuery.push(`nameLIKE${escapeQueryValue(args.query)}`);
         if (args.active === "true") appQuery.push("active=true");
 
         try {
@@ -100,7 +101,7 @@ export async function handler(
 
         // Store apps (sys_store_app)
         const storeQuery: string[] = [];
-        if (args.query) storeQuery.push(`nameLIKE${args.query}`);
+        if (args.query) storeQuery.push(`nameLIKE${escapeQueryValue(args.query)}`);
         if (args.active === "true") storeQuery.push("active=true");
 
         try {
@@ -124,8 +125,8 @@ export async function handler(
 
       case "plugins": {
         const pluginQuery: string[] = [];
-        if (args.query) pluginQuery.push(`nameLIKE${args.query}`);
-        if (args.active) pluginQuery.push(`active=${args.active}`);
+        if (args.query) pluginQuery.push(`nameLIKE${escapeQueryValue(args.query)}`);
+        if (args.active) pluginQuery.push(`active=${escapeQueryValue(args.active)}`);
 
         const resp = await client.get("/api/now/table/v_plugin", {
           sysparm_fields: "sys_id,name,active",

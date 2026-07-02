@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { buildTableParams, err, formatError, ok, stripEmpty, truncate } from "../src/utils.js";
+import {
+  buildTableParams,
+  err,
+  escapeQueryValue,
+  formatError,
+  ok,
+  stripEmpty,
+  truncate,
+} from "../src/utils.js";
 
 describe("ok", () => {
   it("wraps a string as-is in text content", () => {
@@ -143,6 +151,22 @@ describe("buildTableParams", () => {
     expect(
       buildTableParams({ query: "", fields: "", orderby: "", displayValue: "" })
     ).toEqual({ sysparm_exclude_reference_link: "true" });
+  });
+});
+
+describe("escapeQueryValue", () => {
+  it("strips the ^ condition separator so values cannot inject conditions", () => {
+    expect(escapeQueryValue("x^ORactive=false")).toBe("xORactive=false");
+  });
+
+  it("strips every occurrence, including chained ^OR/^NQ sequences", () => {
+    expect(escapeQueryValue("a^ORb^NQc^EQ")).toBe("aORbNQcEQ");
+  });
+
+  it("passes ordinary values through unchanged", () => {
+    expect(escapeQueryValue("web-server-01")).toBe("web-server-01");
+    expect(escapeQueryValue("has spaces & symbols =!<>")).toBe("has spaces & symbols =!<>");
+    expect(escapeQueryValue("")).toBe("");
   });
 });
 

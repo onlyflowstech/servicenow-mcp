@@ -1,7 +1,22 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError, truncate } from "../utils.js";
+import { ok, err, escapeQueryValue, formatError, truncate } from "../utils.js";
+
+/**
+ * syslog.level stores NUMERIC severities, not the labels the UI shows:
+ * 0=error, 1=warn, 2=info, 3=debug. Filtering on a label (level=error)
+ * matches zero rows, so level names are mapped to their numeric values;
+ * numeric input ("0".."3") is passed through unchanged.
+ */
+const SYSLOG_LEVEL_VALUES: Record<string, string> = {
+  error: "0",
+  warning: "1",
+  info: "2",
+  debug: "3",
+};
+
+const LEVEL_ENUM = ["error", "warning", "info", "debug", "0", "1", "2", "3"] as const;
 
 export const definition = {
   name: "sn_syslog",
@@ -13,8 +28,10 @@ export const definition = {
     properties: {
       level: {
         type: "string",
-        enum: ["error", "warning", "info", "debug"],
-        description: "Filter by severity level",
+        enum: ["error", "warning", "info", "debug", "0", "1", "2", "3"],
+        description:
+          "Filter by severity level: a name (error, warning, info, debug) or the numeric value " +
+          "syslog stores (0=error, 1=warn, 2=info, 3=debug)",
       },
       source: {
         type: "string",
@@ -57,7 +74,7 @@ export const definition = {
 };
 
 export const schema = z.object({
-  level: z.enum(["error", "warning", "info", "debug"]).optional(),
+  level: z.enum(LEVEL_ENUM).optional(),
   source: z.string().optional(),
   message: z.string().optional(),
   query: z.string().optional(),
@@ -81,9 +98,11 @@ export async function handler(
       sysparmQuery = args.query;
     } else {
       const parts: string[] = [];
-      if (args.level) parts.push(`level=${args.level}`);
-      if (args.source) parts.push(`sourceLIKE${args.source}`);
-      if (args.message) parts.push(`messageLIKE${args.message}`);
+      if (args.level) {
+        parts.push(`level=${SYSLOG_LEVEL_VALUES[args.level] ?? args.level}`);
+      }
+      if (args.source) parts.push(`sourceLIKE${escapeQueryValue(args.source)}`);
+      if (args.message) parts.push(`messageLIKE${escapeQueryValue(args.message)}`);
       parts.push(`sys_created_on>=javascript:gs.minutesAgoStart(${args.since})`);
       sysparmQuery = parts.join("^");
     }

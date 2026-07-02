@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError, truncate } from "../utils.js";
+import { ok, err, escapeQueryValue, formatError, truncate } from "../utils.js";
 
 export const definition = {
   name: "sn_codesearch",
@@ -77,7 +77,7 @@ export async function handler(
     for (const target of targets) {
       try {
         const resp = await client.get(`/api/now/table/${target.table}`, {
-          sysparm_query: `${target.field}LIKE${args.search_term}`,
+          sysparm_query: `${escapeQueryValue(target.field)}LIKE${escapeQueryValue(args.search_term)}`,
           sysparm_fields: `sys_id,name,${target.field}`,
           sysparm_limit: String(perTableLimit),
         });

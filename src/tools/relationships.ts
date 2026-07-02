@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError } from "../utils.js";
+import { ok, err, escapeQueryValue, formatError } from "../utils.js";
 
 export const definition = {
   name: "sn_relationships",
@@ -100,7 +100,7 @@ export async function handler(
       rootClass = ciResp.result.sys_class_name;
     } else {
       const ciResp = await client.get("/api/now/table/cmdb_ci", {
-        sysparm_query: `name=${args.ci_name}`,
+        sysparm_query: `name=${escapeQueryValue(args.ci_name!)}`,
         sysparm_fields: "sys_id,name,sys_class_name",
         sysparm_display_value: "true",
         sysparm_limit: "5",
@@ -169,8 +169,9 @@ export async function handler(
 
       let relResp;
       try {
+        const safeId = escapeQueryValue(currentId);
         relResp = await client.get("/api/now/table/cmdb_rel_ci", {
-          sysparm_query: `parent=${currentId}^ORchild=${currentId}`,
+          sysparm_query: `parent=${safeId}^ORchild=${safeId}`,
           sysparm_fields: "parent,child,type",
           sysparm_display_value: "all",
           sysparm_limit: "100",
