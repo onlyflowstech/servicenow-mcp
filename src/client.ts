@@ -45,6 +45,14 @@ type HttpMethod = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
 export const MAX_RETRY_DELAY_MS = 30_000;
+
+/** Guidance appended to 401 errors on basic-auth profiles. */
+export const BASIC_AUTH_401_HINT =
+  "ServiceNow may be enforcing Basic Auth restrictions on this instance " +
+  "(see KB3096078). Exemptions: Web-Service-Access-Only account or " +
+  "snc_basic_auth_api_access role. Recommended: switch this profile to " +
+  "OAuth (authType: 'oauth').";
+
 const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_BASE_RETRY_DELAY_MS = 500;
 const RETRYABLE_STATUSES = [429, 502, 503, 504];
@@ -315,6 +323,9 @@ export class ServiceNowClient {
     message: string,
     detail?: string
   ): ServiceNowError {
+    if (status === 401 && this.auth.kind === "basic") {
+      message = `${message} ${BASIC_AUTH_401_HINT}`;
+    }
     return this.createError(message, detail, status);
   }
 

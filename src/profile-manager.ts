@@ -11,7 +11,14 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { ServiceNowConfig, parseTimeoutMs } from "./config.js";
+import {
+  AuthType,
+  GrantType,
+  ServiceNowConfig,
+  parseAuthType,
+  parseGrantType,
+  parseTimeoutMs,
+} from "./config.js";
 import { ServiceNowClient } from "./client.js";
 
 // ── Interfaces ─────────────────────────────────────────────────────
@@ -19,10 +26,10 @@ import { ServiceNowClient } from "./client.js";
 export interface Profile {
   /** ServiceNow instance URL (e.g. "https://myinstance.service-now.com") */
   instance: string;
-  /** ServiceNow username */
-  username: string;
+  /** ServiceNow username (basic auth and OAuth "password" grant) */
+  username?: string;
   /** Credential: "env:VAR_NAME" to read from env, or a plain string */
-  credential: string;
+  credential?: string;
   /** Application scope (e.g. "x_knowd_know_drago") */
   scope?: string;
   /** Scope sys_id */
@@ -31,6 +38,18 @@ export interface Profile {
   vendor_code?: string;
   /** Human-readable description of this profile */
   description?: string;
+  /** Auth scheme: "basic" (default), "oauth", or "apikey" */
+  authType?: AuthType;
+  /** OAuth client id (authType "oauth") */
+  clientId?: string;
+  /** OAuth client secret: "env:VAR_NAME" or a plain string (authType "oauth") */
+  clientSecret?: string;
+  /** OAuth grant type: "client_credentials" (default) or "password" */
+  grantType?: GrantType;
+  /** API key: "env:VAR_NAME" or a plain string (authType "apikey") */
+  apiKey?: string;
+  /** Header the API key is sent in (default "x-sn-apikey") */
+  apiKeyHeader?: string;
   /** Per-request timeout in ms (default 30000; env fallback SN_TIMEOUT_MS) */
   timeoutMs?: number;
 }
@@ -47,6 +66,7 @@ export interface ProfileConfig {
 export interface ProfileListEntry {
   name: string;
   instance: string;
+  authType: AuthType;
   description?: string;
   isActive: boolean;
 }
@@ -107,23 +127,41 @@ export class ProfileManager {
   resolveCredential(profile: Profile): string {
     const { credential } = profile;
 
-    if (credential.startsWith("env:")) {
-      const varName = credential.slice(4);
+    if (!credential) {
+      throw new Error(
+        `Profile "${this.getProfileNameFor(profile)}" has no credential configured`
+      );
+    }
+
+    return this.resolveSecret(
+      credential,
+      `Profile "${this.getProfileNameFor(profile)}" credential`
+    );
+  }
+
+  /**
+   * Resolve a secret value that supports "env:VAR_NAME" indirection
+   * (credential, clientSecret, apiKey). Plain values are returned as-is
+   * with a stderr warning.
+   */
+  private resolveSecret(raw: string, description: string): string {
+    if (raw.startsWith("env:")) {
+      const varName = raw.slice(4);
       const value = process.env[varName];
       if (!value) {
         throw new Error(
-          `Profile credential references environment variable "${varName}" which is not set`
+          `${description} references environment variable "${varName}" which is not set`
         );
       }
       return value;
     }
 
-    // Plain-text credential -- warn the user
+    // Plain-text secret -- warn the user
     process.stderr.write(
-      `[servicenow-mcp] WARNING: Profile "${this.getProfileNameFor(profile)}" ` +
-        `uses a plain-text credential. Consider using "env:VAR_NAME" instead.\n`
+      `[servicenow-mcp] WARNING: ${description} ` +
+        `is stored as plain text. Consider using "env:VAR_NAME" instead.\n`
     );
-    return credential;
+    return raw;
   }
 
   /**
@@ -150,9 +188,25 @@ export class ProfileManager {
     return Object.entries(this.config.profiles).map(([name, profile]) => ({
       name,
       instance: profile.instance,
+      authType: profile.authType ?? "basic",
       description: profile.description,
       isActive: name === this.activeProfile,
     }));
+  }
+
+  /**
+   * Names of configured profiles that authenticate with basic auth.
+   * Used for the startup deprecation warning (ServiceNow's inbound
+   * Basic Auth restriction program). Unconfigured placeholder profiles
+   * (empty instance) are skipped.
+   */
+  getBasicAuthProfileNames(): string[] {
+    return Object.entries(this.config.profiles)
+      .filter(
+        ([, profile]) =>
+          (profile.authType ?? "basic") === "basic" && profile.instance
+      )
+      .map(([name]) => name);
   }
 
   /**
@@ -186,14 +240,35 @@ export class ProfileManager {
    */
   getConfig(name?: string): ServiceNowConfig {
     const profile = this.getProfile(name);
-    const password = this.resolveCredential(profile);
+    const profileName = name ?? this.activeProfile;
+    const authType = profile.authType ?? "basic";
+    const grantType = profile.grantType ?? "client_credentials";
+
+    // The user password is only needed for basic auth and the OAuth
+    // "password" grant -- don't demand a credential for other schemes.
+    const needsPassword =
+      authType === "basic" || (authType === "oauth" && grantType === "password");
+    const password = needsPassword ? this.resolveCredential(profile) : "";
 
     return {
       instance: normalizeInstanceUrl(profile.instance),
-      user: profile.username,
+      user: profile.username ?? "",
       password,
       displayValue: process.env.SN_DISPLAY_VALUE ?? "true",
       relDepth: parseRelDepth(process.env.SN_REL_DEPTH),
+      authType,
+      grantType,
+      clientId: profile.clientId,
+      clientSecret: profile.clientSecret
+        ? this.resolveSecret(
+            profile.clientSecret,
+            `Profile "${profileName}" clientSecret`
+          )
+        : undefined,
+      apiKey: profile.apiKey
+        ? this.resolveSecret(profile.apiKey, `Profile "${profileName}" apiKey`)
+        : undefined,
+      apiKeyHeader: profile.apiKeyHeader,
       timeoutMs: profile.timeoutMs ?? parseTimeoutMs(process.env.SN_TIMEOUT_MS),
     };
   }
@@ -279,29 +354,53 @@ export class ProfileManager {
    * Build a synthetic ProfileConfig from environment variables.
    * This preserves backward compatibility: if no config file exists,
    * the server works exactly as before using SN_INSTANCE, SN_USER,
-   * and SN_PASSWORD.
+   * and SN_PASSWORD. Additional env vars configure the auth scheme:
+   * SN_AUTH_TYPE, SN_CLIENT_ID, SN_CLIENT_SECRET, SN_GRANT_TYPE,
+   * SN_API_KEY, SN_API_KEY_HEADER, SN_TIMEOUT_MS.
    */
   private buildConfigFromEnv(): ProfileConfig {
     const instance = process.env.SN_INSTANCE;
     const user = process.env.SN_USER;
-    const password = process.env.SN_PASSWORD;
 
     // If env vars are set, create a synthetic profile.
     // If they aren't, still create the config structure -- the error
     // will surface when getConfig() tries to resolve credentials.
+    // Secrets always use env: indirection so they are never persisted
+    // in plain text if this synthetic config is later written to disk.
     const profile: Profile = {
       instance: instance ?? "",
       username: user ?? "",
-      credential: password ? password : "env:SN_PASSWORD",
+      credential: "env:SN_PASSWORD",
     };
 
-    // If all env vars are present, use the password directly to avoid
-    // double-indirection. If password is missing, reference env var so
-    // resolveCredential() gives a clear error message.
-    if (password) {
-      // Store as plain value but since this is from env vars (ephemeral),
-      // suppress the warning by marking it as env-sourced.
-      profile.credential = `env:SN_PASSWORD`;
+    const authType = parseAuthType(process.env.SN_AUTH_TYPE);
+    if (authType) {
+      profile.authType = authType;
+    } else if (process.env.SN_AUTH_TYPE) {
+      process.stderr.write(
+        `[servicenow-mcp] WARNING: Unknown SN_AUTH_TYPE "${process.env.SN_AUTH_TYPE}" ` +
+          `(expected basic, oauth, or apikey). Falling back to basic auth.\n`
+      );
+    }
+    if (process.env.SN_CLIENT_ID) {
+      profile.clientId = process.env.SN_CLIENT_ID;
+    }
+    if (process.env.SN_CLIENT_SECRET) {
+      profile.clientSecret = "env:SN_CLIENT_SECRET";
+    }
+    const grantType = parseGrantType(process.env.SN_GRANT_TYPE);
+    if (grantType) {
+      profile.grantType = grantType;
+    }
+    if (process.env.SN_API_KEY) {
+      profile.apiKey = "env:SN_API_KEY";
+    }
+    if (process.env.SN_API_KEY_HEADER) {
+      profile.apiKeyHeader = process.env.SN_API_KEY_HEADER;
+    }
+    const timeoutMs = parseTimeoutMs(process.env.SN_TIMEOUT_MS);
+    if (timeoutMs !== undefined) {
+      profile.timeoutMs = timeoutMs;
     }
 
     return {

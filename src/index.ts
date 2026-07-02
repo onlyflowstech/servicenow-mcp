@@ -27,6 +27,18 @@ async function main() {
   // Initialise profile manager (loads all profiles from env)
   const profileManager = new ProfileManager();
 
+  // Basic-auth deprecation nudge (stderr; stdout is reserved for MCP).
+  // ServiceNow's inbound Basic Auth restriction program can hard-401
+  // basic-auth API requests per instance at any time.
+  const basicProfiles = profileManager.getBasicAuthProfileNames();
+  if (basicProfiles.length > 0) {
+    console.error(
+      `[servicenow-mcp] WARNING: profile(s) ${basicProfiles.map((n) => `"${n}"`).join(", ")} ` +
+        `use basic auth, which ServiceNow's inbound Basic Auth restriction program ` +
+        `is phasing out (KB3096078). Recommended: set authType "oauth" on these profiles.`
+    );
+  }
+
   // Create MCP server
   const server = new Server(
     {

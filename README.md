@@ -65,6 +65,8 @@ Then pass the credential environment variables in your MCP client config:
 | `env:VAR_NAME` | `"env:SN_PASSWORD_DEV"` | Read from environment variable (recommended) |
 | Plain string | `"mypassword"` | Stored directly in config (not recommended, warns on startup) |
 
+The `env:VAR_NAME` indirection works for every secret field: `credential`, `clientSecret`, and `apiKey`.
+
 ### Using Profiles
 
 With natural language:
@@ -81,6 +83,79 @@ With the `profile` parameter on any tool:
 ### Backward Compatibility
 
 If no config file exists, the server falls back to environment variables (`SN_INSTANCE`, `SN_USER`, `SN_PASSWORD`) exactly as before. No changes needed for existing setups.
+
+---
+
+## Authentication
+
+Three auth types per profile, selected with `authType` (default: `basic`). Existing basic-auth configs keep working unchanged.
+
+> **Heads up:** ServiceNow's [inbound Basic Auth restriction program](https://support.servicenow.com/kb?id=kb_article_view&sysparm_article=KB3096078) is phasing out basic auth for API requests — instances can start hard-rejecting it at any time (exemptions: Web-Service-Access-Only accounts or the `snc_basic_auth_api_access` role). **OAuth is the recommended auth type.** The server prints a startup warning for basic-auth profiles.
+
+### OAuth 2.0 (recommended)
+
+`client_credentials` grant (default) — create an OAuth API endpoint client in ServiceNow (**System OAuth → Application Registry**) and reference the secret via `env:` indirection:
+
+```json
+{
+  "version": 1,
+  "default_profile": "dev",
+  "profiles": {
+    "dev": {
+      "instance": "https://mydev.service-now.com",
+      "authType": "oauth",
+      "clientId": "your-oauth-client-id",
+      "clientSecret": "env:SN_CLIENT_SECRET",
+      "description": "OAuth client_credentials"
+    }
+  }
+}
+```
+
+`password` grant — set `grantType` and provide the user credentials as well:
+
+```json
+{
+  "instance": "https://mydev.service-now.com",
+  "authType": "oauth",
+  "grantType": "password",
+  "clientId": "your-oauth-client-id",
+  "clientSecret": "env:SN_CLIENT_SECRET",
+  "username": "integration.user",
+  "credential": "env:SN_PASSWORD_DEV"
+}
+```
+
+Tokens are cached until shortly before their `expires_in` expiry and refreshed automatically (including a single refresh + retry on 401). Token responses are never logged.
+
+### API key
+
+For instances using Inbound Authentication Profiles with API keys. The header name is configurable (default `x-sn-apikey`):
+
+```json
+{
+  "instance": "https://mydev.service-now.com",
+  "authType": "apikey",
+  "apiKey": "env:SN_API_KEY",
+  "apiKeyHeader": "x-sn-apikey"
+}
+```
+
+### Basic (default, deprecated by ServiceNow)
+
+```json
+{
+  "instance": "https://mydev.service-now.com",
+  "username": "admin",
+  "credential": "env:SN_PASSWORD_DEV"
+}
+```
+
+On a 401, the error explains the Basic Auth restriction program (KB3096078) and how to move to OAuth.
+
+### Timeouts & retries
+
+Every request is bounded by a timeout (default 30s; per-profile `timeoutMs` or env `SN_TIMEOUT_MS`) and retried up to twice with exponential backoff on 429/502/503/504, honoring `Retry-After`. POST requests are only retried on 429 — never after a 5xx that may have executed side effects.
 
 ---
 
@@ -249,12 +324,19 @@ Add to `.vscode/mcp.json`:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `SN_INSTANCE` | ✅* | — | Instance URL (e.g. `https://yourinstance.service-now.com`) |
-| `SN_USER` | ✅* | — | ServiceNow username |
-| `SN_PASSWORD` | ✅* | — | ServiceNow password |
+| `SN_USER` | ✅* | — | ServiceNow username (basic auth / OAuth password grant) |
+| `SN_PASSWORD` | ✅* | — | ServiceNow password (basic auth / OAuth password grant) |
+| `SN_AUTH_TYPE` | ❌ | `basic` | Auth scheme: `basic`, `oauth`, or `apikey` |
+| `SN_CLIENT_ID` | ❌ | — | OAuth client id (`SN_AUTH_TYPE=oauth`) |
+| `SN_CLIENT_SECRET` | ❌ | — | OAuth client secret (`SN_AUTH_TYPE=oauth`) |
+| `SN_GRANT_TYPE` | ❌ | `client_credentials` | OAuth grant: `client_credentials` or `password` |
+| `SN_API_KEY` | ❌ | — | API key (`SN_AUTH_TYPE=apikey`) |
+| `SN_API_KEY_HEADER` | ❌ | `x-sn-apikey` | Header the API key is sent in |
+| `SN_TIMEOUT_MS` | ❌ | `30000` | Per-request timeout in milliseconds |
 | `SN_DISPLAY_VALUE` | ❌ | `true` | Default display value mode (`true`, `false`, `all`) |
 | `SN_REL_DEPTH` | ❌ | `3` | Default CMDB relationship traversal depth |
 
-*Not required when using `~/.servicenow-mcp/config.json` profiles.
+*Not required when using `~/.servicenow-mcp/config.json` profiles, or when `SN_AUTH_TYPE` is `oauth` (client_credentials) / `apikey`.
 
 ---
 
@@ -336,7 +418,7 @@ npx @modelcontextprotocol/inspector node dist/index.js
 ## Roadmap
 
 - [ ] **SSE transport** for remote hosting
-- [ ] **OAuth 2.0** authentication support
+- [x] **OAuth 2.0** authentication support (client_credentials + password grants, API keys)
 - [ ] **sn_script** full implementation with Playwright (SNS-39)
 - [ ] **Streaming** for large result sets
 - [ ] **Caching** for schema and relationship lookups

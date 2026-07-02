@@ -103,12 +103,16 @@ export async function handler(
         }
         const config = profileManager.getConfig(args.name);
         const active = profileManager.getActiveProfileName();
+        // NOTE: never include secret material here (password, clientSecret,
+        // apiKey) -- this output goes straight into the model context.
         return ok({
           name: args.name,
           instance: config.instance,
           user: config.user,
+          auth_type: config.authType ?? "basic",
           display_value: config.displayValue,
           rel_depth: config.relDepth,
+          timeout_ms: config.timeoutMs,
           active: args.name === active,
         });
       }
