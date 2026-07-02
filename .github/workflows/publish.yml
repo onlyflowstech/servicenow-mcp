@@ -1,9 +1,12 @@
 name: Publish
 
+# Strict stable-release tags only (matches the old GitLab
+# `^v\d+\.\d+\.\d+$` rule): pre-release tags like v1.1.0-beta.1 must NOT
+# publish to the npm "latest" dist-tag.
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 jobs:
   publish:

@@ -100,7 +100,12 @@ export async function handler(
     if (total !== undefined) payload.total = total;
     payload.has_more = hasMore;
     if (hasMore) {
-      const nextOffset = offset + recordCount;
+      // Advance by the requested limit, not the returned count: ACLs/domain
+      // separation can strip rows from a page AFTER the limit/offset window
+      // is applied, so record_count < limit does not mean the window was
+      // short -- offset + record_count would re-read (or infinitely repeat)
+      // the same window.
+      const nextOffset = offset + args.limit;
       payload.next_offset = nextOffset;
       payload.hint = `More records available. Call sn_query again with offset=${nextOffset}.`;
     }

@@ -221,7 +221,9 @@ export class OAuthProvider implements AuthProvider {
     } catch {
       // body unreadable -- status alone will have to do
     }
-    return this.redact(detail.slice(0, MAX_ERROR_DETAIL_CHARS));
+    // Redact BEFORE truncating: slicing first can cut a secret at the
+    // boundary so the redaction no longer matches, leaking its prefix.
+    return this.redact(detail).slice(0, MAX_ERROR_DETAIL_CHARS);
   }
 
   private redact(text: string): string {

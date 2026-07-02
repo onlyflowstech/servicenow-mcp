@@ -42,7 +42,7 @@ export const definition = {
       },
       credential: {
         type: "string",
-        description: "Credential source (required for add action). Use 'env:VAR_NAME' to reference an environment variable, or a plain string (not recommended).",
+        description: "Credential source (required for add action). Must be 'env:VAR_NAME' referencing an environment variable -- plain-text secrets are never persisted.",
       },
       description: {
         type: "string",
@@ -140,7 +140,7 @@ export async function handler(
           added: args.name,
           instance: args.instance,
           username: args.username,
-          credential_source: args.credential.startsWith("env:") ? args.credential : "(plain text)",
+          credential_source: args.credential,
           config_path: profileManager.getConfigPath(),
         });
       }

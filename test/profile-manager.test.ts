@@ -225,6 +225,100 @@ describe("config-file profiles", () => {
   });
 });
 
+describe("addProfile secret hygiene", () => {
+  it("rejects a plain-text credential via sn_profile add and persists nothing", async () => {
+    const pm = new ProfileManager();
+    const result = await profileHandler(
+      {
+        action: "add",
+        name: "dev",
+        instance: "https://dev.service-now.com",
+        username: "admin",
+        credential: "plain-text-password",
+      },
+      pm
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("env:VAR_NAME");
+    // Nothing may reach disk -- not the profile, and not the secret.
+    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
+  });
+
+  it("rejects plain-text clientSecret and apiKey", () => {
+    const pm = new ProfileManager();
+    expect(() =>
+      pm.addProfile("o", {
+        instance: "https://x.service-now.com",
+        authType: "oauth",
+        clientId: "id",
+        clientSecret: "plain-oauth-secret",
+      })
+    ).toThrow(/env:VAR_NAME/);
+    expect(() =>
+      pm.addProfile("k", {
+        instance: "https://x.service-now.com",
+        authType: "apikey",
+        apiKey: "plain-api-key",
+      })
+    ).toThrow(/env:VAR_NAME/);
+    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
+  });
+
+  it('rejects a bare "env:" credential with no variable name', () => {
+    const pm = new ProfileManager();
+    expect(() =>
+      pm.addProfile("dev", {
+        instance: "https://x.service-now.com",
+        credential: "env:",
+      })
+    ).toThrow(/env:VAR_NAME/);
+  });
+
+  it("accepts env: indirection and writes config.json owner-only", async () => {
+    const pm = new ProfileManager();
+    const result = await profileHandler(
+      {
+        action: "add",
+        name: "dev",
+        instance: "https://dev.service-now.com",
+        username: "admin",
+        credential: "env:SN_PASSWORD_DEV",
+      },
+      pm
+    );
+    expect(result.isError).toBeUndefined();
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.added).toBe("dev");
+    expect(payload.credential_source).toBe("env:SN_PASSWORD_DEV");
+
+    const configPath = pm.getConfigPath();
+    const raw = fs.readFileSync(configPath, "utf-8");
+    expect(raw).toContain("env:SN_PASSWORD_DEV");
+    if (process.platform !== "win32") {
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(path.dirname(configPath)).mode & 0o777).toBe(0o700);
+    }
+  });
+
+  it("tightens permissions on a pre-existing world-readable config file", async () => {
+    writeConfigFile({
+      version: 1,
+      default_profile: "dev",
+      profiles: {
+        dev: { instance: "https://dev.service-now.com", credential: "env:SN_PASSWORD" },
+      },
+    });
+    const pm = new ProfileManager();
+    pm.addProfile("second", {
+      instance: "https://second.service-now.com",
+      credential: "env:SN_PASSWORD_SECOND",
+    });
+    if (process.platform !== "win32") {
+      expect(fs.statSync(pm.getConfigPath()).mode & 0o777).toBe(0o600);
+    }
+  });
+});
+
 describe("sn_profile output redaction", () => {
   const SECRET_CONFIG: ServiceNowConfig = {
     instance: "https://dev.service-now.com",

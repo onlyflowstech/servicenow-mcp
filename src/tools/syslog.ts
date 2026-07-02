@@ -122,7 +122,9 @@ export async function handler(
     if (total !== undefined) payload.total = total;
     payload.has_more = hasMore;
     if (hasMore) {
-      const nextOffset = offset + recordCount;
+      // Advance by the requested limit, not the returned count -- see the
+      // matching comment in sn_query (ACL-trimmed pages).
+      const nextOffset = offset + args.limit;
       payload.next_offset = nextOffset;
       payload.hint = `More records available. Call sn_syslog again with offset=${nextOffset}.`;
     }

@@ -282,6 +282,12 @@ export class ProfileManager {
       throw new Error("Profile name must be a non-empty string");
     }
 
+    // Never persist plain-text secrets: everything addProfile writes to
+    // disk must reference an environment variable via "env:VAR_NAME".
+    requireEnvIndirection(profile.credential, "credential");
+    requireEnvIndirection(profile.clientSecret, "clientSecret");
+    requireEnvIndirection(profile.apiKey, "apiKey");
+
     this.config.profiles[name] = profile;
 
     // If this was built from env vars and we're adding a real profile,
@@ -418,11 +424,16 @@ export class ProfileManager {
   private persistConfig(): void {
     const dir = path.dirname(this.configFilePath);
     if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
 
     const json = JSON.stringify(this.config, null, 2) + "\n";
-    fs.writeFileSync(this.configFilePath, json, "utf-8");
+    // The config may reference credential material -- keep it owner-only.
+    // Creation modes are masked by umask and don't apply to pre-existing
+    // files, so chmod explicitly as well.
+    fs.writeFileSync(this.configFilePath, json, { encoding: "utf-8", mode: 0o600 });
+    fs.chmodSync(this.configFilePath, 0o600);
+    fs.chmodSync(dir, 0o700);
     this.loadedFromFile = true;
   }
 
@@ -441,6 +452,23 @@ export class ProfileManager {
 }
 
 // ── Module-level helpers ───────────────────────────────────────────
+
+/**
+ * Require "env:VAR_NAME" indirection for a secret that is about to be
+ * persisted to the config file. Plain-text secrets are never written
+ * to disk (they would be readable by other local users and survive in
+ * backups indefinitely).
+ */
+function requireEnvIndirection(value: string | undefined, field: string): void {
+  if (value === undefined) return;
+  if (!value.startsWith("env:") || value.slice(4).length === 0) {
+    throw new Error(
+      `Profile ${field} must use "env:VAR_NAME" indirection -- plain-text ` +
+        `secrets are never persisted to config.json. Set the secret in an ` +
+        `environment variable and pass e.g. "env:SN_PASSWORD_MYINSTANCE".`
+    );
+  }
+}
 
 /**
  * Normalize an instance URL: strip trailing slashes, ensure https://.

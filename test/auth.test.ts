@@ -179,6 +179,37 @@ describe("OAuthProvider", () => {
     expect(thrown!.message).not.toContain(FAKE_CLIENT_SECRET);
   });
 
+  it("redacts a secret that straddles the 300-char truncation boundary", async () => {
+    // If truncation ran BEFORE redaction, a secret starting near char 300
+    // would be cut mid-string, the redaction would no longer match, and
+    // the secret's prefix would leak into the thrown error message.
+    const padding = "x".repeat(290);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(
+          {
+            error: "access_denied",
+            error_description: `${padding}${FAKE_CLIENT_SECRET} rejected`,
+          },
+          401
+        )
+      )
+    );
+
+    let thrown: Error | undefined;
+    try {
+      await oauthProvider().getAuthHeaders();
+    } catch (error) {
+      thrown = error as Error;
+    }
+    expect(thrown).toBeDefined();
+    expect(thrown!.message).toContain("HTTP 401");
+    expect(thrown!.message).not.toContain(FAKE_CLIENT_SECRET);
+    // No partial prefix of the secret may survive truncation either.
+    expect(thrown!.message).not.toContain(FAKE_CLIENT_SECRET.slice(0, 8));
+  });
+
   it("rejects a password grant without username/credential", () => {
     expect(() => oauthProvider({ grantType: "password" })).toThrow(/username and credential/);
   });

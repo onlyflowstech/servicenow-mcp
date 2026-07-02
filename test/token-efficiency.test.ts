@@ -213,6 +213,43 @@ describe("sn_query pagination metadata", () => {
     expect(payload.next_offset).toBeUndefined();
   });
 
+  it("advances next_offset by limit, not record_count, when ACLs trim the page", async () => {
+    // ServiceNow applies limit/offset BEFORE ACL/domain-separation row
+    // stripping: a window of 5 rows can come back with only 3 while
+    // X-Total-Count still counts all matches. Advancing by record_count
+    // would re-read the tail of the window (duplicates).
+    const { client } = metaClient(
+      [{ sys_id: "a" }, { sys_id: "b" }, { sys_id: "c" }],
+      { "X-Total-Count": "100" }
+    );
+    const result = await queryHandler(
+      querySchema.parse({ table: "incident", limit: 5, offset: 0 }),
+      client,
+      config
+    );
+    const payload = parseText(result);
+    expect(payload.record_count).toBe(3);
+    expect(payload.has_more).toBe(true);
+    expect(payload.next_offset).toBe(5);
+    expect(payload.hint).toContain("offset=5");
+  });
+
+  it("never repeats the current offset when an entire window is ACL-stripped", async () => {
+    // Worst case: every row in the window is hidden -> record_count=0 but
+    // has_more=true. next_offset === offset would drive an infinite loop.
+    const { client } = metaClient([], { "X-Total-Count": "100" });
+    const result = await queryHandler(
+      querySchema.parse({ table: "incident", limit: 5, offset: 10 }),
+      client,
+      config
+    );
+    const payload = parseText(result);
+    expect(payload.record_count).toBe(0);
+    expect(payload.has_more).toBe(true);
+    expect(payload.next_offset).toBe(15);
+    expect(payload.next_offset).not.toBe(10);
+  });
+
   it("handles an empty result set with X-Total-Count: 0", async () => {
     const { client } = metaClient([], { "X-Total-Count": "0" });
     const result = await queryHandler(
@@ -350,6 +387,20 @@ describe("sn_syslog pagination metadata", () => {
     expect(payload.hint).toContain("sn_syslog");
     expect(payload.hint).toContain("offset=6");
     expect(payload.results).toHaveLength(2);
+  });
+
+  it("advances next_offset by limit when the page is trimmed below limit", async () => {
+    const { client } = metaClient([row, row], { "X-Total-Count": "100" });
+    const result = await syslogHandler(
+      syslogSchema.parse({ limit: 5, offset: 4 }),
+      client,
+      config
+    );
+    const payload = parseText(result);
+    expect(payload.record_count).toBe(2);
+    expect(payload.has_more).toBe(true);
+    expect(payload.next_offset).toBe(9);
+    expect(payload.hint).toContain("offset=9");
   });
 
   it("omits sysparm_offset when offset is not given and reports has_more=false on a short page", async () => {
