@@ -6,10 +6,32 @@
 
 /**
  * Format a successful tool result as MCP text content.
+ * Objects are serialized as compact JSON (no pretty-print indent).
  */
 export function ok(data: unknown): { content: Array<{ type: "text"; text: string }> } {
-  const text = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  const text = typeof data === "string" ? data : JSON.stringify(data);
   return { content: [{ type: "text", text }] };
+}
+
+/**
+ * Deep-strip empty values from record payloads: removes object entries
+ * whose value is "" or null. Keeps false, 0, and empty arrays. Recurses
+ * into nested objects and arrays. ServiceNow records are full of empty
+ * strings -- stripping them cuts serialized size substantially.
+ */
+export function stripEmpty<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripEmpty(item)) as unknown as T;
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (entry === "" || entry === null) continue;
+      out[key] = stripEmpty(entry);
+    }
+    return out as unknown as T;
+  }
+  return value;
 }
 
 /**
@@ -41,6 +63,8 @@ export function formatError(error: unknown): string {
 
 /**
  * Build a query parameter map for table API requests.
+ * Always excludes reference links (link+value objects are pure URL noise
+ * in tool output).
  */
 export function buildTableParams(opts: {
   query?: string;
@@ -50,7 +74,9 @@ export function buildTableParams(opts: {
   orderby?: string;
   displayValue?: string;
 }): Record<string, string> {
-  const params: Record<string, string> = {};
+  const params: Record<string, string> = {
+    sysparm_exclude_reference_link: "true",
+  };
   if (opts.limit !== undefined) params.sysparm_limit = String(opts.limit);
   if (opts.query) params.sysparm_query = opts.query;
   if (opts.fields) params.sysparm_fields = opts.fields;

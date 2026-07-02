@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { schema as querySchema } from "../src/tools/query.js";
+import { schema as getSchema } from "../src/tools/get.js";
 import { schema as batchSchema } from "../src/tools/batch.js";
 import { schema as atfSchema } from "../src/tools/atf.js";
 
@@ -41,6 +42,46 @@ describe("sn_query schema", () => {
     const result = querySchema.safeParse({ table: "incident", limit: "20" });
     expect(result.success).toBe(false);
     expect(issueString(result)).toContain("limit:");
+  });
+
+  it("rejects display_value outside the true/false/all enum", () => {
+    const result = querySchema.safeParse({ table: "incident", display_value: "yes" });
+    expect(result.success).toBe(false);
+    expect(issueString(result)).toContain("display_value:");
+  });
+
+  it("rejects out-of-bounds and non-integer limits", () => {
+    expect(querySchema.safeParse({ table: "incident", limit: 0 }).success).toBe(false);
+    expect(querySchema.safeParse({ table: "incident", limit: 1001 }).success).toBe(false);
+    expect(querySchema.safeParse({ table: "incident", limit: 2.5 }).success).toBe(false);
+    expect(querySchema.safeParse({ table: "incident", limit: 1 }).success).toBe(true);
+    expect(querySchema.safeParse({ table: "incident", limit: 1000 }).success).toBe(true);
+  });
+
+  it("rejects negative and non-integer offsets", () => {
+    expect(querySchema.safeParse({ table: "incident", offset: -1 }).success).toBe(false);
+    expect(querySchema.safeParse({ table: "incident", offset: 1.5 }).success).toBe(false);
+    expect(querySchema.safeParse({ table: "incident", offset: 0 }).success).toBe(true);
+  });
+});
+
+describe("sn_get schema", () => {
+  it("rejects display_value outside the true/false/all enum", () => {
+    const result = getSchema.safeParse({
+      table: "incident",
+      sys_id: "abc",
+      display_value: "maybe",
+    });
+    expect(result.success).toBe(false);
+    expect(issueString(result)).toContain("display_value:");
+  });
+
+  it("accepts every display_value enum member", () => {
+    for (const dv of ["true", "false", "all"]) {
+      expect(
+        getSchema.safeParse({ table: "incident", sys_id: "abc", display_value: dv }).success
+      ).toBe(true);
+    }
   });
 });
 

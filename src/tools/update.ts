@@ -1,12 +1,13 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError } from "../utils.js";
+import { ok, err, formatError, stripEmpty } from "../utils.js";
 
 export const definition = {
   name: "sn_update",
   description:
-    "Update an existing ServiceNow record. Pass the sys_id and field values to change.",
+    "Update an existing ServiceNow record. Pass the sys_id and field values to change. " +
+    "Returns sys_id and the updated record (empty fields stripped) under record.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -50,7 +51,11 @@ export async function handler(
       `/api/now/table/${args.table}/${args.sys_id}`,
       args.fields
     );
-    return ok(resp.result);
+    const { sys_id, ...rest } = resp.result || {};
+    return ok({
+      sys_id: sys_id ?? args.sys_id,
+      record: stripEmpty(rest),
+    });
   } catch (error) {
     return err(formatError(error));
   }

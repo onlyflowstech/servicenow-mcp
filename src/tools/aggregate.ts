@@ -33,6 +33,7 @@ export const definition = {
       },
       display_value: {
         type: "string",
+        enum: ["true", "false", "all"],
         description: "Display values mode: true, false, or all",
       },
       profile: {
@@ -50,7 +51,7 @@ export const schema = z.object({
   query: z.string().optional(),
   field: z.string().optional(),
   group_by: z.string().optional(),
-  display_value: z.string().optional(),
+  display_value: z.enum(["true", "false", "all"]).optional(),
   profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 

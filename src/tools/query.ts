@@ -1,12 +1,15 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError, buildTableParams } from "../utils.js";
+import { ok, err, formatError, buildTableParams, stripEmpty } from "../utils.js";
+import { resolveFields } from "../table-defaults.js";
 
 export const definition = {
   name: "sn_query",
   description:
-    "Query any ServiceNow table. Returns records matching the encoded query with support for field selection, pagination, sorting, and display values.",
+    "Query any ServiceNow table. Returns records with pagination metadata " +
+    "(record_count, total, has_more, next_offset). Omit fields for a curated " +
+    'default field set on common tables; pass fields="all" for every field.',
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -21,14 +24,19 @@ export const definition = {
       },
       fields: {
         type: "string",
-        description: "Comma-separated list of fields to return",
+        description:
+          'Comma-separated list of fields to return. Omit for a curated default ' +
+          'field set on common tables; pass "all" for every field.',
       },
       limit: {
-        type: "number",
-        description: "Maximum records to return (default 20)",
+        type: "integer",
+        minimum: 1,
+        maximum: 1000,
+        description: "Maximum records to return (default 20, max 1000)",
       },
       offset: {
-        type: "number",
+        type: "integer",
+        minimum: 0,
         description: "Pagination offset",
       },
       orderby: {
@@ -37,6 +45,7 @@ export const definition = {
       },
       display_value: {
         type: "string",
+        enum: ["true", "false", "all"],
         description: "Display values mode: true, false, or all (default: true)",
       },
       profile: {
@@ -52,10 +61,10 @@ export const schema = z.object({
   table: z.string(),
   query: z.string().optional(),
   fields: z.string().optional(),
-  limit: z.number().optional().default(20),
-  offset: z.number().optional(),
+  limit: z.number().int().min(1).max(1000).optional().default(20),
+  offset: z.number().int().min(0).optional(),
   orderby: z.string().optional(),
-  display_value: z.string().optional(),
+  display_value: z.enum(["true", "false", "all"]).optional(),
   profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
@@ -67,19 +76,36 @@ export async function handler(
   try {
     const params = buildTableParams({
       query: args.query,
-      fields: args.fields,
+      fields: resolveFields(args.table, args.fields),
       limit: args.limit,
       offset: args.offset,
       orderby: args.orderby,
       displayValue: args.display_value ?? config.displayValue,
     });
 
-    const resp = await client.get(`/api/now/table/${args.table}`, params);
-    const results = resp.result || [];
-    return ok({
-      record_count: results.length,
-      results,
-    });
+    const resp = await client.getWithMeta(`/api/now/table/${args.table}`, params);
+    const results = stripEmpty(resp.data?.result || []);
+    const offset = args.offset ?? 0;
+    const recordCount = results.length;
+
+    const totalHeader = resp.headers.get("x-total-count");
+    const total =
+      totalHeader !== null && Number.isFinite(Number(totalHeader))
+        ? Number(totalHeader)
+        : undefined;
+    const hasMore =
+      total !== undefined ? offset + recordCount < total : recordCount === args.limit;
+
+    const payload: Record<string, unknown> = { record_count: recordCount };
+    if (total !== undefined) payload.total = total;
+    payload.has_more = hasMore;
+    if (hasMore) {
+      const nextOffset = offset + recordCount;
+      payload.next_offset = nextOffset;
+      payload.hint = `More records available. Call sn_query again with offset=${nextOffset}.`;
+    }
+    payload.results = results;
+    return ok(payload);
   } catch (error) {
     return err(formatError(error));
   }

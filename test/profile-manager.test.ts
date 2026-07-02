@@ -259,7 +259,7 @@ describe("sn_profile output redaction", () => {
   it("info reports auth_type but never password/clientSecret/apiKey", async () => {
     const result = await profileHandler({ action: "info", name: "dev" }, stubManager());
     const text = result.content[0].text;
-    expect(text).toContain('"auth_type": "oauth"');
+    expect(text).toContain('"auth_type":"oauth"');
     expect(text).not.toContain("fake-user-password");
     expect(text).not.toContain("fake-oauth-secret");
     expect(text).not.toContain("fake-api-key");
@@ -268,7 +268,7 @@ describe("sn_profile output redaction", () => {
   it("list output contains no secret material", async () => {
     const result = await profileHandler({ action: "list" }, stubManager());
     const text = result.content[0].text;
-    expect(text).toContain('"authType": "oauth"');
+    expect(text).toContain('"authType":"oauth"');
     expect(text).not.toContain("fake-user-password");
     expect(text).not.toContain("fake-oauth-secret");
     expect(text).not.toContain("fake-api-key");

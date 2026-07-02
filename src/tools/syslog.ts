@@ -6,7 +6,8 @@ import { ok, err, formatError, truncate } from "../utils.js";
 export const definition = {
   name: "sn_syslog",
   description:
-    "Query ServiceNow system logs (syslog table) with severity, source, and time-based filters. Results ordered newest first.",
+    "Query ServiceNow system logs (syslog table) with severity, source, and time-based filters. " +
+    "Results ordered newest first, with pagination metadata (record_count, total, has_more, next_offset).",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -28,8 +29,15 @@ export const definition = {
         description: "Raw encoded query (overrides individual filters)",
       },
       limit: {
-        type: "number",
-        description: "Max records (default 25)",
+        type: "integer",
+        minimum: 1,
+        maximum: 1000,
+        description: "Max records (default 25, max 1000)",
+      },
+      offset: {
+        type: "integer",
+        minimum: 0,
+        description: "Pagination offset",
       },
       since: {
         type: "number",
@@ -53,7 +61,8 @@ export const schema = z.object({
   source: z.string().optional(),
   message: z.string().optional(),
   query: z.string().optional(),
-  limit: z.number().optional().default(25),
+  limit: z.number().int().min(1).max(1000).optional().default(25),
+  offset: z.number().int().min(0).optional(),
   since: z.number().optional().default(60),
   fields: z.string().optional(),
   profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
@@ -82,13 +91,16 @@ export async function handler(
     // Always order newest first
     sysparmQuery += "^ORDERBYDESCsys_created_on";
 
-    const resp = await client.get("/api/now/table/syslog", {
+    const params: Record<string, string> = {
       sysparm_query: sysparmQuery,
       sysparm_fields: fields,
       sysparm_limit: String(args.limit),
-    });
+    };
+    if (args.offset !== undefined) params.sysparm_offset = String(args.offset);
 
-    const results = (resp.result || []).map((r: Record<string, string>) => ({
+    const resp = await client.getWithMeta("/api/now/table/syslog", params);
+
+    const results = (resp.data?.result || []).map((r: Record<string, string>) => ({
       sys_id: r.sys_id,
       timestamp: r.sys_created_on,
       level: r.level,
@@ -96,7 +108,26 @@ export async function handler(
       message: r.message ? truncate(r.message, 300) : undefined,
     }));
 
-    return ok(results);
+    const offset = args.offset ?? 0;
+    const recordCount = results.length;
+    const totalHeader = resp.headers.get("x-total-count");
+    const total =
+      totalHeader !== null && Number.isFinite(Number(totalHeader))
+        ? Number(totalHeader)
+        : undefined;
+    const hasMore =
+      total !== undefined ? offset + recordCount < total : recordCount === args.limit;
+
+    const payload: Record<string, unknown> = { record_count: recordCount };
+    if (total !== undefined) payload.total = total;
+    payload.has_more = hasMore;
+    if (hasMore) {
+      const nextOffset = offset + recordCount;
+      payload.next_offset = nextOffset;
+      payload.hint = `More records available. Call sn_syslog again with offset=${nextOffset}.`;
+    }
+    payload.results = results;
+    return ok(payload);
   } catch (error) {
     return err(formatError(error));
   }

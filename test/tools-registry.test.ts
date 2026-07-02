@@ -7,6 +7,7 @@ import {
 } from "../src/tools/index.js";
 import type { ProfileManager } from "../src/profile-manager.js";
 import type { ServiceNowConfig } from "../src/config.js";
+import { DEFAULT_FIELDS } from "../src/table-defaults.js";
 
 /**
  * A ProfileManager stub that fails loudly if the registry touches it.
@@ -84,7 +85,11 @@ describe("executeTool", () => {
 
   it("resolves the requested profile and strips it from handler args", async () => {
     const fakeClient = {
-      get: vi.fn(async () => ({ result: [{ sys_id: "abc123" }] })),
+      getWithMeta: vi.fn(async () => ({
+        data: { result: [{ sys_id: "abc123" }] },
+        status: 200,
+        headers: new Headers(),
+      })),
     };
     const fakeConfig: ServiceNowConfig = {
       instance: "https://example.service-now.com",
@@ -106,13 +111,16 @@ describe("executeTool", () => {
 
     expect(pm.getClient).toHaveBeenCalledWith("secondary");
     expect(pm.getConfig).toHaveBeenCalledWith("secondary");
-    expect(fakeClient.get).toHaveBeenCalledWith("/api/now/table/incident", {
+    expect(fakeClient.getWithMeta).toHaveBeenCalledWith("/api/now/table/incident", {
+      sysparm_exclude_reference_link: "true",
+      sysparm_fields: DEFAULT_FIELDS.incident,
       sysparm_limit: "20",
       sysparm_display_value: "true",
     });
     expect(result.isError).toBeUndefined();
     expect(JSON.parse(result.content[0].text)).toEqual({
       record_count: 1,
+      has_more: false,
       results: [{ sys_id: "abc123" }],
     });
   });

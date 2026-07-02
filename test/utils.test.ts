@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTableParams, err, formatError, ok, truncate } from "../src/utils.js";
+import { buildTableParams, err, formatError, ok, stripEmpty, truncate } from "../src/utils.js";
 
 describe("ok", () => {
   it("wraps a string as-is in text content", () => {
@@ -7,16 +7,57 @@ describe("ok", () => {
     expect(result).toEqual({ content: [{ type: "text", text: "hello" }] });
   });
 
-  it("pretty-prints objects as 2-space-indented JSON", () => {
-    const result = ok({ a: 1, b: "two" });
+  it("serializes objects as compact JSON with no indentation", () => {
+    const result = ok({ a: 1, b: "two", nested: { c: [1, 2] } });
     expect(result.content).toHaveLength(1);
     expect(result.content[0].type).toBe("text");
-    expect(result.content[0].text).toBe(JSON.stringify({ a: 1, b: "two" }, null, 2));
-    expect(result.content[0].text).toContain("\n  ");
+    expect(result.content[0].text).toBe('{"a":1,"b":"two","nested":{"c":[1,2]}}');
+    expect(result.content[0].text).not.toContain("\n");
+    expect(result.content[0].text).not.toContain("  ");
   });
 
   it("does not set isError", () => {
     expect(ok("x")).not.toHaveProperty("isError");
+  });
+});
+
+describe("stripEmpty", () => {
+  it("drops empty-string and null object entries", () => {
+    expect(stripEmpty({ a: "", b: null, c: "keep" })).toEqual({ c: "keep" });
+  });
+
+  it("keeps false, 0, and empty arrays", () => {
+    expect(stripEmpty({ active: false, count: 0, tags: [] })).toEqual({
+      active: false,
+      count: 0,
+      tags: [],
+    });
+  });
+
+  it("recurses into nested objects", () => {
+    expect(
+      stripEmpty({ outer: { a: "", b: null, c: "x", inner: { d: null, e: 1 } } })
+    ).toEqual({ outer: { c: "x", inner: { e: 1 } } });
+  });
+
+  it("recurses into arrays of objects without removing array elements", () => {
+    expect(
+      stripEmpty([
+        { a: "", b: "one" },
+        { a: null, b: "two" },
+      ])
+    ).toEqual([{ b: "one" }, { b: "two" }]);
+  });
+
+  it("keeps empty objects produced by stripping", () => {
+    expect(stripEmpty({ meta: { a: "", b: null } })).toEqual({ meta: {} });
+  });
+
+  it("passes primitives through unchanged", () => {
+    expect(stripEmpty("text")).toBe("text");
+    expect(stripEmpty(42)).toBe(42);
+    expect(stripEmpty(false)).toBe(false);
+    expect(stripEmpty(null)).toBe(null);
   });
 });
 
@@ -63,8 +104,10 @@ describe("formatError", () => {
 });
 
 describe("buildTableParams", () => {
-  it("returns an empty object for empty options", () => {
-    expect(buildTableParams({})).toEqual({});
+  it("always sets sysparm_exclude_reference_link=true, even for empty options", () => {
+    expect(buildTableParams({})).toEqual({
+      sysparm_exclude_reference_link: "true",
+    });
   });
 
   it("maps every option to its sysparm_* parameter", () => {
@@ -78,6 +121,7 @@ describe("buildTableParams", () => {
         displayValue: "all",
       })
     ).toEqual({
+      sysparm_exclude_reference_link: "true",
       sysparm_query: "active=true^priority=1",
       sysparm_fields: "sys_id,number,short_description",
       sysparm_limit: "50",
@@ -89,6 +133,7 @@ describe("buildTableParams", () => {
 
   it("includes zero-valued limit and offset", () => {
     expect(buildTableParams({ limit: 0, offset: 0 })).toEqual({
+      sysparm_exclude_reference_link: "true",
       sysparm_limit: "0",
       sysparm_offset: "0",
     });
@@ -97,7 +142,7 @@ describe("buildTableParams", () => {
   it("omits empty-string query, fields, orderby, and displayValue", () => {
     expect(
       buildTableParams({ query: "", fields: "", orderby: "", displayValue: "" })
-    ).toEqual({});
+    ).toEqual({ sysparm_exclude_reference_link: "true" });
   });
 });
 

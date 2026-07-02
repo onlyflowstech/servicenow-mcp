@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
 import { ok, err, formatError, buildTableParams } from "../utils.js";
+import { DEFAULT_FIELDS, TABLE_ALIASES } from "../table-defaults.js";
 
 export const definition = {
   name: "sn_nl",
@@ -43,66 +44,6 @@ export const schema = z.object({
   force: z.boolean().optional().default(false),
   profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
-
-// ── Table aliases ──────────────────────────────────────────────────
-const TABLE_ALIASES: Record<string, string> = {
-  // ITSM
-  incident: "incident", incidents: "incident", inc: "incident",
-  ticket: "incident", tickets: "incident",
-  change: "change_request", changes: "change_request",
-  "change request": "change_request", "change requests": "change_request",
-  problem: "problem", problems: "problem",
-  task: "task", tasks: "task",
-  // Users
-  user: "sys_user", users: "sys_user", people: "sys_user", person: "sys_user",
-  group: "sys_user_group", groups: "sys_user_group",
-  team: "sys_user_group", teams: "sys_user_group",
-  // CMDB
-  server: "cmdb_ci_server", servers: "cmdb_ci_server",
-  ci: "cmdb_ci", cis: "cmdb_ci", cmdb: "cmdb_ci",
-  "configuration item": "cmdb_ci", "configuration items": "cmdb_ci",
-  computer: "cmdb_ci_computer", computers: "cmdb_ci_computer",
-  laptop: "cmdb_ci_computer", laptops: "cmdb_ci_computer",
-  database: "cmdb_ci_database", databases: "cmdb_ci_database", db: "cmdb_ci_database",
-  application: "cmdb_ci_appl", applications: "cmdb_ci_appl",
-  app: "cmdb_ci_appl", apps: "cmdb_ci_appl",
-  service: "cmdb_ci_service", services: "cmdb_ci_service",
-  "business service": "cmdb_ci_service", "business services": "cmdb_ci_service",
-  "network gear": "cmdb_ci_netgear", router: "cmdb_ci_netgear", routers: "cmdb_ci_netgear",
-  switch: "cmdb_ci_netgear", switches: "cmdb_ci_netgear",
-  // Knowledge
-  knowledge: "kb_knowledge", "knowledge article": "kb_knowledge",
-  "knowledge articles": "kb_knowledge", article: "kb_knowledge",
-  articles: "kb_knowledge", kb: "kb_knowledge",
-  // Service Catalog
-  "catalog item": "sc_cat_item", "catalog items": "sc_cat_item",
-  request: "sc_request", requests: "sc_request",
-  "requested item": "sc_req_item", "requested items": "sc_req_item",
-  ritm: "sc_req_item", ritms: "sc_req_item",
-  // Other
-  "update set": "sys_update_set", "update sets": "sys_update_set",
-  flow: "sys_hub_flow", flows: "sys_hub_flow",
-  notification: "sysevent_email_action", notifications: "sysevent_email_action",
-  "business rule": "sys_script", "business rules": "sys_script",
-  alert: "em_alert", alerts: "em_alert",
-  sla: "task_sla", slas: "task_sla",
-  email: "sys_email", emails: "sys_email",
-};
-
-// Default fields by table
-const DEFAULT_FIELDS: Record<string, string> = {
-  incident: "number,short_description,state,priority,assigned_to,assignment_group,opened_at",
-  change_request: "number,short_description,state,priority,assigned_to,start_date,end_date",
-  problem: "number,short_description,state,priority,assigned_to,opened_at",
-  sc_req_item: "number,short_description,state,assigned_to,request,opened_at",
-  sc_request: "number,short_description,state,requested_for,opened_at",
-  sys_user: "user_name,name,email,department,active",
-  sys_user_group: "name,description,manager,active",
-  cmdb_ci_server: "name,ip_address,os,classification,operational_status",
-  cmdb_ci: "name,sys_class_name,operational_status,owned_by",
-  kb_knowledge: "number,short_description,workflow_state,author,published",
-  task: "number,short_description,state,assigned_to,sys_class_name,opened_at",
-};
 
 export async function handler(
   args: z.infer<typeof schema>,

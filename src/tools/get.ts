@@ -1,12 +1,14 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError } from "../utils.js";
+import { ok, err, formatError, buildTableParams, stripEmpty } from "../utils.js";
+import { resolveFields } from "../table-defaults.js";
 
 export const definition = {
   name: "sn_get",
   description:
-    "Get a single ServiceNow record by sys_id. Returns all fields or a specified subset.",
+    "Get a single ServiceNow record by sys_id. Omit fields for a curated " +
+    'default field set on common tables; pass fields="all" for every field.',
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -20,10 +22,13 @@ export const definition = {
       },
       fields: {
         type: "string",
-        description: "Comma-separated list of fields to return",
+        description:
+          'Comma-separated list of fields to return. Omit for a curated default ' +
+          'field set on common tables; pass "all" for every field.',
       },
       display_value: {
         type: "string",
+        enum: ["true", "false", "all"],
         description: "Display values mode: true, false, or all",
       },
       profile: {
@@ -39,7 +44,7 @@ export const schema = z.object({
   table: z.string(),
   sys_id: z.string(),
   fields: z.string().optional(),
-  display_value: z.string().optional(),
+  display_value: z.enum(["true", "false", "all"]).optional(),
   profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
@@ -49,15 +54,16 @@ export async function handler(
   config: ServiceNowConfig
 ) {
   try {
-    const params: Record<string, string> = {};
-    if (args.fields) params.sysparm_fields = args.fields;
-    params.sysparm_display_value = args.display_value ?? config.displayValue;
+    const params = buildTableParams({
+      fields: resolveFields(args.table, args.fields),
+      displayValue: args.display_value ?? config.displayValue,
+    });
 
     const resp = await client.get(
       `/api/now/table/${args.table}/${args.sys_id}`,
       params
     );
-    return ok(resp.result);
+    return ok(stripEmpty(resp.result));
   } catch (error) {
     return err(formatError(error));
   }

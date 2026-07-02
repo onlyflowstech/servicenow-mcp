@@ -1,12 +1,13 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError } from "../utils.js";
+import { ok, err, formatError, stripEmpty } from "../utils.js";
 
 export const definition = {
   name: "sn_create",
   description:
-    "Create a new record on any ServiceNow table. Pass field values as a JSON object.",
+    "Create a new record on any ServiceNow table. Pass field values as a JSON object. " +
+    "Returns sys_id, number, table, and the created record (empty fields stripped) under record.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -42,11 +43,12 @@ export async function handler(
 ) {
   try {
     const resp = await client.post(`/api/now/table/${args.table}`, args.fields);
-    const result = resp.result || {};
+    const { sys_id, number, ...rest } = resp.result || {};
     return ok({
-      sys_id: result.sys_id,
-      number: result.number,
-      result,
+      sys_id,
+      number,
+      table: args.table,
+      record: stripEmpty(rest),
     });
   } catch (error) {
     return err(formatError(error));
