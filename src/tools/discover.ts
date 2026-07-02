@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, escapeQueryValue, formatError } from "../utils.js";
+import { ok, err, escapeQueryValue, formatError, withWarnings } from "../utils.js";
 
 export const definition = {
   name: "sn_discover",
@@ -80,6 +80,7 @@ export async function handler(
 
       case "apps": {
         let allApps: Array<Record<string, unknown>> = [];
+        const warnings: string[] = [];
 
         // Scoped apps (sys_app)
         const appQuery: string[] = [];
@@ -95,8 +96,9 @@ export async function handler(
           for (const r of appResp.result || []) {
             allApps.push({ ...r, source: "scoped" });
           }
-        } catch {
-          // sys_app may require elevated role
+        } catch (error) {
+          // sys_app may require elevated role -- report, don't hide
+          warnings.push(`sys_app: ${formatError(error)}`);
         }
 
         // Store apps (sys_store_app)
@@ -115,12 +117,13 @@ export async function handler(
           for (const r of storeResp.result || []) {
             allApps.push({ ...r, source: "store" });
           }
-        } catch {
-          // May not be accessible
+        } catch (error) {
+          // May not be accessible -- report, don't hide
+          warnings.push(`sys_store_app: ${formatError(error)}`);
         }
 
         allApps = allApps.slice(0, args.limit);
-        return ok(allApps);
+        return ok(withWarnings(allApps, warnings));
       }
 
       case "plugins": {

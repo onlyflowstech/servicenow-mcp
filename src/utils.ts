@@ -62,6 +62,25 @@ export function formatError(error: unknown): string {
 }
 
 /**
+ * Attach a list of per-request failure warnings to a success payload.
+ *
+ * No-op when there are no warnings -- the success shape is unchanged.
+ * With warnings, plain objects gain a `warnings` key; arrays are wrapped
+ * as `{ results, warnings }` and scalars as `{ result, warnings }` since
+ * neither can carry extra keys. This lets tools that fan out over several
+ * sub-requests report partial failures (e.g. an ACL-denied table) instead
+ * of silently returning fewer results.
+ */
+export function withWarnings(data: unknown, warnings: string[]): unknown {
+  if (warnings.length === 0) return data;
+  if (Array.isArray(data)) return { results: data, warnings };
+  if (data !== null && typeof data === "object") {
+    return { ...(data as Record<string, unknown>), warnings };
+  }
+  return { result: data, warnings };
+}
+
+/**
  * Build a query parameter map for table API requests.
  * Always excludes reference links (link+value objects are pure URL noise
  * in tool output).

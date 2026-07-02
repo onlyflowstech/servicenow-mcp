@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, escapeQueryValue, formatError } from "../utils.js";
+import { ok, err, escapeQueryValue, formatError, withWarnings } from "../utils.js";
 
 export const definition = {
   name: "sn_atf",
@@ -150,6 +150,9 @@ export async function handler(
         if (!args.test_sys_id) return err("test_sys_id is required for run");
 
         const timeout = args.timeout ?? 120;
+        // Each fallback strategy that fails is recorded so the caller can
+        // see which execution paths were tried and why they failed.
+        const warnings: string[] = [];
         let runResp: any;
 
         // Try sn_atf REST API first
@@ -157,13 +160,17 @@ export async function handler(
           runResp = await client.post("/api/sn_atf/rest/test", {
             test_id: args.test_sys_id,
           });
-        } catch {
+        } catch (error) {
+          warnings.push(`POST /api/sn_atf/rest/test: ${formatError(error)}`);
           // Fallback: try /api/now/atf/test/{id}/run
           try {
             runResp = await client.post(
               `/api/now/atf/test/${args.test_sys_id}/run`
             );
-          } catch {
+          } catch (error2) {
+            warnings.push(
+              `POST /api/now/atf/test/{id}/run: ${formatError(error2)}`
+            );
             // Last fallback: schedule via Table API
             try {
               runResp = await client.post(
@@ -173,9 +180,13 @@ export async function handler(
                   status: "scheduled",
                 }
               );
-            } catch (e) {
+            } catch (error3) {
+              warnings.push(
+                `sys_atf_test_result (schedule via Table API): ${formatError(error3)}`
+              );
               return err(
-                "All ATF execution methods failed. Ensure ATF plugin is active and user has atf_admin role."
+                "All ATF execution methods failed. Ensure ATF plugin is active and user has atf_admin role.\n" +
+                  warnings.join("\n")
               );
             }
           }
@@ -187,7 +198,7 @@ export async function handler(
           runResp?.result?.tracker_id || runResp?.result?.progress_id;
 
         if (!args.wait) {
-          return ok(runResp?.result || runResp);
+          return ok(withWarnings(runResp?.result || runResp, warnings));
         }
 
         // Poll for completion
@@ -196,7 +207,8 @@ export async function handler(
           args.test_sys_id,
           resultId,
           trackerId,
-          timeout
+          timeout,
+          warnings
         );
       }
 
@@ -206,26 +218,33 @@ export async function handler(
           return err("suite_sys_id is required for run-suite");
 
         const timeout = args.timeout ?? 300;
+        // Record failed fallback strategies (same pattern as "run").
+        const warnings: string[] = [];
         let runResp: any;
 
         try {
           runResp = await client.post("/api/sn_atf/rest/suite", {
             suite_id: args.suite_sys_id,
           });
-        } catch {
+        } catch (error) {
+          warnings.push(`POST /api/sn_atf/rest/suite: ${formatError(error)}`);
           try {
             runResp = await client.post(
               `/api/now/atf/suite/${args.suite_sys_id}/run`
             );
-          } catch {
+          } catch (error2) {
+            warnings.push(
+              `POST /api/now/atf/suite/{id}/run: ${formatError(error2)}`
+            );
             return err(
-              "Suite execution failed. Ensure ATF plugin is active and user has atf_admin role."
+              "Suite execution failed. Ensure ATF plugin is active and user has atf_admin role.\n" +
+                warnings.join("\n")
             );
           }
         }
 
         if (!args.wait) {
-          return ok(runResp?.result || runResp);
+          return ok(withWarnings(runResp?.result || runResp, warnings));
         }
 
         // Poll tracker
@@ -290,16 +309,21 @@ export async function handler(
             r.status === "Skipped" || r.status === "Cancelled"
         ).length;
 
-        return ok({
-          suite_sys_id: args.suite_sys_id,
-          summary: {
-            total: testResults.length,
-            passed,
-            failed,
-            skipped,
-          },
-          results: testResults,
-        });
+        return ok(
+          withWarnings(
+            {
+              suite_sys_id: args.suite_sys_id,
+              summary: {
+                total: testResults.length,
+                passed,
+                failed,
+                skipped,
+              },
+              results: testResults,
+            },
+            warnings
+          )
+        );
       }
 
       // ── results ──
@@ -351,7 +375,8 @@ async function pollTestResult(
   testId: string,
   resultId: string | undefined,
   trackerId: string | undefined,
-  timeout: number
+  timeout: number,
+  warnings: string[]
 ) {
   let elapsed = 0;
   const pollInterval = 5;
@@ -445,11 +470,21 @@ async function pollTestResult(
           sysparm_display_value: "true",
         }
       );
-      return ok(resp.result);
+      return ok(withWarnings(resp.result, warnings));
     } catch {
-      return ok({ status: "timeout", message: `Timed out after ${timeout}s` });
+      return ok(
+        withWarnings(
+          { status: "timeout", message: `Timed out after ${timeout}s` },
+          warnings
+        )
+      );
     }
   }
 
-  return ok({ status: "timeout", message: `Timed out after ${timeout}s` });
+  return ok(
+    withWarnings(
+      { status: "timeout", message: `Timed out after ${timeout}s` },
+      warnings
+    )
+  );
 }

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, escapeQueryValue, formatError, truncate } from "../utils.js";
+import { ok, err, escapeQueryValue, formatError, truncate, withWarnings } from "../utils.js";
 
 export const definition = {
   name: "sn_codesearch",
@@ -73,6 +73,7 @@ export async function handler(
         : args.limit;
 
     let allResults: Array<Record<string, unknown>> = [];
+    const warnings: string[] = [];
 
     for (const target of targets) {
       try {
@@ -94,15 +95,16 @@ export async function handler(
               : "",
           });
         }
-      } catch {
-        // Skip tables that fail (ACL issues, etc.)
+      } catch (error) {
+        // Tables can fail (ACL issues, etc.) -- report, don't hide
+        warnings.push(`${target.table}: ${formatError(error)}`);
       }
     }
 
     // Trim to requested limit
     allResults = allResults.slice(0, args.limit);
 
-    return ok(allResults);
+    return ok(withWarnings(allResults, warnings));
   } catch (error) {
     return err(formatError(error));
   }

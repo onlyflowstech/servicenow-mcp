@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, escapeQueryValue, formatError } from "../utils.js";
+import { ok, err, escapeQueryValue, formatError, withWarnings } from "../utils.js";
 
 export const definition = {
   name: "sn_relationships",
@@ -118,6 +118,7 @@ export async function handler(
     const visited = new Set<string>([rootId]);
     const classCache = new Map<string, string>([[rootId, rootClass]]);
     const allRels: RelNode[] = [];
+    const warnings: string[] = [];
 
     async function getClass(id: string): Promise<string> {
       if (classCache.has(id)) return classCache.get(id)!;
@@ -176,7 +177,11 @@ export async function handler(
           sysparm_display_value: "all",
           sysparm_limit: "100",
         });
-      } catch {
+      } catch (error) {
+        // A failed hop truncates the walk -- report, don't hide
+        warnings.push(
+          `cmdb_rel_ci (traversal at depth ${currentDepth}): ${formatError(error)}`
+        );
         return;
       }
 
@@ -238,11 +243,16 @@ export async function handler(
 
     await traverse(rootId, 1);
 
-    return ok({
-      root: { name: rootName, class: rootClass, sys_id: rootId },
-      relationships: allRels,
-      meta: { depth: maxDepth, direction, total: allRels.length },
-    });
+    return ok(
+      withWarnings(
+        {
+          root: { name: rootName, class: rootClass, sys_id: rootId },
+          relationships: allRels,
+          meta: { depth: maxDepth, direction, total: allRels.length },
+        },
+        warnings
+      )
+    );
   } catch (error) {
     return err(formatError(error));
   }

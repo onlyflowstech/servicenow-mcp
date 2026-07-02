@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ServiceNowClient } from "../client.js";
 import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError } from "../utils.js";
+import { ok, err, formatError, withWarnings } from "../utils.js";
 
 export const definition = {
   name: "sn_health",
@@ -32,14 +32,22 @@ export const schema = z.object({
   profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
 });
 
+/**
+ * GET that converts a failure into a null result plus a warning naming
+ * the sub-check and the underlying error, so a denied table is
+ * distinguishable from an empty one.
+ */
 async function safeGet(
   client: ServiceNowClient,
   path: string,
-  params: Record<string, string>
+  params: Record<string, string>,
+  label: string,
+  warnings: string[]
 ): Promise<any> {
   try {
     return await client.get(path, params);
-  } catch {
+  } catch (error) {
+    warnings.push(`${label}: ${formatError(error)}`);
     return null;
   }
 }
@@ -55,32 +63,51 @@ export async function handler(
       instance: config.instance,
       timestamp: new Date().toISOString(),
     };
+    const warnings: string[] = [];
 
     // ── version ──
     if (check === "all" || check === "version") {
       const version: Record<string, string> = {};
 
-      const buildResp = await safeGet(client, "/api/now/table/sys_properties", {
-        sysparm_query: "name=glide.war",
-        sysparm_fields: "value",
-        sysparm_limit: "1",
-      });
+      const buildResp = await safeGet(
+        client,
+        "/api/now/table/sys_properties",
+        {
+          sysparm_query: "name=glide.war",
+          sysparm_fields: "value",
+          sysparm_limit: "1",
+        },
+        "sys_properties (glide.war)",
+        warnings
+      );
       version.build = buildResp?.result?.[0]?.value ?? "unavailable";
 
-      const dateResp = await safeGet(client, "/api/now/table/sys_properties", {
-        sysparm_query: "name=glide.build.date",
-        sysparm_fields: "value",
-        sysparm_limit: "1",
-      });
+      const dateResp = await safeGet(
+        client,
+        "/api/now/table/sys_properties",
+        {
+          sysparm_query: "name=glide.build.date",
+          sysparm_fields: "value",
+          sysparm_limit: "1",
+        },
+        "sys_properties (glide.build.date)",
+        warnings
+      );
       if (dateResp?.result?.[0]?.value) {
         version.build_date = dateResp.result[0].value;
       }
 
-      const tagResp = await safeGet(client, "/api/now/table/sys_properties", {
-        sysparm_query: "name=glide.build.tag",
-        sysparm_fields: "value",
-        sysparm_limit: "1",
-      });
+      const tagResp = await safeGet(
+        client,
+        "/api/now/table/sys_properties",
+        {
+          sysparm_query: "name=glide.build.tag",
+          sysparm_fields: "value",
+          sysparm_limit: "1",
+        },
+        "sys_properties (glide.build.tag)",
+        warnings
+      );
       if (tagResp?.result?.[0]?.value) {
         version.build_tag = tagResp.result[0].value;
       }
@@ -96,7 +123,9 @@ export async function handler(
         {
           sysparm_fields: "node_id,status,system_id,most_recent_message",
           sysparm_limit: "50",
-        }
+        },
+        "sys_cluster_state",
+        warnings
       );
       if (nodesResp?.result) {
         output.nodes = nodesResp.result.map(
@@ -114,11 +143,17 @@ export async function handler(
 
     // ── jobs ──
     if (check === "all" || check === "jobs") {
-      const jobsResp = await safeGet(client, "/api/now/table/sys_trigger", {
-        sysparm_query: "state=0^next_action<javascript:gs.minutesAgo(30)",
-        sysparm_fields: "name,next_action,state,trigger_type",
-        sysparm_limit: "20",
-      });
+      const jobsResp = await safeGet(
+        client,
+        "/api/now/table/sys_trigger",
+        {
+          sysparm_query: "state=0^next_action<javascript:gs.minutesAgo(30)",
+          sysparm_fields: "name,next_action,state,trigger_type",
+          sysparm_limit: "20",
+        },
+        "sys_trigger",
+        warnings
+      );
       if (jobsResp?.result) {
         output.jobs = {
           stuck: jobsResp.result.length,
@@ -136,11 +171,17 @@ export async function handler(
 
     // ── semaphores ──
     if (check === "all" || check === "semaphores") {
-      const semResp = await safeGet(client, "/api/now/table/sys_semaphore", {
-        sysparm_query: "state=active",
-        sysparm_fields: "name,state,holder",
-        sysparm_limit: "20",
-      });
+      const semResp = await safeGet(
+        client,
+        "/api/now/table/sys_semaphore",
+        {
+          sysparm_query: "state=active",
+          sysparm_fields: "name,state,holder",
+          sysparm_limit: "20",
+        },
+        "sys_semaphore",
+        warnings
+      );
       if (semResp?.result) {
         output.semaphores = {
           active: semResp.result.length,
@@ -161,34 +202,58 @@ export async function handler(
     if (check === "all" || check === "stats") {
       const stats: Record<string, number> = {};
 
-      const incResp = await safeGet(client, "/api/now/stats/incident", {
-        sysparm_count: "true",
-        sysparm_query: "state!=7",
-      });
+      const incResp = await safeGet(
+        client,
+        "/api/now/stats/incident",
+        {
+          sysparm_count: "true",
+          sysparm_query: "state!=7",
+        },
+        "incident stats (active count)",
+        warnings
+      );
       if (incResp?.result?.stats?.count) {
         stats.incidents_active = parseInt(incResp.result.stats.count, 10);
       }
 
-      const p1Resp = await safeGet(client, "/api/now/stats/incident", {
-        sysparm_count: "true",
-        sysparm_query: "active=true^priority=1",
-      });
+      const p1Resp = await safeGet(
+        client,
+        "/api/now/stats/incident",
+        {
+          sysparm_count: "true",
+          sysparm_query: "active=true^priority=1",
+        },
+        "incident stats (open P1 count)",
+        warnings
+      );
       if (p1Resp?.result?.stats?.count) {
         stats.p1_open = parseInt(p1Resp.result.stats.count, 10);
       }
 
-      const chgResp = await safeGet(client, "/api/now/stats/change_request", {
-        sysparm_count: "true",
-        sysparm_query: "active=true",
-      });
+      const chgResp = await safeGet(
+        client,
+        "/api/now/stats/change_request",
+        {
+          sysparm_count: "true",
+          sysparm_query: "active=true",
+        },
+        "change_request stats (active count)",
+        warnings
+      );
       if (chgResp?.result?.stats?.count) {
         stats.changes_active = parseInt(chgResp.result.stats.count, 10);
       }
 
-      const prbResp = await safeGet(client, "/api/now/stats/problem", {
-        sysparm_count: "true",
-        sysparm_query: "active=true",
-      });
+      const prbResp = await safeGet(
+        client,
+        "/api/now/stats/problem",
+        {
+          sysparm_count: "true",
+          sysparm_query: "active=true",
+        },
+        "problem stats (active count)",
+        warnings
+      );
       if (prbResp?.result?.stats?.count) {
         stats.problems_open = parseInt(prbResp.result.stats.count, 10);
       }
@@ -196,7 +261,7 @@ export async function handler(
       output.stats = stats;
     }
 
-    return ok(output);
+    return ok(withWarnings(output, warnings));
   } catch (error) {
     return err(formatError(error));
   }
