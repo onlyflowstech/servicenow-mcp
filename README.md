@@ -74,7 +74,8 @@ With natural language:
 - *"switch to prod"* — changes the active profile for the session
 - *"which instance am I connected to?"* — shows active profile details
 - *"show me the dev profile info"* — inspect a specific profile's config
-- *"add a new profile called staging at https://staging.service-now.com with user admin and credential env:SN_PASSWORD_STAGING"* — add a new profile (persisted to config file)
+- *"add a new profile called staging at https://staging.service-now.com with user admin and credential env:SN_PASSWORD_STAGING"* — add a basic-auth profile (persisted to config file)
+- *"add an oauth profile called prod at https://prod.service-now.com with client id abc123 and client secret env:SN_CLIENT_SECRET_PROD"* — onboard an OAuth profile in-session (`auth_type: "oauth"`); API-key profiles work the same way (`auth_type: "apikey"`, `api_key: "env:SN_API_KEY_PROD"`). No file editing required — secrets must be `env:VAR_NAME` references, and the response warns if the referenced variable isn't set yet.
 
 With the `profile` parameter on any tool:
 - *"query incidents on prod"* — uses the prod profile for this call only
@@ -88,7 +89,7 @@ If no config file exists, the server falls back to environment variables (`SN_IN
 
 ## Authentication
 
-Three auth types per profile, selected with `authType` (default: `basic`). Existing basic-auth configs keep working unchanged.
+Three auth types per profile, selected with `authType` (default: `basic`). Existing basic-auth configs keep working unchanged. Profiles of any auth type can be onboarded in-session via `sn_profile add` (see [Using Profiles](#using-profiles)) — the config-file snippets below are the equivalent hand-written form.
 
 > **Heads up:** ServiceNow's [inbound Basic Auth restriction program](https://support.servicenow.com/kb?id=kb_article_view&sysparm_article=KB3096078) is phasing out basic auth for API requests — instances can start hard-rejecting it at any time (exemptions: Web-Service-Access-Only accounts or the `snc_basic_auth_api_access` role). **OAuth is the recommended auth type.** The server prints a startup warning for basic-auth profiles.
 

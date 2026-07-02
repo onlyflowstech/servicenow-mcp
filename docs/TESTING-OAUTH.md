@@ -67,8 +67,13 @@ claude mcp add servicenow \
   -- node /Users/openclaw/Development/servicenow-mcp-test/dist/index.js
 ```
 
-(Alternative: named profile in `~/.servicenow-mcp/config.json` with `"clientSecret": "env:VAR"` —
-plain-text secrets are rejected. `sn_profile add` at runtime is basic-auth-only today.)
+(Alternative: onboard the profile in-session — `sn_profile add` supports OAuth and API-key
+profiles, so file editing is no longer required. Inside a session with the server connected:
+`sn_profile {action:"add", name:"pdi", instance:"https://devXXXXXX.service-now.com",
+auth_type:"oauth", client_id:"<client_id>", client_secret:"env:SN_CLIENT_SECRET"}` — or
+hand-write the named profile in `~/.servicenow-mcp/config.json` with `"clientSecret": "env:VAR"`.
+Either way plain-text secrets are rejected, and the env var must be set in the environment the
+server is launched with — `sn_profile add` warns in its response if it isn't set yet.)
 
 For the terminal-based tests below, also export the same four variables in your shell:
 

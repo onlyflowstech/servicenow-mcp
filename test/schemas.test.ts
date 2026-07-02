@@ -3,6 +3,10 @@ import { schema as querySchema } from "../src/tools/query.js";
 import { schema as getSchema } from "../src/tools/get.js";
 import { schema as batchSchema } from "../src/tools/batch.js";
 import { schema as atfSchema } from "../src/tools/atf.js";
+import {
+  schema as profileSchema,
+  definition as profileDefinition,
+} from "../src/tools/profile.js";
 
 /** Join zod issues the same way executeTool renders them. */
 function issueString(result: { success: boolean; error?: { issues: Array<{ path: (string | number)[]; message: string }> } }): string {
@@ -152,5 +156,37 @@ describe("sn_atf schema", () => {
     const result = atfSchema.safeParse({ action: "run", timeout: "soon" });
     expect(result.success).toBe(false);
     expect(issueString(result)).toContain("timeout:");
+  });
+});
+
+describe("sn_profile schema", () => {
+  it("declares the same parameters in zod and the hand-written JSON schema", () => {
+    const jsonProps = Object.keys(profileDefinition.inputSchema.properties);
+    const zodKeys = Object.keys(profileSchema.shape);
+    expect(new Set(jsonProps)).toEqual(new Set(zodKeys));
+  });
+
+  it("keeps the auth_type and grant_type enums in sync between zod and JSON schema", () => {
+    expect(profileDefinition.inputSchema.properties.auth_type.enum).toEqual(
+      profileSchema.shape.auth_type.unwrap().options
+    );
+    expect(profileDefinition.inputSchema.properties.grant_type.enum).toEqual(
+      profileSchema.shape.grant_type.unwrap().options
+    );
+  });
+
+  it("rejects unknown auth_type and grant_type values", () => {
+    expect(
+      profileSchema.safeParse({ action: "add", auth_type: "token" }).success
+    ).toBe(false);
+    expect(
+      profileSchema.safeParse({ action: "add", grant_type: "implicit" }).success
+    ).toBe(false);
+  });
+
+  it("rejects non-positive and non-integer timeout_ms", () => {
+    expect(profileSchema.safeParse({ action: "add", timeout_ms: 0 }).success).toBe(false);
+    expect(profileSchema.safeParse({ action: "add", timeout_ms: 1.5 }).success).toBe(false);
+    expect(profileSchema.safeParse({ action: "add", timeout_ms: 5000 }).success).toBe(true);
   });
 });
