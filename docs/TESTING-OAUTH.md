@@ -17,8 +17,13 @@ Use a **PDI or sub-prod instance**. Every test below states **What it verifies �
 
 1. Filter navigator → `sys_properties.list` → find or create
    `glide.oauth.inbound.client.credential.grant_type.enabled` (type true/false) → set **true**.
-2. Create service account `mcp.service`: *Web service access only* checked, role `admin` (PDI) or
-   least-privilege. Zurich+: **Identity Type must be "Human"**.
+2. Create service account `mcp.service`: **First and Last name populated** (accounts with blank
+   names are hidden from the OAuth application user picker), Active. On builds where
+   *Web service access only* is read-only, set **Identity type = Machine Identity** to enable it;
+   on older builds check *Web service access only* directly. Grant role `admin` (PDI) or
+   least-privilege. Do NOT use a personal admin account — the token acts as this user.
+   If the A-1 token curl later fails with a machine-identity error, switch the account to
+   Identity type Human + *Internal Integration User* checked instead — builds differ; A-1 decides.
 3. System OAuth → Application Registry → New → **"Create an OAuth API endpoint for external clients"**:
    name `servicenow-mcp`, save, copy **Client ID** + **Client Secret**, set **OAuth Application User**
    = `mcp.service`.
@@ -37,7 +42,8 @@ Use a **PDI or sub-prod instance**. Every test below states **What it verifies �
   |---|---|
   | `invalid_client` | wrong client_id/secret |
   | `unauthorized_client` / grant-type error | step 1 property not set, or grant not enabled on the registry record |
-  | token works but API calls later 401 | **OAuth Application User** not set on the registry record, or the user lacks roles / is a Machine identity |
+  | token works but API calls later 401 | **OAuth Application User** not set on the registry record, or the user lacks roles |
+  | service account missing from the OAuth application user picker | blank first/last name, interactive human account (needs Web service access only / Machine Identity / Internal Integration User), or beyond the picker's first 1000 users alphabetically (KB2624687) — type to search |
 
 ## Part B — Build
 
