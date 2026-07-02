@@ -10,6 +10,18 @@ export interface ServiceNowConfig {
   password: string;
   displayValue: string;
   relDepth: number;
+  /** Per-request timeout in ms (default 30000). */
+  timeoutMs?: number;
+}
+
+/**
+ * Parse a timeout value (ms). Returns undefined for missing,
+ * non-numeric, or non-positive values.
+ */
+export function parseTimeoutMs(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = parseInt(value, 10);
+  return isNaN(parsed) || parsed <= 0 ? undefined : parsed;
 }
 
 /**
@@ -50,5 +62,6 @@ export function loadConfig(): ServiceNowConfig {
     password: password!,
     displayValue,
     relDepth: isNaN(relDepth) ? 3 : relDepth,
+    timeoutMs: parseTimeoutMs(process.env.SN_TIMEOUT_MS),
   };
 }

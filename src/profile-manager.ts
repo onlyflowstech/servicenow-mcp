@@ -11,7 +11,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { ServiceNowConfig } from "./config.js";
+import { ServiceNowConfig, parseTimeoutMs } from "./config.js";
 import { ServiceNowClient } from "./client.js";
 
 // ── Interfaces ─────────────────────────────────────────────────────
@@ -31,6 +31,8 @@ export interface Profile {
   vendor_code?: string;
   /** Human-readable description of this profile */
   description?: string;
+  /** Per-request timeout in ms (default 30000; env fallback SN_TIMEOUT_MS) */
+  timeoutMs?: number;
 }
 
 export interface ProfileConfig {
@@ -192,6 +194,7 @@ export class ProfileManager {
       password,
       displayValue: process.env.SN_DISPLAY_VALUE ?? "true",
       relDepth: parseRelDepth(process.env.SN_REL_DEPTH),
+      timeoutMs: profile.timeoutMs ?? parseTimeoutMs(process.env.SN_TIMEOUT_MS),
     };
   }
 
