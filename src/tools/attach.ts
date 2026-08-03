@@ -8,7 +8,10 @@ import * as path from "path";
 export const definition = {
   name: "sn_attach",
   description:
-    "Manage attachments on ServiceNow records. List, download, or upload attachments.",
+    "Manage attachments on ServiceNow records. List, download, or upload attachments. " +
+    "Upload accepts either a local file_path or inline base64 content (for remote/hosted " +
+    "servers with no local filesystem). Download writes to output_path or, with " +
+    "return_content, returns the bytes as base64 inline.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -31,11 +34,27 @@ export const definition = {
       },
       output_path: {
         type: "string",
-        description: "Local file path to save downloaded attachment",
+        description:
+          "Local file path to save downloaded attachment (omit and set return_content=true to get base64 inline)",
+      },
+      return_content: {
+        type: "boolean",
+        description:
+          "For download: return the attachment bytes as base64 in the response instead of writing to output_path. Default false.",
       },
       file_path: {
         type: "string",
-        description: "Local file path to upload",
+        description: "Local file path to upload (alternative to content)",
+      },
+      content: {
+        type: "string",
+        description:
+          "For upload: base64-encoded file bytes to upload directly, without a local file. Requires file_name. Use this from remote/hosted servers that can't read a local file_path.",
+      },
+      file_name: {
+        type: "string",
+        description:
+          "File name for the uploaded attachment. Required when uploading via content; optional with file_path (defaults to the file's basename).",
       },
       content_type: {
         type: "string",
@@ -52,7 +71,10 @@ export const schema = z.object({
   sys_id: z.string().optional(),
   attachment_sys_id: z.string().optional(),
   output_path: z.string().optional(),
+  return_content: z.boolean().optional(),
   file_path: z.string().optional(),
+  content: z.string().optional(),
+  file_name: z.string().optional(),
   content_type: z.string().optional(),
 });
 
@@ -86,13 +108,23 @@ export async function handler(
         if (!args.attachment_sys_id) {
           return err("attachment_sys_id is required for download");
         }
-        if (!args.output_path) {
-          return err("output_path is required for download");
+        if (!args.output_path && !args.return_content) {
+          return err(
+            "either output_path or return_content=true is required for download"
+          );
         }
         const { data } = await client.getRaw(
           `/api/now/attachment/${args.attachment_sys_id}/file`
         );
-        fs.writeFileSync(args.output_path, data);
+        if (args.return_content) {
+          return ok({
+            status: "downloaded",
+            size_bytes: data.length,
+            encoding: "base64",
+            content: Buffer.from(data).toString("base64"),
+          });
+        }
+        fs.writeFileSync(args.output_path as string, data);
         return ok({
           status: "downloaded",
           path: args.output_path,
@@ -101,14 +133,31 @@ export async function handler(
       }
 
       case "upload": {
-        if (!args.table || !args.sys_id || !args.file_path) {
-          return err("table, sys_id, and file_path are required for upload");
+        if (!args.table || !args.sys_id) {
+          return err("table and sys_id are required for upload");
         }
-        if (!fs.existsSync(args.file_path)) {
-          return err(`File not found: ${args.file_path}`);
+
+        let data: Buffer;
+        let filename: string;
+        if (args.content !== undefined) {
+          if (!args.file_name) {
+            return err(
+              "file_name is required when uploading via content (base64)"
+            );
+          }
+          data = Buffer.from(args.content, "base64");
+          filename = args.file_name;
+        } else if (args.file_path) {
+          if (!fs.existsSync(args.file_path)) {
+            return err(`File not found: ${args.file_path}`);
+          }
+          data = fs.readFileSync(args.file_path);
+          filename = args.file_name || path.basename(args.file_path);
+        } else {
+          return err(
+            "either file_path or content (base64) is required for upload"
+          );
         }
-        const filename = path.basename(args.file_path);
-        const data = fs.readFileSync(args.file_path);
         const contentType = args.content_type || "application/octet-stream";
 
         const resp = await client.postBinary(
