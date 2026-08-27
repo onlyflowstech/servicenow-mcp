@@ -58,6 +58,90 @@ describe("SNSDK-29 table policy", () => {
     ).toThrow(TablePolicyError);
   });
 
+  it("supports wildcard read allowlists without per-table target babysitting", () => {
+    const policy = createTableAccessPolicy({
+      readTables: [" * "],
+      writeTables: [],
+    });
+
+    expect(policy).toEqual({ readTables: ["*"], writeTables: [], targets: [] });
+    expect(
+      authorizeTableAccess(
+        policy,
+        { operation: "read", table: "u_custom_table" },
+        "sn_query"
+      )
+    ).toBe("u_custom_table");
+    expect(
+      authorizeTableAccess(policy, { operation: "read", table: "problem" }, "sn_get")
+    ).toBe("problem");
+    expect(() =>
+      authorizeTableAccess(policy, { operation: "read", table: "sys_user_password" }, "sn_query")
+    ).toThrow(TablePolicyError);
+    expect(() =>
+      authorizeTableAccess(policy, { operation: "write", table: "u_custom_table" }, "sn_update")
+    ).toThrow(TablePolicyError);
+  });
+
+  it("supports wildcard write allowlists without implying read access", () => {
+    const policy = createTableAccessPolicy({
+      readTables: [],
+      writeTables: ["*"],
+    });
+
+    expect(
+      authorizeTableAccess(
+        policy,
+        { operation: "write", table: "u_custom_table" },
+        "sn_update"
+      )
+    ).toBe("u_custom_table");
+    expect(() =>
+      authorizeTableAccess(policy, { operation: "read", table: "u_custom_table" }, "sn_query")
+    ).toThrow(TablePolicyError);
+    expect(() =>
+      authorizeTableAccess(policy, { operation: "write", table: "oauth_token" }, "sn_update")
+    ).toThrow(TablePolicyError);
+  });
+
+  it("lets explicit wildcard targets narrow tools and related-table closure", () => {
+    const policy = createTableAccessPolicy({
+      readTables: ["*"],
+      targets: [
+        {
+          table: "incident",
+          kind: "canonical",
+          tools: ["sn_get"],
+          closureComplete: true,
+          relatedTables: ["incident", "task"],
+        },
+      ],
+    });
+
+    expect(
+      authorizeTableAccess(policy, { operation: "read", table: "incident" }, "sn_get")
+    ).toBe("incident");
+    expect(() =>
+      authorizeTableAccess(policy, { operation: "read", table: "incident" }, "sn_query")
+    ).toThrow(TablePolicyError);
+    expect(
+      authorizeTableAccess(policy, { operation: "read", table: "problem" }, "sn_query")
+    ).toBe("problem");
+  });
+
+  it("loads wildcard table allowlists from environment", () => {
+    expect(
+      tableAccessPolicyFromEnvironment({
+        SN_ALLOWED_READ_TABLES: "*",
+        SN_ALLOWED_WRITE_TABLES: "incident,*",
+      })
+    ).toEqual({
+      readTables: ["*"],
+      writeTables: ["*", "incident"],
+      targets: [],
+    });
+  });
+
   it.each([
     "sys_user_password",
     "SYS_AUTH_PROFILE",

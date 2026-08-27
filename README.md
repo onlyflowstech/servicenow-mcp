@@ -388,19 +388,20 @@ are returned.
 
 ### Table access policy
 
-V2 denies every ServiceNow table by default. Operators must configure exact,
-comma-separated allowlists; table names are trimmed, lowercased, deduplicated,
-and must be valid ServiceNow identifiers. Wildcards are not supported.
+V2 denies every ServiceNow table by default. Operators configure comma-separated
+allowlists; entries may be exact table names or the literal `*` to allow every
+non-hard-denied table for that operation. Table names are trimmed, lowercased,
+deduplicated, and must be valid ServiceNow identifiers.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SN_ALLOWED_READ_TABLES` | ❌ | deny all | Tables permitted for read operations. |
-| `SN_ALLOWED_WRITE_TABLES` | ❌ | deny all | Tables permitted for create, update, incident journal append, delete, upload, and confirmed batch operations. Write permission never implies read permission. |
-| `SN_TABLE_ACCESS_TARGETS` | Required for caller-addressable tables | `[]` | Trusted JSON classification with `table`, exact permitted `tools`, `kind` (`canonical`, `alias`, `view`, or `extension`), literal `closureComplete: true`, and the complete backing/ancestor/descendant `relatedTables` closure. |
+| `SN_ALLOWED_READ_TABLES` | ❌ | deny all | Tables permitted for read operations. Use `*` to allow all non-hard-denied readable tables. |
+| `SN_ALLOWED_WRITE_TABLES` | ❌ | deny all | Tables permitted for create, update, incident journal append, delete, upload, and confirmed batch operations. Use `*` to allow all non-hard-denied writable tables. Write permission never implies read permission. |
+| `SN_TABLE_ACCESS_TARGETS` | Required for exact allowlisted caller-addressable tables; optional with `*` | `[]` | Trusted JSON classification with `table`, exact permitted `tools`, `kind` (`canonical`, `alias`, `view`, or `extension`), literal `closureComplete: true`, and the complete backing/ancestor/descendant `relatedTables` closure. With `*`, omitted target entries use the wildcard operation grant; explicit target entries can still narrow tools and validate related-table closure. |
 | `SN_ENCODED_QUERY_READ_POLICY` | ❌ | deny all | Trusted JSON object containing bounded `rules` for an exact `sn_query`/table pair. Each rule requires `maxLength`, `maxTerms`, readable `fields`, supported `operators`, `maxLimit`, `maxOffset`, and `maxResponseBytes`. No rule can authorize a write or another tool. |
 
 Credential, authentication, encryption, and security-policy tables remain
-hard-denied even if listed. Invalid or prohibited policy configuration fails
+hard-denied even when `*` is configured. Invalid or prohibited policy configuration fails
 startup. A composed tool is admitted only when its complete backing-table plan
 is allowed before the first ServiceNow client access. Every related target must
 have the same read or write permission, so a base table, alias, view, or

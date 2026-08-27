@@ -185,13 +185,13 @@ SBOM, scanning, and version-identification commands.
 
 ## Table-policy change
 
-V2 denies table access unless the service operator configures the exact table
-name in `SN_ALLOWED_READ_TABLES` or `SN_ALLOWED_WRITE_TABLES`. Both variables
-are comma-separated and default to an empty allowlist. Read and write grants
+V2 denies table access unless the service operator configures the table name or
+the literal `*` in `SN_ALLOWED_READ_TABLES` or `SN_ALLOWED_WRITE_TABLES`. Both
+variables are comma-separated and default to an empty allowlist. Read and write grants
 are independent: a table listed for reads is not writable, and a table listed
 for writes is not implicitly readable. Every caller-addressable name must also
-have a trusted entry in `SN_TABLE_ACCESS_TARGETS` listing the exact permitted
-tools and identifying whether it is canonical,
+have a trusted entry in `SN_TABLE_ACCESS_TARGETS` unless the relevant operation
+uses `*`. Target entries still narrow permitted tools when present, and identify whether the table is canonical,
 an alias, a view, or an extension and listing every backing/ancestor table it
 can reach, including descendant tables reachable through base-table access.
 Each entry must explicitly set `closureComplete: true`, and each related table

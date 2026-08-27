@@ -1,9 +1,11 @@
 /**
  * Fail-closed ServiceNow table authorization for SNSDK-29.
  *
- * Policies contain separate exact read and write allowlists. A built-in hard
- * denial for credential, authentication, encryption, and security-policy
- * tables is applied both while configuration is loaded and at every decision.
+ * Policies contain separate read and write allowlists. Each allowlist accepts
+ * exact table names or the literal "*" to allow every non-hard-denied table for
+ * that operation. A built-in hard denial for credential, authentication,
+ * encryption, and security-policy tables is applied both while configuration is
+ * loaded and at every decision.
  *
  * @module table-policy
  */
@@ -66,6 +68,7 @@ const MAX_ALLOWLIST_TEXT_LENGTH = 16_384;
 const MAX_TARGET_TEXT_LENGTH = 65_536;
 const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 const TOOL_NAME = /^sn_[a-z0-9_]{1,61}$/u;
+const TABLE_ALLOWLIST_WILDCARD = "*";
 
 /** Exact families that must never become remotely accessible by configuration. */
 const HARD_DENIED_EXACT = new Set([
@@ -216,12 +219,15 @@ export function authorizeTableAccess(
       operation === "read"
         ? policy.readTables
         : policy.writeTables;
-    if (!allowlist.includes(table)) throw new TablePolicyError();
+    if (!allowlistGrantsTable(allowlist, table)) throw new TablePolicyError();
     const target = policy.targets.find((entry) => entry.table === table);
-    if (!target) throw new TablePolicyError();
+    if (!target) {
+      if (allowlistGrantsAllTables(allowlist)) return table;
+      throw new TablePolicyError();
+    }
     if (!target.tools.includes(authorizedTool)) throw new TablePolicyError();
     for (const relatedTable of target.relatedTables) {
-      if (isHardDeniedTable(relatedTable) || !allowlist.includes(relatedTable)) {
+      if (isHardDeniedTable(relatedTable) || !allowlistGrantsTable(allowlist, relatedTable)) {
         throw new TablePolicyError();
       }
     }
@@ -280,6 +286,10 @@ function normalizeAllowlist(
   }
   const tables = new Set<string>();
   for (const entry of candidate) {
+    if (typeof entry === "string" && entry.trim() === TABLE_ALLOWLIST_WILDCARD) {
+      tables.add(TABLE_ALLOWLIST_WILDCARD);
+      continue;
+    }
     const table = normalizeTableName(entry);
     if (isHardDeniedTable(table)) {
       throw new TypeError(`${label} table allowlist contains a prohibited table`);
@@ -310,8 +320,14 @@ function normalizeTargets(
   writeTables: readonly string[]
 ): readonly TableAccessTarget[] {
   const configuredTables = new Set([...readTables, ...writeTables]);
+  const readAllowsAll = allowlistGrantsAllTables(readTables);
+  const writeAllowsAll = allowlistGrantsAllTables(writeTables);
+  const allowsAnyConfiguredOperation = (table: string): boolean =>
+    configuredTables.has(table) || readAllowsAll || writeAllowsAll;
   if (candidate === undefined) {
-    if (configuredTables.size === 0) return Object.freeze([]);
+    if (configuredTables.size === 0 || readAllowsAll || writeAllowsAll) {
+      return Object.freeze([]);
+    }
     throw new TypeError("table access targets are required for every allowed table");
   }
   if (!Array.isArray(candidate) || candidate.length > MAX_TABLES_PER_ALLOWLIST * 2) {
@@ -324,7 +340,7 @@ function normalizeTargets(
       throw new TypeError("table access target must be an object");
     }
     const table = normalizeTableName(entry.table);
-    if (!configuredTables.has(table) || targets.has(table)) {
+    if (!allowsAnyConfiguredOperation(table) || targets.has(table)) {
       throw new TypeError("table access target is duplicate or not allowlisted");
     }
     const kind = normalizeTargetKind(entry.kind);
@@ -377,14 +393,22 @@ function validateRelatedPermissions(
 ): void {
   for (const target of targets) {
     for (const allowlist of [readTables, writeTables]) {
-      if (!allowlist.includes(target.table)) continue;
-      if (target.relatedTables.some((related) => !allowlist.includes(related))) {
+      if (!allowlistGrantsTable(allowlist, target.table)) continue;
+      if (target.relatedTables.some((related) => !allowlistGrantsTable(allowlist, related))) {
         throw new TypeError(
           "table access target backing tables require the same operation permission"
         );
       }
     }
   }
+}
+
+function allowlistGrantsAllTables(allowlist: readonly string[]): boolean {
+  return allowlist.includes(TABLE_ALLOWLIST_WILDCARD);
+}
+
+function allowlistGrantsTable(allowlist: readonly string[], table: string): boolean {
+  return allowlistGrantsAllTables(allowlist) || allowlist.includes(table);
 }
 
 function normalizeTargetKind(candidate: unknown): TableAccessTargetKind {
