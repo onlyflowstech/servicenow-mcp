@@ -2,9 +2,15 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ProfileManager } from "../src/profile-manager.js";
-import { handler as profileHandler } from "../src/tools/profile.js";
-import type { ServiceNowConfig } from "../src/config.js";
+import {
+  normalizeInstanceUrl,
+  type Profile,
+  ProfileManager,
+} from "../src/profile-manager.js";
+import {
+  encryptCredential,
+  type ProfileEncryptionKeyProvider,
+} from "../src/profile-credentials.js";
 
 /**
  * These tests run a real ProfileManager against a throwaway HOME directory
@@ -14,6 +20,7 @@ import type { ServiceNowConfig } from "../src/config.js";
 
 const ENV_KEYS = [
   "HOME",
+  "SN_PROFILE_NAME",
   "SN_INSTANCE",
   "SN_USER",
   "SN_PASSWORD",
@@ -27,6 +34,8 @@ const ENV_KEYS = [
   "SN_DISPLAY_VALUE",
   "SN_REL_DEPTH",
   "SN_ALLOWED_INSTANCE_HOSTS",
+  "SN_PROFILE_ENCRYPTION_KEY",
+  "UNSET_PROFILE_SECRET",
   // Test-only variables referenced by sn_profile add round-trip tests
   "SN_TEST_USER_PW",
   "SN_TEST_CLIENT_SECRET",
@@ -63,13 +72,29 @@ function writeConfigFile(config: unknown): void {
   fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify(config), "utf-8");
 }
 
-describe("env-var fallback profile", () => {
-  it("keeps existing basic-auth env setups working unchanged", () => {
+describe("explicit named SN_* environment profile", () => {
+  it("does not create a routing target from bare canonical SN_* values", () => {
+    process.env.SN_INSTANCE = "https://unmapped.service-now.com";
+    process.env.SN_USER = "admin";
+    process.env.SN_PASSWORD = "must-not-be-resolved";
+
+    const manager = new ProfileManager();
+    expect(manager.listProfiles()).toEqual([]);
+    expect(() => manager.getProfile("default")).toThrow(/not found/u);
+    expect(() => manager.getConfig("default")).toThrow(/not found/u);
+  });
+
+  it("maps basic-auth SN_* values only under SN_PROFILE_NAME", () => {
+    process.env.SN_PROFILE_NAME = "legacy-env";
     process.env.SN_INSTANCE = "https://legacy.service-now.com";
     process.env.SN_USER = "admin";
     process.env.SN_PASSWORD = "placeholder-password";
+    process.env.SN_AUTH_TYPE = "basic";
 
-    const config = new ProfileManager().getConfig();
+    const manager = new ProfileManager();
+    expect(manager.listProfiles().map(({ name }) => name)).toEqual(["legacy-env"]);
+    expect(() => manager.getConfig("default")).toThrow(/not found/u);
+    const config = manager.getConfig("legacy-env");
     expect(config.instance).toBe("https://legacy.service-now.com");
     expect(config.user).toBe("admin");
     expect(config.password).toBe("placeholder-password");
@@ -78,12 +103,13 @@ describe("env-var fallback profile", () => {
   });
 
   it("wires SN_AUTH_TYPE=oauth without requiring SN_PASSWORD", () => {
+    process.env.SN_PROFILE_NAME = "oauth-env";
     process.env.SN_INSTANCE = "https://oauth.service-now.com";
     process.env.SN_AUTH_TYPE = "oauth";
     process.env.SN_CLIENT_ID = "my-client-id";
     process.env.SN_CLIENT_SECRET = "fake-oauth-secret";
 
-    const config = new ProfileManager().getConfig();
+    const config = new ProfileManager().getConfig("oauth-env");
     expect(config.authType).toBe("oauth");
     expect(config.grantType).toBe("client_credentials");
     expect(config.clientId).toBe("my-client-id");
@@ -92,31 +118,305 @@ describe("env-var fallback profile", () => {
   });
 
   it("wires SN_AUTH_TYPE=apikey with SN_API_KEY_HEADER", () => {
+    process.env.SN_PROFILE_NAME = "apikey-env";
     process.env.SN_INSTANCE = "https://apikey.service-now.com";
     process.env.SN_AUTH_TYPE = "apikey";
     process.env.SN_API_KEY = "fake-api-key";
     process.env.SN_API_KEY_HEADER = "x-custom-key";
 
-    const config = new ProfileManager().getConfig();
+    const config = new ProfileManager().getConfig("apikey-env");
     expect(config.authType).toBe("apikey");
     expect(config.apiKey).toBe("fake-api-key");
     expect(config.apiKeyHeader).toBe("x-custom-key");
   });
 
   it("parses SN_TIMEOUT_MS and ignores invalid values", () => {
+    process.env.SN_PROFILE_NAME = "timeout-env";
     process.env.SN_INSTANCE = "https://x.service-now.com";
     process.env.SN_USER = "admin";
     process.env.SN_PASSWORD = "placeholder-password";
 
     process.env.SN_TIMEOUT_MS = "5000";
-    expect(new ProfileManager().getConfig().timeoutMs).toBe(5000);
+    expect(new ProfileManager().getConfig("timeout-env").timeoutMs).toBe(5000);
 
     process.env.SN_TIMEOUT_MS = "not-a-number";
-    expect(new ProfileManager().getConfig().timeoutMs).toBeUndefined();
+    expect(new ProfileManager().getConfig("timeout-env").timeoutMs).toBeUndefined();
+  });
+
+  it("maps the complete canonical SN_* OAuth password-grant configuration", () => {
+    process.env.SN_PROFILE_NAME = "oauth-password-env";
+    process.env.SN_INSTANCE = "https://oauth-password.service-now.com";
+    process.env.SN_USER = "oauth-user";
+    process.env.SN_PASSWORD = "oauth-user-password";
+    process.env.SN_AUTH_TYPE = "oauth";
+    process.env.SN_CLIENT_ID = "oauth-client";
+    process.env.SN_CLIENT_SECRET = "oauth-client-secret";
+    process.env.SN_GRANT_TYPE = "password";
+    process.env.SN_TIMEOUT_MS = "7654";
+    process.env.SN_DISPLAY_VALUE = "all";
+    process.env.SN_REL_DEPTH = "5";
+
+    expect(new ProfileManager().getConfig("oauth-password-env")).toEqual({
+      instance: "https://oauth-password.service-now.com",
+      user: "oauth-user",
+      password: "oauth-user-password",
+      displayValue: "all",
+      relDepth: 5,
+      authType: "oauth",
+      clientId: "oauth-client",
+      clientSecret: "oauth-client-secret",
+      grantType: "password",
+      timeoutMs: 7654,
+    });
+  });
+
+  it("gives a named file profile precedence without creating an implicit env profile", () => {
+    writeConfigFile({
+      version: 2,
+      default_profile: "ignored-file-default",
+      profiles: {
+        dev: {
+          instance: "https://file-dev.service-now.com",
+          username: "file-user",
+          credential: "env:SN_TEST_USER_PW",
+          timeoutMs: 4321,
+        },
+      },
+    });
+    process.env.SN_INSTANCE = "https://environment.service-now.com";
+    process.env.SN_PROFILE_NAME = "environment";
+    process.env.SN_USER = "environment-user";
+    process.env.SN_PASSWORD = "environment-password";
+    process.env.SN_AUTH_TYPE = "apikey";
+    process.env.SN_API_KEY = "environment-api-key";
+    process.env.SN_TIMEOUT_MS = "9876";
+    process.env.SN_DISPLAY_VALUE = "false";
+    process.env.SN_REL_DEPTH = "4";
+    process.env.SN_TEST_USER_PW = "file-profile-password";
+
+    const manager = new ProfileManager();
+    expect(manager.listProfiles().map(({ name }) => name)).toEqual(["dev"]);
+    expect(() => manager.getConfig("default")).toThrow(/not found/);
+    expect(() => manager.getConfig("environment")).toThrow(/not found/);
+    expect(() => manager.getConfig("ignored-file-default")).toThrow(/not found/);
+    expect(manager.getConfig("dev")).toEqual({
+      instance: "https://file-dev.service-now.com",
+      user: "file-user",
+      password: "file-profile-password",
+      displayValue: "false",
+      relDepth: 4,
+      authType: "basic",
+      grantType: "client_credentials",
+      timeoutMs: 4321,
+    });
+  });
+
+  it("rejects an invalid or incomplete explicit environment mapping", () => {
+    process.env.SN_PROFILE_NAME = "bad profile name";
+    process.env.SN_INSTANCE = "https://bad.service-now.com";
+    expect(() => new ProfileManager()).toThrow(/Profile name is invalid/u);
+
+    process.env.SN_PROFILE_NAME = "missing-instance";
+    delete process.env.SN_INSTANCE;
+    expect(() => new ProfileManager()).toThrow(
+      /SN_PROFILE_NAME requires SN_INSTANCE/u
+    );
+  });
+
+  it.each([
+    ["SN_AUTH_TYPE", "digest", /SN_AUTH_TYPE must be basic, oauth, or apikey/u],
+    [
+      "SN_GRANT_TYPE",
+      "device_code",
+      /SN_GRANT_TYPE must be client_credentials or password/u,
+    ],
+  ] as const)(
+    "fails closed before secrets or clients for an invalid %s mapping",
+    (key, value, expected) => {
+      process.env.SN_PROFILE_NAME = "invalid-auth-mapping";
+      process.env.SN_INSTANCE = "https://invalid-auth.service-now.com";
+      process.env.SN_USER = "must-not-authenticate";
+      process.env.SN_PASSWORD = "must-not-resolve";
+      process.env.SN_CLIENT_ID = "must-not-authenticate";
+      process.env.SN_CLIENT_SECRET = "must-not-resolve";
+      if (key === "SN_GRANT_TYPE") process.env.SN_AUTH_TYPE = "oauth";
+      process.env[key] = value;
+      const resolveSecret = vi.fn(() => {
+        throw new Error("secret resolution must not run");
+      });
+      const fetchProbe = vi.spyOn(globalThis, "fetch");
+
+      expect(
+        () =>
+          new ProfileManager({
+            secretResolvers: [
+              {
+                provider: "env",
+                resolve: resolveSecret,
+              },
+            ],
+          })
+      ).toThrow(expected);
+      expect(resolveSecret).not.toHaveBeenCalled();
+      expect(fetchProbe).not.toHaveBeenCalled();
+      fetchProbe.mockRestore();
+    }
+  );
+
+  it("never persists the mapped SN_* plaintext when administration creates a file", () => {
+    const plaintext = "environment-only-secret-must-not-persist";
+    process.env.SN_PROFILE_NAME = "environment-prod";
+    process.env.SN_INSTANCE = "https://environment-prod.service-now.com";
+    process.env.SN_USER = "environment-user";
+    process.env.SN_PASSWORD = plaintext;
+    process.env.SN_TEST_USER_PW = "second-profile-secret";
+
+    const manager = new ProfileManager();
+    manager.addProfile("second", {
+      instance: "https://second.service-now.com",
+      username: "second-user",
+      credential: "env:SN_TEST_USER_PW",
+    });
+
+    const raw = fs.readFileSync(manager.getConfigPath(), "utf8");
+    const persisted = JSON.parse(raw);
+    expect(raw).not.toContain(plaintext);
+    expect(persisted).not.toHaveProperty("default_profile");
+    expect(persisted.profiles["environment-prod"].credential).toEqual({
+      type: "secret_ref",
+      provider: "env",
+      reference: "SN_PASSWORD",
+    });
   });
 });
 
+describe("explicit V2 profile selection", () => {
+  it("requires a profile name at every accessor type boundary", () => {
+    type RequiresArgument<T extends (...args: never[]) => unknown> =
+      [] extends Parameters<T> ? false : true;
+    const accessorsRequireName: {
+      getProfile: RequiresArgument<ProfileManager["getProfile"]>;
+      getConfig: RequiresArgument<ProfileManager["getConfig"]>;
+      getClient: RequiresArgument<ProfileManager["getClient"]>;
+    } = {
+      getProfile: true,
+      getConfig: true,
+      getClient: true,
+    };
+
+    expect(accessorsRequireName).toEqual({
+      getProfile: true,
+      getConfig: true,
+      getClient: true,
+    });
+  });
+
+  it("never routes omitted runtime calls through default_profile", () => {
+    writeConfigFile({
+      version: 1,
+      default_profile: "dev",
+      profiles: {
+        dev: {
+          instance: "https://dev.service-now.com",
+          username: "admin",
+          credential: "env:SN_PASSWORD",
+        },
+      },
+    });
+    process.env.SN_PASSWORD = "placeholder-password";
+    const profileManager = new ProfileManager();
+
+    expect(() => Reflect.apply(profileManager.getProfile, profileManager, [])).toThrow(
+      'Profile "undefined" not found'
+    );
+    expect(() => Reflect.apply(profileManager.getConfig, profileManager, [])).toThrow(
+      'Profile "undefined" not found'
+    );
+    expect(() => Reflect.apply(profileManager.getClient, profileManager, [])).toThrow(
+      'Profile "undefined" not found'
+    );
+    expect("switchProfile" in profileManager).toBe(false);
+    expect("getActiveProfileName" in profileManager).toBe(false);
+    expect(profileManager.listProfiles()).toEqual([
+      {
+        name: "dev",
+        instance: "https://dev.service-now.com",
+        authType: "basic",
+        description: undefined,
+      },
+    ]);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["stale", "removed-profile"],
+  ])(
+    "keeps named profiles when legacy default_profile metadata is %s",
+    (_label, defaultProfile) => {
+      writeConfigFile({
+        version: 1,
+        ...(defaultProfile === undefined
+          ? {}
+          : { default_profile: defaultProfile }),
+        profiles: {
+          dev: {
+            instance: "https://dev.service-now.com",
+            username: "admin",
+            credential: "env:SN_PASSWORD",
+          },
+        },
+      });
+      process.env.SN_PASSWORD = "placeholder-password";
+
+      const profileManager = new ProfileManager();
+      expect(profileManager.getConfig("dev")).toMatchObject({
+        instance: "https://dev.service-now.com",
+        user: "admin",
+        password: "placeholder-password",
+      });
+      expect(() => profileManager.getConfig("default")).toThrow(/not found/);
+    }
+  );
+});
+
 describe("config-file profiles", () => {
+  it.each([
+    ["  https://dev.service-now.com", "https://dev.service-now.com"],
+    ["HTTPS://DEV.SERVICE-NOW.COM/", "https://dev.service-now.com"],
+    ["httpdev.service-now.com", "https://httpdev.service-now.com"],
+  ])("uses one canonical instance URL for validation and execution", (raw, expected) => {
+    expect(normalizeInstanceUrl(raw)).toBe(expected);
+    writeConfigFile({
+      version: 1,
+      default_profile: "dev",
+      profiles: {
+        dev: {
+          instance: raw,
+          username: "admin",
+          credential: "env:SN_PASSWORD",
+        },
+      },
+    });
+    process.env.SN_PASSWORD = "placeholder-password";
+    expect(new ProfileManager().getConfig("dev").instance).toBe(expected);
+  });
+
+  it("rejects an invalid instance before resolving its credential", () => {
+    writeConfigFile({
+      version: 1,
+      default_profile: "dev",
+      profiles: {
+        dev: {
+          instance: "",
+          username: "admin",
+          credential: "env:UNSET_PROFILE_SECRET",
+        },
+      },
+    });
+
+    expect(() => new ProfileManager().getConfig("dev")).toThrow(/URL must not be empty/);
+  });
+
   it("resolves an oauth profile with env: indirection for clientSecret", () => {
     writeConfigFile({
       version: 1,
@@ -133,7 +433,7 @@ describe("config-file profiles", () => {
     });
     process.env.SN_CLIENT_SECRET = "fake-secret-from-env";
 
-    const config = new ProfileManager().getConfig();
+    const config = new ProfileManager().getConfig("dev");
     expect(config.authType).toBe("oauth");
     expect(config.clientSecret).toBe("fake-secret-from-env");
     expect(config.timeoutMs).toBe(10_000);
@@ -153,7 +453,9 @@ describe("config-file profiles", () => {
       },
     });
 
-    expect(() => new ProfileManager().getConfig()).toThrow(/SN_CLIENT_SECRET.*not set/);
+    expect(() => new ProfileManager().getConfig("dev")).toThrow(
+      "Credential resolution failed"
+    );
   });
 
   it("supports oauth password grant profiles (credential still resolved)", () => {
@@ -175,7 +477,7 @@ describe("config-file profiles", () => {
     process.env.SN_PASSWORD = "fake-user-password";
     process.env.SN_CLIENT_SECRET = "fake-secret-from-env";
 
-    const config = new ProfileManager().getConfig();
+    const config = new ProfileManager().getConfig("dev");
     expect(config.grantType).toBe("password");
     expect(config.user).toBe("integration.user");
     expect(config.password).toBe("fake-user-password");
@@ -196,7 +498,7 @@ describe("config-file profiles", () => {
     });
     process.env.SN_API_KEY = "fake-api-key-from-env";
 
-    const config = new ProfileManager().getConfig();
+    const config = new ProfileManager().getConfig("dev");
     expect(config.authType).toBe("apikey");
     expect(config.apiKey).toBe("fake-api-key-from-env");
   });
@@ -230,82 +532,109 @@ describe("config-file profiles", () => {
   });
 });
 
-describe("addProfile secret hygiene", () => {
-  it("rejects a plain-text credential via sn_profile add and persists nothing", async () => {
-    const pm = new ProfileManager();
-    const result = await profileHandler(
-      {
-        action: "add",
-        name: "dev",
-        instance: "https://dev.service-now.com",
-        username: "admin",
-        credential: "plain-text-password",
-      },
-      pm
-    );
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("env:VAR_NAME");
-    // Nothing may reach disk -- not the profile, and not the secret.
-    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
-  });
-
-  it("rejects plain-text clientSecret and apiKey", () => {
+describe("out-of-band addProfile safeguards", () => {
+  it("rejects plain-text and empty env secret references without persisting", () => {
     const pm = new ProfileManager();
     expect(() =>
-      pm.addProfile("o", {
-        instance: "https://x.service-now.com",
+      pm.addProfile("basic", {
+        instance: "https://dev.service-now.com",
+        credential: "plain-text-password",
+      })
+    ).toThrow(/secret reference.*encrypted envelope/);
+    expect(() =>
+      pm.addProfile("oauth", {
+        instance: "https://dev.service-now.com",
         authType: "oauth",
-        clientId: "id",
         clientSecret: "plain-oauth-secret",
       })
-    ).toThrow(/env:VAR_NAME/);
+    ).toThrow(/secret reference.*encrypted envelope/);
     expect(() =>
-      pm.addProfile("k", {
-        instance: "https://x.service-now.com",
+      pm.addProfile("key", {
+        instance: "https://dev.service-now.com",
         authType: "apikey",
         apiKey: "plain-api-key",
       })
-    ).toThrow(/env:VAR_NAME/);
+    ).toThrow(/secret reference.*encrypted envelope/);
+    expect(() =>
+      pm.addProfile("empty", {
+        instance: "https://dev.service-now.com",
+        authType: "apikey",
+        apiKey: "env:",
+      })
+    ).toThrow(/secret reference.*encrypted envelope/);
     expect(fs.existsSync(pm.getConfigPath())).toBe(false);
   });
 
-  it('rejects a bare "env:" credential with no variable name', () => {
+  it("treats inherited object keys as unknown unless explicitly configured", () => {
     const pm = new ProfileManager();
-    expect(() =>
-      pm.addProfile("dev", {
-        instance: "https://x.service-now.com",
-        credential: "env:",
-      })
-    ).toThrow(/env:VAR_NAME/);
+    for (const inheritedName of [
+      "toString",
+      "constructor",
+      "__proto__",
+      "valueOf",
+      "hasOwnProperty",
+    ]) {
+      expect(() => pm.getProfile(inheritedName)).toThrow(/not found/);
+    }
+
+    pm.addProfile("__proto__", {
+      instance: "https://special.service-now.com",
+      username: "tester",
+      credential: "env:SN_TEST_USER_PW",
+    });
+    expect(pm.getProfile("__proto__").instance).toBe(
+      "https://special.service-now.com"
+    );
   });
 
-  it("accepts env: indirection and writes config.json owner-only", async () => {
-    const pm = new ProfileManager();
-    const result = await profileHandler(
-      {
-        action: "add",
-        name: "dev",
-        instance: "https://dev.service-now.com",
-        username: "admin",
-        credential: "env:SN_PASSWORD_DEV",
-      },
-      pm
-    );
-    expect(result.isError).toBeUndefined();
-    const payload = JSON.parse(result.content[0].text);
-    expect(payload.added).toBe("dev");
-    expect(payload.credential_source).toBe("env:SN_PASSWORD_DEV");
+  it("copies and freezes profile snapshots instead of retaining mutable aliases", () => {
+    const manager = new ProfileManager();
+    const reference = {
+      type: "secret_ref",
+      provider: "env",
+      reference: "SN_TEST_USER_PW",
+    };
+    const supplied = {
+      instance: "https://immutable.service-now.com",
+      username: "before",
+      credential: reference,
+    } as Profile;
 
-    const configPath = pm.getConfigPath();
-    const raw = fs.readFileSync(configPath, "utf-8");
-    expect(raw).toContain("env:SN_PASSWORD_DEV");
+    manager.addProfile("immutable", supplied);
+    supplied.instance = "https://changed.service-now.com";
+    reference.reference = "SN_PASSWORD";
+
+    const snapshot = manager.getProfile("immutable");
+    expect(snapshot.instance).toBe("https://immutable.service-now.com");
+    expect(snapshot.credential).toMatchObject({ reference: "SN_TEST_USER_PW" });
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.credential)).toBe(true);
+    expect(() => {
+      snapshot.instance = "https://mutated.service-now.com";
+    }).toThrow();
+  });
+
+  it("persists only env references with owner-only permissions", () => {
+    const pm = new ProfileManager();
+    pm.addProfile("dev", {
+      instance: "https://dev.service-now.com",
+      username: "admin",
+      credential: "env:SN_TEST_USER_PW",
+    });
+
+    const raw = fs.readFileSync(pm.getConfigPath(), "utf8");
+    expect(JSON.parse(raw).profiles.dev.credential).toEqual({
+      type: "secret_ref",
+      provider: "env",
+      reference: "SN_TEST_USER_PW",
+    });
     if (process.platform !== "win32") {
-      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
-      expect(fs.statSync(path.dirname(configPath)).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(pm.getConfigPath()).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(path.dirname(pm.getConfigPath())).mode & 0o777).toBe(0o700);
     }
   });
 
-  it("tightens permissions on a pre-existing world-readable config file", async () => {
+  it("tightens permissions on a pre-existing world-readable config file", () => {
     writeConfigFile({
       version: 1,
       default_profile: "dev",
@@ -313,414 +642,93 @@ describe("addProfile secret hygiene", () => {
         dev: { instance: "https://dev.service-now.com", credential: "env:SN_PASSWORD" },
       },
     });
+    fs.chmodSync(path.join(tempHome, ".servicenow-mcp", "config.json"), 0o644);
     const pm = new ProfileManager();
     pm.addProfile("second", {
       instance: "https://second.service-now.com",
-      credential: "env:SN_PASSWORD_SECOND",
+      credential: "env:SN_TEST_USER_PW",
     });
     if (process.platform !== "win32") {
       expect(fs.statSync(pm.getConfigPath()).mode & 0o777).toBe(0o600);
     }
   });
-});
 
-describe("sn_profile add auth types", () => {
-  it("keeps basic add behavior unchanged (no auth-scheme keys persisted)", async () => {
-    process.env.SN_TEST_USER_PW = "fake-basic-password";
+  it("round-trips basic, OAuth, and API-key profiles", () => {
+    process.env.SN_TEST_USER_PW = "fake-user-password";
+    process.env.SN_TEST_CLIENT_SECRET = "fake-oauth-secret";
+    process.env.SN_TEST_API_KEY = "fake-api-key";
     const pm = new ProfileManager();
-    const result = await profileHandler(
-      {
-        action: "add",
-        name: "dev",
-        instance: "https://dev.service-now.com",
-        username: "admin",
-        credential: "env:SN_TEST_USER_PW",
-      },
-      pm
-    );
-    expect(result.isError).toBeUndefined();
-    const payload = JSON.parse(result.content[0].text);
-    expect(payload.added).toBe("dev");
-    expect(payload.auth_type).toBe("basic");
-    expect(payload.credential_source).toBe("env:SN_TEST_USER_PW");
-    expect(payload.warnings).toBeUndefined();
-
-    // The persisted profile carries exactly the pre-existing basic shape.
-    const stored = JSON.parse(fs.readFileSync(pm.getConfigPath(), "utf-8"));
-    expect(stored.profiles.dev).toEqual({
-      instance: "https://dev.service-now.com",
+    pm.addProfile("basic", {
+      instance: "https://basic.service-now.com",
       username: "admin",
       credential: "env:SN_TEST_USER_PW",
     });
+    pm.addProfile("oauth", {
+      instance: "https://oauth.service-now.com",
+      authType: "oauth",
+      clientId: "client-id",
+      clientSecret: "env:SN_TEST_CLIENT_SECRET",
+    });
+    pm.addProfile("key", {
+      instance: "https://key.service-now.com",
+      authType: "apikey",
+      apiKey: "env:SN_TEST_API_KEY",
+      apiKeyHeader: "x-custom-key",
+      timeoutMs: 5000,
+    });
 
-    // A fresh manager resolves the credential from the env var.
-    const config = new ProfileManager().getConfig("dev");
-    expect(config.authType).toBe("basic");
-    expect(config.password).toBe("fake-basic-password");
+    const reloaded = new ProfileManager();
+    expect(reloaded.getConfig("basic").password).toBe("fake-user-password");
+    expect(reloaded.getConfig("oauth")).toMatchObject({
+      authType: "oauth",
+      clientId: "client-id",
+      clientSecret: "fake-oauth-secret",
+      password: "",
+    });
+    expect(reloaded.getConfig("key")).toMatchObject({
+      authType: "apikey",
+      apiKey: "fake-api-key",
+      apiKeyHeader: "x-custom-key",
+      timeoutMs: 5000,
+    });
   });
 
-  it("adds an oauth client_credentials profile that round-trips through config.json", async () => {
-    process.env.SN_TEST_CLIENT_SECRET = "fake-oauth-secret";
+  it("rejects non-ServiceNow, lookalike, and plain-http hosts", () => {
     const pm = new ProfileManager();
-    const result = await profileHandler(
-      {
-        action: "add",
-        name: "oauth-dev",
-        instance: "https://oauth-dev.service-now.com",
-        auth_type: "oauth",
-        client_id: "dev-client-id",
-        client_secret: "env:SN_TEST_CLIENT_SECRET",
-      },
-      pm
-    );
-    expect(result.isError).toBeUndefined();
-    const payload = JSON.parse(result.content[0].text);
-    expect(payload.auth_type).toBe("oauth");
-    expect(payload.grant_type).toBe("client_credentials");
-    expect(payload.client_id).toBe("dev-client-id");
-    expect(payload.client_secret_source).toBe("env:SN_TEST_CLIENT_SECRET");
-    expect(payload.warnings).toBeUndefined();
-    // Only the env: reference may appear -- never the resolved secret.
-    expect(result.content[0].text).not.toContain("fake-oauth-secret");
-
-    const config = new ProfileManager().getConfig("oauth-dev");
-    expect(config.authType).toBe("oauth");
-    expect(config.grantType).toBe("client_credentials");
-    expect(config.clientId).toBe("dev-client-id");
-    expect(config.clientSecret).toBe("fake-oauth-secret");
-    expect(config.password).toBe("");
-  });
-
-  it("requires username + credential for the oauth password grant, then round-trips", async () => {
-    process.env.SN_TEST_USER_PW = "fake-user-password";
-    process.env.SN_TEST_CLIENT_SECRET = "fake-oauth-secret";
-    const pm = new ProfileManager();
-
-    const missingUser = await profileHandler(
-      {
-        action: "add",
-        name: "pw-dev",
-        instance: "https://pw-dev.service-now.com",
-        auth_type: "oauth",
-        grant_type: "password",
-        client_id: "dev-client-id",
-        client_secret: "env:SN_TEST_CLIENT_SECRET",
-      },
-      pm
-    );
-    expect(missingUser.isError).toBe(true);
-    expect(missingUser.content[0].text).toContain("username");
-    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
-
-    const result = await profileHandler(
-      {
-        action: "add",
-        name: "pw-dev",
-        instance: "https://pw-dev.service-now.com",
-        auth_type: "oauth",
-        grant_type: "password",
-        client_id: "dev-client-id",
-        client_secret: "env:SN_TEST_CLIENT_SECRET",
-        username: "integration.user",
-        credential: "env:SN_TEST_USER_PW",
-      },
-      pm
-    );
-    expect(result.isError).toBeUndefined();
-
-    const config = new ProfileManager().getConfig("pw-dev");
-    expect(config.authType).toBe("oauth");
-    expect(config.grantType).toBe("password");
-    expect(config.user).toBe("integration.user");
-    expect(config.password).toBe("fake-user-password");
-    expect(config.clientSecret).toBe("fake-oauth-secret");
-  });
-
-  it("adds an apikey profile with header and timeout that round-trips", async () => {
-    process.env.SN_TEST_API_KEY = "fake-api-key";
-    const pm = new ProfileManager();
-    const result = await profileHandler(
-      {
-        action: "add",
-        name: "key-dev",
-        instance: "https://key-dev.service-now.com",
-        auth_type: "apikey",
-        api_key: "env:SN_TEST_API_KEY",
-        api_key_header: "x-custom-key",
-        timeout_ms: 5000,
-      },
-      pm
-    );
-    expect(result.isError).toBeUndefined();
-    const payload = JSON.parse(result.content[0].text);
-    expect(payload.auth_type).toBe("apikey");
-    expect(payload.api_key_source).toBe("env:SN_TEST_API_KEY");
-    expect(payload.api_key_header).toBe("x-custom-key");
-    expect(payload.timeout_ms).toBe(5000);
-    expect(payload.warnings).toBeUndefined();
-    expect(result.content[0].text).not.toContain("fake-api-key");
-
-    const config = new ProfileManager().getConfig("key-dev");
-    expect(config.authType).toBe("apikey");
-    expect(config.apiKey).toBe("fake-api-key");
-    expect(config.apiKeyHeader).toBe("x-custom-key");
-    expect(config.timeoutMs).toBe(5000);
-  });
-
-  it("rejects oauth without client_id/client_secret and apikey without api_key", async () => {
-    const pm = new ProfileManager();
-    const base = { action: "add" as const, instance: "https://x.service-now.com" };
-
-    const noId = await profileHandler({ ...base, name: "o", auth_type: "oauth" }, pm);
-    expect(noId.isError).toBe(true);
-    expect(noId.content[0].text).toContain("client_id");
-
-    const noSecret = await profileHandler(
-      { ...base, name: "o", auth_type: "oauth", client_id: "id" },
-      pm
-    );
-    expect(noSecret.isError).toBe(true);
-    expect(noSecret.content[0].text).toContain("client_secret");
-
-    const noKey = await profileHandler({ ...base, name: "k", auth_type: "apikey" }, pm);
-    expect(noKey.isError).toBe(true);
-    expect(noKey.content[0].text).toContain("api_key");
-
+    for (const instance of [
+      "https://evil.example",
+      "https://evilservice-now.com",
+      "http://dev.service-now.com",
+    ]) {
+      expect(() =>
+        pm.addProfile("blocked", {
+          instance,
+          credential: "env:SN_TEST_USER_PW",
+        })
+      ).toThrow();
+    }
     expect(fs.existsSync(pm.getConfigPath())).toBe(false);
   });
 
-  it("rejects plain-text client_secret and api_key through the handler", async () => {
-    const pm = new ProfileManager();
-    const oauth = await profileHandler(
-      {
-        action: "add",
-        name: "o",
-        instance: "https://x.service-now.com",
-        auth_type: "oauth",
-        client_id: "id",
-        client_secret: "plain-oauth-secret",
-      },
-      pm
-    );
-    expect(oauth.isError).toBe(true);
-    expect(oauth.content[0].text).toContain("env:VAR_NAME");
-
-    const apikey = await profileHandler(
-      {
-        action: "add",
-        name: "k",
-        instance: "https://x.service-now.com",
-        auth_type: "apikey",
-        api_key: "plain-api-key",
-      },
-      pm
-    );
-    expect(apikey.isError).toBe(true);
-    expect(apikey.content[0].text).toContain("env:VAR_NAME");
-
-    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
-  });
-
-  it("warns when the referenced env var is unset but still saves the profile", async () => {
-    const pm = new ProfileManager();
-    const result = await profileHandler(
-      {
-        action: "add",
-        name: "oauth-dev",
-        instance: "https://oauth-dev.service-now.com",
-        auth_type: "oauth",
-        client_id: "dev-client-id",
-        client_secret: "env:SN_TEST_CLIENT_SECRET",
-      },
-      pm
-    );
-    expect(result.isError).toBeUndefined();
-    const payload = JSON.parse(result.content[0].text);
-    expect(payload.warnings).toHaveLength(1);
-    expect(payload.warnings[0]).toContain("client_secret");
-    expect(payload.warnings[0]).toContain("SN_TEST_CLIENT_SECRET");
-    expect(payload.warnings[0]).toContain("not set");
-    // Profile persisted despite the warning.
-    expect(fs.readFileSync(pm.getConfigPath(), "utf-8")).toContain("env:SN_TEST_CLIENT_SECRET");
-  });
-});
-
-describe("sn_profile add instance host allowlist", () => {
-  // Regression (review fix): a profile binds secret env-var references to
-  // an instance, and the resolved secret is transmitted to that host on
-  // the next call. add {instance:"https://evil.example", api_key:"env:
-  // SN_API_KEY"} previously succeeded -- a secret-exfiltration path.
-  it("rejects a non-ServiceNow host and persists nothing", async () => {
-    process.env.SN_TEST_API_KEY = "fake-api-key";
-    const pm = new ProfileManager();
-    const result = await profileHandler(
-      {
-        action: "add",
-        name: "x",
-        instance: "https://evil.example",
-        auth_type: "apikey",
-        api_key: "env:SN_TEST_API_KEY",
-      },
-      pm
-    );
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain('"evil.example"');
-    expect(result.content[0].text).toContain("SN_ALLOWED_INSTANCE_HOSTS");
-    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
-  });
-
-  it("rejects lookalike domains that merely end in service-now.com", async () => {
-    const pm = new ProfileManager();
-    const result = await profileHandler(
-      {
-        action: "add",
-        name: "x",
-        instance: "https://evilservice-now.com",
-        username: "admin",
-        credential: "env:SN_TEST_USER_PW",
-      },
-      pm
-    );
-    expect(result.isError).toBe(true);
-    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
-  });
-
-  it("rejects plain http even for a ServiceNow host", async () => {
-    const pm = new ProfileManager();
-    const result = await profileHandler(
-      {
-        action: "add",
-        name: "x",
-        instance: "http://dev.service-now.com",
-        username: "admin",
-        credential: "env:SN_TEST_USER_PW",
-      },
-      pm
-    );
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("https://");
-    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
-  });
-
-  it("accepts *.service-now.com and *.servicenowservices.com hosts", async () => {
+  it("accepts ServiceNow domains and operator-allowlisted custom hosts only", () => {
+    process.env.SN_ALLOWED_INSTANCE_HOSTS = "sn.corp.example.com,*.snow.example.org";
     const pm = new ProfileManager();
     for (const [name, instance] of [
-      ["dev", "https://dev12345.service-now.com"],
-      ["gov", "https://agency.servicenowservices.com"],
+      ["commercial", "https://dev.service-now.com"],
+      ["government", "https://agency.servicenowservices.com"],
+      ["exact", "https://sn.corp.example.com"],
+      ["wildcard", "https://eu1.snow.example.org"],
     ] as const) {
-      const result = await profileHandler(
-        { action: "add", name, instance, username: "admin", credential: "env:SN_TEST_USER_PW" },
-        pm
-      );
-      expect(result.isError).toBeUndefined();
+      expect(() =>
+        pm.addProfile(name, { instance, credential: "env:SN_TEST_USER_PW" })
+      ).not.toThrow();
     }
-  });
-
-  it("accepts a custom host the operator allowlisted via SN_ALLOWED_INSTANCE_HOSTS", async () => {
-    process.env.SN_ALLOWED_INSTANCE_HOSTS = "sn.corp.example.com, *.snow.example.org";
-    const pm = new ProfileManager();
-
-    const exact = await profileHandler(
-      {
-        action: "add",
-        name: "corp",
-        instance: "https://sn.corp.example.com",
-        username: "admin",
-        credential: "env:SN_TEST_USER_PW",
-      },
-      pm
-    );
-    expect(exact.isError).toBeUndefined();
-
-    const wildcard = await profileHandler(
-      {
-        action: "add",
-        name: "wild",
-        instance: "https://eu1.snow.example.org",
-        username: "admin",
-        credential: "env:SN_TEST_USER_PW",
-      },
-      pm
-    );
-    expect(wildcard.isError).toBeUndefined();
-
-    // The allowlist is exact/wildcard-scoped -- other hosts stay rejected.
-    const other = await profileHandler(
-      {
-        action: "add",
-        name: "other",
+    expect(() =>
+      pm.addProfile("other", {
         instance: "https://other.example.com",
-        username: "admin",
         credential: "env:SN_TEST_USER_PW",
-      },
-      pm
-    );
-    expect(other.isError).toBe(true);
-  });
-});
-
-describe("sn_profile add rejects params foreign to the auth type", () => {
-  // Regression (review fix): a stray api_key on an oauth profile was
-  // persisted and later resolved unconditionally -- an unset env var then
-  // failed EVERY call on the otherwise-valid profile.
-  it("rejects api_key on an oauth profile and persists nothing", async () => {
-    process.env.SN_TEST_CLIENT_SECRET = "fake-oauth-secret";
-    const pm = new ProfileManager();
-    const result = await profileHandler(
-      {
-        action: "add",
-        name: "oauth-dev",
-        instance: "https://oauth-dev.service-now.com",
-        auth_type: "oauth",
-        client_id: "dev-client-id",
-        client_secret: "env:SN_TEST_CLIENT_SECRET",
-        api_key: "env:SN_UNSET_API_KEY",
-      },
-      pm
-    );
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("api_key");
-    expect(result.content[0].text).toContain('"oauth"');
-    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
-  });
-
-  it("rejects oauth params on a basic profile, naming every stray param", async () => {
-    const pm = new ProfileManager();
-    const result = await profileHandler(
-      {
-        action: "add",
-        name: "dev",
-        instance: "https://dev.service-now.com",
-        username: "admin",
-        credential: "env:SN_TEST_USER_PW",
-        client_id: "stray-id",
-        client_secret: "env:SN_TEST_CLIENT_SECRET",
-        grant_type: "password",
-      },
-      pm
-    );
-    expect(result.isError).toBe(true);
-    for (const param of ["client_id", "client_secret", "grant_type"]) {
-      expect(result.content[0].text).toContain(param);
-    }
-    expect(fs.existsSync(pm.getConfigPath())).toBe(false);
-  });
-
-  it("rejects api_key_header on a basic profile", async () => {
-    const pm = new ProfileManager();
-    const result = await profileHandler(
-      {
-        action: "add",
-        name: "dev",
-        instance: "https://dev.service-now.com",
-        username: "admin",
-        credential: "env:SN_TEST_USER_PW",
-        api_key_header: "x-custom-key",
-      },
-      pm
-    );
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("api_key_header");
+      })
+    ).toThrow(/SN_ALLOWED_INSTANCE_HOSTS/);
   });
 });
 
@@ -743,7 +751,7 @@ describe("getConfig resolves only the secrets the auth scheme uses", () => {
     });
     process.env.SN_CLIENT_SECRET = "fake-secret-from-env";
 
-    const config = new ProfileManager().getConfig();
+    const config = new ProfileManager().getConfig("dev");
     expect(config.authType).toBe("oauth");
     expect(config.clientSecret).toBe("fake-secret-from-env");
     expect(config.apiKey).toBeUndefined();
@@ -764,7 +772,7 @@ describe("getConfig resolves only the secrets the auth scheme uses", () => {
     });
     process.env.SN_API_KEY = "fake-api-key-from-env";
 
-    const config = new ProfileManager().getConfig();
+    const config = new ProfileManager().getConfig("dev");
     expect(config.authType).toBe("apikey");
     expect(config.apiKey).toBe("fake-api-key-from-env");
     expect(config.clientSecret).toBeUndefined();
@@ -786,59 +794,281 @@ describe("getConfig resolves only the secrets the auth scheme uses", () => {
     });
     process.env.SN_PASSWORD = "fake-password";
 
-    const config = new ProfileManager().getConfig();
+    const config = new ProfileManager().getConfig("dev");
     expect(config.authType).toBe("basic");
     expect(config.clientSecret).toBeUndefined();
     expect(config.apiKey).toBeUndefined();
   });
 });
 
-describe("sn_profile output redaction", () => {
-  const SECRET_CONFIG: ServiceNowConfig = {
-    instance: "https://dev.service-now.com",
-    user: "integration.user",
-    password: "fake-user-password",
-    displayValue: "true",
-    relDepth: 3,
-    authType: "oauth",
-    grantType: "password",
-    clientId: "dev-client-id",
-    clientSecret: "fake-oauth-secret",
-    apiKey: "fake-api-key",
-    apiKeyHeader: "x-sn-apikey",
-    timeoutMs: 30_000,
-  };
+describe("SNSDK-38 secure profile persistence", () => {
+  it("uses an explicitly named environment mapping only for absent configuration", () => {
+    process.env.SN_PROFILE_NAME = "fallback-env";
+    process.env.SN_INSTANCE = "https://fallback.service-now.com";
+    process.env.SN_USER = "fallback-user";
+    process.env.SN_PASSWORD = "fallback-secret";
+    const missingPath = path.join(tempHome, "missing", "nested", "config.json");
 
-  function stubManager() {
-    return {
-      getConfig: vi.fn(() => SECRET_CONFIG),
-      getActiveProfileName: vi.fn(() => "dev"),
-      listProfiles: vi.fn(() => [
-        {
-          name: "dev",
-          instance: SECRET_CONFIG.instance,
-          authType: "oauth" as const,
-          isActive: true,
-        },
-      ]),
-    } as unknown as ProfileManager;
-  }
-
-  it("info reports auth_type but never password/clientSecret/apiKey", async () => {
-    const result = await profileHandler({ action: "info", name: "dev" }, stubManager());
-    const text = result.content[0].text;
-    expect(text).toContain('"auth_type":"oauth"');
-    expect(text).not.toContain("fake-user-password");
-    expect(text).not.toContain("fake-oauth-secret");
-    expect(text).not.toContain("fake-api-key");
+    expect(
+      new ProfileManager({ configFilePath: missingPath }).getConfig("fallback-env")
+    ).toMatchObject({
+      instance: "https://fallback.service-now.com",
+      user: "fallback-user",
+      password: "fallback-secret",
+    });
   });
 
-  it("list output contains no secret material", async () => {
-    const result = await profileHandler({ action: "list" }, stubManager());
-    const text = result.content[0].text;
-    expect(text).toContain('"authType":"oauth"');
-    expect(text).not.toContain("fake-user-password");
-    expect(text).not.toContain("fake-oauth-secret");
-    expect(text).not.toContain("fake-api-key");
+  it("rejects legacy plaintext configuration instead of falling back to env", () => {
+    writeConfigFile({
+      version: 1,
+      profiles: {
+        dev: {
+          instance: "https://dev.service-now.com",
+          username: "admin",
+          credential: "plaintext-must-never-load",
+        },
+      },
+    });
+    process.env.SN_INSTANCE = "https://fallback.service-now.com";
+    process.env.SN_PROFILE_NAME = "fallback-env";
+    process.env.SN_PASSWORD = "fallback-secret";
+
+    expect(() => new ProfileManager()).toThrow(/Legacy plaintext.*rejected/);
+  });
+
+  it("rejects unknown credential-shaped fields and config symlinks", () => {
+    writeConfigFile({
+      version: 2,
+      profiles: {
+        dev: {
+          instance: "https://dev.service-now.com",
+          username: "admin",
+          credential: "env:SN_PASSWORD",
+          password: "hidden-in-an-unknown-field",
+        },
+      },
+    });
+    expect(() => new ProfileManager()).toThrow(/could not be loaded safely/);
+
+    if (process.platform !== "win32") {
+      const configPath = path.join(tempHome, ".servicenow-mcp", "config.json");
+      const targetPath = path.join(tempHome, "outside-config.json");
+      fs.unlinkSync(configPath);
+      fs.writeFileSync(targetPath, JSON.stringify({ version: 2, profiles: {} }));
+      fs.symlinkSync(targetPath, configPath);
+      expect(() => new ProfileManager()).toThrow(/could not be loaded safely/);
+    }
+  });
+
+  it("rejects broken final symlinks and parent-component symlinks", () => {
+    if (process.platform === "win32") return;
+    process.env.SN_INSTANCE = "https://fallback.service-now.com";
+    process.env.SN_PASSWORD = "fallback-secret";
+    const configDirectory = path.join(tempHome, ".servicenow-mcp");
+    fs.mkdirSync(configDirectory, { recursive: true });
+    const configPath = path.join(configDirectory, "config.json");
+    fs.symlinkSync(path.join(tempHome, "does-not-exist.json"), configPath);
+    expect(() => new ProfileManager()).toThrow(/could not be loaded safely/);
+
+    fs.unlinkSync(configPath);
+    const realDirectory = path.join(tempHome, "real-config-directory");
+    fs.mkdirSync(realDirectory);
+    fs.writeFileSync(
+      path.join(realDirectory, "config.json"),
+      JSON.stringify({ version: 2, profiles: {} })
+    );
+    const linkedDirectory = path.join(tempHome, "linked-config-directory");
+    fs.symlinkSync(realDirectory, linkedDirectory, "dir");
+    expect(
+      () =>
+        new ProfileManager({
+          configFilePath: path.join(linkedDirectory, "config.json"),
+        })
+    ).toThrow(/could not be loaded safely/);
+
+    const brokenDirectory = path.join(tempHome, "broken-config-directory");
+    fs.symlinkSync(path.join(tempHome, "missing-directory"), brokenDirectory, "dir");
+    expect(
+      () =>
+        new ProfileManager({
+          configFilePath: path.join(brokenDirectory, "config.json"),
+        })
+    ).toThrow(/could not be loaded safely/);
+  });
+
+  it("rejects non-regular and oversized configuration files", () => {
+    if (process.platform !== "win32") {
+      const configPath = path.join(tempHome, "directory-as-config");
+      fs.mkdirSync(configPath);
+      expect(() => new ProfileManager({ configFilePath: configPath })).toThrow(
+        /could not be loaded safely/
+      );
+    }
+
+    const oversizedPath = path.join(tempHome, "oversized-config.json");
+    fs.writeFileSync(oversizedPath, " ".repeat(1024 * 1024 + 1));
+    expect(() => new ProfileManager({ configFilePath: oversizedPath })).toThrow(
+      /could not be loaded safely/
+    );
+  });
+
+  it.each(["", "bad\nname", "x".repeat(65)])(
+    "rejects an invalid loaded profile name %j",
+    (name) => {
+      const profiles: Record<string, unknown> = Object.create(null);
+      Object.defineProperty(profiles, name, {
+        value: {
+          instance: "https://dev.service-now.com",
+          credential: "env:SN_PASSWORD",
+        },
+        enumerable: true,
+      });
+      writeConfigFile({ version: 2, profiles });
+      expect(() => new ProfileManager()).toThrow(/could not be loaded safely/);
+    }
+  );
+
+  it("loads an intentionally valid __proto__ profile without prototype mutation", () => {
+    const profiles: Record<string, unknown> = Object.create(null);
+    Object.defineProperty(profiles, "__proto__", {
+      value: {
+        instance: "https://special.service-now.com",
+        credential: "env:SN_PASSWORD",
+      },
+      enumerable: true,
+    });
+    writeConfigFile({ version: 2, profiles });
+    const manager = new ProfileManager();
+    expect(manager.getProfile("__proto__").instance).toBe(
+      "https://special.service-now.com"
+    );
+    expect(Object.getPrototypeOf({})).toBe(Object.prototype);
+  });
+
+  it("does not apply POSIX permission operations on the Windows branch", async () => {
+    const canonicalDirectory = fs.realpathSync(tempHome);
+    const windowsConfigPath = path.join(canonicalDirectory, "windows-config.json");
+    fs.writeFileSync(
+      windowsConfigPath,
+      JSON.stringify({ version: 2, profiles: {} }),
+      { mode: 0o644 }
+    );
+    fs.chmodSync(windowsConfigPath, 0o644);
+    fs.chmodSync(canonicalDirectory, 0o755);
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    try {
+      Object.defineProperty(process, "platform", { value: "win32" });
+      vi.resetModules();
+      const windowsModule = await import("../src/profile-manager.js");
+      const windowsManager = new windowsModule.ProfileManager({
+        configFilePath: windowsConfigPath,
+      });
+      expect(fs.statSync(windowsConfigPath).mode & 0o777).toBe(0o644);
+      expect(fs.statSync(canonicalDirectory).mode & 0o777).toBe(0o755);
+      windowsManager.addProfile("windows", {
+        instance: "https://windows.service-now.com",
+        credential: "env:SN_TEST_USER_PW",
+      });
+      expect(windowsManager.getProfile("windows").instance).toBe(
+        "https://windows.service-now.com"
+      );
+      // Persistence exercises the Windows no-op directory-sync branch while
+      // retaining the enclosing directory's non-POSIX-managed mode.
+      expect(fs.statSync(canonicalDirectory).mode & 0o777).toBe(0o755);
+    } finally {
+      if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
+      vi.resetModules();
+    }
+  });
+
+  it("tightens permissions immediately when loading a profile file", () => {
+    writeConfigFile({ version: 2, profiles: {} });
+    const configPath = path.join(tempHome, ".servicenow-mcp", "config.json");
+    if (process.platform !== "win32") {
+      fs.chmodSync(configPath, 0o644);
+      fs.chmodSync(path.dirname(configPath), 0o755);
+    }
+    new ProfileManager();
+    if (process.platform !== "win32") {
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(path.dirname(configPath)).mode & 0o777).toBe(0o700);
+    }
+  });
+
+  it("stores ciphertext atomically without plaintext or the separate key", () => {
+    const key = Buffer.alloc(32, 0x51);
+    const provider: ProfileEncryptionKeyProvider = {
+      getKey: () => Buffer.from(key),
+    };
+    const manager = new ProfileManager({ encryptionKeyProvider: provider });
+    manager.addProfile("encrypted", {
+      instance: "https://encrypted.service-now.com",
+      username: "admin",
+      credential: encryptCredential(
+        "unique-plaintext-value",
+        "encrypted",
+        "credential",
+        provider
+      ),
+    });
+
+    const raw = fs.readFileSync(manager.getConfigPath(), "utf8");
+    expect(raw).not.toContain("unique-plaintext-value");
+    expect(raw).not.toContain(key.toString("base64"));
+    expect(raw).toContain('"algorithm": "aes-256-gcm"');
+    expect(manager.getConfig("encrypted").password).toBe("unique-plaintext-value");
+    expect(
+      fs.readdirSync(path.dirname(manager.getConfigPath())).filter((name) =>
+        name.endsWith(".tmp") || name.endsWith(".lock")
+      )
+    ).toEqual([]);
+  });
+
+  it("cannot reuse a cached client after the separate key becomes unavailable", () => {
+    const key = Buffer.alloc(32, 0x37);
+    let available = true;
+    const provider: ProfileEncryptionKeyProvider = {
+      getKey: () => {
+        if (!available) throw new Error("Profile encryption key is unavailable");
+        return Buffer.from(key);
+      },
+    };
+    const manager = new ProfileManager({ encryptionKeyProvider: provider });
+    manager.addProfile("dev", {
+      instance: "https://dev.service-now.com",
+      username: "admin",
+      credential: encryptCredential("credential-value", "dev", "credential", provider),
+    });
+    manager.getClient("dev");
+    available = false;
+    expect(() => manager.getClient("dev")).toThrow(
+      "Profile encryption key is unavailable"
+    );
+  });
+
+  it("merges stale concurrent manager updates under the atomic write lock", () => {
+    const first = new ProfileManager();
+    const second = new ProfileManager();
+    first.addProfile("dev", {
+      instance: "https://dev.service-now.com",
+      username: "dev-user",
+      credential: "env:SN_TEST_USER_PW",
+    });
+    second.addProfile("prod", {
+      instance: "https://prod.service-now.com",
+      username: "prod-user",
+      credential: "env:SN_TEST_USER_PW",
+    });
+
+    expect(new ProfileManager().listProfiles().map(({ name }) => name)).toEqual([
+      "dev",
+      "prod",
+    ]);
+    const parsed = JSON.parse(fs.readFileSync(first.getConfigPath(), "utf8"));
+    expect(parsed.version).toBe(2);
+    if (process.platform !== "win32") {
+      expect(fs.statSync(first.getConfigPath()).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(path.dirname(first.getConfigPath())).mode & 0o777).toBe(0o700);
+    }
   });
 });

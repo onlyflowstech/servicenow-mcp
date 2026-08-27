@@ -1,0 +1,15 @@
+# Default-deny the build context. Only files named below can influence layers,
+# which keeps local profiles, dotenv files, logs, Git data, and credentials out.
+**
+!Dockerfile
+!.dockerignore
+!.npmrc
+!package.json
+!package-lock.json
+!tsconfig.json
+!src/
+!src/**
+!scripts/
+!scripts/clean-dist.mjs
+!deploy/
+!deploy/container-healthcheck.mjs

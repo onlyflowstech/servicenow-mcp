@@ -66,13 +66,24 @@ describe("sn_syslog level filter", () => {
     expect(schema.safeParse({ level: 2 }).success).toBe(false);
   });
 
-  it("keeps the JSON-schema enum in sync with the zod enum", async () => {
-    const { definition } = await import("../src/tools/syslog.js");
-    expect(definition.inputSchema.properties.level.enum).toEqual([...schema.shape.level.unwrap().options]);
+  it("keeps the level values and description in the authoritative Zod schema", () => {
+    expect(schema.shape.level.unwrap().options).toEqual([
+      "error", "warning", "info", "debug", "-1", "0", "1", "2",
+    ]);
+    expect(schema.shape.level.description).toContain("-1=debug");
   });
 
-  it("leaves a raw encoded query untouched (no level mapping)", async () => {
-    const query = await queryFor({ query: "level=0^messageLIKEboom" });
-    expect(query).toBe("level=0^messageLIKEboom^ORDERBYDESCsys_created_on");
+  it("denies raw encoded syslog reads instead of forwarding them", async () => {
+    const { client, getWithMeta } = metaClient();
+    await expect(
+      handler(
+        { ...schema.parse({}), query: "level=0^messageLIKEboom" } as never,
+        client,
+        config
+      )
+    ).rejects.toThrow(
+      "Raw encoded query denied by policy. Use structured_query with policy-authorized filters."
+    );
+    expect(getWithMeta).not.toHaveBeenCalled();
   });
 });

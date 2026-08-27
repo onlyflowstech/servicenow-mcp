@@ -1,64 +1,10 @@
-import { z } from "zod";
-import { ServiceNowClient } from "../client.js";
-import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError, stripEmpty } from "../utils.js";
+/** Compatibility identity facade for the canonical sn_create module. */
 
-export const definition = {
-  name: "sn_create",
-  description:
-    "Create a new record on any ServiceNow table. Pass field values as a JSON object. " +
-    "Returns sys_id, number, table, and the created record (empty fields stripped) under record.",
-  annotations: {
-    title: "Create record",
-    readOnlyHint: false,
-    destructiveHint: false,
-    // Every call inserts a new record, so repeats are NOT idempotent.
-    idempotentHint: false,
-    openWorldHint: true,
-  },
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      table: {
-        type: "string",
-        description: "ServiceNow table name (e.g. incident)",
-      },
-      fields: {
-        type: "object",
-        description:
-          'JSON object of field name/value pairs (e.g. {"short_description":"Server down","urgency":"1"})',
-        additionalProperties: true,
-      },
-      profile: {
-        type: "string",
-        description: "Named profile to use. Defaults to active profile.",
-      },
-    },
-    required: ["table", "fields"],
-  },
-};
-
-export const schema = z.object({
-  table: z.string(),
-  fields: z.record(z.unknown()),
-  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
-});
-
-export async function handler(
-  args: z.infer<typeof schema>,
-  client: ServiceNowClient,
-  _config: ServiceNowConfig
-) {
-  try {
-    const resp = await client.post(`/api/now/table/${args.table}`, args.fields);
-    const { sys_id, number, ...rest } = resp.result || {};
-    return ok({
-      sys_id,
-      number,
-      table: args.table,
-      record: stripEmpty(rest),
-    });
-  } catch (error) {
-    return err(formatError(error));
-  }
-}
+export {
+  createToolModule,
+  definition,
+  handler,
+  moduleInputSchema,
+  resolveCreateAccess,
+  schema,
+} from "./create-module.js";

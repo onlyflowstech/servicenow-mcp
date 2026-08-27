@@ -4,6 +4,12 @@
  * @module utils
  */
 
+import {
+  ENCODED_QUERY_MIGRATION_MESSAGE,
+  isEncodedQueryPolicyError,
+} from "./encoded-query-policy.js";
+import { formatToolError } from "./tool-error.js";
+
 /**
  * Format a successful tool result as MCP text content.
  * Objects are serialized as compact JSON (no pretty-print indent).
@@ -45,20 +51,19 @@ export function err(message: string): {
 }
 
 /**
- * Safely format a ServiceNow error for display.
+ * Convert an untrusted exception into a fixed, caller-safe failure category.
+ *
+ * Exception messages, details, causes, response bodies, URLs, headers, and
+ * stack text are deliberately ignored. Upstream libraries commonly embed
+ * credentials and query values in those fields, and incomplete regex
+ * redaction cannot make arbitrary text safe. Only module-private trusted
+ * provenance can retain a category; every other value becomes `internal`.
  */
 export function formatError(error: unknown): string {
-  if (error && typeof error === "object") {
-    const e = error as Record<string, unknown>;
-    if (e.message) {
-      let msg = String(e.message);
-      if (e.detail) msg += `\nDetail: ${e.detail}`;
-      if (e.status) msg += ` (HTTP ${e.status})`;
-      return msg;
-    }
+  if (isEncodedQueryPolicyError(error)) {
+    return ENCODED_QUERY_MIGRATION_MESSAGE;
   }
-  if (error instanceof Error) return error.message;
-  return String(error);
+  return formatToolError(error);
 }
 
 /**
@@ -92,6 +97,7 @@ export function buildTableParams(opts: {
   offset?: number;
   orderby?: string;
   displayValue?: string;
+  noCount?: boolean;
 }): Record<string, string> {
   const params: Record<string, string> = {
     sysparm_exclude_reference_link: "true",
@@ -102,6 +108,7 @@ export function buildTableParams(opts: {
   if (opts.offset !== undefined) params.sysparm_offset = String(opts.offset);
   if (opts.orderby) params.sysparm_orderby = opts.orderby;
   if (opts.displayValue) params.sysparm_display_value = opts.displayValue;
+  if (opts.noCount) params.sysparm_no_count = "true";
   return params;
 }
 

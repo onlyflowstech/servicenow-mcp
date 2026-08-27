@@ -1,7 +1,14 @@
 import { z } from "zod";
-import { ServiceNowClient } from "../client.js";
-import { ServiceNowConfig } from "../config.js";
+import type { ServiceNowOperations } from "../client.js";
+import type { ExecutionContext } from "../execution-context.js";
+import type { ServiceNowToolSettings } from "./tool-module.js";
+import {
+  filterReadableRecord,
+  preparedReadableFields,
+  resolveReadableFields,
+} from "../field-policy.js";
 import { ok, err, escapeQueryValue, formatError, withWarnings } from "../utils.js";
+import { createCommonToolError } from "../tool-error.js";
 
 export const definition = {
   name: "sn_discover",
@@ -14,51 +21,28 @@ export const definition = {
     idempotentHint: true,
     openWorldHint: true,
   },
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      type: {
-        type: "string",
-        enum: ["tables", "apps", "plugins"],
-        description: "What to discover: tables, apps, or plugins",
-      },
-      query: {
-        type: "string",
-        description: "Search by name (LIKE match)",
-      },
-      limit: {
-        type: "number",
-        description: "Max results (default 20)",
-      },
-      active: {
-        type: "string",
-        description: "Filter by active status: true or false (apps and plugins only)",
-      },
-      profile: {
-        type: "string",
-        description: "Named profile to use. Defaults to active profile.",
-      },
-    },
-    required: ["type"],
-  },
 };
 
 export const schema = z.object({
-  type: z.enum(["tables", "apps", "plugins"]),
-  query: z.string().optional(),
-  limit: z.number().optional().default(20),
-  active: z.string().optional(),
-  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
+  type: z.enum(["tables", "apps", "plugins"]).describe("What to discover: tables, apps, or plugins"),
+  query: z.string().optional().describe("Search by name (LIKE match)"),
+  limit: z.number().int().min(1).max(1000).optional().default(20).describe("Max results (default 20, max 1000)"),
+  offset: z.number().int().min(0).max(10000).optional().default(0).describe("Deterministic result offset (default 0)"),
+  active: z.string().optional().describe("Filter by active status: true or false (apps and plugins only)"),
 });
 
 export async function handler(
   args: z.infer<typeof schema>,
-  client: ServiceNowClient,
-  _config: ServiceNowConfig
+  client: ServiceNowOperations,
+  _config: ServiceNowToolSettings,
+  _context: ExecutionContext
 ) {
   try {
     switch (args.type) {
       case "tables": {
+        const readableFields =
+          preparedReadableFields(args, "sys_db_object") ??
+          resolveReadableFields("sys_db_object");
         let sysparmQuery = "";
         if (args.query) {
           const q = escapeQueryValue(args.query);
@@ -67,27 +51,47 @@ export async function handler(
 
         const resp = await client.get("/api/now/table/sys_db_object", {
           sysparm_fields: "sys_id,name,label,super_class,sys_scope,is_extendable",
-          sysparm_limit: String(args.limit),
+          sysparm_limit: String(args.limit + 1),
+          sysparm_offset: String(args.offset),
+          sysparm_orderby: "sys_id",
           sysparm_display_value: "true",
           ...(sysparmQuery ? { sysparm_query: sysparmQuery } : {}),
         });
 
-        const results = (resp.result || []).map(
-          (r: Record<string, string>) => ({
+        const filtered = filterReadableRecord(resp.result || [], readableFields);
+        const records = Array.isArray(filtered) ? filtered : [];
+        const results = records.flatMap((candidate) => {
+          if (
+            typeof candidate !== "object" ||
+            candidate === null ||
+            Array.isArray(candidate)
+          ) {
+            return [];
+          }
+          const r = candidate as Record<string, unknown>;
+          return [{
             sys_id: r.sys_id,
             name: r.name,
             label: r.label,
             super_class: r.super_class,
             scope: r.sys_scope,
             is_extendable: r.is_extendable,
-          })
-        );
+          }];
+        });
         return ok(results);
       }
 
       case "apps": {
+        const appReadableFields =
+          preparedReadableFields(args, "sys_app") ??
+          resolveReadableFields("sys_app");
+        const storeReadableFields =
+          preparedReadableFields(args, "sys_store_app") ??
+          resolveReadableFields("sys_store_app");
         let allApps: Array<Record<string, unknown>> = [];
         const warnings: string[] = [];
+        const failures: unknown[] = [];
+        const windowLimit = args.offset + args.limit + 1;
 
         // Scoped apps (sys_app)
         const appQuery: string[] = [];
@@ -97,14 +101,23 @@ export async function handler(
         try {
           const appResp = await client.get("/api/now/table/sys_app", {
             sysparm_fields: "sys_id,name,version,scope,active",
-            sysparm_limit: String(args.limit),
+            sysparm_limit: String(windowLimit),
+            sysparm_offset: "0",
+            sysparm_orderby: "sys_id",
             ...(appQuery.length ? { sysparm_query: appQuery.join("^") } : {}),
           });
-          for (const r of appResp.result || []) {
-            allApps.push({ ...r, source: "scoped" });
+          const filtered = filterReadableRecord(
+            appResp.result || [],
+            appReadableFields
+          );
+          for (const r of Array.isArray(filtered) ? filtered : []) {
+            if (typeof r === "object" && r !== null && !Array.isArray(r)) {
+              allApps.push({ ...(r as Record<string, unknown>), source: "scoped" });
+            }
           }
         } catch (error) {
           // sys_app may require elevated role -- report, don't hide
+          failures.push(error);
           warnings.push(`sys_app: ${formatError(error)}`);
         }
 
@@ -116,48 +129,77 @@ export async function handler(
         try {
           const storeResp = await client.get("/api/now/table/sys_store_app", {
             sysparm_fields: "sys_id,name,version,scope,active",
-            sysparm_limit: String(args.limit),
+            sysparm_limit: String(windowLimit),
+            sysparm_offset: "0",
+            sysparm_orderby: "sys_id",
             ...(storeQuery.length
               ? { sysparm_query: storeQuery.join("^") }
               : {}),
           });
-          for (const r of storeResp.result || []) {
-            allApps.push({ ...r, source: "store" });
+          const filtered = filterReadableRecord(
+            storeResp.result || [],
+            storeReadableFields
+          );
+          for (const r of Array.isArray(filtered) ? filtered : []) {
+            if (typeof r === "object" && r !== null && !Array.isArray(r)) {
+              allApps.push({ ...(r as Record<string, unknown>), source: "store" });
+            }
           }
         } catch (error) {
           // May not be accessible -- report, don't hide
+          failures.push(error);
           warnings.push(`sys_store_app: ${formatError(error)}`);
         }
 
         // Both app tables failed: that is a failure, not "no apps
         // installed" -- an empty success here would misread as none.
         if (warnings.length === 2) {
-          return err(`both app tables failed:\n${warnings.join("\n")}`);
+          throw createCommonToolError(failures);
         }
 
-        allApps = allApps.slice(0, args.limit);
+        allApps.sort((left, right) => {
+          const sourceOrder = String(left.source).localeCompare(
+            String(right.source)
+          );
+          return sourceOrder !== 0
+            ? sourceOrder
+            : String(left.sys_id).localeCompare(String(right.sys_id));
+        });
+        allApps = allApps.slice(args.offset, args.offset + args.limit + 1);
         return ok(withWarnings(allApps, warnings));
       }
 
       case "plugins": {
+        const readableFields =
+          preparedReadableFields(args, "v_plugin") ??
+          resolveReadableFields("v_plugin");
         const pluginQuery: string[] = [];
         if (args.query) pluginQuery.push(`nameLIKE${escapeQueryValue(args.query)}`);
         if (args.active) pluginQuery.push(`active=${escapeQueryValue(args.active)}`);
 
         const resp = await client.get("/api/now/table/v_plugin", {
           sysparm_fields: "sys_id,name,active",
-          sysparm_limit: String(args.limit),
+          sysparm_limit: String(args.limit + 1),
+          sysparm_offset: String(args.offset),
+          sysparm_orderby: "sys_id",
           ...(pluginQuery.length
             ? { sysparm_query: pluginQuery.join("^") }
             : {}),
         });
 
-        const results = (resp.result || []).map(
-          (r: Record<string, string>) => ({
-            sys_id: r.sys_id,
-            name: r.name,
-            active: r.active,
-          })
+        const filtered = filterReadableRecord(resp.result || [], readableFields);
+        const results = (Array.isArray(filtered) ? filtered : []).flatMap(
+          (candidate) => {
+            if (
+              typeof candidate !== "object" ||
+              candidate === null ||
+              Array.isArray(candidate)
+            ) {
+              return [];
+            }
+            const r = candidate as Record<string, unknown>;
+            return [{ sys_id: r.sys_id, name: r.name, active: r.active }];
+          }
         );
         return ok(results);
       }
@@ -166,6 +208,6 @@ export async function handler(
         return err(`Unknown discover type: ${args.type}`);
     }
   } catch (error) {
-    return err(formatError(error));
+    throw error;
   }
 }

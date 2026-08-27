@@ -8,6 +8,10 @@ import {
 } from "../src/auth.js";
 import { ServiceNowClient } from "../src/client.js";
 import type { ServiceNowConfig } from "../src/config.js";
+import {
+  trustedToolErrorDescriptor,
+  type ToolErrorDescriptor,
+} from "../src/tool-error.js";
 
 const INSTANCE = "https://example.service-now.com";
 const FAKE_CLIENT_ID = "mcp-client-id";
@@ -35,6 +39,28 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
     status,
     headers: { "Content-Type": "application/json", ...headers },
   });
+}
+
+async function rejectedToolError(operation: Promise<unknown>): Promise<ToolErrorDescriptor> {
+  try {
+    await operation;
+  } catch (error) {
+    const descriptor = trustedToolErrorDescriptor(error);
+    expect(descriptor).toBeDefined();
+    return descriptor!;
+  }
+  throw new Error("expected operation to reject");
+}
+
+function thrownToolError(operation: () => unknown): ToolErrorDescriptor {
+  try {
+    operation();
+  } catch (error) {
+    const descriptor = trustedToolErrorDescriptor(error);
+    expect(descriptor).toBeDefined();
+    return descriptor!;
+  }
+  throw new Error("expected operation to throw");
 }
 
 afterEach(() => {
@@ -153,6 +179,146 @@ describe("OAuthProvider", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a shared refresh alive while one uncancelled subscriber remains", async () => {
+    let release!: (value: Response) => void;
+    let tokenSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+      tokenSignal = init.signal as AbortSignal;
+      return new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = oauthProvider();
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const first = provider.getAuthHeaders(firstController.signal);
+    const second = provider.getAuthHeaders(secondController.signal);
+
+    firstController.abort();
+    await expect(first).rejects.toThrow("OAuth token request cancelled");
+    expect(tokenSignal?.aborted).toBe(false);
+    release(tokenResponse("surviving-subscriber-token"));
+    await expect(second).resolves.toEqual({
+      Authorization: "Bearer surviving-subscriber-token",
+    });
+    await expect(provider.getAuthHeaders()).resolves.toEqual({
+      Authorization: "Bearer surviving-subscriber-token",
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("aborts an abandoned token POST and fences a late completion from cache", async () => {
+    const releases: Array<(value: Response) => void> = [];
+    const tokenSignals: AbortSignal[] = [];
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+      tokenSignals.push(init.signal as AbortSignal);
+      return new Promise<Response>((resolve) => releases.push(resolve));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = oauthProvider();
+    const controller = new AbortController();
+    const abandoned = provider.getAuthHeaders(controller.signal);
+    controller.abort();
+
+    await expect(abandoned).rejects.toThrow("OAuth token request cancelled");
+    expect(tokenSignals[0]?.aborted).toBe(true);
+    releases[0]?.(tokenResponse("must-never-be-cached"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const replacement = provider.getAuthHeaders();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    releases[1]?.(tokenResponse("replacement-token"));
+    await expect(replacement).resolves.toEqual({
+      Authorization: "Bearer replacement-token",
+    });
+  });
+
+  it("cancels a streamed token response that exceeds its byte ceiling", async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(16 * 1024));
+      },
+      cancel,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(body, { status: 200 }))
+    );
+
+    await expect(
+      rejectedToolError(oauthProvider().getAuthHeaders())
+    ).resolves.toMatchObject({
+      category: "upstream",
+      retry: "retry_if_safe_and_idempotent",
+    });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("bounds token-endpoint error bodies before extracting detail", async () => {
+    const cancel = vi.fn();
+    const secret = FAKE_CLIENT_SECRET;
+    const chunk = new TextEncoder().encode(secret.repeat(3_000));
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(chunk);
+      },
+      cancel,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(body, { status: 401 }))
+    );
+
+    const thrown = await rejectedToolError(oauthProvider().getAuthHeaders());
+    expect(thrown).toMatchObject({
+      category: "authentication",
+      retry: "retry_after_correction",
+    });
+    expect(JSON.stringify(thrown)).not.toContain(secret);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a hostile declared token response length without parsing", async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({ cancel });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(body, {
+          status: 200,
+          headers: { "Content-Length": "9007199254740992" },
+        })
+      )
+    );
+
+    await expect(
+      rejectedToolError(oauthProvider().getAuthHeaders())
+    ).resolves.toMatchObject({
+      category: "upstream",
+      retry: "retry_if_safe_and_idempotent",
+    });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("times out and cancels a stalled token response body", async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({ cancel });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(body, { status: 200 }))
+    );
+
+    await expect(
+      rejectedToolError(oauthProvider({ timeoutMs: 20 }).getAuthHeaders())
+    ).resolves.toMatchObject({
+      category: "timeout",
+      retry: "retry_if_safe_and_idempotent",
+    });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   it("redacts the client secret from token-endpoint error messages", async () => {
     vi.stubGlobal(
       "fetch",
@@ -167,16 +333,10 @@ describe("OAuthProvider", () => {
       )
     );
 
-    let thrown: Error | undefined;
-    try {
-      await oauthProvider().getAuthHeaders();
-    } catch (error) {
-      thrown = error as Error;
-    }
-    expect(thrown).toBeDefined();
-    expect(thrown!.message).toContain("HTTP 401");
-    expect(thrown!.message).toContain("access_denied");
-    expect(thrown!.message).not.toContain(FAKE_CLIENT_SECRET);
+    const thrown = await rejectedToolError(oauthProvider().getAuthHeaders());
+    expect(thrown).toMatchObject({ category: "authentication" });
+    expect(JSON.stringify(thrown)).not.toContain("access_denied");
+    expect(JSON.stringify(thrown)).not.toContain(FAKE_CLIENT_SECRET);
   });
 
   it("redacts a secret that straddles the 300-char truncation boundary", async () => {
@@ -197,21 +357,98 @@ describe("OAuthProvider", () => {
       )
     );
 
-    let thrown: Error | undefined;
-    try {
-      await oauthProvider().getAuthHeaders();
-    } catch (error) {
-      thrown = error as Error;
-    }
-    expect(thrown).toBeDefined();
-    expect(thrown!.message).toContain("HTTP 401");
-    expect(thrown!.message).not.toContain(FAKE_CLIENT_SECRET);
+    const thrown = await rejectedToolError(oauthProvider().getAuthHeaders());
+    expect(thrown).toMatchObject({ category: "authentication" });
+    expect(JSON.stringify(thrown)).not.toContain(FAKE_CLIENT_SECRET);
     // No partial prefix of the secret may survive truncation either.
     expect(thrown!.message).not.toContain(FAKE_CLIENT_SECRET.slice(0, 8));
   });
 
   it("rejects a password grant without username/credential", () => {
-    expect(() => oauthProvider({ grantType: "password" })).toThrow(/username and credential/);
+    expect(
+      thrownToolError(() => oauthProvider({ grantType: "password" }))
+    ).toMatchObject({
+      category: "authentication",
+      retry: "retry_after_correction",
+    });
+  });
+
+  it.each([
+    [400, "authentication", "retry_after_correction"],
+    [401, "authentication", "retry_after_correction"],
+    [403, "authentication", "retry_after_correction"],
+    [408, "timeout", "retry_if_safe_and_idempotent"],
+    [409, "conflict", "retry_after_correction"],
+    [429, "rate_limit", "retry_later"],
+    [503, "upstream", "retry_if_safe_and_idempotent"],
+  ] as const)(
+    "maps token endpoint HTTP %i to trusted %s",
+    async (status, category, retry) => {
+      const canary = `RAW_OAUTH_${status}_SECRET`;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          jsonResponse(
+            { error: "token_error", error_description: canary },
+            status,
+            status === 429 ? { "Retry-After": "19" } : {}
+          )
+        )
+      );
+      const failure = await rejectedToolError(oauthProvider().getAuthHeaders());
+      expect(failure).toMatchObject({ category, retry });
+      expect(JSON.stringify(failure)).not.toContain(canary);
+      if (status === 429) expect(failure.retryAfterSeconds).toBe(19);
+    }
+  );
+
+  it("maps a hostile token-network rejection without inspecting it", async () => {
+    const get = vi.fn(() => {
+      throw new Error("RAW_OAUTH_PROXY_SECRET");
+    });
+    const hostile = new Proxy({}, { get });
+    vi.stubGlobal("fetch", vi.fn(() => Promise.reject(hostile)));
+
+    const failure = await rejectedToolError(oauthProvider().getAuthHeaders());
+
+    expect(failure).toMatchObject({
+      category: "upstream",
+      retry: "retry_if_safe_and_idempotent",
+    });
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("keeps missing local OAuth material existence-equivalent to HTTP 401", async () => {
+    const locallyUnavailable = thrownToolError(() =>
+      createAuthProvider({
+        instance: INSTANCE,
+        user: "",
+        password: "",
+        displayValue: "true",
+        relDepth: 3,
+        authType: "oauth",
+      })
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(
+          {
+            error: "invalid_client",
+            error_description: "RAW_PRESENT_BUT_WRONG_SECRET",
+          },
+          401
+        )
+      )
+    );
+    const remotelyRejected = await rejectedToolError(
+      oauthProvider().getAuthHeaders()
+    );
+
+    expect(remotelyRejected).toEqual(locallyUnavailable);
+    expect(JSON.stringify(remotelyRejected)).not.toContain(
+      "RAW_PRESENT_BUT_WRONG_SECRET"
+    );
   });
 });
 
@@ -267,7 +504,10 @@ describe("client + OAuth integration", () => {
     } catch (error) {
       thrown = error;
     }
-    expect(thrown).toMatchObject({ status: 401 });
+    expect(trustedToolErrorDescriptor(thrown)).toMatchObject({
+      category: "authentication",
+      retry: "retry_after_correction",
+    });
     // exactly one refresh + one retry: token, 401, token, 401 -- no fifth call
     expect(fetchMock).toHaveBeenCalledTimes(4);
 
@@ -289,8 +529,8 @@ describe("client + OAuth integration", () => {
   });
 });
 
-describe("basic-auth 401 guidance", () => {
-  it("appends the KB3096078 hint to 401 errors on basic-auth profiles", async () => {
+describe("basic-auth 401 safety", () => {
+  it("returns the fixed authentication contract without upstream text", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => jsonResponse({ error: { message: "User Not Authenticated" } }, 401))
@@ -310,17 +550,13 @@ describe("basic-auth 401 guidance", () => {
     } catch (error) {
       thrown = error;
     }
-    const message = (thrown as { message: string }).message;
-    expect(message).toContain("User Not Authenticated");
-    expect(message).toContain(
-      "ServiceNow may be enforcing Basic Auth restrictions on this instance (see KB3096078)."
-    );
-    expect(message).toContain(
-      "Exemptions: Web-Service-Access-Only account or snc_basic_auth_api_access role."
-    );
-    expect(message).toContain(
-      "Recommended: switch this profile to OAuth (authType: 'oauth')."
-    );
+    expect(trustedToolErrorDescriptor(thrown)).toMatchObject({
+      category: "authentication",
+      retry: "retry_after_correction",
+    });
+    const message = (thrown as Error).message;
+    expect(message).not.toContain("User Not Authenticated");
+    expect(message).not.toContain("KB3096078");
   });
 });
 
@@ -346,14 +582,16 @@ describe("createAuthProvider", () => {
         clientSecret: FAKE_CLIENT_SECRET,
       }).kind
     ).toBe("oauth");
-    expect(() => createAuthProvider({ ...BASE, authType: "oauth" })).toThrow(
-      /clientId and clientSecret/
-    );
+    expect(
+      thrownToolError(() => createAuthProvider({ ...BASE, authType: "oauth" }))
+    ).toMatchObject({ category: "authentication" });
 
     expect(createAuthProvider({ ...BASE, authType: "apikey", apiKey: "fake-key" }).kind).toBe(
       "apikey"
     );
-    expect(() => createAuthProvider({ ...BASE, authType: "apikey" })).toThrow(/apiKey/);
+    expect(
+      thrownToolError(() => createAuthProvider({ ...BASE, authType: "apikey" }))
+    ).toMatchObject({ category: "authentication" });
   });
 });
 

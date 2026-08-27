@@ -1,192 +1,296 @@
 #!/usr/bin/env node
 /**
- * Live smoke test for @onlyflows/servicenow-mcp (branch feature/efficiency-auth-hardening).
- * Spawns dist/index.js over stdio and exercises the new behavior against a real instance.
+ * Opt-in live smoke test for an already-running V2 HTTP service.
  *
- * Usage:  node smoke-test.mjs [--write] [--bad-auth]
- * Env:    SN_INSTANCE, SN_USER, SN_PASSWORD  (or SN_AUTH_TYPE=oauth + SN_CLIENT_ID/SN_CLIENT_SECRET)
- *
- * --write     also run a create -> update -> delete round-trip on `incident` (sub-prod only!)
- * --bad-auth  also respawn with a wrong password to verify the 401 KB3096078 hint
+ * Have an approved supervisor inject MCP_BEARER_TOKEN out of band, set the
+ * non-secret MCP_URL and MCP_PROFILE values, then run `npm run smoke`.
+ * Writes additionally require `--write --confirm-write-profile=<MCP_PROFILE>`.
  */
-import { spawn } from "node:child_process";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
-import { fileURLToPath } from "node:url";
-import path from "node:path";
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const WRITE = process.argv.includes("--write");
-const BAD_AUTH = process.argv.includes("--bad-auth");
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-function startServer(envOverride = {}) {
-  const server = spawn("node", ["dist/index.js"], {
-    cwd: REPO,
-    env: { ...process.env, ...envOverride },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  const stderrLines = [];
-  server.stderr.on("data", (d) => stderrLines.push(d.toString()));
-  let buf = "";
-  const pending = new Map();
-  let nextId = 1;
-  server.stdout.on("data", (d) => {
-    buf += d.toString();
-    let i;
-    while ((i = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, i);
-      buf = buf.slice(i + 1);
-      if (!line.trim()) continue;
-      try {
-        const msg = JSON.parse(line);
-        if (msg.id !== undefined && pending.has(msg.id)) {
-          pending.get(msg.id)(msg);
-          pending.delete(msg.id);
-        }
-      } catch { /* ignore non-JSON */ }
-    }
-  });
-  function rpc(method, params, timeoutMs = 90000) {
-    const id = nextId++;
-    return new Promise((resolve, reject) => {
-      pending.set(id, resolve);
-      server.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-      setTimeout(() => {
-        if (pending.has(id)) { pending.delete(id); reject(new Error(`${method} timed out after ${timeoutMs}ms`)); }
-      }, timeoutMs).unref();
-    });
+const BEARER_TOKEN = /^[A-Za-z0-9._~+/-]+={0,2}$/u;
+const SYS_ID = /^[0-9a-f]{32}$/u;
+const WRITE_CONFIRM_PREFIX = "--confirm-write-profile=";
+
+export function resolveSmokeOptions(argv, environment) {
+  const token = environment.MCP_BEARER_TOKEN;
+  const profile = environment.MCP_PROFILE;
+  const endpointValue = environment.MCP_URL;
+  if (typeof token !== "string" || token.length < 32 || token.length > 4096) {
+    throw new Error("MCP_BEARER_TOKEN must be injected and contain 32-4096 characters");
   }
-  const notify = (method, params) =>
-    server.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");
-  return { server, rpc, notify, stderrLines };
-}
+  if (!BEARER_TOKEN.test(token)) {
+    throw new Error("MCP_BEARER_TOKEN is invalid");
+  }
+  if (
+    typeof profile !== "string" ||
+    profile.length === 0 ||
+    profile.length > 128 ||
+    profile !== profile.trim()
+  ) {
+    throw new Error("MCP_PROFILE must explicitly name one configured profile");
+  }
+  if (typeof endpointValue !== "string" || endpointValue.length === 0) {
+    throw new Error("MCP_URL must explicitly identify the protected /mcp endpoint");
+  }
 
-async function initialize(h) {
-  await h.rpc("initialize", {
-    protocolVersion: "2025-06-18",
-    capabilities: {},
-    clientInfo: { name: "smoke-test", version: "1.0.0" },
+  const endpoint = validatedMcpEndpoint(endpointValue);
+  const timeoutMs = validatedTimeout(environment.MCP_SMOKE_TIMEOUT_MS);
+  const writeFlags = argv.filter((argument) => argument === "--write");
+  const confirmations = argv.filter((argument) =>
+    argument.startsWith(WRITE_CONFIRM_PREFIX)
+  );
+  const knownArguments = argv.filter(
+    (argument) =>
+      argument === "--write" || argument.startsWith(WRITE_CONFIRM_PREFIX)
+  );
+  if (knownArguments.length !== argv.length || writeFlags.length > 1) {
+    throw new Error("Smoke arguments are invalid");
+  }
+  if (confirmations.length > 1) {
+    throw new Error("Only one write-profile confirmation is allowed");
+  }
+
+  const writeEnabled = writeFlags.length === 1;
+  const confirmedProfile = confirmations[0]?.slice(WRITE_CONFIRM_PREFIX.length);
+  if (writeEnabled && confirmedProfile !== profile) {
+    throw new Error(
+      "--write requires --confirm-write-profile=<exact MCP_PROFILE>"
+    );
+  }
+  if (!writeEnabled && confirmedProfile !== undefined) {
+    throw new Error("Write-profile confirmation requires --write");
+  }
+
+  return Object.freeze({
+    endpoint,
+    token,
+    profile,
+    writeEnabled,
+    timeoutMs,
   });
-  h.notify("notifications/initialized");
 }
 
-async function callTool(h, name, args) {
-  const resp = await h.rpc("tools/call", { name, arguments: args });
-  if (resp.error) return { isError: true, text: JSON.stringify(resp.error) };
-  const text = (resp.result?.content ?? []).map((c) => c.text ?? "").join("\n");
-  return { isError: !!resp.result?.isError, text };
+export function extractCreatedSysId(result) {
+  const structured = result?.structuredContent;
+  const data =
+    typeof structured === "object" && structured !== null
+      ? Reflect.get(structured, "data")
+      : undefined;
+  const sysId =
+    typeof data === "object" && data !== null
+      ? Reflect.get(data, "sys_id")
+      : undefined;
+  if (typeof sysId !== "string" || !SYS_ID.test(sysId)) {
+    throw new Error("sn_create did not return a canonical structured sys_id");
+  }
+  return sysId;
 }
 
-const results = [];
-function record(name, pass, note = "") {
-  results.push({ name, pass, note });
+export async function runSmoke(options) {
+  const transport = new StreamableHTTPClientTransport(options.endpoint, {
+    requestInit: { headers: { authorization: `Bearer ${options.token}` } },
+  });
+  const client = new Client({
+    name: "servicenow-mcp-http-smoke",
+    version: "2.0.0",
+  });
+  const checks = [];
+
+  try {
+    await client.connect(transport, requestOptions(options.timeoutMs));
+    const discovered = await client.listTools(undefined, requestOptions(options.timeoutMs));
+    record(
+      checks,
+      "tools/list",
+      discovered.tools.length === 20,
+      `${discovered.tools.length} tools`
+    );
+    record(
+      checks,
+      "required profile schemas",
+      discovered.tools.every(
+        (tool) =>
+          tool.inputSchema.required?.includes("profile") &&
+          tool.inputSchema.properties?.profile?.minLength === 1
+      )
+    );
+
+    const profileResult = await call(
+      client,
+      "sn_profile",
+      { profile: options.profile },
+      options.timeoutMs
+    );
+    record(
+      checks,
+      "sn_profile",
+      !profileResult.isError &&
+        profileResult.structuredContent?.profile === options.profile
+    );
+
+    const health = await call(
+      client,
+      "sn_health",
+      { profile: options.profile, check: "version" },
+      options.timeoutMs
+    );
+    record(
+      checks,
+      "sn_health version",
+      !health.isError && health.structuredContent?.profile === options.profile,
+      health.text.slice(0, 120)
+    );
+
+    const query = await call(
+      client,
+      "sn_query",
+      { profile: options.profile, table: "incident", limit: 3 },
+      options.timeoutMs
+    );
+    record(
+      checks,
+      "sn_query incident",
+      !query.isError && query.structuredContent?.profile === options.profile,
+      `${query.text.length} chars`
+    );
+
+    if (options.writeEnabled) {
+      await writeRoundTrip(client, checks, options.profile, options.timeoutMs);
+    }
+  } finally {
+    await client.close();
+  }
+
+  const failures = checks.filter((check) => !check.pass);
+  console.log(`\n${checks.length - failures.length}/${checks.length} checks passed`);
+  if (failures.length > 0) process.exitCode = 1;
+}
+
+export async function writeRoundTrip(client, checks, profile, timeoutMs = 30_000) {
+  const created = await call(client, "sn_create", {
+    profile,
+    table: "incident",
+    fields: { short_description: "MCP V2 HTTP smoke test — safe to delete" },
+  }, timeoutMs);
+  if (created.isError) {
+    record(checks, "sn_create incident", false, created.text.slice(0, 120));
+    return;
+  }
+
+  const sysId = extractCreatedSysId(created);
+  record(
+    checks,
+    "sn_create incident",
+    created.structuredContent?.profile === profile
+  );
+  try {
+    const journaled = await call(client, "sn_incident_add_work_note", {
+      profile,
+      sys_id: sysId,
+      content: "tested through V2 Streamable HTTP",
+    }, timeoutMs);
+    record(
+      checks,
+      "sn_incident_add_work_note",
+      !journaled.isError && journaled.structuredContent?.profile === profile
+    );
+  } finally {
+    const deleted = await call(client, "sn_delete", {
+      profile,
+      table: "incident",
+      sys_id: sysId,
+      confirm: true,
+    }, timeoutMs);
+    record(
+      checks,
+      "sn_delete incident",
+      !deleted.isError && deleted.structuredContent?.profile === profile
+    );
+  }
+}
+
+async function call(client, name, args, timeoutMs) {
+  const result = await client.callTool(
+    { name, arguments: args },
+    undefined,
+    requestOptions(timeoutMs)
+  );
+  return {
+    isError: result.isError === true,
+    structuredContent: result.structuredContent,
+    text: result.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("\n"),
+  };
+}
+
+function requestOptions(timeoutMs) {
+  return Object.freeze({
+    signal: AbortSignal.timeout(timeoutMs),
+    timeout: timeoutMs,
+  });
+}
+
+function validatedTimeout(value) {
+  if (value === undefined) return 30_000;
+  if (!/^[0-9]+$/u.test(value)) {
+    throw new Error("MCP_SMOKE_TIMEOUT_MS must be an integer from 1000 to 120000");
+  }
+  const timeoutMs = Number(value);
+  if (timeoutMs < 1_000 || timeoutMs > 120_000) {
+    throw new Error("MCP_SMOKE_TIMEOUT_MS must be an integer from 1000 to 120000");
+  }
+  return timeoutMs;
+}
+
+function record(checks, name, pass, note = "") {
+  checks.push({ name, pass, note });
   console.log(`${pass ? "PASS" : "FAIL"}  ${name}${note ? ` — ${note}` : ""}`);
 }
 
-const main = async () => {
-  const h = startServer();
-  await initialize(h);
-
-  // 1. tools/list
-  const list = await h.rpc("tools/list", {});
-  const tools = list.result?.tools ?? [];
-  record("tools/list", tools.length === 18, `${tools.length} tools`);
-
-  // 2. connectivity + instance info
-  const health = await callTool(h, "sn_health", { check: "version" });
-  record("sn_health version", !health.isError, health.text.slice(0, 160).replace(/\n/g, " "));
-
-  // 3. default-field query: compact, curated fields, pagination metadata
-  const q = await callTool(h, "sn_query", { table: "incident", limit: 3 });
-  let qNote = `${q.text.length} chars`;
-  let qPass = !q.isError;
-  if (qPass) {
-    const parsed = JSON.parse(q.text);
-    const rec = parsed.results?.[0] ?? {};
-    const keys = Object.keys(rec);
-    qPass =
-      !q.text.includes('\n  "') && // compact
-      "record_count" in parsed &&
-      "has_more" in parsed &&
-      keys.length > 0 && keys.length <= 14; // curated default set, not 100+ fields
-    qNote += `; keys/record=${keys.length}; total=${parsed.total}; has_more=${parsed.has_more}`;
-  } else qNote += `; ${q.text.slice(0, 200)}`;
-  record("sn_query incident (defaults)", qPass, qNote);
-
-  // 4. fields="all" escape hatch returns a much fuller record
-  const qAll = await callTool(h, "sn_query", { table: "incident", limit: 1, fields: "all" });
-  if (!qAll.isError) {
-    const keysAll = Object.keys(JSON.parse(qAll.text).results?.[0] ?? {}).length;
-    record("sn_query fields=all", keysAll > 30, `${keysAll} keys, ${qAll.text.length} chars`);
-  } else record("sn_query fields=all", false, qAll.text.slice(0, 200));
-
-  // 5. pagination follow-up using next_offset
-  const p1 = await callTool(h, "sn_query", { table: "incident", limit: 2, fields: "number,sys_id" });
-  if (!p1.isError) {
-    const parsed = JSON.parse(p1.text);
-    if (parsed.has_more && parsed.next_offset !== undefined) {
-      const p2 = await callTool(h, "sn_query", {
-        table: "incident", limit: 2, offset: parsed.next_offset, fields: "number,sys_id",
-      });
-      const first = new Set((parsed.results ?? []).map((r) => r.sys_id));
-      const second = JSON.parse(p2.text).results ?? [];
-      const overlap = second.some((r) => first.has(r.sys_id));
-      record("pagination next_offset", !p2.isError && !overlap, overlap ? "OVERLAPPING PAGES" : "no overlap");
-    } else record("pagination next_offset", true, "table has <=2 incidents; skipped follow-up");
-  } else record("pagination next_offset", false, p1.text.slice(0, 200));
-
-  // 6. validate every DEFAULT_FIELDS column against the live schema
-  const { DEFAULT_FIELDS } = await import(`${REPO}/dist/table-defaults.js`);
-  const missing = [];
-  for (const [table, fields] of Object.entries(DEFAULT_FIELDS)) {
-    const s = await callTool(h, "sn_schema", { table });
-    if (s.isError) { missing.push(`${table}: schema fetch failed`); continue; }
-    const schemaText = s.text;
-    for (const f of fields) {
-      if (!schemaText.includes(`"${f}"`)) missing.push(`${table}.${f}`);
-    }
+function validatedMcpEndpoint(value) {
+  let endpoint;
+  try {
+    endpoint = new URL(value);
+  } catch {
+    throw new Error("MCP_URL is invalid");
   }
-  record("DEFAULT_FIELDS vs live schema", missing.length === 0,
-    missing.length ? `missing: ${missing.join(", ")}` : `all columns exist across ${Object.keys(DEFAULT_FIELDS).length} tables`);
-
-  // 7. aggregate count (display_value enum path untouched)
-  const agg = await callTool(h, "sn_aggregate", { table: "incident", count: true });
-  record("sn_aggregate count", !agg.isError, agg.text.slice(0, 120).replace(/\n/g, " "));
-
-  // 8. error quality on a bad table
-  const bad = await callTool(h, "sn_query", { table: "x_no_such_table_zz" });
-  record("bad-table error surfaced", bad.isError && /invalid|not exist|400|403/i.test(bad.text), bad.text.slice(0, 160).replace(/\n/g, " "));
-
-  // 9. optional write round-trip
-  if (WRITE) {
-    const created = await callTool(h, "sn_create", {
-      table: "incident",
-      data: { short_description: "MCP smoke test — safe to delete", urgency: "3", impact: "3" },
-    });
-    if (!created.isError) {
-      const sysId = JSON.parse(created.text).sys_id;
-      record("sn_create incident", !!sysId, `sys_id=${sysId}, ${created.text.length} chars`);
-      const upd = await callTool(h, "sn_update", {
-        table: "incident", sys_id: sysId, data: { work_notes: "smoke test update" },
-      });
-      record("sn_update incident", !upd.isError, `${upd.text.length} chars`);
-      const del = await callTool(h, "sn_delete", { table: "incident", sys_id: sysId, confirm: true });
-      record("sn_delete incident", !del.isError, del.text.slice(0, 100));
-    } else record("sn_create incident", false, created.text.slice(0, 200));
+  if (
+    endpoint.username ||
+    endpoint.password ||
+    endpoint.search ||
+    endpoint.hash ||
+    endpoint.pathname !== "/mcp"
+  ) {
+    throw new Error("MCP_URL must be an exact credential-free /mcp URL");
   }
-
-  h.server.kill();
-
-  // 10. optional wrong-password run to verify the KB3096078 hint
-  if (BAD_AUTH) {
-    const hb = startServer({ SN_PASSWORD: "definitely-wrong-password", SN_AUTH_TYPE: "basic" });
-    await initialize(hb);
-    const r = await callTool(hb, "sn_query", { table: "incident", limit: 1 });
-    record("401 basic-auth hint", r.isError && r.text.includes("KB3096078"), r.text.slice(0, 200).replace(/\n/g, " "));
-    hb.server.kill();
+  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(
+    endpoint.hostname
+  );
+  if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && loopback)) {
+    throw new Error("MCP_URL must use HTTPS unless it is loopback-only");
   }
+  return endpoint;
+}
 
-  const failed = results.filter((r) => !r.pass);
-  console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
-  process.exit(failed.length ? 1 : 0);
-};
+function isMainModule() {
+  return (
+    typeof process.argv[1] === "string" &&
+    pathToFileURL(resolve(process.argv[1])).href === import.meta.url
+  );
+}
 
-main().catch((e) => { console.error("HARNESS ERROR:", e.message); process.exit(2); });
+if (isMainModule()) {
+  try {
+    await runSmoke(resolveSmokeOptions(process.argv.slice(2), process.env));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "Smoke validation failed");
+    process.exitCode = 2;
+  }
+}

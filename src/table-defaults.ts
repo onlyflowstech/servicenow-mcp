@@ -9,43 +9,26 @@
  * @module table-defaults
  */
 
+import { SAFE_DEFAULT_FIELDS } from "./field-policy.js";
+
 /**
  * Curated default field sets (~8-12 highest-signal fields per table).
  * Applied as sysparm_fields when `fields` is omitted in sn_query / sn_get.
- * Pass fields="all" to those tools to request the full record instead.
+ * Registered V2 calls resolve fields="all" to the policy-approved readable set.
  */
-export const DEFAULT_FIELDS: Record<string, string> = {
-  incident:
-    "sys_id,number,short_description,state,priority,assigned_to,assignment_group,caller_id,opened_at,sys_updated_on",
-  change_request:
-    "sys_id,number,short_description,state,priority,type,risk,assigned_to,assignment_group,start_date,end_date,sys_updated_on",
-  problem:
-    "sys_id,number,short_description,state,priority,assigned_to,assignment_group,known_error,opened_at,sys_updated_on",
-  sc_request:
-    "sys_id,number,short_description,state,request_state,priority,requested_for,approval,opened_at,sys_updated_on",
-  sc_req_item:
-    "sys_id,number,short_description,state,priority,cat_item,request,assigned_to,stage,opened_at,sys_updated_on",
-  sc_task:
-    "sys_id,number,short_description,state,priority,assigned_to,assignment_group,request_item,opened_at,sys_updated_on",
-  sys_user:
-    "sys_id,user_name,name,email,title,department,manager,location,active,sys_updated_on",
-  sys_user_group:
-    "sys_id,name,description,manager,parent,email,active,sys_updated_on",
-  cmdb_ci:
-    "sys_id,name,sys_class_name,operational_status,install_status,category,owned_by,support_group,sys_updated_on",
-  cmdb_ci_server:
-    "sys_id,name,host_name,ip_address,os,os_version,classification,operational_status,install_status,support_group,sys_updated_on",
-  cmdb_ci_computer:
-    "sys_id,name,host_name,ip_address,os,manufacturer,model_id,operational_status,assigned_to,sys_updated_on",
-  kb_knowledge:
-    "sys_id,number,short_description,workflow_state,kb_knowledge_base,kb_category,author,published,sys_view_count,sys_updated_on",
-  task:
-    "sys_id,number,short_description,state,priority,assigned_to,assignment_group,sys_class_name,opened_at,sys_updated_on",
-};
+export const DEFAULT_FIELDS: Readonly<Record<string, string>> = Object.freeze(
+  Object.fromEntries(
+    Object.entries(SAFE_DEFAULT_FIELDS).map(([table, fields]) => [
+      table,
+      fields.join(","),
+    ])
+  )
+);
 
 /**
  * Resolve the sysparm_fields value for a table:
- * - fields === "all"  -> undefined (full record for any table)
+ * - fields === "all"  -> undefined for direct legacy handler calls; registered
+ *                        V2 calls replace it with the approved readable set
  * - explicit fields   -> passed through as given
  * - omitted           -> the curated DEFAULT_FIELDS set when the table is
  *                        known, otherwise undefined (full record)

@@ -1,7 +1,8 @@
 import { z } from "zod";
-import { ServiceNowClient } from "../client.js";
-import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError, buildTableParams } from "../utils.js";
+import type { ServiceNowOperations } from "../client.js";
+import type { ExecutionContext } from "../execution-context.js";
+import type { ServiceNowToolSettings } from "./tool-module.js";
+import { ok, buildTableParams } from "../utils.js";
 import { DEFAULT_FIELDS, TABLE_ALIASES } from "../table-defaults.js";
 
 export const definition = {
@@ -10,56 +11,28 @@ export const definition = {
     "Natural language interface for ServiceNow. Translates plain English into ServiceNow API calls. Supports queries, aggregates, schema lookups, creates, updates, and batch operations. Read operations execute immediately; write operations require execute=true.",
   annotations: {
     title: "Natural language interface",
-    // The CREATE intent POSTs records with execute=true, and the BATCH
-    // intent PATCHes/DELETEs matching records with execute+confirm(+force),
-    // so this tool can perform destructive bulk writes despite its
-    // read-mostly default (dry-run) behavior.
+    // Keep the conservative destructive classification for this composed
+    // write-capable surface. Bulk writes are nevertheless never executed here
+    // because natural-language selectors lack structured-query provenance.
     readOnlyHint: false,
     destructiveHint: true,
     idempotentHint: false,
     openWorldHint: true,
   },
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      text: {
-        type: "string",
-        description:
-          'Natural language request (e.g. "show all P1 incidents", "how many open changes", "create incident for VPN outage")',
-      },
-      execute: {
-        type: "boolean",
-        description: "Execute write operations (reads always execute). Default false.",
-      },
-      confirm: {
-        type: "boolean",
-        description: "Required for batch/bulk operations",
-      },
-      force: {
-        type: "boolean",
-        description: "Required for bulk deletes (in addition to confirm)",
-      },
-      profile: {
-        type: "string",
-        description: "Named profile to use. Defaults to active profile.",
-      },
-    },
-    required: ["text"],
-  },
 };
 
 export const schema = z.object({
-  text: z.string(),
-  execute: z.boolean().optional().default(false),
-  confirm: z.boolean().optional().default(false),
-  force: z.boolean().optional().default(false),
-  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
+  text: z.string().describe('Natural language request (e.g. "show all P1 incidents", "how many open changes", "create incident for VPN outage")'),
+  execute: z.boolean().optional().default(false).describe("Execute write operations (reads always execute). Default false."),
+  confirm: z.boolean().optional().default(false).describe("Required for batch/bulk operations"),
+  force: z.boolean().optional().default(false).describe("Required for bulk deletes (in addition to confirm)"),
 });
 
 export async function handler(
   args: z.infer<typeof schema>,
-  client: ServiceNowClient,
-  config: ServiceNowConfig
+  client: ServiceNowOperations,
+  _config: ServiceNowToolSettings,
+  _context: ExecutionContext
 ) {
   try {
     const input = args.text;
@@ -156,8 +129,18 @@ export async function handler(
     // Limit
     let limit = 20;
     const limitMatch = lower.match(/(top|first|limit|show)\s+(\d+)/);
-    if (limitMatch) limit = parseInt(limitMatch[2], 10);
+    if (limitMatch) {
+      const parsedLimit = Number(limitMatch[2]);
+      limit = Number.isSafeInteger(parsedLimit)
+        ? Math.min(Math.max(parsedLimit, 1), 1000)
+        : 1000;
+    }
     else if (/\ball\b/.test(lower)) limit = 100;
+    const offsetMatch = lower.match(/offset\s+(\d+)/);
+    const parsedOffset = offsetMatch ? Number(offsetMatch[1]) : 0;
+    const offset = Number.isSafeInteger(parsedOffset)
+      ? Math.min(Math.max(parsedOffset, 0), 10000)
+      : 10000;
 
     const encodedQuery = queryParts.join("^");
 
@@ -245,12 +228,14 @@ export async function handler(
           query: encodedQuery,
           fields,
           limit,
-          orderby,
+          offset,
+          orderby: orderby || "sys_id",
           displayValue: "true",
         });
         const resp = await client.get(`/api/now/table/${table}`, params);
         const records = resp.result || [];
         result.limit = limit;
+        result.offset = offset;
         if (orderby) result.sort = orderby;
         result.record_count = records.length;
         result.results = records;
@@ -262,7 +247,7 @@ export async function handler(
         // Extract short description
         const descMatch = input.match(/(?:for|about|regarding)\s+([^,]+)/i);
         if (descMatch) {
-          let desc = descMatch[1].replace(/\s*(,|assign|priority|p[1-5]|urgency|impact|category).*$/i, "").trim();
+          const desc = descMatch[1].replace(/\s*(,|assign|priority|p[1-5]|urgency|impact|category).*$/i, "").trim();
           payload.short_description = desc;
         }
         // Priority from query parts
@@ -301,59 +286,11 @@ export async function handler(
 
       case "BATCH": {
         const batchAction = /\bdelete\b|\bremove\b/.test(lower) ? "delete" : "update";
-        let batchFields: Record<string, string> | undefined;
-        if (batchAction === "update") {
-          if (/\bclose\b/.test(lower))
-            batchFields = { state: "7", close_code: "Solved (Permanently)", close_notes: "Bulk closed via sn_nl" };
-          else if (/\bresolve\b/.test(lower))
-            batchFields = { state: "6" };
-        }
-
         result.batch_action = batchAction;
-        result.batch_fields = batchFields;
         result.limit = limit;
-
-        if (args.execute && args.confirm) {
-          if (batchAction === "delete" && !args.force) {
-            result.executed = false;
-            result.message = "Bulk DELETE requires force=true. This is a safety measure.";
-          } else {
-            // Actually execute the batch
-            const matchResp = await client.get(`/api/now/table/${table}`, {
-              sysparm_fields: "sys_id",
-              sysparm_limit: String(limit),
-              sysparm_query: encodedQuery,
-            });
-            const records = matchResp.result || [];
-            let processed = 0;
-            let failed = 0;
-            for (const rec of records) {
-              try {
-                if (batchAction === "update" && batchFields) {
-                  await client.patch(`/api/now/table/${table}/${rec.sys_id}`, batchFields);
-                  processed++;
-                } else if (batchAction === "delete") {
-                  await client.delete(`/api/now/table/${table}/${rec.sys_id}`);
-                  processed++;
-                }
-              } catch { failed++; }
-            }
-            result.executed = true;
-            result.matched = records.length;
-            result.processed = processed;
-            result.failed = failed;
-          }
-        } else {
-          // Dry run
-          const matchResp = await client.get(`/api/now/table/${table}`, {
-            sysparm_fields: "sys_id",
-            sysparm_limit: String(limit),
-            sysparm_query: encodedQuery,
-          });
-          result.executed = false;
-          result.matched = (matchResp.result || []).length;
-          result.message = `Dry run — ${(matchResp.result || []).length} records would be affected. Set execute=true and confirm=true to proceed.`;
-        }
+        result.executed = false;
+        result.message =
+          "Natural-language bulk selectors cannot target writes. Use sn_batch with a policy-authorized structured_query filter.";
         break;
       }
 
@@ -367,6 +304,6 @@ export async function handler(
 
     return ok(result);
   } catch (error) {
-    return err(formatError(error));
+    throw error;
   }
 }

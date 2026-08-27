@@ -13,9 +13,13 @@ import {
 } from "../src/tools/relationships.js";
 import { handler as healthHandler, schema as healthSchema } from "../src/tools/health.js";
 import { handler as atfHandler, schema as atfSchema } from "../src/tools/atf.js";
-import { withWarnings } from "../src/utils.js";
+import { formatError, withWarnings } from "../src/utils.js";
 import type { ServiceNowClient } from "../src/client.js";
 import type { ServiceNowConfig } from "../src/config.js";
+import {
+  createToolError,
+  trustedToolErrorDescriptor,
+} from "../src/tool-error.js";
 
 const config: ServiceNowConfig = {
   instance: "https://example.service-now.com",
@@ -25,13 +29,29 @@ const config: ServiceNowConfig = {
   relDepth: 3,
 };
 
-/** The error shape ServiceNowClient throws on a 403. */
-const FORBIDDEN = { message: "insufficient rights", status: 403 };
+/** A genuine trusted authorization failure issued by the client boundary. */
+const FORBIDDEN = createToolError("authorization", "retry_after_correction");
+const NOT_FOUND = createToolError("not_found", "do_not_retry");
+const AMBIGUOUS_POST = createToolError("upstream", "do_not_retry");
+const TIMEOUT = createToolError("timeout", "retry_if_safe_and_idempotent");
 /** What formatError() renders FORBIDDEN as. */
-const FORBIDDEN_TEXT = "insufficient rights (HTTP 403)";
+const FORBIDDEN_TEXT = formatError(FORBIDDEN);
+const INTERNAL_TEXT = formatError(new Error("untrusted"));
+const ROOT_SYS_ID = "0123456789abcdef0123456789abcdef";
+const TEST_SYS_ID = "11111111111111111111111111111111";
+const SUITE_SYS_ID = "22222222222222222222222222222222";
 
 function parseText(result: { content: Array<{ type: string; text: string }> }) {
   return JSON.parse(result.content[0].text);
+}
+
+async function rejectedDescriptor(operation: Promise<unknown>) {
+  try {
+    await operation;
+  } catch (error) {
+    return trustedToolErrorDescriptor(error);
+  }
+  throw new Error("expected operation to reject");
 }
 
 describe("withWarnings", () => {
@@ -57,6 +77,44 @@ describe("withWarnings", () => {
 });
 
 describe("sn_discover apps warnings", () => {
+  it("does not leak exception messages, details, causes, headers, URLs, or bodies", async () => {
+    const secretProbe = {
+      status: 403,
+      message: "Authorization: Bearer RAW_SECRET_TOKEN",
+      detail: "https://host.invalid/api?secret=RAW_QUERY_SECRET",
+      cause: new Error("RAW_CAUSE_SECRET"),
+      headers: { Authorization: "Bearer RAW_HEADER_SECRET" },
+      body: { token: "RAW_BODY_SECRET" },
+    };
+    const get = vi.fn(async (path: string) => {
+      if (path.endsWith("/sys_app")) throw secretProbe;
+      return { result: [{ sys_id: "safe", name: "Safe Store App" }] };
+    });
+    const client = { get } as unknown as ServiceNowClient;
+
+    const result = await discoverHandler(
+      discoverSchema.parse({ type: "apps" }),
+      client,
+      config
+    );
+    const serialized = JSON.stringify(result);
+
+    expect(result.isError).toBeUndefined();
+    expect(parseText(result).warnings).toEqual([`sys_app: ${INTERNAL_TEXT}`]);
+    for (const probe of [
+      "RAW_SECRET_TOKEN",
+      "RAW_QUERY_SECRET",
+      "RAW_CAUSE_SECRET",
+      "RAW_HEADER_SECRET",
+      "RAW_BODY_SECRET",
+      "host.invalid",
+      "Authorization",
+      "Bearer",
+    ]) {
+      expect(serialized).not.toContain(probe);
+    }
+  });
+
   it("returns store apps plus a warning when sys_app is forbidden", async () => {
     const get = vi.fn(async (path: string) => {
       if (path.endsWith("/sys_app")) throw FORBIDDEN;
@@ -82,21 +140,34 @@ describe("sn_discover apps warnings", () => {
 
   // Behavior change (review fix): a TOTAL failure is an error, not an
   // empty success -- `results: []` would misread as "no apps installed".
-  it("returns isError when BOTH app tables are forbidden", async () => {
+  it("preserves unanimous taxonomy when BOTH app tables are forbidden", async () => {
     const get = vi.fn(async () => {
       throw FORBIDDEN;
     });
     const client = { get } as unknown as ServiceNowClient;
 
-    const result = await discoverHandler(
-      discoverSchema.parse({ type: "apps" }),
-      client,
-      config
-    );
-    expect(result.isError).toBe(true);
-    const text = result.content[0].text;
-    expect(text).toContain(`sys_app: ${FORBIDDEN_TEXT}`);
-    expect(text).toContain(`sys_store_app: ${FORBIDDEN_TEXT}`);
+    expect(
+      await rejectedDescriptor(
+        discoverHandler(discoverSchema.parse({ type: "apps" }), client, config)
+      )
+    ).toMatchObject({
+      category: "authorization",
+      retry: "retry_after_correction",
+    });
+  });
+
+  it("uses the fixed internal rule when both app failures disagree", async () => {
+    const get = vi
+      .fn()
+      .mockRejectedValueOnce(FORBIDDEN)
+      .mockRejectedValueOnce(TIMEOUT);
+    const client = { get } as unknown as ServiceNowClient;
+
+    expect(
+      await rejectedDescriptor(
+        discoverHandler(discoverSchema.parse({ type: "apps" }), client, config)
+      )
+    ).toMatchObject({ category: "internal", retry: "do_not_retry" });
   });
 
   it("keeps the bare-array shape (no warnings) when both tables succeed", async () => {
@@ -154,28 +225,24 @@ describe("sn_codesearch warnings", () => {
   // Regression (review fix): every table failing (expired credentials,
   // no ACLs anywhere) must be isError -- `results: []` would misread as
   // "no code references this term".
-  it("returns isError when ALL code tables fail", async () => {
+  it("preserves unanimous taxonomy when ALL code tables fail", async () => {
     const get = vi.fn(async () => {
       throw FORBIDDEN;
     });
     const client = { get } as unknown as ServiceNowClient;
 
-    const result = await codesearchHandler(
-      codesearchSchema.parse({ search_term: "getUser" }),
-      client,
-      config
-    );
-    expect(result.isError).toBe(true);
-    const text = result.content[0].text;
-    for (const table of [
-      "sys_script",
-      "sys_script_include",
-      "sys_ui_script",
-      "sys_script_client",
-      "sys_ws_operation",
-    ]) {
-      expect(text).toContain(`${table}: ${FORBIDDEN_TEXT}`);
-    }
+    expect(
+      await rejectedDescriptor(
+        codesearchHandler(
+          codesearchSchema.parse({ search_term: "getUser" }),
+          client,
+          config
+        )
+      )
+    ).toMatchObject({
+      category: "authorization",
+      retry: "retry_after_correction",
+    });
   });
 
   it("returns isError when the single requested table fails", async () => {
@@ -184,19 +251,49 @@ describe("sn_codesearch warnings", () => {
     });
     const client = { get } as unknown as ServiceNowClient;
 
-    const result = await codesearchHandler(
-      codesearchSchema.parse({ search_term: "getUser", table: "sys_script" }),
-      client,
-      config
-    );
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain(`sys_script: ${FORBIDDEN_TEXT}`);
+    expect(
+      await rejectedDescriptor(
+        codesearchHandler(
+          codesearchSchema.parse({
+            search_term: "getUser",
+            table: "sys_script",
+          }),
+          client,
+          config
+        )
+      )
+    ).toMatchObject({
+      category: "authorization",
+      retry: "retry_after_correction",
+    });
+  });
+
+  it("uses the fixed internal rule when code-table failures disagree", async () => {
+    const get = vi
+      .fn()
+      .mockRejectedValueOnce(FORBIDDEN)
+      .mockRejectedValue(TIMEOUT);
+    const client = { get } as unknown as ServiceNowClient;
+
+    expect(
+      await rejectedDescriptor(
+        codesearchHandler(
+          codesearchSchema.parse({ search_term: "getUser" }),
+          client,
+          config
+        )
+      )
+    ).toMatchObject({ category: "internal", retry: "do_not_retry" });
   });
 });
 
 describe("sn_relationships warnings", () => {
   const rootRecord = {
-    result: { sys_id: "root1", name: "web-server-01", sys_class_name: "cmdb_ci_server" },
+    result: {
+      sys_id: ROOT_SYS_ID,
+      name: "web-server-01",
+      sys_class_name: "cmdb_ci_server",
+    },
   };
 
   it("surfaces a forbidden cmdb_rel_ci traversal instead of returning silently", async () => {
@@ -207,7 +304,7 @@ describe("sn_relationships warnings", () => {
     const client = { get } as unknown as ServiceNowClient;
 
     const result = await relationshipsHandler(
-      relationshipsSchema.parse({ sys_id: "root1" }),
+      relationshipsSchema.parse({ sys_id: ROOT_SYS_ID }),
       client,
       config
     );
@@ -229,7 +326,7 @@ describe("sn_relationships warnings", () => {
 
     const parsed = parseText(
       await relationshipsHandler(
-        relationshipsSchema.parse({ sys_id: "root1" }),
+        relationshipsSchema.parse({ sys_id: ROOT_SYS_ID }),
         client,
         config
       )
@@ -272,18 +369,20 @@ describe("sn_health warnings", () => {
 
   // Regression (review fix): a fully broken connection must be isError,
   // not a healthy-looking envelope of instance + timestamp + placeholders.
-  it("returns isError when EVERY sub-request fails (check=all)", async () => {
+  it("preserves unanimous taxonomy when EVERY sub-request fails", async () => {
     const get = vi.fn(async () => {
       throw FORBIDDEN;
     });
     const client = { get } as unknown as ServiceNowClient;
 
-    const result = await healthHandler(healthSchema.parse({}), client, config);
-    expect(result.isError).toBe(true);
-    const text = result.content[0].text;
-    expect(text).toContain("no health data could be retrieved");
-    expect(text).toContain(`sys_cluster_state: ${FORBIDDEN_TEXT}`);
-    expect(text).toContain(`sys_trigger: ${FORBIDDEN_TEXT}`);
+    expect(
+      await rejectedDescriptor(
+        healthHandler(healthSchema.parse({}), client, config)
+      )
+    ).toMatchObject({
+      category: "authorization",
+      retry: "retry_after_correction",
+    });
   });
 
   it("returns isError when a single-section check fails entirely", async () => {
@@ -292,26 +391,45 @@ describe("sn_health warnings", () => {
     });
     const client = { get } as unknown as ServiceNowClient;
 
-    const result = await healthHandler(
-      healthSchema.parse({ check: "nodes" }),
-      client,
-      config
-    );
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain(`sys_cluster_state: ${FORBIDDEN_TEXT}`);
+    expect(
+      await rejectedDescriptor(
+        healthHandler(
+          healthSchema.parse({ check: "nodes" }),
+          client,
+          config
+        )
+      )
+    ).toMatchObject({
+      category: "authorization",
+      retry: "retry_after_correction",
+    });
+  });
+
+  it("uses the fixed internal rule when health sub-check failures disagree", async () => {
+    const get = vi
+      .fn()
+      .mockRejectedValueOnce(FORBIDDEN)
+      .mockRejectedValue(TIMEOUT);
+    const client = { get } as unknown as ServiceNowClient;
+
+    expect(
+      await rejectedDescriptor(
+        healthHandler(healthSchema.parse({ check: "version" }), client, config)
+      )
+    ).toMatchObject({ category: "internal", retry: "do_not_retry" });
   });
 });
 
 describe("sn_atf fallback-chain warnings", () => {
-  it("run: reports strategies that failed before the one that succeeded", async () => {
+  it("run: falls back after a trusted endpoint not-found", async () => {
     const post = vi.fn(async (path: string) => {
-      if (path === "/api/sn_atf/rest/test") throw FORBIDDEN;
+      if (path === "/api/sn_atf/rest/test") throw NOT_FOUND;
       return { result: { sys_id: "res1" } };
     });
     const client = { post } as unknown as ServiceNowClient;
 
     const result = await atfHandler(
-      atfSchema.parse({ action: "run", test_sys_id: "t1", wait: false }),
+      atfSchema.parse({ action: "run", test_sys_id: TEST_SYS_ID, wait: false }),
       client,
       config
     );
@@ -319,8 +437,9 @@ describe("sn_atf fallback-chain warnings", () => {
     const parsed = parseText(result);
     expect(parsed.sys_id).toBe("res1");
     expect(parsed.warnings).toEqual([
-      `POST /api/sn_atf/rest/test: ${FORBIDDEN_TEXT}`,
+      `POST /api/sn_atf/rest/test: ${formatError(NOT_FOUND)}`,
     ]);
+    expect(post).toHaveBeenCalledTimes(2);
   });
 
   it("run: omits warnings when the first strategy succeeds", async () => {
@@ -329,7 +448,11 @@ describe("sn_atf fallback-chain warnings", () => {
 
     const parsed = parseText(
       await atfHandler(
-        atfSchema.parse({ action: "run", test_sys_id: "t1", wait: false }),
+        atfSchema.parse({
+          action: "run",
+          test_sys_id: TEST_SYS_ID,
+          wait: false,
+        }),
         client,
         config
       )
@@ -337,35 +460,84 @@ describe("sn_atf fallback-chain warnings", () => {
     expect(parsed).toEqual({ sys_id: "res1" });
   });
 
-  it("run: the final error lists every failed strategy and why", async () => {
+  it("run: never duplicates an ambiguous first POST failure", async () => {
+    const post = vi
+      .fn()
+      .mockRejectedValueOnce(AMBIGUOUS_POST)
+      .mockResolvedValue({ result: { sys_id: "must-not-run" } });
+    const client = { post } as unknown as ServiceNowClient;
+
+    expect(
+      await rejectedDescriptor(
+        atfHandler(
+          atfSchema.parse({
+            action: "run",
+            test_sys_id: TEST_SYS_ID,
+            wait: false,
+          }),
+          client,
+          config
+        )
+      )
+    ).toMatchObject({ category: "upstream", retry: "do_not_retry" });
+    expect(post).toHaveBeenCalledOnce();
+  });
+
+  it("run: stops before the third POST after an ambiguous second failure", async () => {
+    const post = vi
+      .fn()
+      .mockRejectedValueOnce(NOT_FOUND)
+      .mockRejectedValueOnce(AMBIGUOUS_POST)
+      .mockResolvedValue({ result: { sys_id: "must-not-run" } });
+    const client = { post } as unknown as ServiceNowClient;
+
+    expect(
+      await rejectedDescriptor(
+        atfHandler(
+          atfSchema.parse({
+            action: "run",
+            test_sys_id: TEST_SYS_ID,
+            wait: false,
+          }),
+          client,
+          config
+        )
+      )
+    ).toMatchObject({ category: "upstream", retry: "do_not_retry" });
+    expect(post).toHaveBeenCalledTimes(2);
+  });
+
+  it("run: reaches the final strategy only after two trusted not-found responses", async () => {
     const post = vi.fn(async () => {
-      throw FORBIDDEN;
+      throw NOT_FOUND;
     });
     const client = { post } as unknown as ServiceNowClient;
 
-    const result = await atfHandler(
-      atfSchema.parse({ action: "run", test_sys_id: "t1" }),
-      client,
-      config
-    );
-    expect(result.isError).toBe(true);
-    const text = result.content[0].text;
-    expect(text).toContain(`POST /api/sn_atf/rest/test: ${FORBIDDEN_TEXT}`);
-    expect(text).toContain(`POST /api/now/atf/test/{id}/run: ${FORBIDDEN_TEXT}`);
-    expect(text).toContain(
-      `sys_atf_test_result (schedule via Table API): ${FORBIDDEN_TEXT}`
-    );
+    expect(
+      await rejectedDescriptor(
+        atfHandler(
+          atfSchema.parse({ action: "run", test_sys_id: TEST_SYS_ID }),
+          client,
+          config
+        )
+      )
+    ).toMatchObject({ category: "not_found", retry: "do_not_retry" });
+    expect(post).toHaveBeenCalledTimes(3);
   });
 
-  it("run-suite: reports the failed first strategy when the fallback succeeds", async () => {
+  it("run-suite: falls back after a trusted endpoint not-found", async () => {
     const post = vi.fn(async (path: string) => {
-      if (path === "/api/sn_atf/rest/suite") throw FORBIDDEN;
+      if (path === "/api/sn_atf/rest/suite") throw NOT_FOUND;
       return { result: { tracker_id: "trk1" } };
     });
     const client = { post } as unknown as ServiceNowClient;
 
     const result = await atfHandler(
-      atfSchema.parse({ action: "run-suite", suite_sys_id: "s1", wait: false }),
+      atfSchema.parse({
+        action: "run-suite",
+        suite_sys_id: SUITE_SYS_ID,
+        wait: false,
+      }),
       client,
       config
     );
@@ -373,24 +545,31 @@ describe("sn_atf fallback-chain warnings", () => {
     const parsed = parseText(result);
     expect(parsed.tracker_id).toBe("trk1");
     expect(parsed.warnings).toEqual([
-      `POST /api/sn_atf/rest/suite: ${FORBIDDEN_TEXT}`,
+      `POST /api/sn_atf/rest/suite: ${formatError(NOT_FOUND)}`,
     ]);
+    expect(post).toHaveBeenCalledTimes(2);
   });
 
-  it("run-suite: the final error lists both failed strategies", async () => {
-    const post = vi.fn(async () => {
-      throw FORBIDDEN;
-    });
+  it("run-suite: never duplicates an ambiguous first POST failure", async () => {
+    const post = vi
+      .fn()
+      .mockRejectedValueOnce(AMBIGUOUS_POST)
+      .mockResolvedValue({ result: { tracker_id: "must-not-run" } });
     const client = { post } as unknown as ServiceNowClient;
 
-    const result = await atfHandler(
-      atfSchema.parse({ action: "run-suite", suite_sys_id: "s1" }),
-      client,
-      config
-    );
-    expect(result.isError).toBe(true);
-    const text = result.content[0].text;
-    expect(text).toContain(`POST /api/sn_atf/rest/suite: ${FORBIDDEN_TEXT}`);
-    expect(text).toContain(`POST /api/now/atf/suite/{id}/run: ${FORBIDDEN_TEXT}`);
+    expect(
+      await rejectedDescriptor(
+        atfHandler(
+          atfSchema.parse({
+            action: "run-suite",
+            suite_sys_id: SUITE_SYS_ID,
+            wait: false,
+          }),
+          client,
+          config
+        )
+      )
+    ).toMatchObject({ category: "upstream", retry: "do_not_retry" });
+    expect(post).toHaveBeenCalledOnce();
   });
 });

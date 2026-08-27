@@ -1,7 +1,17 @@
 import { z } from "zod";
-import { ServiceNowClient } from "../client.js";
-import { ServiceNowConfig } from "../config.js";
-import { ok, err, escapeQueryValue, formatError, truncate } from "../utils.js";
+import type { ServiceNowOperations } from "../client.js";
+import type { ExecutionContext } from "../execution-context.js";
+import type { ServiceNowToolSettings } from "./tool-module.js";
+import {
+  authorizeRawEncodedRead,
+  ENCODED_QUERY_MIGRATION_MESSAGE,
+} from "../encoded-query-policy.js";
+import {
+  filterReadableRecord,
+  preparedReadableFields,
+  resolveReadableFields,
+} from "../field-policy.js";
+import { ok, escapeQueryValue, truncate } from "../utils.js";
 
 /**
  * syslog.level stores NUMERIC severities, not the labels the UI shows.
@@ -10,8 +20,9 @@ import { ok, err, escapeQueryValue, formatError, truncate } from "../utils.js";
  *   -1=debug, 0=information, 1=warning, 2=error.
  * Filtering on a label (level=error) matches zero rows, so level names
  * are mapped to their numeric values; numeric input ("-1".."2") is
- * passed through unchanged. Instances with custom levels can filter on
- * them via the raw `query` parameter.
+ * passed through unchanged. Raw encoded-query input is intentionally not
+ * exposed by this tool; use an explicitly policy-approved `sn_query` rule for
+ * controlled legacy reads.
  */
 const SYSLOG_LEVEL_VALUES: Record<string, string> = {
   debug: "-1",
@@ -34,92 +45,62 @@ export const definition = {
     idempotentHint: true,
     openWorldHint: true,
   },
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      level: {
-        type: "string",
-        enum: ["error", "warning", "info", "debug", "-1", "0", "1", "2"],
-        description:
-          "Filter by severity level: a name (error, warning, info, debug) or the numeric value " +
-          "syslog stores (-1=debug, 0=info, 1=warning, 2=error)",
-      },
-      source: {
-        type: "string",
-        description: "Filter by source field (LIKE match)",
-      },
-      message: {
-        type: "string",
-        description: "Filter message contains text (LIKE match)",
-      },
-      query: {
-        type: "string",
-        description: "Raw encoded query (overrides individual filters)",
-      },
-      limit: {
-        type: "integer",
-        minimum: 1,
-        maximum: 1000,
-        description: "Max records (default 25, max 1000)",
-      },
-      offset: {
-        type: "integer",
-        minimum: 0,
-        description: "Pagination offset",
-      },
-      since: {
-        type: "number",
-        description: "Show logs from last N minutes (default 60)",
-      },
-      fields: {
-        type: "string",
-        description: "Fields to return (default: sys_id,level,source,message,sys_created_on)",
-      },
-      profile: {
-        type: "string",
-        description: "Named profile to use. Defaults to active profile.",
-      },
-    },
-    required: [],
-  },
 };
 
-export const schema = z.object({
-  level: z.enum(LEVEL_ENUM).optional(),
-  source: z.string().optional(),
-  message: z.string().optional(),
-  query: z.string().optional(),
-  limit: z.number().int().min(1).max(1000).optional().default(25),
-  offset: z.number().int().min(0).optional(),
-  since: z.number().optional().default(60),
-  fields: z.string().optional(),
-  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
-});
+export const schema = z
+  .object({
+    level: z.enum(LEVEL_ENUM).optional().describe("Filter by severity level: a name (error, warning, info, debug) or the numeric value syslog stores (-1=debug, 0=info, 1=warning, 2=error)"),
+    source: z.string().optional().describe("Filter by source field (LIKE match)"),
+    message: z.string().optional().describe("Filter message contains text (LIKE match)"),
+    limit: z.number().int().min(1).max(1000).optional().default(25).describe("Max records (default 25, max 1000)"),
+    offset: z.number().int().min(0).max(10000).optional().describe("Pagination offset (max 10000)"),
+    since: z.number().int().min(1).max(525600).optional().default(60).describe("Show logs from last N minutes (default 60, max 525600)"),
+    fields: z.string().optional().describe("Fields to return (default: sys_id,level,source,message,sys_created_on)"),
+  })
+  .strict(ENCODED_QUERY_MIGRATION_MESSAGE);
+
+function parseTotalCountHeader(value: string | null): number | undefined {
+  if (value === null || !/^(?:0|[1-9]\d*)$/u.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
 
 export async function handler(
   args: z.infer<typeof schema>,
-  client: ServiceNowClient,
-  _config: ServiceNowConfig
+  client: ServiceNowOperations,
+  _config: ServiceNowToolSettings,
+  _context: ExecutionContext
 ) {
   try {
-    const fields = args.fields || "sys_id,level,source,message,sys_created_on";
+    const rawQuery = (args as unknown as Readonly<Record<string, unknown>>).query;
+    if (rawQuery !== undefined) {
+      authorizeRawEncodedRead(_context?.effectivePolicy.encodedQueryAccess, {
+        tool: "sn_syslog",
+        table: "syslog",
+        query: rawQuery,
+        limit: args.limit,
+        offset: args.offset ?? 0,
+        maxResponseBytes: 100_000,
+        outputFields: [],
+      });
+    }
+    const readableFields =
+      preparedReadableFields(args, "syslog") ??
+      resolveReadableFields("syslog", { fields: args.fields });
+    const fields = readableFields.join(",");
     let sysparmQuery: string;
 
-    if (args.query) {
-      sysparmQuery = args.query;
-    } else {
-      const parts: string[] = [];
-      if (args.level) {
-        parts.push(`level=${SYSLOG_LEVEL_VALUES[args.level] ?? args.level}`);
-      }
-      if (args.source) parts.push(`sourceLIKE${escapeQueryValue(args.source)}`);
-      if (args.message) parts.push(`messageLIKE${escapeQueryValue(args.message)}`);
-      parts.push(`sys_created_on>=javascript:gs.minutesAgoStart(${args.since})`);
-      sysparmQuery = parts.join("^");
+    const parts: string[] = [];
+    if (args.level) {
+      parts.push(`level=${SYSLOG_LEVEL_VALUES[args.level] ?? args.level}`);
     }
+    if (args.source) parts.push(`sourceLIKE${escapeQueryValue(args.source)}`);
+    if (args.message) parts.push(`messageLIKE${escapeQueryValue(args.message)}`);
+    parts.push(`sys_created_on>=javascript:gs.minutesAgoStart(${args.since})`);
+    sysparmQuery = parts.join("^");
 
     // Always order newest first
-    sysparmQuery += "^ORDERBYDESCsys_created_on";
+    sysparmQuery += "^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id";
 
     const params: Record<string, string> = {
       sysparm_query: sysparmQuery,
@@ -130,21 +111,24 @@ export async function handler(
 
     const resp = await client.getWithMeta("/api/now/table/syslog", params);
 
-    const results = (resp.data?.result || []).map((r: Record<string, string>) => ({
-      sys_id: r.sys_id,
-      timestamp: r.sys_created_on,
-      level: r.level,
-      source: r.source,
-      message: r.message ? truncate(r.message, 300) : undefined,
-    }));
+    const filtered = filterReadableRecord(resp.data?.result || [], readableFields);
+    const records = Array.isArray(filtered) ? filtered : [];
+    const results = records
+      .filter(
+        (record): record is Record<string, unknown> =>
+          typeof record === "object" && record !== null && !Array.isArray(record)
+      )
+      .map((r) => ({
+        sys_id: r.sys_id,
+        timestamp: r.sys_created_on,
+        level: r.level,
+        source: r.source,
+        message: r.message ? truncate(String(r.message), 300) : undefined,
+      }));
 
     const offset = args.offset ?? 0;
     const recordCount = results.length;
-    const totalHeader = resp.headers.get("x-total-count");
-    const total =
-      totalHeader !== null && Number.isFinite(Number(totalHeader))
-        ? Number(totalHeader)
-        : undefined;
+    const total = parseTotalCountHeader(resp.headers.get("x-total-count"));
     const hasMore =
       total !== undefined ? offset + recordCount < total : recordCount === args.limit;
 
@@ -161,6 +145,6 @@ export async function handler(
     payload.results = results;
     return ok(payload);
   } catch (error) {
-    return err(formatError(error));
+    throw error;
   }
 }

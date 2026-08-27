@@ -1,199 +1,98 @@
-# Live Test Plan — OAuth Onboarding + Efficiency Branch
+# Live test plan — ServiceNow OAuth through V2 HTTP
 
-Branch under test: `feature/efficiency-auth-hardening`. Six changes are being validated end to end:
+This is an opt-in plan for a PDI or sub-production ServiceNow instance. The
+normal unit and HTTP contract suites use deterministic fakes and do not need
+ServiceNow credentials or network access.
 
-1. Dependency bumps (MCP SDK 1.29, zod 3.25) — server still works
-2. Compact JSON + empty-field stripping in tool responses
-3. HTTP client hardening: timeouts, retry/backoff, rate-limit handling
-4. Default field selection + `sysparm_exclude_reference_link`
-5. Pagination metadata (`total`, `has_more`, `next_offset`) from `X-Total-Count`
-6. OAuth `client_credentials` auth: token mint, caching, expiry refresh, 401 recovery, secret redaction
+## 1. Configure ServiceNow OAuth
 
-Use a **PDI or sub-prod instance**. Every test below states **What it verifies → How → Pass evidence → If it fails**.
+1. Enable `glide.oauth.inbound.client.credential.grant_type.enabled` on the
+   test instance if client-credentials is required.
+2. Create a dedicated web-service account with the minimum roles needed for
+   the checks. Do not use a personal administrator identity.
+3. Create an OAuth API endpoint application in **System OAuth → Application
+   Registry**, bind its OAuth Application User to that service account, and
+   copy the client ID and secret into a secret store.
+4. Confirm the instance token endpoint independently before debugging this
+   service. Never paste tokens or secrets into test output or issue comments.
 
----
+## 2. Start the authenticated V2 service
 
-## Part A — Instance-side OAuth setup (one-time, ~10 min)
-
-1. Filter navigator → `sys_properties.list` → find or create
-   `glide.oauth.inbound.client.credential.grant_type.enabled` (type true/false) → set **true**.
-2. Create service account `mcp.service`: **First and Last name populated** (accounts with blank
-   names are hidden from the OAuth application user picker), Active. On builds where
-   *Web service access only* is read-only, set **Identity type = Machine Identity** to enable it;
-   on older builds check *Web service access only* directly. Grant role `admin` (PDI) or
-   least-privilege. Do NOT use a personal admin account — the token acts as this user.
-   If the A-1 token curl later fails with a machine-identity error, switch the account to
-   Identity type Human + *Internal Integration User* checked instead — builds differ; A-1 decides.
-3. System OAuth → Application Registry → New → **"Create an OAuth API endpoint for external clients"**:
-   name `servicenow-mcp`, save, copy **Client ID** + **Client Secret**, set **OAuth Application User**
-   = `mcp.service`.
-
-### A-1: Token endpoint sanity check (do this before anything else)
-
-- **Verifies:** the instance mints client_credentials tokens at all (isolates instance problems from server problems).
-- **How:**
-  ```bash
-  curl -s https://<instance>.service-now.com/oauth_token.do \
-    -d grant_type=client_credentials -d client_id=<ID> -d client_secret=<SECRET>
-  ```
-- **Pass:** JSON containing `"access_token"` and `"expires_in":1800`.
-- **If it fails:**
-  | Response | Cause |
-  |---|---|
-  | `invalid_client` | wrong client_id/secret |
-  | `unauthorized_client` / grant-type error | step 1 property not set, or grant not enabled on the registry record |
-  | token works but API calls later 401 | **OAuth Application User** not set on the registry record, or the user lacks roles |
-  | service account missing from the OAuth application user picker | blank first/last name, interactive human account (needs Web service access only / Machine Identity / Internal Integration User), or beyond the picker's first 1000 users alphabetically (KB2624687) — type to search |
-
-## Part B — Build
+Use an out-of-band named profile, or explicitly map canonical `SN_*` variables
+to an environment profile:
 
 ```bash
-cd ~/Development/servicenow-mcp-test        # clean clone, already created
-git log --oneline -1                        # expect 3e9a7bd or later
-npm ci && npm run build && npm test         # expect: build clean, ALL tests pass, 0 failed (exact count grows with the suite)
+export MCP_OWNER_ID="oauth-test-owner"
+export MCP_CLIENT_ID="oauth-test-client"
+export SN_PROFILE_NAME="oauth-test"
+export SN_INSTANCE="https://devXXXXXX.service-now.com"
+export SN_AUTH_TYPE="oauth"
+export SN_CLIENT_ID="service-now-oauth-client-id"
+npm ci
+npm run build
+npm test
+npm start
 ```
 
-## Part C — Onboard the OAuth profile
+The approved test supervisor, keychain, or secret manager must inject
+`MCP_BEARER_TOKEN` and `SN_CLIENT_SECRET` directly into the service process
+before those non-secret commands run. Never type either value into shell input,
+an argument, a dotenv file, or command history.
 
-Register the server for Claude Code (run inside the test directory so it scopes to this project):
+Startup must fail when the MCP bearer secret, owner ID, or client ID is absent
+or invalid. The service listens at `http://127.0.0.1:3000/mcp` unless
+`MCP_HOST` or `MCP_PORT` is explicitly set.
+
+## 3. Run the HTTP smoke client
+
+In a second terminal whose process environment already receives the same
+bearer from the approved injection mechanism, select the non-secret profile
+and endpoint explicitly:
 
 ```bash
-cd ~/Development/servicenow-mcp-test
-claude mcp add servicenow \
-  -e SN_INSTANCE=https://devXXXXXX.service-now.com \
-  -e SN_AUTH_TYPE=oauth \
-  -e SN_CLIENT_ID=<client_id> \
-  -e SN_CLIENT_SECRET=<client_secret> \
-  -- node /Users/openclaw/Development/servicenow-mcp-test/dist/index.js
+export MCP_PROFILE="oauth-test"
+export MCP_URL="http://127.0.0.1:3000/mcp"
+npm run smoke
 ```
 
-(Alternative: onboard the profile in-session — `sn_profile add` supports OAuth and API-key
-profiles, so file editing is no longer required. Inside a session with the server connected:
-`sn_profile {action:"add", name:"pdi", instance:"https://devXXXXXX.service-now.com",
-auth_type:"oauth", client_id:"<client_id>", client_secret:"env:SN_CLIENT_SECRET"}` — or
-hand-write the named profile in `~/.servicenow-mcp/config.json` with `"clientSecret": "env:VAR"`.
-Either way plain-text secrets are rejected, and the env var must be set in the environment the
-server is launched with — `sn_profile add` warns in its response if it isn't set yet.)
+The smoke client uses the official MCP Streamable HTTP client and verifies:
 
-For the terminal-based tests below, also export the same four variables in your shell:
+- initialization and discovery over `/mcp`;
+- exactly 20 tools;
+- every discovered schema requires a non-empty `profile`;
+- `sn_profile` returns `structuredContent.profile` without credentials;
+- a version health check and a bounded incident query return that same resolved
+  profile through OAuth; and
+- each MCP operation is cancellation-aware and bounded to 30 seconds by default
+  (`MCP_SMOKE_TIMEOUT_MS` accepts 1000 through 120000).
+
+To opt into a create / incident work-note append / delete round trip on a
+disposable PDI only:
 
 ```bash
-export SN_INSTANCE=https://devXXXXXX.service-now.com
-export SN_AUTH_TYPE=oauth SN_CLIENT_ID=<client_id> SN_CLIENT_SECRET=<client_secret>
+npm run smoke -- --write --confirm-write-profile=oauth-test
 ```
 
----
+The confirmation must exactly equal `MCP_PROFILE`. Never use `--write` against
+production or a shared instance. The smoke client reads the created identifier
+from `structuredContent.data.sys_id` and attempts deletion in `finally`; a
+cleanup failure is a failed run and requires authorized manual cleanup.
 
-## Part D — Automated harness (run FIRST, from the terminal)
+## 4. OAuth lifecycle checks
 
-```bash
-cd ~/Development/servicenow-mcp-test
-node scripts/smoke-test.mjs --write        # --write is safe on a PDI; omit on shared instances
-```
+- After several read calls, the ServiceNow OAuth token table should show one
+  cached access token rather than one token per call.
+- Revoke the test token, then repeat a read. The client should refresh once and
+  retry without exposing the token response.
+- Start the service once with an intentionally invalid ServiceNow client secret.
+  The tool call must fail with a sanitized error; the secret must not appear in
+  the MCP result, service output, or audit record.
+- Send an absent or invalid MCP bearer header. The HTTP boundary must return a
+  generic 401 before parsing MCP input or touching any profile credential.
 
-**Pass = final line `11/11 checks passed`, exit code 0** (9/9 without `--write`). What each check proves:
+## 5. Shutdown check
 
-| Check line | Verifies | Pass evidence in the note |
-|---|---|---|
-| `tools/list` | server boots on SDK 1.29, registry intact | `18 tools` |
-| `sn_health version` | OAuth token minted + authenticated GET works | instance version/build info printed |
-| `sn_query incident (defaults)` | change #2 + #4 + #5 together | `keys/record=` ≤ 14 (curated defaults, not 100+); `total=` a number; `has_more=` present; chars low (≈1–3k, not 10k+) |
-| `sn_query fields=all` | the escape hatch returns full records | `keys` > 30 |
-| `pagination next_offset` | change #5, incl. the ACL-trim bug fix | `no overlap` (two pages share no sys_ids) |
-| `DEFAULT_FIELDS vs live schema` | every curated column exists on YOUR instance — the one check mocks couldn't do | `all columns exist across 13 tables` |
-| `sn_aggregate count` | display_value enum path unbroken | a count is returned |
-| `bad-table error surfaced` | error quality: agent can self-correct | `isError` + a ServiceNow message (400/403/invalid), not a stack trace |
-| `sn_create/sn_update/sn_delete incident` (`--write`) | write path + new compact response shapes | create note shows `sys_id=`; all three PASS |
-
-- **If `DEFAULT_FIELDS vs live schema` fails:** the note lists exactly which `table.field` is missing —
-  report those; they're one-line fixes in `src/table-defaults.ts`.
-- **If nothing works:** run the server directly to see its stderr banner/error:
-  `node dist/index.js` (Ctrl-C to exit). A config problem prints a descriptive missing-variable error.
-
-## Part E — Interactive session tests (inside `claude`)
-
-Start: `cd ~/Development/servicenow-mcp-test && claude`, then check `/mcp` shows **servicenow ✔ connected**.
-For each test: type the prompt, watch which tool gets called and what comes back.
-
-### E-1: Profile info leaks no secrets
-- **Verifies:** #6 (redaction in sn_profile output)
-- **Prompt:** `Show me the active ServiceNow profile details using sn_profile.`
-- **Pass:** output shows instance URL and `auth_type: "oauth"`; contains **no** client secret, token, or password — search the response for any 8+ char fragment of your real secret.
-- **Fail if:** any secret material appears anywhere. Stop and report — that's a critical bug.
-
-### E-2: Default-field query (the token-efficiency headline)
-- **Verifies:** #2 + #4
-- **Prompt:** `Query the 3 most recently updated incidents.`
-- **Pass:** expect `sn_query {table:"incident", limit:3, orderby:"-sys_updated_on"}` (or similar); each
-  record has ~10 fields — `sys_id, number, short_description, state, priority, assigned_to,
-  assignment_group, caller_id, opened_at, sys_updated_on` — with empty fields absent entirely;
-  reference fields (assigned_to, caller_id) are display-value strings, **not** `{link:..., value:...}` objects.
-- **Fail if:** records have 50–100+ fields (defaults not applied) or contain `"link":"https://..."` noise.
-
-### E-3: Full-record escape hatch
-- **Prompt:** `Get that first incident again with ALL of its fields.`
-- **Pass:** the model passes `fields: "all"` and the record comes back with the full column set.
-
-### E-4: Pagination follow-through
-- **Verifies:** #5 — and that the metadata actually *steers the model*
-- **Prompt:** `List incidents 2 at a time and show me the second page.`
-- **Pass:** first call returns `has_more: true` + `next_offset: 2`; the model's second call uses
-  `offset: 2` **without you telling it how**; no incident number repeats across pages.
-
-### E-5: Error quality on a bad table
-- **Prompt:** `Query the table x_totally_fake_table_zz for any records.`
-- **Pass:** a clean error (`Invalid table` / 400) that the model relays sensibly — ideally it suggests
-  checking the table name or using sn_discover; no crash, no raw stack trace.
-
-### E-6: Write round-trip (PDI only)
-- **Prompt:** `Create an incident with short description "MCP live test — safe to delete", then add the work note "tested via MCP", then delete it (confirm the deletion).`
-- **Pass:** create returns `{sys_id, number, table, record}`; update returns `{sys_id, record}`;
-  delete requires and uses `confirm: true`; afterwards the incident number is gone from the instance
-  (spot-check `incident.list`).
-
-## Part F — Instance-side verifications (the OAuth lifecycle)
-
-### F-1: Token caching (ONE token, not one per call)
-- **Verifies:** #6 expiry-tracked cache
-- **How:** after E-1…E-5, on the instance open `oauth_credential.list` (or System OAuth → Manage Tokens)
-  and filter by the `servicenow-mcp` application.
-- **Pass:** exactly **1** access-token row exists despite many tool calls.
-- **Fail if:** a row per call → caching broken; report immediately (it would hammer real instances).
-
-### F-2: Mid-session token revocation (the 401 retry)
-- **Verifies:** #6 single refresh-and-retry
-- **How:** delete that token row on the instance, then back in the session:
-  `Query the most recent incident.`
-- **Pass:** the query **succeeds with no visible error** (server got 401, refreshed, retried once);
-  `oauth_credential.list` now shows exactly 1 fresh token.
-
-### F-3: Wrong-secret failure is clean and redacted
-- **How (terminal):**
-  ```bash
-  SN_CLIENT_SECRET=definitely-wrong node scripts/smoke-test.mjs
-  ```
-- **Pass:** checks fail fast with an error naming the token endpoint + HTTP status
-  (e.g. `OAuth token request failed (HTTP 401)`); the string `definitely-wrong` appears **nowhere** in output.
-
-### F-4 (optional): Basic-auth deprecation UX
-- **How:** in a terminal, `SN_AUTH_TYPE=basic SN_USER=admin SN_PASSWORD=<pw> node scripts/smoke-test.mjs --bad-auth`
-- **Pass:** stderr shows the one-line Basic Auth deprecation warning at startup; the final
-  `401 basic-auth hint` check PASSes (error text cites **KB3096078** and the exemption paths).
-
----
-
-## Results template
-
-```
-Date: ____  Instance: ____  Release: ____
-A-1 token curl        [ ]   E-3 fields=all        [ ]
-Part B build/tests    [ ]   E-4 pagination        [ ]
-Part D harness  __/11 [ ]   E-5 error quality     [ ]
-E-1 no secret leak    [ ]   E-6 write round-trip  [ ]
-E-2 default fields    [ ]   F-1 single token      [ ]
-F-2 401 recovery      [ ]   F-3 redacted failure  [ ]
-F-4 basic-auth UX     [ ]
-Notes / failures (paste the exact FAIL line or response): 
-```
-
-Anything that fails: paste the exact output into the dev session and it can be fixed on the branch.
+While one request is in flight, send SIGTERM (and repeat with SIGINT). The
+listener must stop accepting new work, accepted work may drain only within
+`MCP_SHUTDOWN_GRACE_MS`, and the process must release its owned HTTP/MCP
+resources at the deadline.

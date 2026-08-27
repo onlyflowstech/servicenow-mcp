@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildTableParams,
   err,
@@ -8,6 +8,11 @@ import {
   stripEmpty,
   truncate,
 } from "../src/utils.js";
+import {
+  createToolError,
+  type ToolErrorCategory,
+  type ToolErrorRetry,
+} from "../src/tool-error.js";
 
 describe("ok", () => {
   it("wraps a string as-is in text content", () => {
@@ -80,34 +85,102 @@ describe("err", () => {
 });
 
 describe("formatError", () => {
-  it("formats a ServiceNow error object with message, detail, and status", () => {
-    const formatted = formatError({
-      message: "Insufficient rights",
-      detail: "User lacks the itil role",
-      status: 403,
+  it.each([
+    [
+      "authentication",
+      "retry_after_correction",
+      "ServiceNow authentication could not be completed. Error category: authentication. Retry after correcting the request or configuration.",
+    ],
+    [
+      "authorization",
+      "retry_after_correction",
+      "ServiceNow access was denied. Error category: authorization. Retry after correcting the request or configuration.",
+    ],
+    [
+      "not_found",
+      "do_not_retry",
+      "The requested ServiceNow resource was not found. Error category: not_found. Retry unchanged is not recommended.",
+    ],
+    [
+      "timeout",
+      "retry_if_safe_and_idempotent",
+      "The ServiceNow request timed out. Error category: timeout. Retry only if the operation is safe and idempotent.",
+    ],
+    [
+      "conflict",
+      "retry_after_correction",
+      "ServiceNow reported a conflicting resource state. Error category: conflict. Retry after correcting the request or configuration.",
+    ],
+    [
+      "rate_limit",
+      "retry_later",
+      "ServiceNow rate limit was exceeded. Error category: rate_limit. Retry later.",
+    ],
+    [
+      "upstream",
+      "retry_if_safe_and_idempotent",
+      "ServiceNow could not complete the request. Error category: upstream. Retry only if the operation is safe and idempotent.",
+    ],
+    [
+      "internal",
+      "do_not_retry",
+      "The operation failed unexpectedly. Error category: internal. Retry unchanged is not recommended.",
+    ],
+  ] as ReadonlyArray<readonly [ToolErrorCategory, ToolErrorRetry, string]>) (
+    "uses fixed safe guidance for trusted %s errors",
+    (category, retry, expected) => {
+      expect(formatError(createToolError(category, retry))).toBe(expected);
+    }
+  );
+
+  it.each([
+    new Error(
+      "Authorization: Bearer RAW_SECRET_TOKEN https://host.invalid/api?secret=RAW_QUERY_SECRET"
+    ),
+    "RAW_STRING_SECRET",
+    null,
+    {
+      message: "RAW_MESSAGE_SECRET",
+      detail: "RAW_DETAIL_SECRET",
+      cause: new Error("RAW_CAUSE_SECRET"),
+      body: { token: "RAW_BODY_SECRET" },
+      headers: { Authorization: "Bearer RAW_HEADER_SECRET" },
+    },
+    { status: "403", message: "RAW_COERCION_SECRET" },
+    { status: Number.NaN, detail: "RAW_NAN_SECRET" },
+    { status: 999, detail: "RAW_RANGE_SECRET" },
+  ])("replaces arbitrary thrown values and nested details with one safe message", (error) => {
+    const formatted = formatError(error);
+    expect(formatted).toBe(
+      "The operation failed unexpectedly. Error category: internal. " +
+        "Retry unchanged is not recommended."
+    );
+    expect(formatted).not.toMatch(/RAW_|Bearer|Authorization|secret=|host\.invalid/i);
+  });
+
+  it("fails closed when reading a hostile status getter throws", () => {
+    const hostile = Object.defineProperty({}, "status", {
+      get() {
+        throw new Error("RAW_GETTER_SECRET");
+      },
     });
-    expect(formatted).toBe("Insufficient rights\nDetail: User lacks the itil role (HTTP 403)");
+    expect(formatError(hostile)).toBe(
+      "The operation failed unexpectedly. Error category: internal. " +
+        "Retry unchanged is not recommended."
+    );
   });
 
-  it("formats a message-only error object", () => {
-    expect(formatError({ message: "Not found" })).toBe("Not found");
-  });
+  it("does not execute Proxy traps while checking encoded-policy provenance", () => {
+    const getPrototypeOf = vi.fn(() => {
+      throw new Error("RAW_POLICY_PROXY_SECRET");
+    });
+    const hostile = new Proxy({}, { getPrototypeOf });
 
-  it("appends status without detail", () => {
-    expect(formatError({ message: "Nope", status: 404 })).toBe("Nope (HTTP 404)");
-  });
-
-  it("uses the message of an Error instance", () => {
-    expect(formatError(new Error("kaboom"))).toBe("kaboom");
-  });
-
-  it("stringifies plain strings", () => {
-    expect(formatError("just a string")).toBe("just a string");
-  });
-
-  it("stringifies null and objects without a message", () => {
-    expect(formatError(null)).toBe("null");
-    expect(formatError({ detail: "no message field" })).toBe("[object Object]");
+    expect(formatError(hostile)).toBe(
+      "The operation failed unexpectedly. Error category: internal. " +
+        "Retry unchanged is not recommended."
+    );
+    expect(getPrototypeOf).not.toHaveBeenCalled();
   });
 });
 

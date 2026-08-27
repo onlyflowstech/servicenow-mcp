@@ -1,7 +1,16 @@
 import { z } from "zod";
-import { ServiceNowClient } from "../client.js";
-import { ServiceNowConfig } from "../config.js";
-import { ok, err, formatError } from "../utils.js";
+import type { ServiceNowOperations } from "../client.js";
+import type { ExecutionContext } from "../execution-context.js";
+import type { ServiceNowToolSettings } from "./tool-module.js";
+import {
+  ENCODED_QUERY_MIGRATION_MESSAGE,
+  rejectRawEncodedWrite,
+} from "../encoded-query-policy.js";
+import { ok, err } from "../utils.js";
+import {
+  serviceNowSysIdPathSegment,
+  serviceNowSysIdSchema,
+} from "../servicenow-identifiers.js";
 
 export const definition = {
   name: "sn_delete",
@@ -16,43 +25,32 @@ export const definition = {
     idempotentHint: true,
     openWorldHint: true,
   },
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      table: {
-        type: "string",
-        description: "ServiceNow table name (e.g. incident)",
-      },
-      sys_id: {
-        type: "string",
-        description: "The sys_id of the record to delete",
-      },
-      confirm: {
-        type: "boolean",
-        description: "Must be true to execute the deletion. Safety measure to prevent accidental deletes.",
-      },
-      profile: {
-        type: "string",
-        description: "Named profile to use. Defaults to active profile.",
-      },
-    },
-    required: ["table", "sys_id", "confirm"],
-  },
 };
 
-export const schema = z.object({
-  table: z.string(),
-  sys_id: z.string(),
-  confirm: z.boolean(),
-  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
-});
+export const schema = z
+  .object({
+    table: z.string().describe("ServiceNow table name (e.g. incident)"),
+    sys_id: serviceNowSysIdSchema.describe(
+      "The 32-hex sys_id of the record to delete"
+    ),
+    confirm: z
+      .boolean()
+      .describe(
+        "Must be true to execute the deletion. Safety measure to prevent accidental deletes."
+      ),
+  })
+  .strict(ENCODED_QUERY_MIGRATION_MESSAGE);
 
 export async function handler(
   args: z.infer<typeof schema>,
-  client: ServiceNowClient,
-  _config: ServiceNowConfig
+  client: ServiceNowOperations,
+  _config: ServiceNowToolSettings,
+  _context: ExecutionContext
 ) {
   try {
+    rejectRawEncodedWrite(
+      (args as unknown as Readonly<Record<string, unknown>>).query
+    );
     if (!args.confirm) {
       return err(
         "Must set confirm to true to delete records. This is a safety measure."
@@ -61,7 +59,9 @@ export async function handler(
 
     // client.delete throws on any failure status, so reaching this point
     // means the deletion succeeded (ServiceNow returns 204 No Content).
-    await client.delete(`/api/now/table/${args.table}/${args.sys_id}`);
+    await client.delete(
+      `/api/now/table/${args.table}/${serviceNowSysIdPathSegment(args.sys_id)}`
+    );
 
     return ok({
       status: "deleted",
@@ -69,6 +69,6 @@ export async function handler(
       table: args.table,
     });
   } catch (error) {
-    return err(formatError(error));
+    throw error;
   }
 }

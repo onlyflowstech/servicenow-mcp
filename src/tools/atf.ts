@@ -1,7 +1,23 @@
 import { z } from "zod";
-import { ServiceNowClient } from "../client.js";
-import { ServiceNowConfig } from "../config.js";
+import type { ServiceNowOperations } from "../client.js";
+import type { ExecutionContext } from "../execution-context.js";
+import type { ServiceNowToolSettings } from "./tool-module.js";
+import {
+  authorizeRawEncodedRead,
+  ENCODED_QUERY_MIGRATION_MESSAGE,
+} from "../encoded-query-policy.js";
+import {
+  filterReadableRecord,
+  preparedReadableFields,
+  resolveReadableFields,
+} from "../field-policy.js";
 import { ok, err, escapeQueryValue, formatError, withWarnings } from "../utils.js";
+import {
+  normalizeServiceNowSysId,
+  serviceNowSysIdPathSegment,
+  serviceNowSysIdSchema,
+} from "../servicenow-identifiers.js";
+import { trustedToolErrorDescriptor } from "../tool-error.js";
 
 export const definition = {
   name: "sn_atf",
@@ -17,114 +33,151 @@ export const definition = {
     idempotentHint: false,
     openWorldHint: true,
   },
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      action: {
-        type: "string",
-        enum: ["list", "suites", "run", "run-suite", "results"],
-        description: "ATF operation: list tests, list suites, run a test, run a suite, or get results",
-      },
-      test_sys_id: {
-        type: "string",
-        description: "Test sys_id (required for run)",
-      },
-      suite_sys_id: {
-        type: "string",
-        description: "Suite sys_id (required for run-suite)",
-      },
-      suite_name: {
-        type: "string",
-        description: "Filter tests by suite name (for list action)",
-      },
-      execution_id: {
-        type: "string",
-        description: "Execution/result sys_id (required for results action)",
-      },
-      query: {
-        type: "string",
-        description: "ServiceNow encoded query filter",
-      },
-      fields: {
-        type: "string",
-        description: "Comma-separated fields to return",
-      },
-      limit: {
-        type: "number",
-        description: "Max results (default 20)",
-      },
-      wait: {
-        type: "boolean",
-        description: "Wait for test/suite completion (default true)",
-      },
-      timeout: {
-        type: "number",
-        description: "Max wait time in seconds (default 120 for tests, 300 for suites)",
-      },
-      profile: {
-        type: "string",
-        description: "Named profile to use. Defaults to active profile.",
-      },
-    },
-    required: ["action"],
-  },
 };
 
 export const schema = z.object({
-  action: z.enum(["list", "suites", "run", "run-suite", "results"]),
-  test_sys_id: z.string().optional(),
-  suite_sys_id: z.string().optional(),
-  suite_name: z.string().optional(),
-  execution_id: z.string().optional(),
-  query: z.string().optional(),
-  fields: z.string().optional(),
-  limit: z.number().optional().default(20),
-  wait: z.boolean().optional().default(true),
-  timeout: z.number().optional(),
-  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
-});
+  action: z.enum(["list", "suites", "run", "run-suite", "results"]).describe("ATF operation: list tests, list suites, run a test, run a suite, or get results"),
+  test_sys_id: serviceNowSysIdSchema.optional().describe("32-hex test sys_id (required for run)"),
+  suite_sys_id: serviceNowSysIdSchema.optional().describe("32-hex suite sys_id (required for run-suite)"),
+  suite_name: z.string().optional().describe("Filter tests by suite name (for list action)"),
+  execution_id: serviceNowSysIdSchema.optional().describe("32-hex execution/result sys_id (required for results action)"),
+  fields: z.string().optional().describe("Comma-separated fields to return"),
+  limit: z.number().int().min(1).max(1000).optional().default(20).describe("Max results (default 20, max 1000)"),
+  offset: z.number().int().min(0).max(10000).optional().default(0).describe("Deterministic result offset (default 0)"),
+  wait: z.boolean().optional().default(true).describe("Wait for test/suite completion (default true)"),
+  timeout: z.number().optional().describe("Max wait time in seconds (default 120 for tests, 300 for suites)"),
+}).strict(ENCODED_QUERY_MIGRATION_MESSAGE);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function pagedResult(
+  records: readonly unknown[],
+  offset: number,
+  limit: number
+): Record<string, unknown> {
+  const results = records.slice(0, limit);
+  const hasMore = records.length > limit;
+  return {
+    record_count: results.length,
+    limit,
+    offset,
+    has_more: hasMore,
+    ...(hasMore ? { next_offset: offset + limit } : {}),
+    results,
+  };
+}
+
+interface AtfRunResult {
+  readonly sys_id?: string;
+  readonly result_id?: string;
+  readonly tracker_id?: string;
+  readonly progress_id?: string;
+  readonly [key: string]: unknown;
+}
+
+interface AtfRunResponse {
+  readonly result?: AtfRunResult;
+}
+
+/** A trusted not-found proves this invocation endpoint did not execute. */
+function isSafeEndpointFallback(error: unknown): boolean {
+  const descriptor = trustedToolErrorDescriptor(error);
+  return (
+    descriptor?.category === "not_found" &&
+    descriptor.retry === "do_not_retry"
+  );
+}
+
 export async function handler(
   args: z.infer<typeof schema>,
-  client: ServiceNowClient,
-  _config: ServiceNowConfig
+  client: ServiceNowOperations,
+  _config: ServiceNowToolSettings,
+  _context: ExecutionContext
 ) {
   try {
+    const rawQuery = (args as unknown as Readonly<Record<string, unknown>>).query;
+    if (rawQuery !== undefined) {
+      const targetTable =
+        args.action === "suites"
+          ? "sys_atf_test_suite"
+          : args.action === "results"
+            ? "sys_atf_test_result"
+            : "sys_atf_test";
+      authorizeRawEncodedRead(_context?.effectivePolicy.encodedQueryAccess, {
+        tool: "sn_atf",
+        table: targetTable,
+        query: rawQuery,
+        limit: args.limit,
+        offset: args.offset,
+        maxResponseBytes: 100_000,
+        outputFields: [],
+      });
+    }
     switch (args.action) {
       // ── list tests ──
       case "list": {
-        const fields =
-          args.fields || "sys_id,name,description,active,sys_updated_on";
-        let query = args.query || "";
+        const readableFields =
+          preparedReadableFields(args, "sys_atf_test") ??
+          resolveReadableFields("sys_atf_test", { fields: args.fields });
+        const fields = readableFields.join(",");
+        let query = "";
 
         // If suite_name given, resolve suite and filter tests
         if (args.suite_name) {
           const suiteResp = await client.get(
             "/api/now/table/sys_atf_test_suite",
             {
-              sysparm_query: `name=${escapeQueryValue(args.suite_name)}`,
+              sysparm_query: `name=${escapeQueryValue(args.suite_name)}^ORDERBYsys_id`,
               sysparm_fields: "sys_id,name",
               sysparm_limit: "1",
             }
           );
-          const suiteId = suiteResp.result?.[0]?.sys_id;
-          if (!suiteId) return err(`Suite not found: ${args.suite_name}`);
+          const suiteFields =
+            preparedReadableFields(args, "sys_atf_test_suite") ??
+            resolveReadableFields("sys_atf_test_suite", {
+              fields: "sys_id,name",
+            });
+          const filteredSuites = filterReadableRecord(
+            suiteResp.result || [],
+            suiteFields
+          );
+          const suiteRecord = Array.isArray(filteredSuites)
+            ? filteredSuites[0]
+            : undefined;
+          const suiteId =
+            typeof suiteRecord === "object" &&
+            suiteRecord !== null &&
+            !Array.isArray(suiteRecord)
+              ? (suiteRecord as Record<string, unknown>).sys_id
+              : undefined;
+          if (typeof suiteId !== "string" || !suiteId) {
+            return err(`Suite not found: ${args.suite_name}`);
+          }
 
           // Get test IDs from M2M table
           const m2mResp = await client.get(
             "/api/now/table/sys_atf_test_suite_test",
             {
-              sysparm_query: `test_suite=${escapeQueryValue(suiteId)}`,
+              sysparm_query: `test_suite=${escapeQueryValue(suiteId)}^ORDERBYtest`,
               sysparm_fields: "test",
               sysparm_limit: "500",
             }
           );
-          const testIds = (m2mResp.result || [])
-            .map((r: Record<string, string>) => r.test)
+          const m2mFields =
+            preparedReadableFields(args, "sys_atf_test_suite_test") ??
+            resolveReadableFields("sys_atf_test_suite_test", { fields: "test" });
+          const filteredM2m = filterReadableRecord(
+            m2mResp.result || [],
+            m2mFields
+          );
+          const testIds = (Array.isArray(filteredM2m) ? filteredM2m : [])
+            .map((r) =>
+              typeof r === "object" && r !== null && !Array.isArray(r)
+                ? (r as Record<string, unknown>).test
+                : undefined
+            )
             .filter(Boolean)
             .join(",");
           if (!testIds)
@@ -135,24 +188,31 @@ export async function handler(
         }
 
         const resp = await client.get("/api/now/table/sys_atf_test", {
-          sysparm_limit: String(args.limit),
+          sysparm_limit: String(args.limit + 1),
+          sysparm_offset: String(args.offset),
           sysparm_fields: fields,
-          ...(query ? { sysparm_query: query } : {}),
+          sysparm_query: query ? `${query}^ORDERBYsys_id` : "ORDERBYsys_id",
         });
-        const results = resp.result || [];
-        return ok({ record_count: results.length, results });
+        const filtered = filterReadableRecord(resp.result || [], readableFields);
+        const results = Array.isArray(filtered) ? filtered : [];
+        return ok(pagedResult(results, args.offset, args.limit));
       }
 
       // ── list suites ──
       case "suites": {
-        const fields = args.fields || "sys_id,name,description,active";
+        const readableFields =
+          preparedReadableFields(args, "sys_atf_test_suite") ??
+          resolveReadableFields("sys_atf_test_suite", { fields: args.fields });
+        const fields = readableFields.join(",");
         const resp = await client.get("/api/now/table/sys_atf_test_suite", {
-          sysparm_limit: String(args.limit),
+          sysparm_limit: String(args.limit + 1),
+          sysparm_offset: String(args.offset),
           sysparm_fields: fields,
-          ...(args.query ? { sysparm_query: args.query } : {}),
+          sysparm_query: "ORDERBYsys_id",
         });
-        const results = resp.result || [];
-        return ok({ record_count: results.length, results });
+        const filtered = filterReadableRecord(resp.result || [], readableFields);
+        const results = Array.isArray(filtered) ? filtered : [];
+        return ok(pagedResult(results, args.offset, args.limit));
       }
 
       // ── run single test ──
@@ -163,27 +223,29 @@ export async function handler(
         // Each fallback strategy that fails is recorded so the caller can
         // see which execution paths were tried and why they failed.
         const warnings: string[] = [];
-        let runResp: any;
+        let runResp: AtfRunResponse | null;
 
         // Try sn_atf REST API first
         try {
-          runResp = await client.post("/api/sn_atf/rest/test", {
+          runResp = await client.post<AtfRunResponse>("/api/sn_atf/rest/test", {
             test_id: args.test_sys_id,
           });
         } catch (error) {
+          if (!isSafeEndpointFallback(error)) throw error;
           warnings.push(`POST /api/sn_atf/rest/test: ${formatError(error)}`);
           // Fallback: try /api/now/atf/test/{id}/run
           try {
-            runResp = await client.post(
-              `/api/now/atf/test/${args.test_sys_id}/run`
+            runResp = await client.post<AtfRunResponse>(
+              `/api/now/atf/test/${serviceNowSysIdPathSegment(args.test_sys_id)}/run`
             );
           } catch (error2) {
+            if (!isSafeEndpointFallback(error2)) throw error2;
             warnings.push(
               `POST /api/now/atf/test/{id}/run: ${formatError(error2)}`
             );
             // Last fallback: schedule via Table API
             try {
-              runResp = await client.post(
+              runResp = await client.post<AtfRunResponse>(
                 "/api/now/table/sys_atf_test_result",
                 {
                   test: args.test_sys_id,
@@ -191,13 +253,7 @@ export async function handler(
                 }
               );
             } catch (error3) {
-              warnings.push(
-                `sys_atf_test_result (schedule via Table API): ${formatError(error3)}`
-              );
-              return err(
-                "All ATF execution methods failed. Ensure ATF plugin is active and user has atf_admin role.\n" +
-                  warnings.join("\n")
-              );
+              throw error3;
             }
           }
         }
@@ -230,26 +286,21 @@ export async function handler(
         const timeout = args.timeout ?? 300;
         // Record failed fallback strategies (same pattern as "run").
         const warnings: string[] = [];
-        let runResp: any;
+        let runResp: AtfRunResponse | null;
 
         try {
-          runResp = await client.post("/api/sn_atf/rest/suite", {
+          runResp = await client.post<AtfRunResponse>("/api/sn_atf/rest/suite", {
             suite_id: args.suite_sys_id,
           });
         } catch (error) {
+          if (!isSafeEndpointFallback(error)) throw error;
           warnings.push(`POST /api/sn_atf/rest/suite: ${formatError(error)}`);
           try {
-            runResp = await client.post(
-              `/api/now/atf/suite/${args.suite_sys_id}/run`
+            runResp = await client.post<AtfRunResponse>(
+              `/api/now/atf/suite/${serviceNowSysIdPathSegment(args.suite_sys_id)}/run`
             );
           } catch (error2) {
-            warnings.push(
-              `POST /api/now/atf/suite/{id}/run: ${formatError(error2)}`
-            );
-            return err(
-              "Suite execution failed. Ensure ATF plugin is active and user has atf_admin role.\n" +
-                warnings.join("\n")
-            );
+            throw error2;
           }
         }
 
@@ -270,7 +321,7 @@ export async function handler(
           if (trackerId) {
             try {
               const trackerResp = await client.get(
-                `/api/now/table/sys_execution_tracker/${trackerId}`,
+                `/api/now/table/sys_execution_tracker/${serviceNowSysIdPathSegment(trackerId)}`,
                 {
                   sysparm_fields: "state,result,message,completion_percent",
                   sysparm_display_value: "true",
@@ -291,18 +342,28 @@ export async function handler(
         }
 
         // Fetch suite results
+        const effectiveLimit = Math.min(args.limit, 200);
         const resultsResp = await client.get(
           "/api/now/table/sys_atf_test_result",
           {
-            sysparm_query: `test_suite=${escapeQueryValue(args.suite_sys_id)}^ORDERBYDESCsys_created_on`,
+            sysparm_query: `test_suite=${escapeQueryValue(args.suite_sys_id)}^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`,
             sysparm_fields:
               "sys_id,test,status,output,duration,start_time,end_time",
             sysparm_display_value: "true",
-            sysparm_limit: "200",
+            sysparm_limit: String(effectiveLimit + 1),
+            sysparm_offset: String(args.offset),
           }
         );
 
-        const testResults = resultsResp.result || [];
+        const rawTestResults = Array.isArray(resultsResp.result)
+          ? resultsResp.result
+          : [];
+        const page = pagedResult(
+          rawTestResults,
+          args.offset,
+          effectiveLimit
+        );
+        const testResults = page.results as Array<Record<string, string>>;
         const passed = testResults.filter(
           (r: Record<string, string>) =>
             r.status === "Success" || r.status === "Pass" || r.status === "Passed"
@@ -323,6 +384,13 @@ export async function handler(
           withWarnings(
             {
               suite_sys_id: args.suite_sys_id,
+              record_count: page.record_count,
+              limit: page.limit,
+              offset: page.offset,
+              has_more: page.has_more,
+              ...(page.next_offset === undefined
+                ? {}
+                : { next_offset: page.next_offset }),
               summary: {
                 total: testResults.length,
                 passed,
@@ -340,48 +408,58 @@ export async function handler(
       case "results": {
         if (!args.execution_id) return err("execution_id is required for results");
 
-        const fields =
-          args.fields ||
-          "sys_id,test,status,output,duration,start_time,end_time";
+        const readableFields =
+          preparedReadableFields(args, "sys_atf_test_result") ??
+          resolveReadableFields("sys_atf_test_result", { fields: args.fields });
+        const fields = readableFields.join(",");
 
         // Try direct get first
         try {
           const resp = await client.get(
-            `/api/now/table/sys_atf_test_result/${args.execution_id}`,
+            `/api/now/table/sys_atf_test_result/${serviceNowSysIdPathSegment(args.execution_id)}`,
             {
               sysparm_fields: fields,
               sysparm_display_value: "true",
             }
           );
-          if (resp.result?.sys_id) {
-            return ok(resp.result);
+          const filtered = filterReadableRecord(resp.result, readableFields);
+          if (
+            typeof filtered === "object" &&
+            filtered !== null &&
+            !Array.isArray(filtered) &&
+            (filtered as Record<string, unknown>).sys_id
+          ) {
+            return ok(filtered);
           }
         } catch {
           // Not found by direct ID — try query
         }
 
         const executionId = escapeQueryValue(args.execution_id);
-        const query = `execution=${executionId}^ORparent=${executionId}^ORtest_suite=${executionId}`;
+        const safeExecutionId = normalizeServiceNowSysId(executionId);
+        const query = `execution=${safeExecutionId}^ORparent=${safeExecutionId}^ORtest_suite=${safeExecutionId}`;
         const resp = await client.get("/api/now/table/sys_atf_test_result", {
-          sysparm_query: query,
+          sysparm_query: `${query}^ORDERBYsys_id`,
           sysparm_fields: fields,
           sysparm_display_value: "true",
-          sysparm_limit: String(args.limit),
+          sysparm_limit: String(args.limit + 1),
+          sysparm_offset: String(args.offset),
         });
-        const results = resp.result || [];
-        return ok({ record_count: results.length, results });
+        const filtered = filterReadableRecord(resp.result || [], readableFields);
+        const results = Array.isArray(filtered) ? filtered : [];
+        return ok(pagedResult(results, args.offset, args.limit));
       }
 
       default:
         return err(`Unknown ATF action: ${args.action}`);
     }
   } catch (error) {
-    return err(formatError(error));
+    throw error;
   }
 }
 
 async function pollTestResult(
-  client: ServiceNowClient,
+  client: ServiceNowOperations,
   testId: string,
   resultId: string | undefined,
   trackerId: string | undefined,
@@ -400,7 +478,7 @@ async function pollTestResult(
     if (currentResultId) {
       try {
         const resp = await client.get(
-          `/api/now/table/sys_atf_test_result/${currentResultId}`,
+          `/api/now/table/sys_atf_test_result/${serviceNowSysIdPathSegment(currentResultId)}`,
           {
             sysparm_fields:
               "sys_id,test,status,output,duration,start_time,end_time",
@@ -414,7 +492,7 @@ async function pollTestResult(
     } else if (trackerId) {
       try {
         const resp = await client.get(
-          `/api/now/table/sys_execution_tracker/${trackerId}`,
+          `/api/now/table/sys_execution_tracker/${serviceNowSysIdPathSegment(trackerId)}`,
           {
             sysparm_fields: "state,result,message",
             sysparm_display_value: "true",
@@ -435,7 +513,7 @@ async function pollTestResult(
       // Poll by test sys_id
       try {
         const resp = await client.get("/api/now/table/sys_atf_test_result", {
-          sysparm_query: `test=${escapeQueryValue(testId)}^ORDERBYDESCsys_created_on`,
+          sysparm_query: `test=${escapeQueryValue(normalizeServiceNowSysId(testId))}^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`,
           sysparm_fields:
             "sys_id,test,status,output,duration,start_time,end_time",
           sysparm_display_value: "true",
@@ -473,7 +551,7 @@ async function pollTestResult(
   if (currentResultId) {
     try {
       const resp = await client.get(
-        `/api/now/table/sys_atf_test_result/${currentResultId}`,
+        `/api/now/table/sys_atf_test_result/${serviceNowSysIdPathSegment(currentResultId)}`,
         {
           sysparm_fields:
             "sys_id,test,status,output,duration,start_time,end_time",

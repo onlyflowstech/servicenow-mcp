@@ -1,6 +1,7 @@
 import { z } from "zod";
-import { ServiceNowClient } from "../client.js";
-import { ServiceNowConfig } from "../config.js";
+import type { ServiceNowOperations } from "../client.js";
+import type { ExecutionContext } from "../execution-context.js";
+import type { ServiceNowToolSettings } from "./tool-module.js";
 import { err } from "../utils.js";
 
 export const definition = {
@@ -21,47 +22,20 @@ export const definition = {
     idempotentHint: false,
     openWorldHint: true,
   },
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      code: {
-        type: "string",
-        description: "JavaScript code to execute (GlideRecord, GlideSystem, gs.print(), etc.)",
-      },
-      scope: {
-        type: "string",
-        description: "Application scope to run in (default: global)",
-      },
-      timeout: {
-        type: "number",
-        description: "Timeout in seconds (default 30, max 300)",
-      },
-      confirm: {
-        type: "boolean",
-        description:
-          "Required for scripts containing destructive keywords (deleteRecord, deleteMultiple, setWorkflow(false))",
-      },
-      profile: {
-        type: "string",
-        description: "Named profile to use. Defaults to active profile.",
-      },
-    },
-    required: ["code"],
-  },
 };
 
 export const schema = z.object({
-  code: z.string(),
-  scope: z.string().optional().default("global"),
-  timeout: z.number().optional().default(30),
-  confirm: z.boolean().optional().default(false),
-  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
+  code: z.string().describe("JavaScript code to execute (GlideRecord, GlideSystem, gs.print(), etc.)"),
+  scope: z.string().optional().default("global").describe("Application scope to run in (default: global)"),
+  timeout: z.number().optional().default(30).describe("Timeout in seconds (default 30, max 300)"),
+  confirm: z.boolean().optional().default(false).describe("Required for scripts containing destructive keywords (deleteRecord, deleteMultiple, setWorkflow(false))"),
 });
 
 export async function handler(
   _args: z.infer<typeof schema>,
-  _client: ServiceNowClient,
-  _config: ServiceNowConfig
+  _client: ServiceNowOperations,
+  _config: ServiceNowToolSettings,
+  _context: ExecutionContext
 ) {
   return err(
     "sn_script is not yet supported -- no script was executed. ServiceNow has no REST API for " +

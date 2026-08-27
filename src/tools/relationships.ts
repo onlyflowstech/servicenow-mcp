@@ -1,7 +1,13 @@
 import { z } from "zod";
-import { ServiceNowClient } from "../client.js";
-import { ServiceNowConfig } from "../config.js";
+import type { ServiceNowOperations } from "../client.js";
+import type { ExecutionContext } from "../execution-context.js";
+import type { ServiceNowToolSettings } from "./tool-module.js";
 import { ok, err, escapeQueryValue, formatError, withWarnings } from "../utils.js";
+import {
+  normalizeServiceNowSysId,
+  serviceNowSysIdPathSegment,
+  serviceNowSysIdSchema,
+} from "../servicenow-identifiers.js";
 
 export const definition = {
   name: "sn_relationships",
@@ -14,56 +20,18 @@ export const definition = {
     idempotentHint: true,
     openWorldHint: true,
   },
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      ci_name: {
-        type: "string",
-        description: "Name of the CI to start from (resolved via cmdb_ci name field)",
-      },
-      sys_id: {
-        type: "string",
-        description: "Sys_id of the CI to start from (alternative to ci_name)",
-      },
-      depth: {
-        type: "number",
-        description: "How many levels deep to traverse (1-5, default from SN_REL_DEPTH or 3)",
-      },
-      direction: {
-        type: "string",
-        enum: ["upstream", "downstream", "both"],
-        description: "Traversal direction (default: both)",
-      },
-      type: {
-        type: "string",
-        description: "Filter by relationship type name (substring match)",
-      },
-      class: {
-        type: "string",
-        description: "Filter displayed CIs by class name (substring match)",
-      },
-      impact: {
-        type: "boolean",
-        description: "Impact analysis mode -- walks upstream only",
-      },
-      profile: {
-        type: "string",
-        description: "Named profile to use. Defaults to active profile.",
-      },
-    },
-    required: [],
-  },
 };
 
 export const schema = z.object({
-  ci_name: z.string().optional(),
-  sys_id: z.string().optional(),
-  depth: z.number().optional(),
-  direction: z.enum(["upstream", "downstream", "both"]).optional().default("both"),
-  type: z.string().optional(),
-  class: z.string().optional(),
-  impact: z.boolean().optional().default(false),
-  profile: z.string().optional().describe("Named profile to use. Defaults to active profile."),
+  ci_name: z.string().optional().describe("Name of the CI to start from (resolved via cmdb_ci name field)"),
+  sys_id: serviceNowSysIdSchema.optional().describe("32-hex sys_id of the CI to start from (alternative to ci_name)"),
+  depth: z.number().int().min(1).max(5).optional().describe("How many levels deep to traverse (1-5, default from SN_REL_DEPTH or 3)"),
+  limit: z.number().int().min(1).max(1000).optional().default(100).describe("Maximum relationships to return (default 100, max 1000)"),
+  offset: z.number().int().min(0).max(1000).optional().default(0).describe("Deterministic traversal offset (default 0, max 1000)"),
+  direction: z.enum(["upstream", "downstream", "both"]).optional().default("both").describe("Traversal direction (default: both)"),
+  type: z.string().optional().describe("Filter by relationship type name (substring match)"),
+  class: z.string().optional().describe("Filter displayed CIs by class name (substring match)"),
+  impact: z.boolean().optional().default(false).describe("Impact analysis mode -- walks upstream only"),
 });
 
 interface RelNode {
@@ -77,8 +45,9 @@ interface RelNode {
 
 export async function handler(
   args: z.infer<typeof schema>,
-  client: ServiceNowClient,
-  config: ServiceNowConfig
+  client: ServiceNowOperations,
+  config: ServiceNowToolSettings,
+  _context: ExecutionContext
 ) {
   try {
     if (!args.ci_name && !args.sys_id) {
@@ -95,19 +64,19 @@ export async function handler(
     let rootClass: string;
 
     if (args.sys_id) {
-      const ciResp = await client.get(`/api/now/table/cmdb_ci/${args.sys_id}`, {
+      const ciResp = await client.get(`/api/now/table/cmdb_ci/${serviceNowSysIdPathSegment(args.sys_id)}`, {
         sysparm_fields: "sys_id,name,sys_class_name",
         sysparm_display_value: "true",
       });
       if (!ciResp.result?.name) {
         return err(`CI not found with sys_id: ${args.sys_id}`);
       }
-      rootId = args.sys_id;
+      rootId = normalizeServiceNowSysId(args.sys_id);
       rootName = ciResp.result.name;
       rootClass = ciResp.result.sys_class_name;
     } else {
       const ciResp = await client.get("/api/now/table/cmdb_ci", {
-        sysparm_query: `name=${escapeQueryValue(args.ci_name!)}`,
+        sysparm_query: `name=${escapeQueryValue(args.ci_name!)}^ORDERBYsys_id`,
         sysparm_fields: "sys_id,name,sys_class_name",
         sysparm_display_value: "true",
         sysparm_limit: "5",
@@ -126,11 +95,16 @@ export async function handler(
     const classCache = new Map<string, string>([[rootId, rootClass]]);
     const allRels: RelNode[] = [];
     const warnings: string[] = [];
+    const traversalTarget = args.offset + args.limit + 1;
+    const maxTraversalRequests = 2_001;
+    let traversalRequests = 0;
+    let traversalTruncated = false;
 
     async function getClass(id: string): Promise<string> {
       if (classCache.has(id)) return classCache.get(id)!;
       try {
-        const resp = await client.get(`/api/now/table/cmdb_ci/${id}`, {
+        const safeId = normalizeServiceNowSysId(id);
+        const resp = await client.get(`/api/now/table/cmdb_ci/${serviceNowSysIdPathSegment(safeId)}`, {
           sysparm_fields: "sys_class_name",
           sysparm_display_value: "true",
         });
@@ -173,13 +147,18 @@ export async function handler(
     }
 
     async function traverse(currentId: string, currentDepth: number): Promise<void> {
-      if (currentDepth > maxDepth) return;
+      if (currentDepth > maxDepth || allRels.length >= traversalTarget) return;
+      if (traversalRequests >= maxTraversalRequests) {
+        traversalTruncated = true;
+        return;
+      }
+      traversalRequests += 1;
 
       let relResp;
       try {
-        const safeId = escapeQueryValue(currentId);
+        const safeId = escapeQueryValue(normalizeServiceNowSysId(currentId));
         relResp = await client.get("/api/now/table/cmdb_rel_ci", {
-          sysparm_query: `parent=${safeId}^ORchild=${safeId}`,
+          sysparm_query: `parent=${safeId}^ORchild=${safeId}^ORDERBYsys_id`,
           sysparm_fields: "parent,child,type",
           sysparm_display_value: "all",
           sysparm_limit: "100",
@@ -196,8 +175,19 @@ export async function handler(
       const seen = new Set<string>();
 
       for (const rec of records) {
-        const parentId = extractValue(rec.parent);
-        const childId = extractValue(rec.child);
+        if (allRels.length >= traversalTarget) {
+          traversalTruncated = true;
+          break;
+        }
+        let parentId: string;
+        let childId: string;
+        try {
+          parentId = normalizeServiceNowSysId(extractValue(rec.parent));
+          childId = normalizeServiceNowSysId(extractValue(rec.child));
+        } catch {
+          warnings.push("cmdb_rel_ci returned an invalid relationship identifier");
+          continue;
+        }
         const parentName = extractDisplay(rec.parent);
         const childName = extractDisplay(rec.child);
         const typeName = extractDisplay(rec.type) || "Related to";
@@ -250,17 +240,31 @@ export async function handler(
 
     await traverse(rootId, 1);
 
+    const page = allRels.slice(args.offset, args.offset + args.limit);
+
     return ok(
       withWarnings(
         {
           root: { name: rootName, class: rootClass, sys_id: rootId },
-          relationships: allRels,
-          meta: { depth: maxDepth, direction, total: allRels.length },
+          relationships: page,
+          meta: {
+            depth: maxDepth,
+            direction,
+            total: allRels.length,
+            offset: args.offset,
+            limit: args.limit,
+            has_more: args.offset + page.length < allRels.length,
+            ...(args.offset + page.length < allRels.length
+              ? { next_offset: args.offset + page.length }
+              : {}),
+            traversal_truncated: traversalTruncated,
+            traversal_requests: traversalRequests,
+          },
         },
         warnings
       )
     );
   } catch (error) {
-    return err(formatError(error));
+    throw error;
   }
 }

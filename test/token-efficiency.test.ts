@@ -5,6 +5,7 @@ import { handler as createHandler, schema as createSchema } from "../src/tools/c
 import { handler as updateHandler, schema as updateSchema } from "../src/tools/update.js";
 import { handler as syslogHandler, schema as syslogSchema } from "../src/tools/syslog.js";
 import { DEFAULT_FIELDS, resolveFields } from "../src/table-defaults.js";
+import { resolveReadableFields } from "../src/field-policy.js";
 import type { ServiceNowClient } from "../src/client.js";
 import type { ServiceNowConfig } from "../src/config.js";
 
@@ -95,14 +96,19 @@ describe("sn_query default field selection", () => {
     );
   });
 
-  it("sends no sysparm_fields for an unknown table", async () => {
+  it("fails closed for a table without an explicit field policy", async () => {
     const { client, getWithMeta } = metaClient([]);
-    await queryHandler(querySchema.parse({ table: "u_custom_widget" }), client, config);
-    const params = getWithMeta.mock.calls[0][1] as Record<string, string>;
-    expect(params.sysparm_fields).toBeUndefined();
+    await expect(
+      queryHandler(
+        querySchema.parse({ table: "u_custom_widget" }),
+        client,
+        config
+      )
+    ).rejects.toThrow("Field access denied by policy");
+    expect(getWithMeta).not.toHaveBeenCalled();
   });
 
-  it('sends no sysparm_fields when fields="all" on a known table', async () => {
+  it('maps fields="all" to the finite readable policy', async () => {
     const { client, getWithMeta } = metaClient([]);
     await queryHandler(
       querySchema.parse({ table: "incident", fields: "all" }),
@@ -110,7 +116,9 @@ describe("sn_query default field selection", () => {
       config
     );
     const params = getWithMeta.mock.calls[0][1] as Record<string, string>;
-    expect(params.sysparm_fields).toBeUndefined();
+    expect(params.sysparm_fields).toBe(
+      resolveReadableFields("incident", { fields: "all" }).join(",")
+    );
   });
 
   it("passes explicit fields through unchanged", async () => {
@@ -187,14 +195,24 @@ describe("sn_query pagination metadata", () => {
     expect(payload.hint).toBeUndefined();
   });
 
-  it("falls back to record_count === limit when the header is absent", async () => {
-    const { client } = metaClient([{ sys_id: "a" }, { sys_id: "b" }]);
+  it("uses the limit+1 sentinel when the total header is absent", async () => {
+    const { client, getWithMeta } = metaClient([
+      { sys_id: "a" },
+      { sys_id: "b" },
+      { sys_id: "sentinel" },
+    ]);
     const result = await queryHandler(
       querySchema.parse({ table: "incident", limit: 2 }),
       client,
       config
     );
     const payload = parseText(result);
+    expect(getWithMeta).toHaveBeenCalledWith(
+      "/api/now/table/incident",
+      expect.objectContaining({ sysparm_limit: "3" })
+    );
+    expect(payload.results).toEqual([{ sys_id: "a" }, { sys_id: "b" }]);
+    expect(payload.record_count).toBe(2);
     expect(payload.total).toBeUndefined();
     expect(payload.has_more).toBe(true);
     expect(payload.next_offset).toBe(2);
@@ -262,6 +280,26 @@ describe("sn_query pagination metadata", () => {
     expect(payload.total).toBe(0);
     expect(payload.has_more).toBe(false);
   });
+
+  it.each(["-1", "1.5", "9007199254740992", " ", "1e3", "+3", "01"])(
+    "ignores hostile X-Total-Count %j and uses the bounded page fallback",
+    async (header) => {
+      const { client } = metaClient([{ sys_id: "a" }], {
+        "X-Total-Count": header,
+      });
+      const result = await queryHandler(
+        querySchema.parse({ table: "incident", limit: 2, offset: 7 }),
+        client,
+        config
+      );
+      const payload = parseText(result);
+
+      expect(payload.record_count).toBe(1);
+      expect(payload.total).toBeUndefined();
+      expect(payload.has_more).toBe(false);
+      expect(payload.next_offset).toBeUndefined();
+    }
+  );
 });
 
 describe("sn_get default field selection", () => {
@@ -273,12 +311,12 @@ describe("sn_get default field selection", () => {
   it("applies DEFAULT_FIELDS for a known table", async () => {
     const { client, get } = getClient();
     await getHandler(
-      getSchema.parse({ table: "incident", sys_id: "abc" }),
+      getSchema.parse({ table: "incident", sys_id: "11111111111111111111111111111111" }),
       client,
       config
     );
     expect(get).toHaveBeenCalledWith(
-      "/api/now/table/incident/abc",
+      "/api/now/table/incident/11111111111111111111111111111111",
       expect.objectContaining({
         sysparm_fields: DEFAULT_FIELDS.incident,
         sysparm_exclude_reference_link: "true",
@@ -286,32 +324,38 @@ describe("sn_get default field selection", () => {
     );
   });
 
-  it("sends no sysparm_fields for an unknown table", async () => {
+  it("fails closed for a table without an explicit field policy", async () => {
     const { client, get } = getClient();
-    await getHandler(
-      getSchema.parse({ table: "u_custom_widget", sys_id: "abc" }),
-      client,
-      config
-    );
-    const params = get.mock.calls[0][1] as Record<string, string>;
-    expect(params.sysparm_fields).toBeUndefined();
+    await expect(
+      getHandler(
+        getSchema.parse({
+          table: "u_custom_widget",
+          sys_id: "11111111111111111111111111111111",
+        }),
+        client,
+        config
+      )
+    ).rejects.toThrow("Field access denied by policy");
+    expect(get).not.toHaveBeenCalled();
   });
 
-  it('sends no sysparm_fields when fields="all"', async () => {
+  it('maps fields="all" to the finite readable policy', async () => {
     const { client, get } = getClient();
     await getHandler(
-      getSchema.parse({ table: "incident", sys_id: "abc", fields: "all" }),
+      getSchema.parse({ table: "incident", sys_id: "11111111111111111111111111111111", fields: "all" }),
       client,
       config
     );
     const params = get.mock.calls[0][1] as Record<string, string>;
-    expect(params.sysparm_fields).toBeUndefined();
+    expect(params.sysparm_fields).toBe(
+      resolveReadableFields("incident", { fields: "all" }).join(",")
+    );
   });
 
   it("strips empty fields from the record", async () => {
     const { client } = getClient({ sys_id: "abc", state: "2", close_code: "", parent: null });
     const result = await getHandler(
-      getSchema.parse({ table: "incident", sys_id: "abc" }),
+      getSchema.parse({ table: "incident", sys_id: "11111111111111111111111111111111" }),
       client,
       config
     );
@@ -323,7 +367,7 @@ describe("sn_create response shape", () => {
   it("returns sys_id, number, table, and the stripped record without duplication", async () => {
     const post = vi.fn(async () => ({
       result: {
-        sys_id: "s1",
+        sys_id: "2".repeat(32),
         number: "INC0010001",
         short_description: "Server down",
         description: "",
@@ -339,10 +383,10 @@ describe("sn_create response shape", () => {
       config
     );
     expect(parseText(result)).toEqual({
-      sys_id: "s1",
+      sys_id: "2".repeat(32),
       number: "INC0010001",
       table: "incident",
-      record: { short_description: "Server down", active: false, reopen_count: 0 },
+      record: { short_description: "Server down", active: false },
     });
   });
 });
@@ -350,16 +394,16 @@ describe("sn_create response shape", () => {
 describe("sn_update response shape", () => {
   it("returns sys_id plus the stripped record without duplicating sys_id", async () => {
     const patch = vi.fn(async () => ({
-      result: { sys_id: "s1", state: "6", close_notes: "Fixed", comments: "", parent: null },
+      result: { sys_id: "1".repeat(32), state: "6", close_notes: "Fixed", comments: "", parent: null },
     }));
     const client = { patch } as unknown as ServiceNowClient;
     const result = await updateHandler(
-      updateSchema.parse({ table: "incident", sys_id: "s1", fields: { state: "6" } }),
+      updateSchema.parse({ table: "incident", sys_id: "11111111111111111111111111111111", fields: { state: "6" } }),
       client,
       config
     );
     expect(parseText(result)).toEqual({
-      sys_id: "s1",
+      sys_id: "1".repeat(32),
       record: { state: "6", close_notes: "Fixed" },
     });
   });

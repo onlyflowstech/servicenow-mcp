@@ -29,12 +29,34 @@ export interface ServiceNowConfig {
   apiKeyHeader?: string;
   /** Per-request timeout in ms (default 30000). */
   timeoutMs?: number;
+  /** Per-instance upstream REST concurrency cap (default 4). */
+  maxConcurrentRequests?: number;
+  /** Schema metadata cache TTL in milliseconds (default 300000). */
+  schemaCacheTtlMs?: number;
 }
 
 /**
  * Parse a timeout value (ms). Returns undefined for missing,
  * non-numeric, or non-positive values.
  */
+export function parsePositiveIntegerEnv(
+  value: string | undefined,
+  name: string,
+  options: { readonly min?: number; readonly max?: number } = {}
+): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  if (!/^(?:0|[1-9]\d*)$/u.test(value.trim())) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  const parsed = Number(value.trim());
+  const min = options.min ?? 1;
+  const max = options.max ?? Number.MAX_SAFE_INTEGER;
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be between ${min} and ${max}`);
+  }
+  return parsed;
+}
+
 export function parseTimeoutMs(value: string | undefined): number | undefined {
   if (!value) return undefined;
   const parsed = parseInt(value, 10);

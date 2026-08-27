@@ -29,6 +29,7 @@ const config: ServiceNowConfig = {
  */
 const INJECTION = "web-server-01^ORactive=false";
 const NEUTRALIZED = "web-server-01ORactive=false";
+const VALID_SYS_ID = "0123456789abcdef0123456789abcdef";
 
 function getClient(result: unknown = []) {
   const get = vi.fn(async () => ({ result }));
@@ -59,16 +60,37 @@ describe("encoded-query injection is neutralized", () => {
     expect(params.sysparm_query).toContain(`messageLIKE${NEUTRALIZED}`);
   });
 
-  it("sn_attach list table and sys_id filters", async () => {
+  it("sn_attach list table filter", async () => {
     const { client, get } = getClient();
     await attachHandler(
-      attachSchema.parse({ action: "list", table: INJECTION, sys_id: INJECTION }),
+      attachSchema.parse({
+        action: "list",
+        table: INJECTION,
+        sys_id: VALID_SYS_ID,
+      }),
       client,
       config
     );
     expect(queryOfCall(get)).toBe(
-      `table_name=${NEUTRALIZED}^table_sys_id=${NEUTRALIZED}`
+      `table_name=${NEUTRALIZED}^table_sys_id=${VALID_SYS_ID}`
     );
+  });
+
+  it("sn_attach rejects sys_id injection before client calls", () => {
+    const { get } = getClient();
+    const parsed = attachSchema.safeParse({
+      action: "list",
+      table: "incident",
+      sys_id: INJECTION,
+    });
+
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues).toContainEqual(
+        expect.objectContaining({ path: ["sys_id"], code: "invalid_string" })
+      );
+    }
+    expect(get).not.toHaveBeenCalled();
   });
 
   it("sn_discover tables name/label search", async () => {
@@ -105,8 +127,10 @@ describe("encoded-query injection is neutralized", () => {
 
   it("sn_schema table name", async () => {
     const { client, get } = getClient();
-    await schemaHandler(schemaSchema.parse({ table: INJECTION }), client, config);
-    expect(queryOfCall(get)).toBe(`name=${NEUTRALIZED}^internal_type!=collection`);
+    await expect(
+      schemaHandler(schemaSchema.parse({ table: INJECTION }), client, config)
+    ).rejects.toThrow("Field access denied by policy");
+    expect(get).not.toHaveBeenCalled();
   });
 
   it("sn_relationships ci_name lookup", async () => {
@@ -116,7 +140,7 @@ describe("encoded-query injection is neutralized", () => {
       client,
       config
     );
-    expect(queryOfCall(get)).toBe(`name=${NEUTRALIZED}`);
+    expect(queryOfCall(get)).toBe(`name=${NEUTRALIZED}^ORDERBYsys_id`);
     expect(result.isError).toBe(true); // no CI found -- lookup stays scoped
   });
 
@@ -127,7 +151,7 @@ describe("encoded-query injection is neutralized", () => {
       client,
       config
     );
-    expect(queryOfCall(get)).toBe(`name=${NEUTRALIZED}`);
+    expect(queryOfCall(get)).toBe(`name=${NEUTRALIZED}^ORDERBYsys_id`);
     expect(result.isError).toBe(true); // suite not found
   });
 
@@ -141,7 +165,7 @@ describe("encoded-query injection is neutralized", () => {
       client,
       config
     );
-    expect(queryOfCall(get)).toBe("name=gs.getUserID()");
+    expect(queryOfCall(get)).toBe("name=gs.getUserID()^ORDERBYsys_id");
   });
 
   it("sn_syslog message filter with a javascript: prefix is matched literally", async () => {
@@ -165,18 +189,22 @@ describe("encoded-query injection is neutralized", () => {
     );
   });
 
-  it("sn_atf results execution_id fan-out query", async () => {
-    // First call (direct get) returns no record, second call runs the query.
+  it("sn_atf rejects execution_id injection before client calls", () => {
     const get = vi.fn(async () => ({ result: [] }));
-    const client = { get } as unknown as ServiceNowClient;
-    await atfHandler(
-      atfSchema.parse({ action: "results", execution_id: INJECTION }),
-      client,
-      config
-    );
-    const query = queryOfCall(get, 1);
-    expect(query).toBe(
-      `execution=${NEUTRALIZED}^ORparent=${NEUTRALIZED}^ORtest_suite=${NEUTRALIZED}`
-    );
+    const parsed = atfSchema.safeParse({
+      action: "results",
+      execution_id: INJECTION,
+    });
+
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues).toContainEqual(
+        expect.objectContaining({
+          path: ["execution_id"],
+          code: "invalid_string",
+        })
+      );
+    }
+    expect(get).not.toHaveBeenCalled();
   });
 });

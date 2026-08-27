@@ -3,10 +3,8 @@ import { schema as querySchema } from "../src/tools/query.js";
 import { schema as getSchema } from "../src/tools/get.js";
 import { schema as batchSchema } from "../src/tools/batch.js";
 import { schema as atfSchema } from "../src/tools/atf.js";
-import {
-  schema as profileSchema,
-  definition as profileDefinition,
-} from "../src/tools/profile.js";
+import { schema as profileSchema } from "../src/tools/profile.js";
+import { profileNameSchema } from "../src/tools/index.js";
 
 /** Join zod issues the same way executeTool renders them. */
 function issueString(result: { success: boolean; error?: { issues: Array<{ path: (string | number)[]; message: string }> } }): string {
@@ -34,11 +32,9 @@ describe("sn_query schema", () => {
       offset: 10,
       orderby: "-sys_created_on",
       display_value: "all",
-      profile: "secondary",
     });
     expect(parsed.table).toBe("change_request");
     expect(parsed.limit).toBe(5);
-    expect(parsed.profile).toBe("secondary");
   });
 
   it("rejects missing table with a table field path", () => {
@@ -78,7 +74,7 @@ describe("sn_get schema", () => {
   it("rejects display_value outside the true/false/all enum", () => {
     const result = getSchema.safeParse({
       table: "incident",
-      sys_id: "abc",
+      sys_id: "11111111111111111111111111111111",
       display_value: "maybe",
     });
     expect(result.success).toBe(false);
@@ -88,7 +84,7 @@ describe("sn_get schema", () => {
   it("accepts every display_value enum member", () => {
     for (const dv of ["true", "false", "all"]) {
       expect(
-        getSchema.safeParse({ table: "incident", sys_id: "abc", display_value: dv }).success
+        getSchema.safeParse({ table: "incident", sys_id: "11111111111111111111111111111111", display_value: dv }).success
       ).toBe(true);
     }
   });
@@ -98,7 +94,9 @@ describe("sn_batch schema", () => {
   it("parses a valid update and applies defaults (dry-run, limit 200)", () => {
     const parsed = batchSchema.parse({
       table: "incident",
-      query: "active=true",
+      structured_query: {
+        filter: { type: "equality", field: "active", operator: "eq", value: true },
+      },
       action: "update",
       fields: { state: "7" },
     });
@@ -110,7 +108,9 @@ describe("sn_batch schema", () => {
   it("parses a valid delete without fields", () => {
     const parsed = batchSchema.parse({
       table: "incident",
-      query: "active=false",
+      structured_query: {
+        filter: { type: "equality", field: "active", operator: "eq", value: false },
+      },
       action: "delete",
     });
     expect(parsed.fields).toBeUndefined();
@@ -119,17 +119,51 @@ describe("sn_batch schema", () => {
   it("rejects an unknown action with an action field path", () => {
     const result = batchSchema.safeParse({
       table: "incident",
-      query: "active=true",
+      structured_query: {
+        filter: { type: "equality", field: "active", operator: "eq", value: true },
+      },
       action: "upsert",
     });
     expect(result.success).toBe(false);
     expect(issueString(result)).toContain("action:");
   });
 
-  it("rejects missing query with a query field path", () => {
+  it("rejects missing structured_query with a structured_query field path", () => {
     const result = batchSchema.safeParse({ table: "incident", action: "delete" });
     expect(result.success).toBe(false);
-    expect(issueString(result)).toContain("query:");
+    expect(issueString(result)).toContain("structured_query:");
+  });
+
+  it("does not publish or accept the removed raw query selector", () => {
+    expect(Object.keys(batchSchema.shape)).not.toContain("query");
+    const result = batchSchema.safeParse({
+      table: "incident",
+      query: "active=true^ORpasswordISNOTEMPTY",
+      action: "delete",
+    });
+    expect(result.success).toBe(false);
+    expect(issueString(result)).toContain("Use structured_query");
+
+    const mixed = batchSchema.safeParse({
+      table: "incident",
+      structured_query: {
+        filter: { type: "equality", field: "active", operator: "eq", value: true },
+      },
+      query: "active=true",
+      action: "delete",
+    });
+    expect(mixed.success).toBe(false);
+    expect(issueString(mixed)).toContain("Use structured_query");
+  });
+
+  it("requires an actual filter and rejects order-only bulk selection", () => {
+    const result = batchSchema.safeParse({
+      table: "incident",
+      structured_query: { order_by: [{ field: "priority" }] },
+      action: "delete",
+    });
+    expect(result.success).toBe(false);
+    expect(issueString(result)).toContain("structured_query.filter");
   });
 });
 
@@ -160,33 +194,15 @@ describe("sn_atf schema", () => {
 });
 
 describe("sn_profile schema", () => {
-  it("declares the same parameters in zod and the hand-written JSON schema", () => {
-    const jsonProps = Object.keys(profileDefinition.inputSchema.properties);
-    const zodKeys = Object.keys(profileSchema.shape);
-    expect(new Set(jsonProps)).toEqual(new Set(zodKeys));
+  it("has no tool-specific inputs beyond the shared profile selector", () => {
+    expect(Object.keys(profileSchema.shape)).toEqual([]);
   });
 
-  it("keeps the auth_type and grant_type enums in sync between zod and JSON schema", () => {
-    expect(profileDefinition.inputSchema.properties.auth_type.enum).toEqual(
-      profileSchema.shape.auth_type.unwrap().options
-    );
-    expect(profileDefinition.inputSchema.properties.grant_type.enum).toEqual(
-      profileSchema.shape.grant_type.unwrap().options
-    );
-  });
-
-  it("rejects unknown auth_type and grant_type values", () => {
-    expect(
-      profileSchema.safeParse({ action: "add", auth_type: "token" }).success
-    ).toBe(false);
-    expect(
-      profileSchema.safeParse({ action: "add", grant_type: "implicit" }).success
-    ).toBe(false);
-  });
-
-  it("rejects non-positive and non-integer timeout_ms", () => {
-    expect(profileSchema.safeParse({ action: "add", timeout_ms: 0 }).success).toBe(false);
-    expect(profileSchema.safeParse({ action: "add", timeout_ms: 1.5 }).success).toBe(false);
-    expect(profileSchema.safeParse({ action: "add", timeout_ms: 5000 }).success).toBe(true);
+  it("requires a non-empty profile name and trims it", () => {
+    expect(profileNameSchema.safeParse(7).success).toBe(false);
+    expect(profileNameSchema.safeParse("").success).toBe(false);
+    expect(profileNameSchema.safeParse("   ").success).toBe(false);
+    expect(profileNameSchema.safeParse("x".repeat(129)).success).toBe(false);
+    expect(profileNameSchema.parse("  secondary  ")).toBe("secondary");
   });
 });
