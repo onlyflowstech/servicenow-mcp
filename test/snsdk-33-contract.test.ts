@@ -542,6 +542,39 @@ describe("SNSDK-33 bounded collection inputs", () => {
     expect(syslogSchema.safeParse({ offset: 10_001 }).success).toBe(false);
   });
 
+  it("preserves ungrouped COUNT stats returned as an object", async () => {
+    const get = vi.fn(async () => ({
+      result: { stats: { count: "161" } },
+    }));
+    const args = aggregateSchema.parse({
+      table: "incident",
+      type: "COUNT",
+    });
+    const legacy = await aggregateHandler(
+      args,
+      { get } as never,
+      {} as never,
+      {} as never
+    );
+
+    expect(get).toHaveBeenCalledWith("/api/now/stats/incident", {
+      sysparm_count: "true",
+      sysparm_limit: "1",
+      sysparm_offset: "0",
+    });
+
+    const structured = productionToolOutputSchemas.sn_aggregate.parse(
+      finalizeEnvelopeResult(
+        enrichSuccessfulResult(
+          envelopeCompatibilityResult("sn_aggregate", args, legacy),
+          PROFILE
+        )
+      )?.structuredContent
+    );
+
+    expect(structured.data.result).toEqual([{ stats: { count: "161" } }]);
+  });
+
   it("uses stable upstream aggregate ordering with a sentinel group", async () => {
     const get = vi.fn(async () => ({
       result: [

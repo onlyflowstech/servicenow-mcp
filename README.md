@@ -157,6 +157,8 @@ On a 401, the error explains the Basic Auth restriction program (KB3096078) and 
 
 Every request is bounded by a timeout (default 30s; per-profile `timeoutMs` or env `SN_TIMEOUT_MS`) and retried up to twice with exponential backoff on 429/502/503/504, honoring `Retry-After`. POST requests are only retried on 429 — never after a 5xx that may have executed side effects.
 
+ServiceNow can return HTTP 429 with an empty body. Treat the status and `Retry-After` header as authoritative; do not benchmark or validate tool success from response latency or body shape alone. In normal ServiceNow instances, plan around the Background throttling default of roughly 120 requests per 60 seconds per identity unless the instance limit is explicitly raised.
+
 ---
 
 ## Why This MCP Server?

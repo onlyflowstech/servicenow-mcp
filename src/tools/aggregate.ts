@@ -38,6 +38,19 @@ function canonicalAggregateKey(value: unknown, depth = 0): string {
   return JSON.stringify(value) ?? String(value);
 }
 
+function normalizeAggregateGroups(filtered: unknown): unknown[] {
+  if (Array.isArray(filtered)) return filtered;
+  if (
+    typeof filtered === "object" &&
+    filtered !== null &&
+    !Array.isArray(filtered) &&
+    "stats" in filtered
+  ) {
+    return [filtered];
+  }
+  return [];
+}
+
 export const definition = {
   name: "sn_aggregate",
   description:
@@ -138,7 +151,7 @@ export async function handler(
 
     const resp = await client.get(`/api/now/stats/${args.table}`, params);
     const filtered = filterAggregateResult(resp.result, readableFields);
-    const groups = Array.isArray(filtered) ? filtered : [];
+    const groups = normalizeAggregateGroups(filtered);
     groups.sort((left, right) =>
       canonicalAggregateKey(left).localeCompare(canonicalAggregateKey(right))
     );

@@ -209,6 +209,26 @@ describe("retries", () => {
     expect(sleep).toHaveBeenCalledExactlyOnceWith(7000);
   });
 
+  it("classifies an empty-body 429 as rate_limit instead of parsing it as success", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response("", {
+        status: 429,
+        headers: { "Retry-After": "12" },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      rejectedToolError(makeClient({}, { maxRetries: 0 }).get("/api/now/table/incident"))
+    ).resolves.toEqual({
+      category: "rate_limit",
+      message: "ServiceNow rate limit was exceeded.",
+      retry: "retry_later",
+      retryAfterSeconds: 12,
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("retries a 429 POST (rejected before processing, safe to retry)", async () => {
     const fetchMock = vi
       .fn()
