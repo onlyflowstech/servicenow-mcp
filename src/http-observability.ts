@@ -423,7 +423,13 @@ export function safeHttpRateLimitRejection(
       "content-type": "application/json; charset=utf-8",
       "retry-after": String(retryAfterSeconds),
     }),
-    body: '{"error":"rate_limited"}\n',
+    body: `${JSON.stringify({
+      error: "rate_limited",
+      message:
+        "Rate limited. Retry after the number of seconds in retry_after_seconds or the Retry-After header.",
+      retry_after_seconds: retryAfterSeconds,
+    })}
+`,
   });
 }
 

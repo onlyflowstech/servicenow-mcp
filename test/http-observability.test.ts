@@ -644,7 +644,7 @@ describe("bounded dual-scope HTTP rate limiting", () => {
         "content-type": "application/json; charset=utf-8",
         "retry-after": "10",
       },
-      body: '{"error":"rate_limited"}\n',
+      body: '{"error":"rate_limited","message":"Rate limited. Retry after the number of seconds in retry_after_seconds or the Retry-After header.","retry_after_seconds":10}\n',
     });
     expect(Object.isFrozen(response)).toBe(true);
     expect(Object.isFrozen(response.headers)).toBe(true);

@@ -253,7 +253,12 @@ describe("SNSDK-26 HTTP runtime wiring", () => {
     expect(live.status).toBe(200);
     expect(await live.json()).toEqual({ status: "live" });
     expect(second.headers.get("retry-after")).toMatch(/^\d+$/u);
-    expect(await second.json()).toEqual({ error: "rate_limited" });
+    expect(await second.json()).toEqual({
+      error: "rate_limited",
+      message:
+        "Rate limited. Retry after the number of seconds in retry_after_seconds or the Retry-After header.",
+      retry_after_seconds: Number(second.headers.get("retry-after")),
+    });
     expect(authenticate).toHaveBeenCalledTimes(1);
     expect(createServer).not.toHaveBeenCalled();
     expect(
@@ -306,7 +311,12 @@ describe("SNSDK-26 HTTP runtime wiring", () => {
     });
 
     expect(response.status).toBe(429);
-    expect(await response.json()).toEqual({ error: "rate_limited" });
+    expect(await response.json()).toEqual({
+      error: "rate_limited",
+      message:
+        "Rate limited. Retry after the number of seconds in retry_after_seconds or the Retry-After header.",
+      retry_after_seconds: Number(response.headers.get("retry-after")),
+    });
     expect(createServer).not.toHaveBeenCalled();
     expect(observed.events.at(-1)).toMatchObject({
       type: "http_request",

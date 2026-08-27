@@ -177,7 +177,12 @@ describe("packaged HTTP entrypoint", () => {
       const rejected = await post();
       expect(rejected.status).toBe(429);
       expect(rejected.headers.get("retry-after")).toBe("60");
-      expect(await rejected.json()).toEqual({ error: "rate_limited" });
+      expect(await rejected.json()).toEqual({
+        error: "rate_limited",
+        message:
+          "Rate limited. Retry after the number of seconds in retry_after_seconds or the Retry-After header.",
+        retry_after_seconds: 60,
+      });
 
       const health = await fetch(new URL("/health/live", url));
       expect(health.status).toBe(200);
