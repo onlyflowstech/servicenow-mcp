@@ -398,6 +398,7 @@ deduplicated, and must be valid ServiceNow identifiers.
 | `SN_ALLOWED_READ_TABLES` | ❌ | deny all | Tables permitted for read operations. Use `*` to allow all non-hard-denied readable tables. |
 | `SN_ALLOWED_WRITE_TABLES` | ❌ | deny all | Tables permitted for create, update, incident journal append, delete, upload, and confirmed batch operations. Use `*` to allow all non-hard-denied writable tables. Write permission never implies read permission. |
 | `SN_TABLE_ACCESS_TARGETS` | Required for exact allowlisted caller-addressable tables; optional with `*` | `[]` | Trusted JSON classification with `table`, exact permitted `tools`, `kind` (`canonical`, `alias`, `view`, or `extension`), literal `closureComplete: true`, and the complete backing/ancestor/descendant `relatedTables` closure. With `*`, omitted target entries use the wildcard operation grant; explicit target entries can still narrow tools and validate related-table closure. |
+| `SN_FIELD_POLICY_DEFINITIONS` | Required for custom/generic table fields | built-in finite policy | Trusted JSON object keyed by table name or `*`. Each entry may define `defaults`, `readable`, and `writable`; `readable`/`writable` accept exact field arrays or `"*"`. Sensitive field names are still denied. Use `{"*":{"defaults":["sys_id"],"readable":"*","writable":[]}}` for broad read-only custom-table exploration. Use `writable:"*"` only for intentional broad mutation access. |
 | `SN_ENCODED_QUERY_READ_POLICY` | ❌ | deny all | Trusted JSON object containing bounded `rules` for an exact `sn_query`/table pair. Each rule requires `maxLength`, `maxTerms`, readable `fields`, supported `operators`, `maxLimit`, `maxOffset`, and `maxResponseBytes`. No rule can authorize a write or another tool. |
 
 Credential, authentication, encryption, and security-policy tables remain
@@ -407,9 +408,12 @@ is allowed before the first ServiceNow client access. Every related target must
 have the same read or write permission, so a base table, alias, view, or
 extension cannot bypass an unlisted or hard-denied backing or descendant table.
 Related permission does not make a dependency directly caller-addressable
-without its own target entry. Build the complete target catalog from approved
-ServiceNow metadata and treat it as trusted startup configuration; omit a
-target when reachability cannot be proven complete.
+without its own target entry. Table access is necessary but not sufficient:
+field access is also deny-by-default unless the table is covered by the built-in
+field policy or `SN_FIELD_POLICY_DEFINITIONS` exact/`*` fallback. Build the
+complete target catalog from approved ServiceNow metadata and treat it as
+trusted startup configuration; omit a target when reachability cannot be proven
+complete.
 `sn_nl` and ATF `run`/`run-suite` currently fail closed because they do not emit
 a complete typed side-effect plan; use the corresponding typed tool instead.
 Incident journal fields are append-only: generic `sn_update` rejects `comments`

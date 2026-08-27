@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   FieldPolicyError,
@@ -20,6 +20,10 @@ import {
   validateWritableFields,
 } from "../src/field-policy.js";
 import { resolveToolTableAccess } from "../src/tool-table-access.js";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 function expectPolicyReason(
   action: () => unknown,
@@ -69,6 +73,47 @@ describe("SNSDK-30 readable field policy", () => {
     expectPolicyReason(
       () => resolveReadableFields("incident", { fields: "sys_id,SYS_ID" }),
       "invalid_field_selection"
+    );
+  });
+
+
+  it("supports operator-configured generic readable field fallback", () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({
+        "*": { defaults: ["sys_id", "name"], readable: "*", writable: [] },
+      })
+    );
+
+    expect(resolveReadableFields("u_unclassified")).toEqual(["sys_id", "name"]);
+    expect(
+      resolveReadableFields("u_unclassified", { fields: "sys_id,u_custom_safe" })
+    ).toEqual(["sys_id", "u_custom_safe"]);
+    expectPolicyReason(
+      () => resolveReadableFields("u_unclassified", { fields: "sys_id,password" }),
+      "sensitive_field"
+    );
+  });
+
+  it("supports operator-configured exact table field overrides", () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({
+        incident: {
+          defaults: ["sys_id", "u_public"],
+          readable: ["sys_id", "u_public"],
+          writable: ["u_public"],
+        },
+      })
+    );
+
+    expect(resolveReadableFields("incident")).toEqual(["sys_id", "u_public"]);
+    expect(validateWritableFields("incident", { u_public: "ok" })).toEqual({
+      u_public: "ok",
+    });
+    expectPolicyReason(
+      () => resolveReadableFields("incident", { fields: "number" }),
+      "unreadable_field"
     );
   });
 
@@ -188,6 +233,24 @@ describe("SNSDK-30 writable field policy", () => {
           description: Object.create({ inherited: "unsafe" }),
         }),
       "invalid_write_payload"
+    );
+  });
+
+
+  it("supports operator-configured generic writable field fallback", () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({
+        "*": { defaults: ["sys_id"], readable: "*", writable: "*" },
+      })
+    );
+
+    expect(
+      validateWritableFields("u_unclassified", { u_safe_text: "ok", state: "2" })
+    ).toEqual({ u_safe_text: "ok", state: "2" });
+    expectPolicyReason(
+      () => validateWritableFields("u_unclassified", { client_secret: "no" }),
+      "sensitive_field"
     );
   });
 

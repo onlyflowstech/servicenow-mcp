@@ -3,7 +3,9 @@
  *
  * Table authorization answers whether a tool may reach a table. This module
  * supplies the second, independent boundary: which fields may be requested,
- * written, or returned for the supported V2 table domains.
+ * written, or returned for the supported V2 table domains. Built-in defaults
+ * can be extended or overridden with SN_FIELD_POLICY_DEFINITIONS, including a
+ * generic "*" table fallback for operator-approved custom-table access.
  *
  * @module field-policy
  */
@@ -35,10 +37,18 @@ export type FieldPolicyFailureReason =
   | "traversal_limit_exceeded"
   | "invalid_argument_shape";
 
+type FieldPolicySet = readonly string[] | "*";
+
 interface TableFieldPolicyDefinition {
   readonly defaults: readonly string[];
-  readonly readable: readonly string[];
-  readonly writable: readonly string[];
+  readonly readable: FieldPolicySet;
+  readonly writable: FieldPolicySet;
+}
+
+interface MutableTableFieldPolicyDefinition {
+  readonly defaults?: readonly string[];
+  readonly readable?: FieldPolicySet;
+  readonly writable?: FieldPolicySet;
 }
 
 interface TableFieldPolicy {
@@ -46,6 +56,8 @@ interface TableFieldPolicy {
   readonly defaults: readonly string[];
   readonly readable: readonly string[];
   readonly writable: readonly string[];
+  readonly allowAnyReadable: boolean;
+  readonly allowAnyWritable: boolean;
   readonly maxFields: number;
 }
 
@@ -58,6 +70,10 @@ export const MAX_FIELD_ARRAY_LENGTH = 10_000;
 export const MAX_FIELD_OBJECT_OWN_KEYS = 256;
 export const MAX_TOOL_ARGUMENT_OWN_KEYS = 64;
 const MAX_CANONICAL_ARGUMENT_KEYS = 8;
+const FIELD_POLICY_DEFINITIONS_ENV = "SN_FIELD_POLICY_DEFINITIONS";
+const MAX_FIELD_POLICY_DEFINITIONS_TEXT_LENGTH = 65_536;
+const FIELD_POLICY_WILDCARD = "*";
+const GENERIC_DEFAULT_FIELDS = ["sys_id"] as const;
 
 const INCIDENT_DEFAULTS = [
   "sys_id",
@@ -531,29 +547,7 @@ const POLICY_DEFINITIONS = {
   },
 } as const satisfies Record<string, TableFieldPolicyDefinition>;
 
-const TABLE_FIELD_POLICIES = new Map<string, TableFieldPolicy>(
-  Object.entries(POLICY_DEFINITIONS).map(([table, definition]) => {
-    const defaults = normalizePolicyFields(definition.defaults, `${table} defaults`);
-    const readable = normalizePolicyFields(definition.readable, `${table} readable`);
-    const writable = normalizePolicyFields(definition.writable, `${table} writable`);
-    if (defaults.some((field) => !readable.includes(field))) {
-      throw new TypeError(`${table} default fields must be readable`);
-    }
-    if (readable.length > MAX_FIELDS_PER_OPERATION) {
-      throw new TypeError(`${table} readable fields exceed the maximum`);
-    }
-    return [
-      table,
-      Object.freeze({
-        table,
-        defaults,
-        readable,
-        writable,
-        maxFields: MAX_FIELDS_PER_OPERATION,
-      }),
-    ];
-  })
-);
+const BUILT_IN_TABLE_FIELD_POLICIES = buildFieldPolicyMap(POLICY_DEFINITIONS);
 
 const GENERIC_RECORD_TABLES = new Set([
   "incident",
@@ -575,7 +569,7 @@ const GENERIC_RECORD_TABLES = new Set([
 export const SAFE_DEFAULT_FIELDS: Readonly<Record<string, readonly string[]>> =
   Object.freeze(
     Object.fromEntries(
-      [...TABLE_FIELD_POLICIES]
+      [...BUILT_IN_TABLE_FIELD_POLICIES]
         .filter(([table]) => GENERIC_RECORD_TABLES.has(table))
         .map(([table, policy]) => [table, policy.defaults])
     )
@@ -669,7 +663,7 @@ export function resolveReadableFields(
     const field = normalizeFieldName(candidate);
     if (seen.has(field)) throw new FieldPolicyError("invalid_field_selection");
     if (isSensitiveFieldName(field)) throw new FieldPolicyError("sensitive_field");
-    if (!policy.readable.includes(field)) {
+    if (!fieldSetAllows(policy.readable, policy.allowAnyReadable, field)) {
       throw new FieldPolicyError("unreadable_field");
     }
     seen.add(field);
@@ -713,7 +707,7 @@ export function validateWritableFields(
       throw new FieldPolicyError("invalid_write_payload");
     }
     if (isSensitiveFieldName(field)) throw new FieldPolicyError("sensitive_field");
-    if (!policy.writable.includes(field)) {
+    if (!fieldSetAllows(policy.writable, policy.allowAnyWritable, field)) {
       throw new FieldPolicyError("non_writable_field");
     }
     safeDefine(
@@ -836,7 +830,9 @@ export function preparedReadableFields(
       fields.length === 0 ||
       fields.length > policy.maxFields ||
       fields.some(
-        (field) => typeof field !== "string" || !policy.readable.includes(field)
+        (field) =>
+          typeof field !== "string" ||
+          !fieldSetAllows(policy.readable, policy.allowAnyReadable, field)
       )
     ) {
       return undefined;
@@ -939,9 +935,120 @@ export function isSensitiveFieldName(candidate: unknown): boolean {
 
 function requirePolicy(tableCandidate: unknown): TableFieldPolicy {
   const table = normalizeTableName(tableCandidate);
-  const policy = TABLE_FIELD_POLICIES.get(table);
-  if (!policy) throw new FieldPolicyError("unsupported_table");
-  return policy;
+  const policies = currentTableFieldPolicies();
+  const policy = policies.get(table);
+  if (policy) return policy;
+  const fallback = policies.get(FIELD_POLICY_WILDCARD);
+  if (!fallback) throw new FieldPolicyError("unsupported_table");
+  return Object.freeze({ ...fallback, table });
+}
+
+function fieldSetAllows(
+  fields: readonly string[],
+  allowAny: boolean,
+  field: string
+): boolean {
+  return allowAny || fields.includes(field);
+}
+
+function currentTableFieldPolicies(): ReadonlyMap<string, TableFieldPolicy> {
+  const configured = readConfiguredFieldPolicyDefinitions();
+  if (!configured) return BUILT_IN_TABLE_FIELD_POLICIES;
+  return buildFieldPolicyMap(mergeFieldPolicyDefinitions(POLICY_DEFINITIONS, configured));
+}
+
+function mergeFieldPolicyDefinitions(
+  base: Readonly<Record<string, TableFieldPolicyDefinition>>,
+  configured: Readonly<Record<string, MutableTableFieldPolicyDefinition>>
+): Record<string, TableFieldPolicyDefinition> {
+  const merged: Record<string, TableFieldPolicyDefinition> = { ...base };
+  for (const [table, definition] of Object.entries(configured)) {
+    const existing = merged[table];
+    merged[table] = {
+      defaults: definition.defaults ?? existing?.defaults ?? GENERIC_DEFAULT_FIELDS,
+      readable: definition.readable ?? existing?.readable ?? definition.defaults ?? GENERIC_DEFAULT_FIELDS,
+      writable: definition.writable ?? existing?.writable ?? [],
+    };
+  }
+  return merged;
+}
+
+function buildFieldPolicyMap(
+  definitions: Readonly<Record<string, TableFieldPolicyDefinition>>
+): ReadonlyMap<string, TableFieldPolicy> {
+  return new Map<string, TableFieldPolicy>(
+    Object.entries(definitions).map(([tableCandidate, definition]) => {
+      const table = normalizePolicyTableName(tableCandidate);
+      const defaults = normalizePolicyFields(definition.defaults, `${table} defaults`);
+      const readable = normalizePolicyFieldSet(definition.readable, `${table} readable`);
+      const writable = normalizePolicyFieldSet(definition.writable, `${table} writable`);
+      const readableFields = readable === FIELD_POLICY_WILDCARD ? defaults : readable;
+      const writableFields = writable === FIELD_POLICY_WILDCARD ? [] : writable;
+      if (defaults.some((field) => !fieldSetAllows(readableFields, readable === FIELD_POLICY_WILDCARD, field))) {
+        throw new TypeError(`${table} default fields must be readable`);
+      }
+      if (readableFields.length > MAX_FIELDS_PER_OPERATION) {
+        throw new TypeError(`${table} readable fields exceed the maximum`);
+      }
+      return [
+        table,
+        Object.freeze({
+          table,
+          defaults,
+          readable: readableFields,
+          writable: writableFields,
+          allowAnyReadable: readable === FIELD_POLICY_WILDCARD,
+          allowAnyWritable: writable === FIELD_POLICY_WILDCARD,
+          maxFields: MAX_FIELDS_PER_OPERATION,
+        }),
+      ];
+    })
+  );
+}
+
+function readConfiguredFieldPolicyDefinitions():
+  | Record<string, MutableTableFieldPolicyDefinition>
+  | undefined {
+  const text = process.env[FIELD_POLICY_DEFINITIONS_ENV];
+  if (text === undefined || text.trim() === "") return undefined;
+  if (text.length > MAX_FIELD_POLICY_DEFINITIONS_TEXT_LENGTH) {
+    throw new FieldPolicyError("invalid_argument_shape");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new FieldPolicyError("invalid_argument_shape");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed) || nodeUtilTypes.isProxy(parsed)) {
+    throw new FieldPolicyError("invalid_argument_shape");
+  }
+  const output: Record<string, MutableTableFieldPolicyDefinition> = {};
+  for (const key of Object.keys(parsed)) {
+    const table = normalizePolicyTableName(key);
+    const value = (parsed as Record<string, unknown>)[key];
+    if (typeof value !== "object" || value === null || Array.isArray(value) || nodeUtilTypes.isProxy(value)) {
+      throw new FieldPolicyError("invalid_argument_shape");
+    }
+    const candidate = value as Record<string, unknown>;
+    const definition: Record<string, FieldPolicySet> = {};
+    if (Object.hasOwn(candidate, "defaults")) {
+      definition.defaults = normalizePolicyFields(candidate.defaults as readonly string[], `${table} defaults`);
+    }
+    if (Object.hasOwn(candidate, "readable")) {
+      definition.readable = normalizePolicyFieldSet(candidate.readable as FieldPolicySet, `${table} readable`);
+    }
+    if (Object.hasOwn(candidate, "writable")) {
+      definition.writable = normalizePolicyFieldSet(candidate.writable as FieldPolicySet, `${table} writable`);
+    }
+    output[table] = Object.freeze(definition) as MutableTableFieldPolicyDefinition;
+  }
+  return output;
+}
+
+function normalizePolicyTableName(candidate: unknown): string {
+  if (candidate === FIELD_POLICY_WILDCARD) return FIELD_POLICY_WILDCARD;
+  return normalizeTableName(candidate);
 }
 
 function normalizeTableName(candidate: unknown): string {
@@ -970,6 +1077,14 @@ function normalizeResponseFormat(candidate: unknown): ResponseFormat {
   if (candidate === undefined || candidate === "concise") return "concise";
   if (candidate === "detailed") return "detailed";
   throw new FieldPolicyError("invalid_field_selection");
+}
+
+function normalizePolicyFieldSet(
+  candidates: FieldPolicySet,
+  label: string
+): readonly string[] | "*" {
+  if (candidates === FIELD_POLICY_WILDCARD) return FIELD_POLICY_WILDCARD;
+  return normalizePolicyFields(candidates, label);
 }
 
 function normalizePolicyFields(

@@ -200,6 +200,23 @@ table caller-addressable unless it also has its own target entry. Omit the
 target—and therefore deny direct access—when the metadata closure cannot be
 proven complete.
 
+Table allowlists are paired with a separate field-policy gate. Built-in field
+policy remains finite for known tables, and operators can extend/override it
+with `SN_FIELD_POLICY_DEFINITIONS`, keyed by exact table name or `*` for a
+generic fallback. Each entry may define `defaults`, `readable`, and `writable`;
+`readable`/`writable` accept exact field arrays or `"*"`. Sensitive field-name
+families remain denied even when wildcard field access is configured. Example
+read-only custom-table exploration:
+
+```sh
+export SN_ALLOWED_READ_TABLES='*'
+export SN_ALLOWED_WRITE_TABLES=''
+export SN_FIELD_POLICY_DEFINITIONS='{"*":{"defaults":["sys_id"],"readable":"*","writable":[]}}'
+```
+
+Use `writable:"*"` only when broad mutation access is intentional; write field
+wildcards do not imply read field access or table write access.
+
 The service normalizes identifiers, rejects malformed or wildcard entries, and
 refuses to start when a built-in credential, authentication, encryption, or
 security-policy table is configured. Multi-table tools must have their complete

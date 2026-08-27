@@ -259,6 +259,7 @@ async function harness() {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(
     openHarnesses.splice(0).map(async ({ client, server }) => {
       await client.close();
@@ -366,6 +367,31 @@ describe("SNSDK-30 registered-tool field boundary", () => {
     expect(connected.getConfig).not.toHaveBeenCalled();
     expect(connected.getClient).not.toHaveBeenCalled();
     expect(connected.serviceNowClient.getWithMeta).not.toHaveBeenCalled();
+  });
+
+
+  it("allows wildcard table access to reach custom tables when generic field policy is configured", async () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({
+        "*": { defaults: ["sys_id"], readable: "*", writable: "*" },
+      })
+    );
+    const connected = await harness();
+    const result = await connected.client.callTool({
+      name: "sn_query",
+      arguments: {
+        profile: "field",
+        table: "u_unclassified",
+        fields: "sys_id,u_public",
+      },
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(connected.serviceNowClient.getWithMeta).toHaveBeenCalledWith(
+      "/api/now/table/u_unclassified",
+      expect.objectContaining({ sysparm_fields: "sys_id,u_public" })
+    );
   });
 
   it("filters metadata enumeration to the target table readable set", async () => {
