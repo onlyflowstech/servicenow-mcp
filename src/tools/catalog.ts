@@ -25,7 +25,6 @@ import * as profile from "./profile.js";
 import { queryToolModule } from "./query-module.js";
 import * as relationships from "./relationships.js";
 import { schemaToolModule } from "./schema-module.js";
-import * as script from "./script.js";
 import * as syslog from "./syslog.js";
 import { updateToolModule } from "./update-module.js";
 import {
@@ -206,13 +205,6 @@ export const serviceNowToolModules = Object.freeze([
     apis: ["aggregate", "table"],
     fieldPolicies: ["read", "write"],
     capabilities: ["natural-language:compose"],
-  }),
-  existingToolModule(script, {
-    permissions: ["write"],
-    tables: noTables,
-    apis: [],
-    fieldPolicies: [],
-    capabilities: ["script:unsupported"],
   }),
 ] as const);
 

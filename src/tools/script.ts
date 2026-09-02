@@ -1,3 +1,23 @@
+/**
+ * Background script execution -- FUTURE WORK, INTENTIONALLY NOT REGISTERED.
+ *
+ * This module is deliberately absent from the published tool catalog in
+ * `./catalog.ts`, so `sn_script` is neither advertised by `tools/list` nor
+ * callable via `tools/call`; the MCP SDK answers an unknown-tool call with a
+ * standard JSON-RPC "Tool sn_script not found" error. Shipping a tool whose
+ * only behaviour is an error -- while carrying `destructiveHint: true` -- is a
+ * usability and trust problem, so 2.0 does not expose it at all.
+ *
+ * The implementation is kept in the tree so the design work is not lost.
+ * ServiceNow exposes no REST API for background scripts; execution requires
+ * automating the `sys.scripts.do` UI endpoint with session authentication,
+ * tracked as SNS-39. When that lands, re-register the module in
+ * `./catalog.ts`, restore its `sn_script` entries in `./result-envelope.ts`
+ * and `../tool-table-access.ts`, and bump the published tool count.
+ *
+ * `test/script-stub.test.ts` pins this module as unregistered.
+ */
+
 import { z } from "zod";
 import type { ServiceNowOperations } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";

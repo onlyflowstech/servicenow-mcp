@@ -190,16 +190,15 @@ describe("high-level tool discovery", () => {
     sn_create: ["fields", "profile", "table"],
     sn_delete: ["confirm", "profile", "sys_id", "table"],
     sn_discover: ["active", "limit", "offset", "profile", "query", "type"],
-    sn_get: ["display_value", "fields", "identifier", "max_response_bytes", "profile", "response_format", "sys_id", "table"],
+    sn_get: ["display_value", "fields", "force_recache", "identifier", "max_response_bytes", "profile", "response_format", "sys_id", "table"],
     sn_health: ["check", "profile"],
     sn_incident_add_comment: ["content", "profile", "sys_id"],
     sn_incident_add_work_note: ["content", "profile", "sys_id"],
     sn_nl: ["confirm", "execute", "force", "profile", "text"],
     sn_profile: ["profile"],
-    sn_query: ["display_value", "fields", "limit", "max_response_bytes", "offset", "orderby", "profile", "query", "response_format", "structured_query", "table"],
+    sn_query: ["display_value", "fields", "force_recache", "limit", "max_response_bytes", "offset", "orderby", "profile", "query", "response_format", "structured_query", "table"],
     sn_relationships: ["ci_name", "class", "depth", "direction", "impact", "limit", "offset", "profile", "sys_id", "type"],
-    sn_schema: ["fields_only", "limit", "offset", "profile", "table"],
-    sn_script: ["code", "confirm", "profile", "scope", "timeout"],
+    sn_schema: ["fields_only", "force_recache", "limit", "offset", "profile", "table"],
     sn_syslog: ["fields", "level", "limit", "message", "offset", "profile", "since", "source"],
     sn_update: ["fields", "profile", "sys_id", "table"],
   };
@@ -231,12 +230,11 @@ describe("high-level tool discovery", () => {
     sn_query: { title: "Query records", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_relationships: { title: "Traverse CI relationships", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_schema: { title: "Get table schema", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    sn_script: { title: "Run background script (unavailable)", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     sn_syslog: { title: "Query system logs", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_update: { title: "Update record", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   };
 
-  it("publishes 20 unique sn_* tools from Zod with required profile", async () => {
+  it("publishes 19 unique sn_* tools from Zod with required profile", async () => {
     const fake = createProfileManager();
     const { client } = await harness(fake);
     const discovered = (await client.listTools()).tools;
@@ -476,7 +474,6 @@ describe("profile validation boundary", () => {
     sn_query: { table: "incident" },
     sn_relationships: {},
     sn_schema: { table: "incident" },
-    sn_script: { code: "gs.info('contract test')", confirm: false },
     sn_syslog: {},
     sn_update: { table: "incident", sys_id: "11111111111111111111111111111111", fields: {} },
   };

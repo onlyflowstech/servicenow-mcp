@@ -35,7 +35,6 @@ const EXPECTED_TOOL_NAMES = [
   "sn_query",
   "sn_relationships",
   "sn_schema",
-  "sn_script",
   "sn_syslog",
   "sn_update",
 ] as const;
@@ -148,6 +147,7 @@ describe("HTTP compatibility matrix", () => {
       expect(Object.keys(query?.inputSchema.properties ?? {}).sort()).toEqual([
         "display_value",
         "fields",
+        "force_recache",
         "limit",
         "max_response_bytes",
         "offset",

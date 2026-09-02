@@ -21,7 +21,7 @@ import {
   resolveSmokeOptions,
   writeRoundTrip,
 } from "../scripts/smoke-test.mjs";
-import { toolModules } from "../src/tools/index.js";
+import { REGISTERED_TOOL_COUNT, toolModules } from "../src/tools/index.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const read = (path: string): string =>
@@ -374,9 +374,9 @@ describe("SNSDK-57 deterministic CI and release contract", () => {
 
   it("locks every advertised tool into missing and resolved profile CI", () => {
     const packageJson = JSON.parse(read("package.json"));
-    expect(toolModules).toHaveLength(20);
+    expect(toolModules).toHaveLength(REGISTERED_TOOL_COUNT);
     expect(new Set(toolModules.map(({ definition }) => definition.name))).toHaveLength(
-      20
+      REGISTERED_TOOL_COUNT
     );
     expect(packageJson.scripts["test:protocol"]).toContain(
       "test/http-cross-client.test.ts"
@@ -397,9 +397,11 @@ describe("SNSDK-57 deterministic CI and release contract", () => {
     const packageJson = JSON.parse(read("package.json"));
     const packageLock = JSON.parse(read("package-lock.json"));
     const evidence = validateReleaseContract({ tag: `v${packageJson.version}` });
+    // Derived from package.json so a release bump does not require a test edit;
+    // the drift assertions below are what this case actually guards.
     expect(evidence).toMatchObject({
-      version: "1.2.0",
-      tag: "v1.2.0",
+      version: packageJson.version,
+      tag: `v${packageJson.version}`,
       inspectorVersion: "2.0.0",
       providerNeutral: true,
       publicTunnelCreated: false,
@@ -418,7 +420,7 @@ describe("SNSDK-57 deterministic CI and release contract", () => {
       validateReleaseContract({
         environment: {
           GITHUB_REF_TYPE: "tag",
-          GITHUB_REF_NAME: "v1.2.0-beta.1",
+          GITHUB_REF_NAME: `v${packageJson.version}-beta.1`,
         },
       })
     ).toThrow(/stable/u);

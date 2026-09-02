@@ -353,7 +353,10 @@ async function verifyProfileCalls(callTool, label) {
 }
 
 function normalizeToolManifest(tools, label) {
-  assert(Array.isArray(tools) && tools.length === 20, `${label} did not discover 20 tools`);
+  // Independent external check of the built container: deliberately a literal,
+  // not an import of the local registry. Source of truth is
+  // REGISTERED_TOOL_COUNT in src/tools/index.ts (derived from catalog.ts).
+  assert(Array.isArray(tools) && tools.length === 19, `${label} did not discover 19 tools`);
   const names = new Set();
   const manifest = tools.map((tool) => {
     assert(typeof tool?.name === "string" && tool.name.length > 0, `${label} exposed an invalid tool name`);

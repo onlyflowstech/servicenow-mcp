@@ -24,6 +24,7 @@ import {
 import { ProfileManager, type Profile } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import {
+  REGISTERED_TOOL_COUNT,
   defineContextOnlyToolModule,
   defineServiceNowToolModule,
   registerServiceNowToolModules,
@@ -239,8 +240,8 @@ describe("SNSDK-53 catalog-wide profile and audit contract", () => {
     const started = performance.now();
     const connected = await harness();
     const names = toolModules.map(({ definition }) => definition.name);
-    expect(names).toHaveLength(20);
-    expect(new Set(names).size).toBe(20);
+    expect(names).toHaveLength(REGISTERED_TOOL_COUNT);
+    expect(new Set(names).size).toBe(REGISTERED_TOOL_COUNT);
 
     for (const name of names) {
       for (const selector of [

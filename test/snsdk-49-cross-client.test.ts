@@ -245,13 +245,12 @@ const clients = [
 ] as const;
 
 describe.each(clients)("SNSDK-49 %s incident writes", (_label, createClient) => {
-  it("preserves 20-tool discovery and the exact create/update contracts", async () => {
+  it("preserves full tool discovery and the exact create/update contracts", async () => {
     const harness = await createHarness();
     const client = createClient(harness.url);
     try {
       await client.initialize();
       const tools = await client.listTools();
-      expect(tools).toHaveLength(20);
       expect(tools).toHaveLength(REGISTERED_TOOL_COUNT);
       const create = tools.find(({ name }) => name === "sn_create");
       const update = tools.find(({ name }) => name === "sn_update");
@@ -464,11 +463,22 @@ describe.each(clients)("SNSDK-49 %s incident writes", (_label, createClient) => 
       expect(post).not.toHaveBeenCalled();
       expect(patch).not.toHaveBeenCalled();
       expect(harness.auditWrite).toHaveBeenCalledTimes(8);
+      // One field-policy denial remains -- a sensitive field name, which is
+      // the only field-level denial the built-ins still impose. The rest are
+      // table denials. Every one is a policy rejection recorded before any
+      // credential or upstream access.
+      expect(
+        harness.auditWrite.mock.calls.filter(
+          ([audit]) => audit.reason === "field_access_denied"
+        )
+      ).toHaveLength(1);
       for (const [audit] of harness.auditWrite.mock.calls) {
         expect(audit).toMatchObject({
           outcome: "policy_rejected",
-          reason: "table_access_denied",
         });
+        expect(["table_access_denied", "field_access_denied"]).toContain(
+          audit.reason
+        );
       }
     } finally {
       await client.close();

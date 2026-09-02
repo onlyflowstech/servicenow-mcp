@@ -21,6 +21,7 @@ import {
   type ProductionToolName,
 } from "../src/tools/result-envelope.js";
 import {
+  REGISTERED_TOOL_COUNT,
   enrichSuccessfulResult,
   registerServiceNowTools,
   toolModules,
@@ -153,8 +154,8 @@ function finalized(
 }
 
 describe("SNSDK-33 strict production envelopes", () => {
-  it("publishes the exact shared envelope on all 20 production modules", () => {
-    expect(toolModules).toHaveLength(20);
+  it("publishes the exact shared envelope on all production modules", () => {
+    expect(toolModules).toHaveLength(REGISTERED_TOOL_COUNT);
     for (const module of toolModules) {
       const shape = module.outputSchema.shape;
       expect(Object.keys(shape).sort(), module.definition.name).toEqual([

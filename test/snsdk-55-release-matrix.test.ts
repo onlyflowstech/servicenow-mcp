@@ -386,7 +386,6 @@ describe("SNSDK-55 cross-client release matrix", () => {
         .map((module) => module.definition.name)
         .sort();
       for (const tools of [officialTools, independentTools]) {
-        expect(tools).toHaveLength(20);
         expect(tools).toHaveLength(REGISTERED_TOOL_COUNT);
         expect(tools.map((tool) => tool.name).sort()).toEqual(expectedNames);
         for (const tool of tools) {

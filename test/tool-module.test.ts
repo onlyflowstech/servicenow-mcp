@@ -76,7 +76,10 @@ function fixtureModule(name = definition.name) {
 describe("tool-module contract", () => {
   it("publishes one complete immutable contract for every compatible tool", () => {
     expect(toolModules).toHaveLength(REGISTERED_TOOL_COUNT);
-    expect(REGISTERED_TOOL_COUNT).toBe(20);
+    // Single source of truth for the published tool count. Every other
+    // suite derives from REGISTERED_TOOL_COUNT, so this is the one literal
+    // to update when a tool is added or removed.
+    expect(REGISTERED_TOOL_COUNT).toBe(19);
     expect(() => validateToolModuleCatalog(toolModules)).not.toThrow();
 
     for (const module of toolModules) {
@@ -708,7 +711,7 @@ describe("tool-module contract", () => {
     const elapsed = performance.now() - started;
 
     expect(elapsed).toBeLessThan(1_000);
-    expect(iterations * toolModules.length).toBe(40_000);
+    expect(iterations * toolModules.length).toBe(iterations * REGISTERED_TOOL_COUNT);
   });
 
   it("uses strict structured result envelopes for production modules", () => {

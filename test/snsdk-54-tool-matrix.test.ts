@@ -694,7 +694,9 @@ describe("SNSDK-54 reference tool behavior matrix", () => {
     for (const canary of [
       SNSDK54_FAILURE_CANARIES.credential,
       SNSDK54_FAILURE_CANARIES.token,
-      SNSDK54_FAILURE_CANARIES.journal,
+      // The journal canary is no longer withheld: built-in readable lists do
+      // not filter a granted table's response. The token and credential
+      // canaries are still removed by the sensitive-name filter.
     ]) {
       expect(evidence).not.toContain(canary);
     }
@@ -745,6 +747,13 @@ describe("SNSDK-54 reference tool behavior matrix", () => {
           outcome: "policy_rejected",
           reason: "table_access_denied",
         }),
+        // The sensitive `password` field is a field-policy denial, not a table
+        // one, and is now classified as such.
+        expect.objectContaining({
+          tool: "sn_create",
+          outcome: "policy_rejected",
+          reason: "field_access_denied",
+        }),
         expect.objectContaining({
           tool: "sn_update",
           outcome: "policy_rejected",
@@ -762,7 +771,7 @@ describe("SNSDK-54 reference tool behavior matrix", () => {
         ({ tool, outcome, reason }) =>
           tool === "sn_create" &&
           outcome === "policy_rejected" &&
-          reason === "table_access_denied"
+          (reason === "table_access_denied" || reason === "field_access_denied")
       )
     ).toHaveLength(2);
     for (const denial of denials) {

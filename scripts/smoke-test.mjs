@@ -107,7 +107,10 @@ export async function runSmoke(options) {
     record(
       checks,
       "tools/list",
-      discovered.tools.length === 20,
+      // Independent external check of the live server: deliberately a
+      // literal, not an import of the local registry. Source of truth is
+      // REGISTERED_TOOL_COUNT in src/tools/index.ts (derived from catalog.ts).
+      discovered.tools.length === 19,
       `${discovered.tools.length} tools`
     );
     record(

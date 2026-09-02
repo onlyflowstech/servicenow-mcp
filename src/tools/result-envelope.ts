@@ -226,7 +226,6 @@ const productionDataSchemas = Object.freeze({
   sn_discover: listResultSchema,
   sn_atf: atfResultEnvelopeSchema,
   sn_nl: naturalLanguageResultSchema,
-  sn_script: wrappedResultSchema,
   sn_profile: profileResultSchema,
 });
 
@@ -257,7 +256,6 @@ export const productionToolOutputSchemas = Object.freeze({
   sn_discover: withStructuredResultEnvelope(productionDataSchemas.sn_discover),
   sn_atf: withStructuredResultEnvelope(productionDataSchemas.sn_atf),
   sn_nl: withStructuredResultEnvelope(productionDataSchemas.sn_nl),
-  sn_script: withStructuredResultEnvelope(productionDataSchemas.sn_script),
   sn_profile: withStructuredResultEnvelope(productionDataSchemas.sn_profile),
 });
 
@@ -327,7 +325,6 @@ function normalizeToolData(
     case "sn_get":
       return { record: data };
     case "sn_aggregate":
-    case "sn_script":
       return { result: data };
     case "sn_schema":
       return { fields: data };
