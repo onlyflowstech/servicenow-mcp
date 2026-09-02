@@ -29,7 +29,8 @@ import {
   type HttpObservability,
 } from "./http-observability.js";
 import { createHttpRequestPolicy } from "./http-request-policy.js";
-import { ProfileManager } from "./profile-manager.js";
+import { ProfileManager, type ProfileManager as ProfileManagerType } from "./profile-manager.js";
+import { registerSetupPrompts } from "./setup-prompts.js";
 import { createMcpServer } from "./server.js";
 import {
   DEFAULT_SHUTDOWN_GRACE_PERIOD_MS,
@@ -37,8 +38,8 @@ import {
   installShutdownCoordinator,
 } from "./startup.js";
 import {
-  tableAccessPolicyFromEnvironment,
-  type TableAccessPolicy,
+  createTableAccessPolicy,
+  type TableAccessPolicyInput,
 } from "./table-policy.js";
 import {
   REGISTERED_TOOL_COUNT,
@@ -46,22 +47,46 @@ import {
 } from "./tools/index.js";
 import { VERSION } from "./version.js";
 
+
 function createRestrictedPolicyProvider(
-  tableAccess: TableAccessPolicy,
+  profileManager: ProfileManagerType,
   encodedQueryAccess: EncodedQueryAccessPolicy
 ): EffectivePolicyProvider {
   return Object.freeze({
-    resolve: () =>
-      Object.freeze({
-        id: "restricted-table-policy",
-        revision: "snsdk-32-v1",
-        tableAccess,
+    resolve: ({ profile }: { profile: { name: string } }) => {
+      const configuredProfile = profileManager.getProfile(profile.name);
+      const tableAccess: TableAccessPolicyInput =
+        configuredProfile.tableAccess ?? Object.freeze({});
+      return Object.freeze({
+        id: `restricted-table-policy:${profile.name}`,
+        revision: "snsdk-32-v2-profile-scoped",
+        tableAccess: createTableAccessPolicy(tableAccess),
+        // Only keys the profile actually states are materialized. A key
+        // present with an `undefined` value is not the same input as an
+        // absent key to consumers that branch on key presence.
+        fieldPolicy: {
+          ...(configuredProfile.fieldPolicy === undefined
+            ? {}
+            : { fieldPolicy: configuredProfile.fieldPolicy }),
+          ...(configuredProfile.readableTableFields === undefined
+            ? {}
+            : { readableTableFields: configuredProfile.readableTableFields }),
+          ...(configuredProfile.writableTableFields === undefined
+            ? {}
+            : { writableTableFields: configuredProfile.writableTableFields }),
+        },
         encodedQueryAccess,
-      }),
+      });
+    },
   });
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "setup") {
+    const { runSetupCli } = await import("./setup.js");
+    await runSetupCli({ argv: process.argv.slice(2) });
+    return;
+  }
   const authenticationProvider = new StaticBearerAuthenticationProvider([
     {
       token: requiredEnvironmentVariable("MCP_BEARER_TOKEN"),
@@ -86,7 +111,7 @@ async function main(): Promise<void> {
     DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
   const profileManager = new ProfileManager();
   const effectivePolicyProvider = createRestrictedPolicyProvider(
-    tableAccessPolicyFromEnvironment(),
+    profileManager,
     encodedQueryAccessPolicyFromEnvironment()
   );
   const httpObservability = createHttpObservability({
@@ -217,12 +242,14 @@ function createApplicationServer(
   });
   return createMcpServer({
     dependencies: { profileManager, executionContext },
-    register: (surface, dependencies) =>
-      registerServiceNowTools(
+    register: async (surface, dependencies) => {
+      registerSetupPrompts(surface);
+      await registerServiceNowTools(
         surface,
         dependencies.profileManager,
         dependencies.executionContext
-      ),
+      );
+    },
   });
 }
 

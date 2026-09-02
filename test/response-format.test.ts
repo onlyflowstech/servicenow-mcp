@@ -83,9 +83,12 @@ describe("response_format precedence (sn_query)", () => {
   });
 
   it('explicit fields="all" wins over response_format=concise', async () => {
+    // "all" now means every column, so the projection is omitted entirely
+    // rather than enumerated from a built-in readable list.
+    expect(resolveReadableFields("incident", { fields: "all" })).toEqual(["*"]);
     expect(
       await sysparmFields({ table: "incident", fields: "all", response_format: "concise" })
-    ).toBe(resolveReadableFields("incident", { fields: "all" }).join(","));
+    ).toBeUndefined();
   });
 
   it("concise (explicit) uses DEFAULT_FIELDS on a known table", async () => {
@@ -98,25 +101,27 @@ describe("response_format precedence (sn_query)", () => {
     expect(await sysparmFields({ table: "incident" })).toBe(DEFAULT_FIELDS.incident);
   });
 
-  it('detailed requests the finite readable policy (same as fields="all")', async () => {
+  it('detailed matches fields="all" and omits the projection', async () => {
     expect(
       await sysparmFields({ table: "incident", response_format: "detailed" })
-    ).toBe(resolveReadableFields("incident", { fields: "all" }).join(","));
+    ).toBeUndefined();
   });
 
-  it("concise on an unknown table fails before a client call", async () => {
+  it("concise on an unknown table uses the bounded generic default", async () => {
+    // A table with no field-policy entry is no longer denied here; its
+    // reachability is a tableAccess question. The projection stays bounded.
     const { client, getWithMeta } = metaClient([]);
-    await expect(
-      queryHandler(
-        querySchema.parse({
-          table: "u_custom_widget",
-          response_format: "concise",
-        }),
-        client,
-        config
-      )
-    ).rejects.toThrow("Field access denied by policy");
-    expect(getWithMeta).not.toHaveBeenCalled();
+    await queryHandler(
+      querySchema.parse({
+        table: "u_custom_widget",
+        response_format: "concise",
+      }),
+      client,
+      config
+    );
+    expect(
+      (getWithMeta.mock.calls[0][1] as Record<string, string>).sysparm_fields
+    ).toBe("sys_id");
   });
 });
 
@@ -136,17 +141,17 @@ describe("response_format precedence (sn_get)", () => {
   it('explicit fields="all" wins over response_format=concise', async () => {
     expect(
       await sysparmFields({ table: "incident", fields: "all", response_format: "concise" })
-    ).toBe(resolveReadableFields("incident", { fields: "all" }).join(","));
+    ).toBeUndefined();
   });
 
   it("omitted response_format defaults to concise (DEFAULT_FIELDS)", async () => {
     expect(await sysparmFields({ table: "incident" })).toBe(DEFAULT_FIELDS.incident);
   });
 
-  it("detailed requests the finite readable policy", async () => {
+  it("detailed omits the projection", async () => {
     expect(
       await sysparmFields({ table: "incident", response_format: "detailed" })
-    ).toBe(resolveReadableFields("incident", { fields: "all" }).join(","));
+    ).toBeUndefined();
   });
 });
 

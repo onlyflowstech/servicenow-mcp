@@ -140,6 +140,62 @@ function responseText(
 }
 
 describe("SNSDK-29 registry enforcement", () => {
+  it("separates a field denial from a table denial on a granted table", async () => {
+    // The trap this guards: an operator grants the table, the write still
+    // fails, and the fix lives in a different configuration key. Reporting a
+    // field denial as "table access denied" points them at the wrong one.
+    // Field policy only denies where an operator narrowed, so the narrowing is
+    // part of the setup: this test is about how the denial is *classified*.
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({ incident: { writable: ["state"] } })
+    );
+    const connected = await harness({
+      readTables: ["incident"],
+      writeTables: ["incident"],
+    });
+
+    const denied = await connected.client.callTool({
+      name: "sn_update",
+      arguments: {
+        profile: "policy",
+        table: "incident",
+        sys_id: "a".repeat(32),
+        fields: { sys_created_by: "not-writable" },
+      },
+    });
+
+    expect(denied.isError).toBe(true);
+    const text = responseText(denied);
+    expect(text).toContain('field "sys_created_by"');
+    expect(text).toContain('"incident"');
+    expect(text).toContain("fieldPolicy.incident.writable");
+    expect(text).not.toMatch(/^ERROR: Table access was denied by policy\./u);
+    expect(connected.getConfig).not.toHaveBeenCalled();
+    expect(connected.getClient).not.toHaveBeenCalled();
+    expect(connected.records.at(-1)).toMatchObject({
+      tool: "sn_update",
+      outcome: "policy_rejected",
+      reason: "field_access_denied",
+      profile: "policy",
+    });
+
+    // A genuine table denial keeps the table classification and message.
+    const tableDenied = await connected.client.callTool({
+      name: "sn_query",
+      arguments: { profile: "policy", table: "problem" },
+    });
+    expect(tableDenied.isError).toBe(true);
+    expect(responseText(tableDenied)).toMatch(
+      /^ERROR: Table access was denied by policy\./u
+    );
+    expect(connected.records.at(-1)).toMatchObject({
+      tool: "sn_query",
+      outcome: "policy_rejected",
+      reason: "table_access_denied",
+    });
+  });
+
   it("denies an unlisted table before config, client, or handler access", async () => {
     const connected = await harness({ readTables: ["incident"] });
 
@@ -275,6 +331,9 @@ describe("SNSDK-29 registry enforcement", () => {
     expect(query.isError).toBe(true);
     expect(connected.getConfig).not.toHaveBeenCalled();
     expect(connected.getClient).not.toHaveBeenCalled();
+    // Now that field policy no longer denies a table it has no entry for, this
+    // reaches the table boundary and exercises the per-tool binding it was
+    // always meant to prove.
     expect(connected.records.at(-1)).toMatchObject({
       tool: "sn_query",
       outcome: "policy_rejected",
@@ -418,14 +477,9 @@ describe("SNSDK-32 registry encoded-query enforcement", () => {
   it.each([
     ["implicit concise defaults", {}, resolveReadableFields("incident")],
     [
-      "implicit detailed fields",
-      { response_format: "detailed" },
-      resolveReadableFields("incident", { fields: "all" }),
-    ],
-    [
-      "all readable fields",
-      { fields: "all" },
-      resolveReadableFields("incident", { fields: "all" }),
+      "an explicit bounded projection",
+      { fields: "sys_id,active" },
+      ["sys_id", "active"] as readonly string[],
     ],
   ])("permits %s only when its complete projection is approved", async (_label, selection, fields) => {
     const connected = await harness(

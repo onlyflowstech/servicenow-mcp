@@ -7,12 +7,16 @@ import { z } from "zod";
 
 import type { ServiceNowOperations } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
+import { FORCE_RECACHE_PARAM } from "../metadata-cache.js";
 import {
+  fieldSelectionToSysparmFields,
   filterReadableRecord,
+  isAllFieldSelection,
   preparedReadableFields,
   prepareReadFieldArguments,
   resolveReadableFields,
   withFieldPolicyArgumentValues,
+  type FieldSelection,
 } from "../field-policy.js";
 import {
   recordIdentifierSchema,
@@ -97,6 +101,11 @@ function compatibleInputSchema() {
         .enum(["true", "false", "all"])
         .optional()
         .describe("Display values mode: true, false, or all"),
+      force_recache: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("For metadata tables, bypass the per-instance metadata cache and refresh from ServiceNow."),
     })
     .strict();
 }
@@ -197,7 +206,7 @@ async function executeGet(
 async function fetchOneRecord(
   args: GetArguments,
   selector: RecordLookupSelector,
-  readableFields: readonly string[],
+  readableFields: FieldSelection,
   client: ServiceNowOperations,
   config: ServiceNowToolSettings
 ): Promise<unknown> {
@@ -205,24 +214,30 @@ async function fetchOneRecord(
   if (selector.kind === "sys_id") {
     const response = await client.get(
       `/api/now/table/${args.table}/${serviceNowSysIdPathSegment(selector.sysId)}`,
-      buildTableParams({
-        fields: readableFields.join(","),
-        displayValue,
-      })
+      {
+        ...buildTableParams({
+          fields: fieldSelectionToSysparmFields(readableFields),
+          displayValue,
+        }),
+        ...(args.force_recache ? { [FORCE_RECACHE_PARAM]: "true" } : {}),
+      }
     );
     return resultProperty(response);
   }
 
-  const requestFields = [...new Set([...readableFields, "sys_id"])];
+  const requestFields = isAllFieldSelection(readableFields)
+    ? readableFields
+    : [...new Set([...readableFields, "sys_id"])];
   const response = await client.get(`/api/now/table/${args.table}`, {
     ...buildTableParams({
       query:
         `${selector.field}=${escapeQueryValue(selector.value)}` +
         "^ORDERBYsys_id",
-      fields: requestFields.join(","),
+      fields: fieldSelectionToSysparmFields(requestFields),
       limit: 2,
       displayValue,
     }),
+    ...(args.force_recache ? { [FORCE_RECACHE_PARAM]: "true" } : {}),
   });
   const results = resultProperty(response);
   if (nodeUtilTypes.isProxy(results) || !Array.isArray(results)) {

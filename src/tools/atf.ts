@@ -7,6 +7,7 @@ import {
   ENCODED_QUERY_MIGRATION_MESSAGE,
 } from "../encoded-query-policy.js";
 import {
+  fieldSelectionToSysparmFields,
   filterReadableRecord,
   preparedReadableFields,
   resolveReadableFields,
@@ -121,7 +122,7 @@ export async function handler(
         const readableFields =
           preparedReadableFields(args, "sys_atf_test") ??
           resolveReadableFields("sys_atf_test", { fields: args.fields });
-        const fields = readableFields.join(",");
+        const fields = fieldSelectionToSysparmFields(readableFields);
         let query = "";
 
         // If suite_name given, resolve suite and filter tests
@@ -190,7 +191,7 @@ export async function handler(
         const resp = await client.get("/api/now/table/sys_atf_test", {
           sysparm_limit: String(args.limit + 1),
           sysparm_offset: String(args.offset),
-          sysparm_fields: fields,
+          ...(fields ? { sysparm_fields: fields } : {}),
           sysparm_query: query ? `${query}^ORDERBYsys_id` : "ORDERBYsys_id",
         });
         const filtered = filterReadableRecord(resp.result || [], readableFields);
@@ -203,11 +204,11 @@ export async function handler(
         const readableFields =
           preparedReadableFields(args, "sys_atf_test_suite") ??
           resolveReadableFields("sys_atf_test_suite", { fields: args.fields });
-        const fields = readableFields.join(",");
+        const fields = fieldSelectionToSysparmFields(readableFields);
         const resp = await client.get("/api/now/table/sys_atf_test_suite", {
           sysparm_limit: String(args.limit + 1),
           sysparm_offset: String(args.offset),
-          sysparm_fields: fields,
+          ...(fields ? { sysparm_fields: fields } : {}),
           sysparm_query: "ORDERBYsys_id",
         });
         const filtered = filterReadableRecord(resp.result || [], readableFields);
@@ -411,14 +412,14 @@ export async function handler(
         const readableFields =
           preparedReadableFields(args, "sys_atf_test_result") ??
           resolveReadableFields("sys_atf_test_result", { fields: args.fields });
-        const fields = readableFields.join(",");
+        const fields = fieldSelectionToSysparmFields(readableFields);
 
         // Try direct get first
         try {
           const resp = await client.get(
             `/api/now/table/sys_atf_test_result/${serviceNowSysIdPathSegment(args.execution_id)}`,
             {
-              sysparm_fields: fields,
+              ...(fields ? { sysparm_fields: fields } : {}),
               sysparm_display_value: "true",
             }
           );
@@ -440,7 +441,7 @@ export async function handler(
         const query = `execution=${safeExecutionId}^ORparent=${safeExecutionId}^ORtest_suite=${safeExecutionId}`;
         const resp = await client.get("/api/now/table/sys_atf_test_result", {
           sysparm_query: `${query}^ORDERBYsys_id`,
-          sysparm_fields: fields,
+          ...(fields ? { sysparm_fields: fields } : {}),
           sysparm_display_value: "true",
           sysparm_limit: String(args.limit + 1),
           sysparm_offset: String(args.offset),

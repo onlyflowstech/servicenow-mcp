@@ -621,7 +621,16 @@ describe.each(clients)(
           expect(content.text, name).not.toContain(CANARIES[name]);
           const serialized = JSON.stringify(result);
           expect(serialized.split(CANARIES[name]).length - 1, name).toBe(1);
-          expect(serialized, name).not.toContain(UPSTREAM_PROFILE_SPOOF);
+          // A `profile` column in an upstream record now survives the response
+          // projection, because built-in readable lists no longer withhold a
+          // granted table's columns. What must still hold is that it cannot
+          // forge the envelope's own trust claim: the top-level `profile` is
+          // the server's, and the upstream value appears only as record data.
+          expect(result.structuredContent?.profile, name).toBe(PROFILE);
+          expect(result.structuredContent?.profile, name).not.toBe(
+            UPSTREAM_PROFILE_SPOOF
+          );
+          // The sensitive-name filter is field-level and still removes this.
           expect(serialized, name).not.toContain(UPSTREAM_SECRET);
         }
         expect(results.sn_schema.structuredContent?.data).toMatchObject({

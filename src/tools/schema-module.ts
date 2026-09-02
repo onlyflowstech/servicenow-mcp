@@ -14,11 +14,15 @@ import { z } from "zod";
 
 import type { ServiceNowOperations } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
+import { FORCE_RECACHE_PARAM } from "../metadata-cache.js";
 import {
   filterSchemaEntries,
+  fieldSelectionToSysparmFields,
   MAX_FIELDS_PER_OPERATION,
+  isAllFieldSelection,
   preparedReadableFields,
   resolveReadableFields,
+  type FieldSelection,
 } from "../field-policy.js";
 import { resolveToolTableAccess } from "../tool-table-access.js";
 import { escapeQueryValue, ok } from "../utils.js";
@@ -70,6 +74,11 @@ function compatibleInputSchema() {
       .optional()
       .default(0)
       .describe("Zero-based dictionary row offset (0-10000)"),
+    force_recache: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Bypass the per-instance metadata cache and refresh schema metadata from ServiceNow."),
   });
 }
 
@@ -121,7 +130,13 @@ async function executeSchema(
     const readableFields =
       preparedReadableFields(args, args.table) ??
       resolveReadableFields(args.table, { fields: "all" });
-    const schema = await loadSchemaMetadata(client, args.table, readableFields, !args.fields_only);
+    const schema = await loadSchemaMetadata(
+      client,
+      args.table,
+      readableFields,
+      !args.fields_only,
+      args.force_recache
+    );
     const results = filterSchemaEntries(schema.rows, readableFields)
       .filter(
         (record) => typeof record.element === "string" && record.element !== ""
@@ -169,21 +184,22 @@ async function executeSchema(
 async function loadSchemaMetadata(
   client: ServiceNowOperations,
   table: string,
-  readableFields: readonly string[],
-  enrich: boolean
+  readableFields: FieldSelection,
+  enrich: boolean,
+  forceRecache: boolean
 ): Promise<CachedSchema> {
-  const key = `${table}|${enrich ? "full" : "fields"}|${[...readableFields].sort().join(",")}`;
+  const key = `${table}|${enrich ? "full" : "fields"}|${isAllFieldSelection(readableFields) ? "*" : [...readableFields].sort().join(",")}`;
   const cache = schemaCacheFor(client);
   const cached = cache.get(key);
   const now = Date.now();
-  if (cached && cached.expiresAt > now) return cached;
+  if (!forceRecache && cached && cached.expiresAt > now) return cached;
 
-  const hierarchy = enrich ? await resolveTableHierarchy(client, table) : Object.freeze([table]);
+  const hierarchy = enrich ? await resolveTableHierarchy(client, table, forceRecache) : Object.freeze([table]);
   const rows = enrich
-    ? await fetchDictionaryRows(client, hierarchy, readableFields)
-    : await fetchLocalDictionaryRows(client, table, readableFields);
+    ? await fetchDictionaryRows(client, hierarchy, readableFields, forceRecache)
+    : await fetchLocalDictionaryRows(client, table, readableFields, forceRecache);
   const enriched = enrich
-    ? await enrichSchemaRows(client, table, readableFields, rows)
+    ? await enrichSchemaRows(client, table, readableFields, rows, forceRecache)
     : rows;
   const snapshot: CachedSchema = Object.freeze({
     expiresAt: now + DEFAULT_SCHEMA_CACHE_TTL_MS,
@@ -204,7 +220,8 @@ function schemaCacheFor(client: ServiceNowOperations): Map<string, CachedSchema>
 
 async function resolveTableHierarchy(
   client: ServiceNowOperations,
-  table: string
+  table: string,
+  forceRecache: boolean
 ): Promise<readonly string[]> {
   const hierarchy: string[] = [];
   const seen = new Set<string>();
@@ -222,6 +239,7 @@ async function resolveTableHierarchy(
         sysparm_limit: "1",
         sysparm_display_value: "true",
         sysparm_exclude_reference_link: "true",
+        ...(forceRecache ? { [FORCE_RECACHE_PARAM]: "true" } : {}),
       }
     );
     const row = Array.isArray(response?.result) ? response.result[0] : undefined;
@@ -234,9 +252,11 @@ async function resolveTableHierarchy(
 async function fetchLocalDictionaryRows(
   client: ServiceNowOperations,
   table: string,
-  readableFields: readonly string[]
+  readableFields: FieldSelection,
+  forceRecache: boolean
 ): Promise<readonly Record<string, unknown>[]> {
-  const authorizedElements = readableFields
+  const authorizedElements = fieldSelectionToSysparmFields(readableFields)
+    ?.split(",")
     .map((field) => escapeQueryValue(field))
     .join(",");
   const response = await client.get<{ result?: unknown[] }>(
@@ -244,18 +264,20 @@ async function fetchLocalDictionaryRows(
     {
       sysparm_query:
         `name=${escapeQueryValue(table)}` +
-        `^internal_type!=collection^elementIN${authorizedElements}` +
+        "^internal_type!=collection" +
+        (authorizedElements ? `^elementIN${authorizedElements}` : "") +
         "^ORDERBYelement^ORDERBYsys_id",
       sysparm_fields:
         "sys_id,element,column_label,internal_type,max_length,mandatory,reference",
       sysparm_limit: String(MAX_DICTIONARY_ROWS),
       sysparm_offset: "0",
       sysparm_display_value: "true",
+      ...(forceRecache ? { [FORCE_RECACHE_PARAM]: "true" } : {}),
     }
   );
   const rawResults = Array.isArray(response?.result) ? response.result : [];
   if (rawResults.length > MAX_FIELDS_PER_OPERATION) {
-    throw new TypeError("dictionary result exceeded the authorized field bound");
+    throw new Error("dictionary result exceeded the authorized field bound");
   }
   return Object.freeze(
     rawResults.filter(
@@ -268,9 +290,11 @@ async function fetchLocalDictionaryRows(
 async function fetchDictionaryRows(
   client: ServiceNowOperations,
   hierarchy: readonly string[],
-  readableFields: readonly string[]
+  readableFields: FieldSelection,
+  forceRecache: boolean
 ): Promise<readonly Record<string, unknown>[]> {
-  const authorizedElements = readableFields
+  const authorizedElements = fieldSelectionToSysparmFields(readableFields)
+    ?.split(",")
     .map((field) => escapeQueryValue(field))
     .join(",");
   const response = await client.get<{ result?: unknown[] }>(
@@ -278,18 +302,20 @@ async function fetchDictionaryRows(
     {
       sysparm_query:
         `nameIN${hierarchy.map((name) => escapeQueryValue(name)).join(",")}` +
-        `^internal_type!=collection^elementIN${authorizedElements}` +
+        "^internal_type!=collection" +
+        (authorizedElements ? `^elementIN${authorizedElements}` : "") +
         "^ORDERBYelement^ORDERBYsys_id",
       sysparm_fields:
         "sys_id,name,element,column_label,internal_type,max_length,mandatory,reference",
-      sysparm_limit: String(MAX_DICTIONARY_ROWS * hierarchy.length),
+      sysparm_limit: String(MAX_DICTIONARY_ROWS),
       sysparm_offset: "0",
       sysparm_display_value: "true",
+      ...(forceRecache ? { [FORCE_RECACHE_PARAM]: "true" } : {}),
     }
   );
   const rawResults = Array.isArray(response?.result) ? response.result : [];
-  if (rawResults.length > MAX_FIELDS_PER_OPERATION * hierarchy.length) {
-    throw new TypeError("dictionary result exceeded the authorized field bound");
+  if (rawResults.length > MAX_FIELDS_PER_OPERATION) {
+    throw new Error("dictionary result exceeded the authorized field bound");
   }
   const byElement = new Map<string, Record<string, unknown>>();
   const rank = new Map(hierarchy.map((name, index) => [name, index] as const));
@@ -297,7 +323,7 @@ async function fetchDictionaryRows(
     if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) continue;
     const row = candidate as Record<string, unknown>;
     const element = typeof row.element === "string" ? row.element : "";
-    if (!readableFields.includes(element)) continue;
+    if (!isAllFieldSelection(readableFields) && !readableFields.includes(element)) continue;
     const name = typeof row.name === "string" ? row.name : hierarchy[0];
     const previous = byElement.get(element);
     if (!previous) {
@@ -315,11 +341,12 @@ async function fetchDictionaryRows(
 async function enrichSchemaRows(
   client: ServiceNowOperations,
   table: string,
-  readableFields: readonly string[],
-  rows: readonly Record<string, unknown>[]
+  readableFields: FieldSelection,
+  rows: readonly Record<string, unknown>[],
+  forceRecache: boolean
 ): Promise<readonly Record<string, unknown>[]> {
-  const labels = await fetchDocumentation(client, table, readableFields);
-  const choices = await fetchChoices(client, table, readableFields);
+  const labels = await fetchDocumentation(client, table, readableFields, forceRecache);
+  const choices = await fetchChoices(client, table, readableFields, forceRecache);
   return rows.map((row) => {
     const field = typeof row.element === "string" ? row.element : "";
     return {
@@ -333,19 +360,21 @@ async function enrichSchemaRows(
 async function fetchDocumentation(
   client: ServiceNowOperations,
   table: string,
-  readableFields: readonly string[]
+  readableFields: FieldSelection,
+  forceRecache: boolean
 ): Promise<Map<string, Record<string, unknown>>> {
   const response = await client.get<{ result?: unknown[] }>(
     "/api/now/table/sys_documentation",
     {
       sysparm_query:
         `name=${escapeQueryValue(table)}` +
-        `^elementIN${readableFields.map((field) => escapeQueryValue(field)).join(",")}` +
+        (isAllFieldSelection(readableFields) ? "" : `^elementIN${readableFields.map((field) => escapeQueryValue(field)).join(",")}`) +
         "^ORDERBYelement",
       sysparm_fields: "element,label,plural,help",
-      sysparm_limit: String(MAX_FIELDS_PER_OPERATION),
+      sysparm_limit: String(MAX_DICTIONARY_ROWS),
       sysparm_display_value: "true",
       sysparm_exclude_reference_link: "true",
+      ...(forceRecache ? { [FORCE_RECACHE_PARAM]: "true" } : {}),
     }
   );
   const out = new Map<string, Record<string, unknown>>();
@@ -353,7 +382,7 @@ async function fetchDocumentation(
     if (typeof row !== "object" || row === null || Array.isArray(row)) continue;
     const record = row as Record<string, unknown>;
     const element = typeof record.element === "string" ? record.element : undefined;
-    if (!element || !readableFields.includes(element)) continue;
+    if (!element || (!isAllFieldSelection(readableFields) && !readableFields.includes(element))) continue;
     const entry: Record<string, unknown> = {};
     if (typeof record.label === "string" && record.label.trim()) entry.column_label = record.label;
     if (typeof record.help === "string" && record.help.trim()) entry.help = record.help;
@@ -365,19 +394,21 @@ async function fetchDocumentation(
 async function fetchChoices(
   client: ServiceNowOperations,
   table: string,
-  readableFields: readonly string[]
+  readableFields: FieldSelection,
+  forceRecache: boolean
 ): Promise<Map<string, readonly Record<string, unknown>[]>> {
   const response = await client.get<{ result?: unknown[] }>(
     "/api/now/table/sys_choice",
     {
       sysparm_query:
         `name=${escapeQueryValue(table)}` +
-        `^elementIN${readableFields.map((field) => escapeQueryValue(field)).join(",")}` +
+        (isAllFieldSelection(readableFields) ? "" : `^elementIN${readableFields.map((field) => escapeQueryValue(field)).join(",")}`) +
         "^inactive=false^ORDERBYelement^ORDERBYsequence^ORDERBYvalue",
       sysparm_fields: "element,value,label,sequence",
-      sysparm_limit: String(MAX_FIELDS_PER_OPERATION * 20),
+      sysparm_limit: String(MAX_DICTIONARY_ROWS),
       sysparm_display_value: "true",
       sysparm_exclude_reference_link: "true",
+      ...(forceRecache ? { [FORCE_RECACHE_PARAM]: "true" } : {}),
     }
   );
   const out = new Map<string, Record<string, unknown>[]>();
@@ -385,7 +416,7 @@ async function fetchChoices(
     if (typeof row !== "object" || row === null || Array.isArray(row)) continue;
     const record = row as Record<string, unknown>;
     const element = typeof record.element === "string" ? record.element : undefined;
-    if (!element || !readableFields.includes(element)) continue;
+    if (!element || (!isAllFieldSelection(readableFields) && !readableFields.includes(element))) continue;
     const value = typeof record.value === "string" ? record.value : undefined;
     const label = typeof record.label === "string" ? record.label : value;
     if (!value) continue;

@@ -20,6 +20,12 @@ import {
   type ServiceNowClient,
 } from "../client.js";
 import type { ServiceNowConfig } from "../config.js";
+import { createCachedServiceNowOperations } from "../metadata-cache.js";
+import {
+  fieldPolicyDenialMessage,
+  isFieldPolicyError,
+  runWithFieldPolicyConfiguration,
+} from "../field-policy.js";
 import {
   ENCODED_QUERY_MIGRATION_MESSAGE,
   isEncodedQueryPolicyError,
@@ -46,12 +52,14 @@ import {
   type ToolAuditDisposition,
 } from "../execution-context.js";
 import {
+  credentialFingerprint,
   normalizeInstanceUrl,
   type Profile,
   type ProfileManager,
 } from "../profile-manager.js";
 import type { McpServerRegistrationSurface } from "../server.js";
 import { authorizeTableAccessPlan } from "../table-policy.js";
+import { StructuredQueryError } from "../structured-query.js";
 import { createToolError, formatToolError } from "../tool-error.js";
 import { err } from "../utils.js";
 
@@ -72,7 +80,6 @@ import * as profile from "./profile.js";
 import * as query from "./query.js";
 import * as relationships from "./relationships.js";
 import * as schema from "./schema.js";
-import * as script from "./script.js";
 import * as syslog from "./syslog.js";
 import * as update from "./update.js";
 import { finalizeEnvelopeResult } from "./result-envelope.js";
@@ -146,7 +153,6 @@ export const tools = [
   discover,
   atf,
   nl,
-  script,
 ] as const;
 
 /** Read-only diagnostic tool; it deliberately never resolves credentials. */
@@ -158,7 +164,7 @@ export const toolModules = allToolModules;
 export const REGISTERED_TOOL_COUNT = toolModules.length;
 
 /**
- * Register all 20 published tools through the SDK's high-level API.
+ * Register all 19 published tools through the SDK's high-level API.
  *
  * The contract factory retains each module's inferred Zod type while this
  * dispatcher consumes its deliberately erased, runtime-validated boundary.
@@ -460,7 +466,10 @@ function registerStandardTool(
       // value evaluated by policy is the value used by the handler.
       let authorizedArgs: Record<string, unknown>;
       try {
-        const access = tool.resolveAccess(args, context.effectivePolicy);
+        const access = runWithFieldPolicyConfiguration(
+          context.effectivePolicy.fieldPolicy,
+          () => tool.resolveAccess(args, context.effectivePolicy)
+        );
         authorizeTableAccessPlan(
           context.effectivePolicy.tableAccess,
           access.requests,
@@ -477,19 +486,29 @@ function registerStandardTool(
         );
         if (cancellation) return cancellation;
         const encodedQueryDenied = isEncodedQueryPolicyError(error);
+        const structuredQueryDenied = error instanceof StructuredQueryError;
         const journalUpdateDenied =
           isIncidentJournalPolicyError(error) &&
           error.reason === "generic_journal_update" &&
           error.field !== undefined;
+        // A field-policy denial is a distinct failure from a table denial and
+        // is fixed in a different configuration key. Reporting it as
+        // "table access denied" points the operator at the wrong place.
+        const fieldAccessDenied =
+          !journalUpdateDenied && isFieldPolicyError(error);
         auditInvocation(
           contextDependencies,
           {
             outcome: "policy_rejected",
             reason: encodedQueryDenied
               ? "encoded_query_denied"
-              : journalUpdateDenied
-                ? "journal_update_denied"
-                : "table_access_denied",
+              : structuredQueryDenied
+                ? "structured_query_denied"
+                : journalUpdateDenied
+                  ? "journal_update_denied"
+                  : fieldAccessDenied
+                    ? "field_access_denied"
+                    : "table_access_denied",
             profile: binding,
           },
           tool.definition.name,
@@ -498,9 +517,13 @@ function registerStandardTool(
         return err(
           encodedQueryDenied
             ? `${ENCODED_QUERY_MIGRATION_MESSAGE} Correlation ID: ${context.correlationId}.`
-            : journalUpdateDenied
-              ? `${incidentJournalMigrationMessage(error.field!)} Correlation ID: ${context.correlationId}.`
-            : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
+            : structuredQueryDenied
+              ? `Structured query was denied by policy (${error.reason}). Correlation ID: ${context.correlationId}.`
+              : journalUpdateDenied
+                ? `${incidentJournalMigrationMessage(error.field!)} Correlation ID: ${context.correlationId}.`
+                : fieldAccessDenied
+                  ? `${fieldPolicyDenialMessage(error)} Correlation ID: ${context.correlationId}.`
+                  : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
         );
       }
 
@@ -563,7 +586,14 @@ function registerStandardTool(
       let result: unknown;
       try {
         const services: ServiceNowToolHandlerServices = Object.freeze({
-          serviceNow: createServiceNowOperations(client),
+          serviceNow: createCachedServiceNowOperations(
+            createServiceNowOperations(client),
+            // Scoped by instance AND credential identity. ServiceNow applies
+            // per-user ACLs, and a cache hit bypasses the upstream read, so
+            // two identities on one instance must never share a partition.
+            `${context.profile.instance}|${credentialFingerprint(config)}`,
+            config.metadataCache
+          ),
           settings: Object.freeze({
             instance: context.profile.instance,
             displayValue: config.displayValue,
@@ -574,7 +604,9 @@ function registerStandardTool(
           logger,
         });
         result = await runWithServiceNowRequestSignal(context.signal, () =>
-          tool.invoke(authorizedArgs, services)
+          runWithFieldPolicyConfiguration(context.effectivePolicy.fieldPolicy, () =>
+            tool.invoke(authorizedArgs, services)
+          )
         );
       } catch (error) {
         const cancellation = cancellationResultIfIssued(
@@ -738,14 +770,17 @@ function registerProfileDiagnostic(
 
       let authorizedArgs: Record<string, unknown>;
       try {
-        const access = tool.resolveAccess(args, context.effectivePolicy);
+        const access = runWithFieldPolicyConfiguration(
+          context.effectivePolicy.fieldPolicy,
+          () => tool.resolveAccess(args, context.effectivePolicy)
+        );
         authorizeTableAccessPlan(
           context.effectivePolicy.tableAccess,
           access.requests,
           tool.definition.name
         );
         authorizedArgs = access.args;
-      } catch {
+      } catch (error) {
         const cancellation = cancellationResultIfIssued(
           contextDependencies,
           context.signal,
@@ -754,18 +789,23 @@ function registerProfileDiagnostic(
           request.metadata
         );
         if (cancellation) return cancellation;
+        // Same classification as the primary dispatch path: a field-policy
+        // denial is fixed in a different configuration key than a table one.
+        const fieldAccessDenied = isFieldPolicyError(error);
         auditInvocation(
           contextDependencies,
           {
             outcome: "policy_rejected",
-            reason: "table_access_denied",
+            reason: fieldAccessDenied ? "field_access_denied" : "table_access_denied",
             profile: binding,
           },
           tool.definition.name,
           request.metadata
         );
         return err(
-          `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
+          fieldAccessDenied
+            ? `${fieldPolicyDenialMessage(error)} Correlation ID: ${context.correlationId}.`
+            : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
         );
       }
 
@@ -781,7 +821,9 @@ function registerProfileDiagnostic(
           }),
         });
         result = await runWithServiceNowRequestSignal(context.signal, () =>
-          tool.invoke(authorizedArgs, services)
+          runWithFieldPolicyConfiguration(context.effectivePolicy.fieldPolicy, () =>
+            tool.invoke(authorizedArgs, services)
+          )
         );
       } catch (error) {
         const cancellation = cancellationResultIfIssued(

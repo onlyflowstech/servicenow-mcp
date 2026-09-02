@@ -13,6 +13,7 @@ import type { ServiceNowConfig } from "../src/config.js";
 import type { ExecutionContextDependencies } from "../src/execution-context.js";
 import {
   MAX_FIELDS_PER_OPERATION,
+  fieldSelectionToSysparmFields,
   resolveReadableFields,
 } from "../src/field-policy.js";
 import { StaticBearerAuthenticationProvider } from "../src/http-auth.js";
@@ -44,9 +45,13 @@ const TOKEN = "snsdk-27-cross-client-token-012345678901234567890123";
 const AUTHORIZATION = `Bearer ${TOKEN}`;
 const PROFILE_NAME = "secondary";
 const INSTANCE = "https://example.service-now.com";
+// An open readable set enumerates every column, so no `elementIN` clause is
+// emitted. An operator-narrowed readable set still produces one.
 const SCHEMA_DICTIONARY_QUERY =
-  "name=incident^internal_type!=collection^elementIN" +
-  resolveReadableFields("incident", { fields: "all" }).join(",") +
+  "name=incident^internal_type!=collection" +
+  (fieldSelectionToSysparmFields(resolveReadableFields("incident", { fields: "all" }))
+    ? `^elementIN${resolveReadableFields("incident", { fields: "all" }).join(",")}`
+    : "") +
   "^ORDERBYelement^ORDERBYsys_id";
 
 const expectedInputs: Record<string, readonly string[]> = {
@@ -58,16 +63,15 @@ const expectedInputs: Record<string, readonly string[]> = {
   sn_create: ["fields", "profile", "table"],
   sn_delete: ["confirm", "profile", "sys_id", "table"],
   sn_discover: ["active", "limit", "offset", "profile", "query", "type"],
-  sn_get: ["display_value", "fields", "identifier", "max_response_bytes", "profile", "response_format", "sys_id", "table"],
+  sn_get: ["display_value", "fields", "force_recache", "identifier", "max_response_bytes", "profile", "response_format", "sys_id", "table"],
   sn_health: ["check", "profile"],
   sn_incident_add_comment: ["content", "profile", "sys_id"],
   sn_incident_add_work_note: ["content", "profile", "sys_id"],
   sn_nl: ["confirm", "execute", "force", "profile", "text"],
   sn_profile: ["profile"],
-  sn_query: ["display_value", "fields", "limit", "max_response_bytes", "offset", "orderby", "profile", "query", "response_format", "structured_query", "table"],
+  sn_query: ["display_value", "fields", "force_recache", "limit", "max_response_bytes", "offset", "orderby", "profile", "query", "response_format", "structured_query", "table"],
   sn_relationships: ["ci_name", "class", "depth", "direction", "impact", "limit", "offset", "profile", "sys_id", "type"],
-  sn_schema: ["fields_only", "limit", "offset", "profile", "table"],
-  sn_script: ["code", "confirm", "profile", "scope", "timeout"],
+  sn_schema: ["fields_only", "force_recache", "limit", "offset", "profile", "table"],
   sn_syslog: ["fields", "level", "limit", "message", "offset", "profile", "since", "source"],
   sn_update: ["fields", "profile", "sys_id", "table"],
 };
@@ -90,7 +94,6 @@ const expectedRequired: Record<string, readonly string[]> = {
   sn_query: ["profile", "table"],
   sn_relationships: ["profile"],
   sn_schema: ["profile", "table"],
-  sn_script: ["code", "profile"],
   sn_syslog: ["profile"],
   sn_update: ["fields", "profile", "sys_id", "table"],
 };
@@ -134,7 +137,6 @@ const validProfileBoundaryArguments: Readonly<
   sn_query: { table: "incident" },
   sn_relationships: {},
   sn_schema: { table: "incident" },
-  sn_script: { code: "gs.info('contract test')", confirm: false },
   sn_syslog: {},
   sn_update: {
     table: "incident",
@@ -163,7 +165,6 @@ const expectedAnnotations: Record<string, CompleteAnnotations> = {
   sn_query: { title: "Query records", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_relationships: { title: "Traverse CI relationships", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_schema: { title: "Get table schema", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  sn_script: { title: "Run background script (unavailable)", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   sn_syslog: { title: "Query system logs", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_update: { title: "Update record", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 };
@@ -440,10 +441,9 @@ function mcpHeaders(
 }
 
 function assertExactDiscovery(tools: readonly Tool[]): void {
-  expect(tools).toHaveLength(20);
   expect(tools).toHaveLength(REGISTERED_TOOL_COUNT);
   const names = tools.map((tool) => tool.name);
-  expect(new Set(names).size).toBe(20);
+  expect(new Set(names).size).toBe(REGISTERED_TOOL_COUNT);
   expect([...names].sort()).toEqual(Object.keys(expectedInputs).sort());
 
   for (const tool of tools) {
@@ -700,7 +700,7 @@ const leakProbeModule = defineServiceNowToolModule({
 });
 
 describe.each(clientFactories)("SNSDK-27 %s contract", (_label, createClient) => {
-  it("initializes and discovers the exact 20-tool schema and annotation contract", async () => {
+  it("initializes and discovers the exact 19-tool schema and annotation contract", async () => {
     const harness = await createHarness();
     const client = createClient(harness.url);
     try {
@@ -1601,14 +1601,25 @@ describe.each(clientFactories)(
         expect(harness.getClient).not.toHaveBeenCalled();
         expect(get).not.toHaveBeenCalled();
         expect(harness.auditWrite).toHaveBeenCalledTimes(7);
+        // These selectors are all denied by the table boundary now: field
+        // policy no longer denies a table it has no entry for, and none of
+        // them names a sensitive field. Every one is still a policy rejection
+        // recorded before credential or upstream work.
+        expect(
+          harness.auditWrite.mock.calls.filter(
+            ([record]) => record.reason === "field_access_denied"
+          )
+        ).toHaveLength(0);
         for (const [record] of harness.auditWrite.mock.calls) {
           expect(record).toMatchObject({
             tool: "sn_get",
             profile: PROFILE_NAME,
             instance: INSTANCE,
             outcome: "policy_rejected",
-            reason: "table_access_denied",
           });
+          expect(["table_access_denied", "field_access_denied"]).toContain(
+            record.reason
+          );
         }
         expect(JSON.stringify(harness.auditWrite.mock.calls)).not.toMatch(
           /CANARY|INJECTION|password|credential/u

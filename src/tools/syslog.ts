@@ -7,6 +7,7 @@ import {
   ENCODED_QUERY_MIGRATION_MESSAGE,
 } from "../encoded-query-policy.js";
 import {
+  fieldSelectionToSysparmFields,
   filterReadableRecord,
   preparedReadableFields,
   resolveReadableFields,
@@ -87,7 +88,7 @@ export async function handler(
     const readableFields =
       preparedReadableFields(args, "syslog") ??
       resolveReadableFields("syslog", { fields: args.fields });
-    const fields = readableFields.join(",");
+    const fields = fieldSelectionToSysparmFields(readableFields);
     let sysparmQuery: string;
 
     const parts: string[] = [];
@@ -104,8 +105,8 @@ export async function handler(
 
     const params: Record<string, string> = {
       sysparm_query: sysparmQuery,
-      sysparm_fields: fields,
       sysparm_limit: String(args.limit),
+      ...(fields ? { sysparm_fields: fields } : {}),
     };
     if (args.offset !== undefined) params.sysparm_offset = String(args.offset);
 

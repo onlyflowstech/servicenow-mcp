@@ -15,9 +15,13 @@ import {
   prepareReadFieldArguments,
   prepareWriteFieldArguments,
   preparedReadableFields,
+  fieldPolicyDenialMessage,
+  fieldSelectionToSysparmFields,
   resolveReadableFields,
+  runWithFieldPolicyConfiguration,
   snapshotPlainDataArguments,
   validateWritableFields,
+  type FieldPolicyConfigurationInput,
 } from "../src/field-policy.js";
 import { resolveToolTableAccess } from "../src/tool-table-access.js";
 
@@ -49,18 +53,28 @@ describe("SNSDK-30 readable field policy", () => {
     expect(Object.isFrozen(selected)).toBe(true);
   });
 
-  it("maps detailed and fields=all to the finite readable allowlist", () => {
+  it("maps detailed and fields=all to the full selection, and narrows under config", () => {
+    // Field policy no longer denies at table granularity, so "all" on a
+    // granted table means every field. The bounded projection lives in
+    // `defaults`, which is what an unspecified read still gets.
     const detailed = resolveReadableFields("incident", {
       responseFormat: "detailed",
     });
     const all = resolveReadableFields("incident", { fields: " ALL " });
 
     expect(all).toEqual(detailed);
-    expect(all).toContain("description");
-    expect(all.length).toBeLessThanOrEqual(MAX_FIELDS_PER_OPERATION);
-    expect(all).not.toContain("comments");
-    expect(all).not.toContain("work_notes");
-    expect(all).not.toContain("password");
+    expect(all).toEqual(["*"]);
+    expect(resolveReadableFields("incident")).toEqual(SAFE_DEFAULT_FIELDS.incident);
+
+    // An explicit operator list still bounds "all" to exactly that list.
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({ incident: { readable: ["sys_id", "number"] } })
+    );
+    expect(resolveReadableFields("incident", { fields: "all" })).toEqual([
+      "sys_id",
+      "number",
+    ]);
   });
 
   it("normalizes approved explicit fields and rejects duplicates", () => {
@@ -117,11 +131,37 @@ describe("SNSDK-30 readable field policy", () => {
     );
   });
 
-  it("rejects unsupported tables, invalid names, sensitive fields, and unknown fields", () => {
-    expectPolicyReason(
-      () => resolveReadableFields("u_unclassified"),
-      "unsupported_table"
+  it("keeps readableTableFields wildcard selections as policy wildcards", () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({
+        readableTableFields: [{ table: "incident", fields: "*" }],
+      })
     );
+
+    expect(
+      resolveReadableFields("incident", { fields: "number,u_custom_safe" })
+    ).toEqual(["number", "u_custom_safe"]);
+    expect(resolveReadableFields("incident", { fields: "all" })).toEqual(["*"]);
+    expect(resolveReadableFields("sys_user", { fields: "user_name" })).toEqual([
+      "user_name",
+    ]);
+    expectPolicyReason(
+      () => resolveReadableFields("incident", { fields: "password" }),
+      "sensitive_field"
+    );
+  });
+
+  it("accepts unmapped tables and unknown fields, and still rejects malformed and sensitive names", () => {
+    // A table with no built-in entry is readable: reachability is decided by
+    // tableAccess, not here. It gets the bounded generic default projection.
+    expect(resolveReadableFields("u_unclassified")).toEqual(["sys_id"]);
+    expect(
+      resolveReadableFields("incident", { fields: "sys_id,u_unknown" })
+    ).toEqual(["sys_id", "u_unknown"]);
+
+    // Shape validation and the sensitive-name filter are field-level and
+    // survive: neither is a table-granularity denial.
     expectPolicyReason(
       () => resolveReadableFields("incident", { fields: "sys_id,bad-field" }),
       "invalid_field_selection"
@@ -130,26 +170,33 @@ describe("SNSDK-30 readable field policy", () => {
       () => resolveReadableFields("incident", { fields: "sys_id,client_secret" }),
       "sensitive_field"
     );
-    expectPolicyReason(
-      () => resolveReadableFields("incident", { fields: "sys_id,u_unknown" }),
-      "unreadable_field"
-    );
   });
 
-  it("checks the maximum before inspecting an excessive selection", () => {
+  it("does not cap explicit field selections", () => {
+    const count = MAX_FIELDS_PER_OPERATION + 1;
     const excessive = Array.from(
-      { length: MAX_FIELDS_PER_OPERATION + 1 },
+      { length: count },
       (_, index) => `field_${index}`
     ).join(",");
-    expectPolicyReason(
-      () => resolveReadableFields("incident", { fields: excessive }),
-      "excessive_field_selection"
+
+    expect(resolveReadableFields("incident", { fields: excessive })).toHaveLength(
+      count
     );
   });
 });
 
 describe("SNSDK-30 writable field policy", () => {
-  it("keeps read and write allowlists separate", () => {
+  it("keeps read and write allowlists separate when an operator states both", () => {
+    // Separation is now something configuration expresses, not something the
+    // built-ins impose: an unconfigured table is open for both operations.
+    expect(validateWritableFields("incident", { sys_id: "a".repeat(32) })).toEqual(
+      { sys_id: "a".repeat(32) }
+    );
+
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({ incident: { readable: ["sys_id"], writable: ["state"] } })
+    );
     expect(resolveReadableFields("incident", { fields: "sys_id" })).toEqual([
       "sys_id",
     ]);
@@ -254,30 +301,59 @@ describe("SNSDK-30 writable field policy", () => {
     );
   });
 
-  it("rejects empty, non-writable, journal, sensitive, and unsupported writes", () => {
+  it("applies writableTableFields wildcards only to the named table", () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({
+        writableTableFields: [{ table: "incident", fields: "*" }],
+      })
+    );
+
+    expect(
+      validateWritableFields("incident", { u_custom_safe: "ok", state: "2" })
+    ).toEqual({ u_custom_safe: "ok", state: "2" });
+    // sys_user is not named by the configuration, so it keeps the open base.
+    // Whether it is reachable at all is a tableAccess question, not this one.
+    expect(validateWritableFields("sys_user", { user_name: "ok" })).toEqual({
+      user_name: "ok",
+    });
+    expectPolicyReason(
+      () => validateWritableFields("incident", { client_secret: "no" }),
+      "sensitive_field"
+    );
+  });
+
+  it("rejects empty payloads and sensitive names; accepts everything a config does not narrow", () => {
     expectPolicyReason(
       () => validateWritableFields("incident", {}),
       "invalid_write_payload"
     );
     expectPolicyReason(
-      () => validateWritableFields("incident", { sys_created_on: "now" }),
-      "non_writable_field"
-    );
-    expectPolicyReason(
-      () => validateWritableFields("incident", { comments: "unsafe generic journal" }),
-      "non_writable_field"
-    );
-    expectPolicyReason(
       () => validateWritableFields("incident", { access_token: "not-a-token" }),
       "sensitive_field"
     );
-    expectPolicyReason(
-      () => validateWritableFields("change_request", { state: "2" }),
-      "non_writable_field"
+
+    // Formerly denied by the built-in writable lists. Those no longer deny:
+    // reachability is tableAccess plus the instance ACLs.
+    expect(validateWritableFields("incident", { sys_created_on: "now" })).toEqual(
+      { sys_created_on: "now" }
+    );
+    expect(validateWritableFields("change_request", { state: "2" })).toEqual({
+      state: "2",
+    });
+    expect(validateWritableFields("u_unclassified", { name: "x" })).toEqual({
+      name: "x",
+    });
+
+    // An explicit operator narrowing still denies, which is the only thing
+    // that does.
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({ incident: { writable: ["state"] } })
     );
     expectPolicyReason(
-      () => validateWritableFields("u_unclassified", { name: "x" }),
-      "unsupported_table"
+      () => validateWritableFields("incident", { sys_created_on: "now" }),
+      "non_writable_field"
     );
   });
 });
@@ -319,16 +395,30 @@ describe("SNSDK-30 response filtering", () => {
   });
 
   it("filters schema metadata to the readable target fields", () => {
+    const entries = [
+      { element: "number", column_label: "Number" },
+      { element: "comments", column_label: "Additional comments" },
+      { element: "client_secret", column_label: "Secret" },
+      { element: "u_unknown", column_label: "Unknown" },
+    ];
+
+    // Under the open base, "all" enumerates every non-sensitive column. The
+    // sensitive-name filter is the only thing still removing an entry.
     expect(
-      filterSchemaEntries(
-        [
-          { element: "number", column_label: "Number" },
-          { element: "comments", column_label: "Additional comments" },
-          { element: "client_secret", column_label: "Secret" },
-          { element: "u_unknown", column_label: "Unknown" },
-        ],
-        resolveReadableFields("incident", { fields: "all" })
-      )
+      filterSchemaEntries(entries, resolveReadableFields("incident", { fields: "all" }))
+    ).toEqual([
+      { element: "number", column_label: "Number" },
+      { element: "comments", column_label: "Additional comments" },
+      { element: "u_unknown", column_label: "Unknown" },
+    ]);
+
+    // An operator-narrowed readable set still bounds the enumeration.
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({ incident: { readable: ["number"] } })
+    );
+    expect(
+      filterSchemaEntries(entries, resolveReadableFields("incident", { fields: "all" }))
     ).toEqual([{ element: "number", column_label: "Number" }]);
   });
 
@@ -433,7 +523,8 @@ describe("SNSDK-30 dispatcher preparation", () => {
     );
 
     expect(prepared.fields).toEqual({ short_description: "Safe" });
-    expect(preparedReadableFields(prepared, "incident")).toContain("sys_id");
+    // The issued read projection is now the open selection for a granted table.
+    expect(preparedReadableFields(prepared, "incident")).toEqual(["*"]);
   });
 
   it("rejects a structurally valid but non-issued prepared marker", () => {
@@ -471,8 +562,6 @@ describe("SNSDK-30 dispatcher preparation", () => {
       { table: "sys_script", field: "client_secret" },
       "sensitive_field",
     ],
-    ["sn_atf", { action: "list", fields: "output" }, "unreadable_field"],
-    ["sn_atf", { action: "suites", fields: "output" }, "unreadable_field"],
     [
       "sn_atf",
       { action: "results", fields: "sys_id,password" },
@@ -484,6 +573,29 @@ describe("SNSDK-30 dispatcher preparation", () => {
       reason
     );
   });
+
+  it.each([
+    ["list", "sys_atf_test"],
+    ["suites", "sys_atf_test_suite"],
+  ] as const)(
+    "preflights an operator-narrowed readable set for sn_atf %s",
+    (action, table) => {
+      // `output` used to be denied by the built-in readable list. Built-ins no
+      // longer deny, so it is now accepted -- and denied again only when an
+      // operator narrows that table explicitly. The preflight itself, which is
+      // what this covers, runs either way.
+      expect(() => resolveToolTableAccess("sn_atf", { action, fields: "output" })).not.toThrow();
+
+      vi.stubEnv(
+        "SN_FIELD_POLICY_DEFINITIONS",
+        JSON.stringify({ [table]: { readable: ["sys_id", "name"] } })
+      );
+      expectPolicyReason(
+        () => resolveToolTableAccess("sn_atf", { action, fields: "output" }),
+        "unreadable_field"
+      );
+    }
+  );
 
   it("carries independent issued projections for every multi-table branch", () => {
     const apps = resolveToolTableAccess("sn_discover", { type: "apps" });
@@ -786,5 +898,282 @@ describe("SNSDK-30 descriptor budgets", () => {
       sys_id: "safe",
     });
     expect(getterCalls).toBe(0);
+  });
+});
+
+describe("field policy narrows only where an operator says so", () => {
+  /** The exact object src/index.ts builds for a profile-scoped policy. */
+  function scopedFieldPolicy(profile: {
+    fieldPolicy?: unknown;
+    readableTableFields?: unknown;
+    writableTableFields?: unknown;
+  }): FieldPolicyConfigurationInput {
+    return {
+      ...(profile.fieldPolicy === undefined
+        ? {}
+        : { fieldPolicy: profile.fieldPolicy }),
+      ...(profile.readableTableFields === undefined
+        ? {}
+        : { readableTableFields: profile.readableTableFields }),
+      ...(profile.writableTableFields === undefined
+        ? {}
+        : { writableTableFields: profile.writableTableFields }),
+    };
+  }
+
+  it("treats a key present with an undefined value as an absent key", () => {
+    const narrowing = { incident: { writable: ["state"] } };
+    // The pre-fix provider materialized all three keys unconditionally, which
+    // routed every profile down the list branch and discarded its narrowing.
+    // A policy must mean the same thing however the caller assembled it.
+    const materialized: FieldPolicyConfigurationInput = {
+      fieldPolicy: narrowing,
+      readableTableFields: undefined,
+      writableTableFields: undefined,
+    };
+    const omitted = scopedFieldPolicy({ fieldPolicy: narrowing });
+
+    for (const configuration of [materialized, omitted]) {
+      runWithFieldPolicyConfiguration(configuration, () => {
+        // The configured narrowing is honored, not discarded.
+        expect(validateWritableFields("incident", { state: "2" })).toEqual({
+          state: "2",
+        });
+        expectPolicyReason(
+          () => validateWritableFields("incident", { short_description: "no" }),
+          "non_writable_field"
+        );
+        // A table the profile did not name is unaffected in either direction.
+        expect(validateWritableFields("problem", { state: "2" })).toEqual({
+          state: "2",
+        });
+      });
+    }
+  });
+
+  it("narrows exactly the named table under every configuration form", () => {
+    // The shape of the configuration must never decide the posture. Each form
+    // below narrows `incident` writes to `state` and says nothing about
+    // `problem`; every one must behave identically.
+    const forms: readonly FieldPolicyConfigurationInput[] = [
+      scopedFieldPolicy({ fieldPolicy: { incident: { writable: ["state"] } } }),
+      {
+        fieldPolicy: { incident: { writable: ["state"] } },
+        readableTableFields: undefined,
+        writableTableFields: undefined,
+      },
+      scopedFieldPolicy({
+        writableTableFields: [{ table: "incident", fields: ["state"] }],
+      }),
+    ];
+
+    for (const [index, configuration] of forms.entries()) {
+      runWithFieldPolicyConfiguration(configuration, () => {
+        expect(
+          validateWritableFields("incident", { state: "2" }),
+          `form ${index}`
+        ).toEqual({ state: "2" });
+        expectPolicyReason(
+          () => validateWritableFields("incident", { short_description: "no" }),
+          "non_writable_field"
+        );
+        expect(
+          validateWritableFields("problem", { state: "2" }),
+          `form ${index}`
+        ).toEqual({ state: "2" });
+      });
+    }
+  });
+
+  it("permits writes to script and membership tables that a profile has granted", () => {
+    // Recorded deliberately. Field policy no longer denies at table
+    // granularity: `tableAccess` decides reachability and ServiceNow's
+    // per-user ACLs are the real boundary. An integration account without
+    // the roles to write these tables is refused by the instance.
+    const scriptWrite = { script: "gs.print('x')" };
+    const membershipWrite = { user: "a".repeat(32), group: "b".repeat(32) };
+
+    for (const table of [
+      "sys_script",
+      "sys_script_include",
+      "sys_ui_script",
+      "sys_script_client",
+      "sys_ws_operation",
+    ]) {
+      expect(validateWritableFields(table, scriptWrite)).toEqual(scriptWrite);
+    }
+    expect(validateWritableFields("sys_user_grmember", membershipWrite)).toEqual(
+      membershipWrite
+    );
+  });
+
+  it("still denies those tables when an operator narrows them explicitly", () => {
+    // The control an operator retains: name the table, state the writable set.
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({
+        sys_script: { writable: [] },
+        sys_user_grmember: { writable: [] },
+      })
+    );
+
+    expectPolicyReason(
+      () => validateWritableFields("sys_script", { script: "gs.print('x')" }),
+      "non_writable_field"
+    );
+    expectPolicyReason(
+      () => validateWritableFields("sys_user_grmember", { user: "a".repeat(32) }),
+      "non_writable_field"
+    );
+    // Naming one table leaves every other table alone.
+    expect(validateWritableFields("sys_script_include", { script: "x" })).toEqual(
+      { script: "x" }
+    );
+  });
+
+  it("denies reads only when a configured readable set is empty", () => {
+    // An empty selection would serialize to an empty sysparm_fields, which
+    // ServiceNow reads as "every field". That guard is a wire-format footgun,
+    // not a policy denial, and it survives.
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({ u_write_only: { readable: [], writable: ["u_note"] } })
+    );
+
+    expectPolicyReason(
+      () => resolveReadableFields("u_write_only"),
+      "unreadable_field"
+    );
+    expectPolicyReason(
+      () => resolveReadableFields("u_write_only", { fields: "all" }),
+      "unreadable_field"
+    );
+    expect(validateWritableFields("u_write_only", { u_note: "x" })).toEqual({
+      u_note: "x",
+    });
+  });
+
+  it("keeps the bounded default projection for both built-in and unmapped tables", () => {
+    // `defaults` is ergonomics, not a denial, and is untouched by the move to
+    // an open base: an unspecified read must not become "every column".
+    expect(resolveReadableFields("incident")).toEqual([
+      ...SAFE_DEFAULT_FIELDS.incident!,
+    ]);
+    expect(fieldSelectionToSysparmFields(resolveReadableFields("incident"))).toContain(
+      "sys_id,number"
+    );
+    expect(resolveReadableFields("u_unmapped")).toEqual(["sys_id"]);
+
+    // An explicit wildcard default is still honoured as stated intent.
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({ incident: { defaults: "*" } })
+    );
+    expect(resolveReadableFields("incident")).toEqual(["*"]);
+  });
+
+  it("narrows a built-in table without restating its defaults", () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({ incident: { readable: ["number"], writable: ["number"] } })
+    );
+
+    // Pre-fix this threw a raw TypeError on every request, because the
+    // built-in default projection survived the readable override.
+    expect(resolveReadableFields("incident")).toEqual(["number"]);
+    expectPolicyReason(
+      () => resolveReadableFields("incident", { fields: "caller_id" }),
+      "unreadable_field"
+    );
+    expect(validateWritableFields("incident", { number: "INC1" })).toEqual({
+      number: "INC1",
+    });
+  });
+
+  it("rejects a contradictory policy as a branded denial, not a TypeError", () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({
+        incident: { defaults: ["caller_id"], readable: ["number"] },
+      })
+    );
+
+    expectPolicyReason(
+      () => resolveReadableFields("incident"),
+      "invalid_argument_shape"
+    );
+  });
+});
+
+describe("field-policy denials explain themselves to an operator", () => {
+  function denial(action: () => unknown): FieldPolicyError {
+    try {
+      action();
+    } catch (error) {
+      if (error instanceof FieldPolicyError) return error;
+      throw error;
+    }
+    throw new Error("Expected a field policy rejection");
+  }
+
+  it("names the table, the field, and the config key for a non-writable field", () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({ sys_script: { writable: [] } })
+    );
+    const error = denial(() => validateWritableFields("sys_script", { script: "x" }));
+
+    expect(error.reason).toBe("non_writable_field");
+    expect(error.table).toBe("sys_script");
+    expect(error.field).toBe("script");
+    const message = fieldPolicyDenialMessage(error);
+    expect(message).toContain('"script"');
+    expect(message).toContain('"sys_script"');
+    expect(message).toContain("fieldPolicy.sys_script.writable");
+    // Callers classify denials on this substring.
+    expect(message).toContain("denied by policy");
+  });
+
+  it("names the config key for an unreadable field", () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({ incident: { readable: ["number"] } })
+    );
+    const unreadable = denial(() =>
+      resolveReadableFields("incident", { fields: "u_unknown" })
+    );
+
+    expect(unreadable.reason).toBe("unreadable_field");
+    expect(fieldPolicyDenialMessage(unreadable)).toContain(
+      "fieldPolicy.incident.readable"
+    );
+  });
+
+  it("never reflects a sensitive field name back to the caller", () => {
+    // The name itself is the signal here, so echoing it would both reflect
+    // caller input into a response and hand back an oracle for the
+    // sensitive-name list. A sensitive name cannot be granted by config either.
+    const error = denial(() =>
+      validateWritableFields("incident", { client_secret: "x" })
+    );
+
+    expect(error.reason).toBe("sensitive_field");
+    expect(error.field).toBeUndefined();
+    expect(fieldPolicyDenialMessage(error)).not.toContain("client_secret");
+  });
+
+  it("never carries a field value", () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({ sys_script: { writable: [] } })
+    );
+    const error = denial(() =>
+      validateWritableFields("sys_script", { script: "SECRET-CANARY-VALUE" })
+    );
+
+    expect(fieldPolicyDenialMessage(error)).not.toContain("SECRET-CANARY-VALUE");
+    expect(JSON.stringify({ ...error, message: error.message })).not.toContain(
+      "SECRET-CANARY-VALUE"
+    );
   });
 });

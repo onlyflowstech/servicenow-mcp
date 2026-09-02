@@ -12,6 +12,7 @@
 
 import { randomUUID } from "node:crypto";
 
+import type { FieldPolicyConfigurationInput } from "./field-policy.js";
 import {
   createEncodedQueryAccessPolicy,
   type EncodedQueryAccessPolicy,
@@ -68,6 +69,7 @@ export interface EffectivePolicyReference {
   readonly id: string;
   readonly revision: string;
   readonly tableAccess: TableAccessPolicy;
+  readonly fieldPolicy?: FieldPolicyConfigurationInput;
   /** Omission is the universal deny-all raw encoded-query policy. */
   readonly encodedQueryAccess?: EncodedQueryAccessPolicyInput;
 }
@@ -76,6 +78,7 @@ export interface ResolvedEffectivePolicyReference {
   readonly id: string;
   readonly revision: string;
   readonly tableAccess: TableAccessPolicy;
+  readonly fieldPolicy?: FieldPolicyConfigurationInput;
   readonly encodedQueryAccess: EncodedQueryAccessPolicy;
 }
 
@@ -114,7 +117,9 @@ export type ToolAuditReason =
   | "invalid_profile"
   | "policy_context_unavailable"
   | "table_access_denied"
+  | "field_access_denied"
   | "encoded_query_denied"
+  | "structured_query_denied"
   | "journal_update_denied"
   | "client_initialization_failed"
   | "profile_binding_changed"
@@ -176,7 +181,9 @@ export type ToolAuditRecord =
       readonly outcome: "policy_rejected";
       readonly reason:
         | "table_access_denied"
+        | "field_access_denied"
         | "encoded_query_denied"
+        | "structured_query_denied"
         | "journal_update_denied";
     })
   | (ResolvedToolAuditRecord & ToolAuditErrorFields & {
@@ -322,6 +329,7 @@ export async function createExecutionContext(
     id: safeIdentifier(selectedPolicy.id, "policy id"),
     revision: safeIdentifier(selectedPolicy.revision, "policy revision"),
     tableAccess: createTableAccessPolicy(selectedPolicy.tableAccess),
+    fieldPolicy: selectedPolicy.fieldPolicy,
     encodedQueryAccess: createEncodedQueryAccessPolicy(
       selectedPolicy.encodedQueryAccess
     ),
@@ -388,7 +396,9 @@ export type ToolAuditDisposition =
       readonly outcome: "policy_rejected";
       readonly reason:
         | "table_access_denied"
+        | "field_access_denied"
         | "encoded_query_denied"
+        | "structured_query_denied"
         | "journal_update_denied";
       readonly profile: ResolvedProfileBinding;
     }
@@ -480,7 +490,9 @@ export function createAuditRecord(input: CreateToolAuditRecordInput): ToolAuditR
     case "policy_rejected":
       if (
         reason !== "table_access_denied" &&
+        reason !== "field_access_denied" &&
         reason !== "encoded_query_denied" &&
+        reason !== "structured_query_denied" &&
         reason !== "journal_update_denied"
       ) {
         break;
@@ -728,7 +740,9 @@ function validateAuditInvariant(
       hasProfile) ||
     (outcome === "policy_rejected" &&
       (reason === "table_access_denied" ||
+        reason === "field_access_denied" ||
         reason === "encoded_query_denied" ||
+        reason === "structured_query_denied" ||
         reason === "journal_update_denied") &&
       hasProfile) ||
     (outcome === "client_rejected" &&

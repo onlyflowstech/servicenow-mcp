@@ -85,6 +85,7 @@ export async function createMcpServer<TDependencies extends object>(
     {
       capabilities: {
         tools: {},
+        prompts: {},
       },
     }
   );

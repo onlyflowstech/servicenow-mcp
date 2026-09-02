@@ -10,6 +10,7 @@
  * @module field-policy
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { types as nodeUtilTypes } from "node:util";
 
 export type ResponseFormat = "concise" | "detailed";
@@ -19,50 +20,66 @@ export interface ReadFieldSelectionInput {
   readonly responseFormat?: unknown;
 }
 
+export type FieldSelection = readonly string[];
+
 export interface PreparedFieldAccess {
   readonly entries: readonly {
     readonly table: string;
-    readonly readableFields: readonly string[];
+    readonly readableFields: FieldSelection;
   }[];
 }
 
 export type FieldPolicyFailureReason =
   | "unsupported_table"
   | "invalid_field_selection"
-  | "excessive_field_selection"
-  | "sensitive_field"
   | "unreadable_field"
   | "invalid_write_payload"
   | "non_writable_field"
+  | "sensitive_field"
   | "traversal_limit_exceeded"
   | "invalid_argument_shape";
 
 type FieldPolicySet = readonly string[] | "*";
 
 interface TableFieldPolicyDefinition {
-  readonly defaults: readonly string[];
-  readonly readable: FieldPolicySet;
-  readonly writable: FieldPolicySet;
-}
-
-interface MutableTableFieldPolicyDefinition {
-  readonly defaults?: readonly string[];
+  readonly defaults?: FieldPolicySet;
   readonly readable?: FieldPolicySet;
   readonly writable?: FieldPolicySet;
 }
 
+interface MutableTableFieldPolicyDefinition {
+  readonly defaults?: FieldPolicySet;
+  readonly readable?: FieldPolicySet;
+  readonly writable?: FieldPolicySet;
+}
+
+export interface TableFieldListDefinition {
+  readonly table: string;
+  readonly fields: readonly string[] | "*";
+}
+
+export interface FieldPolicyConfigurationInput {
+  readonly fieldPolicy?: unknown;
+  readonly readableTableFields?: unknown;
+  readonly writableTableFields?: unknown;
+}
+
+interface FieldPolicyConfiguration {
+  readonly definitions: Record<string, MutableTableFieldPolicyDefinition>;
+}
+
 interface TableFieldPolicy {
   readonly table: string;
-  readonly defaults: readonly string[];
+  readonly defaults: FieldSelection;
   readonly readable: readonly string[];
   readonly writable: readonly string[];
   readonly allowAnyReadable: boolean;
   readonly allowAnyWritable: boolean;
-  readonly maxFields: number;
 }
 
 const FIELD_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
-export const MAX_FIELDS_PER_OPERATION = 32;
+/** @deprecated Field authorization no longer caps the number of selected fields. */
+export const MAX_FIELDS_PER_OPERATION = 10_000;
 /** Hard bounds for hostile values crossing the field-policy boundary. */
 export const MAX_FIELD_VALUE_DEPTH = 24;
 export const MAX_FIELD_VALUE_NODES = 50_000;
@@ -73,7 +90,11 @@ const MAX_CANONICAL_ARGUMENT_KEYS = 8;
 const FIELD_POLICY_DEFINITIONS_ENV = "SN_FIELD_POLICY_DEFINITIONS";
 const MAX_FIELD_POLICY_DEFINITIONS_TEXT_LENGTH = 65_536;
 const FIELD_POLICY_WILDCARD = "*";
-const GENERIC_DEFAULT_FIELDS = ["sys_id"] as const;
+const ALL_FIELDS_SELECTION = Object.freeze([FIELD_POLICY_WILDCARD]) as readonly string[];
+/** Bounded projection for a table whose readable set is a wildcard but whose
+ * defaults the operator did not state. An unstated default must stay finite:
+ * "may read any field" is not "return every field on every query". */
+const GENERIC_DEFAULT_FIELDS = Object.freeze(["sys_id"]) as readonly string[];
 
 const INCIDENT_DEFAULTS = [
   "sys_id",
@@ -322,6 +343,16 @@ const POLICY_DEFINITIONS = {
     ],
     writable: [],
   },
+  // Group membership grants every role the group holds. A write here escalates
+  // the integration account to instance admin as surely as a sys_script write,
+  // so the writable set is empty for the same reason. sys_user_role,
+  // sys_user_has_role, and sys_group_has_role are hard-denied at the table
+  // boundary (table-policy.ts); this table is not, so it is denied here.
+  sys_user_grmember: {
+    defaults: ["sys_id", "user", "group"],
+    readable: ["sys_id", "user", "group", "sys_created_on", "sys_updated_on"],
+    writable: [],
+  },
   cmdb_ci: {
     defaults: [
       "sys_id",
@@ -547,7 +578,40 @@ const POLICY_DEFINITIONS = {
   },
 } as const satisfies Record<string, TableFieldPolicyDefinition>;
 
-const BUILT_IN_TABLE_FIELD_POLICIES = buildFieldPolicyMap(POLICY_DEFINITIONS);
+/**
+ * The policy base.
+ *
+ * The built-in entries contribute their `defaults` -- the bounded projection
+ * used when a caller names no fields -- and nothing else. Their `readable` and
+ * `writable` lists are deliberately NOT carried over: field policy does not
+ * deny at table granularity. Reachability is decided by the profile's
+ * `tableAccess` grant and by ServiceNow's per-user ACLs; a table that reaches
+ * this module has already been granted, so denying its fields here would only
+ * contradict the operator's own configuration.
+ *
+ * The "*" entry makes every other table resolvable with the same posture, so
+ * a granted custom table needs no field-policy entry to be usable.
+ */
+const FIELD_POLICY_BASE: Readonly<Record<string, TableFieldPolicyDefinition>> =
+  Object.freeze({
+    ...Object.fromEntries(
+      Object.entries(POLICY_DEFINITIONS).map(([table, definition]) => [
+        table,
+        Object.freeze({
+          defaults: definition.defaults,
+          readable: FIELD_POLICY_WILDCARD,
+          writable: FIELD_POLICY_WILDCARD,
+        }),
+      ])
+    ),
+    [FIELD_POLICY_WILDCARD]: Object.freeze({
+      defaults: GENERIC_DEFAULT_FIELDS,
+      readable: FIELD_POLICY_WILDCARD,
+      writable: FIELD_POLICY_WILDCARD,
+    }),
+  });
+
+const BUILT_IN_TABLE_FIELD_POLICIES = buildFieldPolicyMap(FIELD_POLICY_BASE);
 
 const GENERIC_RECORD_TABLES = new Set([
   "incident",
@@ -575,17 +639,74 @@ export const SAFE_DEFAULT_FIELDS: Readonly<Record<string, readonly string[]>> =
     )
   );
 
+const FIELD_POLICY_CONFIGURATION_SCOPE = new AsyncLocalStorage<FieldPolicyConfigurationInput>();
+
 const PREPARED_FIELD_ACCESS = Symbol("PreparedFieldAccess");
 const ISSUED_FIELD_POLICY_ERRORS = new WeakSet<object>();
 const ISSUED_PREPARED_FIELD_ACCESS = new WeakSet<object>();
 
-/** Bounded policy rejection that never contains the requested field or payload. */
+/**
+ * Bounded policy rejection that never contains a field *value* or the policy
+ * contents. The table and field *names* are carried when known so the denial
+ * can be explained to an operator; both are caller-supplied identifiers that
+ * have already passed the FIELD_NAME regex, so echoing them discloses nothing
+ * the caller did not send.
+ */
 export class FieldPolicyError extends Error {
-  constructor(readonly reason: FieldPolicyFailureReason) {
+  readonly table: string | undefined;
+  readonly field: string | undefined;
+
+  constructor(
+    readonly reason: FieldPolicyFailureReason,
+    detail: { readonly table?: string; readonly field?: string } = {}
+  ) {
     super("Field access denied by policy");
     this.name = "FieldPolicyError";
+    this.table = detail.table;
+    this.field = detail.field;
     ISSUED_FIELD_POLICY_ERRORS.add(this);
     Object.freeze(this);
+  }
+}
+
+/**
+ * Operator-facing explanation for a field-policy denial.
+ *
+ * Names the table, the offending field, and the configuration key that would
+ * grant it, so a denial is fixable without reading source. Two deliberate
+ * limits:
+ *
+ * - Field *values* never appear -- only names the caller itself supplied.
+ * - A `sensitive_field` denial names nothing. The field name *is* the signal
+ *   there, so echoing it both reflects caller input into a response and hands
+ *   back an oracle for the sensitive-name blocklist. That case is not operator-
+ *   actionable anyway: a sensitive name cannot be granted by configuration.
+ *
+ * Every message keeps the phrase "denied by policy" so callers that classify
+ * denials on that substring keep working.
+ */
+export function fieldPolicyDenialMessage(error: FieldPolicyError): string {
+  const { table, field } = error;
+  switch (error.reason) {
+    case "non_writable_field":
+      return table && field
+        ? `Write denied by policy: field "${field}" is not writable on "${table}" under the ` +
+            `configured field policy. Add it to fieldPolicy.${table}.writable to allow this write.`
+        : "Write denied by policy: a field in the payload is not writable under the configured field policy.";
+    case "unreadable_field":
+      return table && field
+        ? `Read denied by policy: field "${field}" is not readable on "${table}" under the ` +
+            `configured field policy. Add it to fieldPolicy.${table}.readable to allow this read.`
+        : "Read denied by policy: a requested field is not readable under the configured field policy.";
+    case "unsupported_table":
+      return table
+        ? `Access denied by policy: table "${table}" has no field policy entry. Add ` +
+            `fieldPolicy.${table}, or a fieldPolicy."*" fallback, to allow it.`
+        : "Access denied by policy: the requested table has no field policy entry.";
+    case "sensitive_field":
+      return "Access denied by policy: a requested field is denied by name as sensitive and cannot be granted by configuration.";
+    default:
+      return `Access denied by policy (${error.reason}).`;
   }
 }
 
@@ -631,11 +752,11 @@ export function withFieldPolicyArgumentValues(
   return output;
 }
 
-/** Resolve a caller selection to a finite approved field list. */
+/** Resolve a caller selection to a policy-approved field selection. */
 export function resolveReadableFields(
   tableCandidate: unknown,
   input: ReadFieldSelectionInput = {}
-): readonly string[] {
+): FieldSelection {
   const policy = requirePolicy(tableCandidate);
   const canonicalInput = snapshotPlainDataArguments(
     input as Readonly<Record<string, unknown>>
@@ -644,33 +765,36 @@ export function resolveReadableFields(
   const requested = canonicalInput.fields;
 
   if (requested === undefined) {
-    return responseFormat === "detailed" ? policy.readable : policy.defaults;
+    return requireNonEmptySelection(
+      responseFormat === "detailed" ? readableSelection(policy) : policy.defaults
+    );
   }
   if (typeof requested !== "string") {
     throw new FieldPolicyError("invalid_field_selection");
   }
   const trimmed = requested.trim();
-  if (trimmed.toLowerCase() === "all") return policy.readable;
+  if (trimmed.toLowerCase() === "all") {
+    return requireNonEmptySelection(readableSelection(policy));
+  }
   if (!trimmed) throw new FieldPolicyError("invalid_field_selection");
 
-  const rawFields = trimmed.split(",");
-  if (rawFields.length > policy.maxFields) {
-    throw new FieldPolicyError("excessive_field_selection");
-  }
   const selected: string[] = [];
   const seen = new Set<string>();
-  for (const candidate of rawFields) {
+  for (const candidate of trimmed.split(",")) {
     const field = normalizeFieldName(candidate);
     if (seen.has(field)) throw new FieldPolicyError("invalid_field_selection");
-    if (isSensitiveFieldName(field)) throw new FieldPolicyError("sensitive_field");
+    if (isSensitiveFieldName(field)) {
+      throw new FieldPolicyError("sensitive_field", { table: policy.table });
+    }
     if (!fieldSetAllows(policy.readable, policy.allowAnyReadable, field)) {
-      throw new FieldPolicyError("unreadable_field");
+      throw new FieldPolicyError("unreadable_field", { table: policy.table, field });
     }
     seen.add(field);
     selected.push(field);
   }
   return Object.freeze(selected);
 }
+
 
 /** Validate and clone one Table API write map using the separate write set. */
 export function validateWritableFields(
@@ -687,11 +811,8 @@ export function validateWritableFields(
     throw new FieldPolicyError("invalid_write_payload");
   }
   assertPlainWriteObject(payloadCandidate);
-  const entries = writeOwnDataEntries(payloadCandidate, policy.maxFields);
+  const entries = writeOwnDataEntries(payloadCandidate, MAX_FIELD_OBJECT_OWN_KEYS);
   if (entries.length === 0) throw new FieldPolicyError("invalid_write_payload");
-  if (entries.length > policy.maxFields) {
-    throw new FieldPolicyError("excessive_field_selection");
-  }
 
   const output: Record<string, unknown> = {};
   const traversal: WriteTraversalState = {
@@ -706,9 +827,11 @@ export function validateWritableFields(
     if (Object.hasOwn(output, field)) {
       throw new FieldPolicyError("invalid_write_payload");
     }
-    if (isSensitiveFieldName(field)) throw new FieldPolicyError("sensitive_field");
+    if (isSensitiveFieldName(field)) {
+      throw new FieldPolicyError("sensitive_field", { table: policy.table });
+    }
     if (!fieldSetAllows(policy.writable, policy.allowAnyWritable, field)) {
-      throw new FieldPolicyError("non_writable_field");
+      throw new FieldPolicyError("non_writable_field", { table: policy.table, field });
     }
     safeDefine(
       output,
@@ -718,6 +841,7 @@ export function validateWritableFields(
   }
   return Object.freeze(output);
 }
+
 
 /**
  * Attach a non-JSON marker after request-field validation. The symbol survives
@@ -741,7 +865,11 @@ export function prepareReadFieldArguments(
   });
   const overrides: Record<string, unknown> = { table };
   if (canonicalOptions.exposeFieldsArgument) {
-    safeDefineArgument(overrides, "fields", readableFields.join(","));
+    safeDefineArgument(
+      overrides,
+      "fields",
+      isAllFieldSelection(readableFields) ? "all" : readableFields.join(",")
+    );
   }
   const prepared = withFieldPolicyArgumentValues(canonicalArgs, overrides);
   safeDefineArgument(
@@ -793,7 +921,7 @@ export function prepareWriteFieldArguments(
 export function preparedReadableFields(
   args: unknown,
   tableCandidate: unknown
-): readonly string[] | undefined {
+): FieldSelection | undefined {
   try {
     if (
       typeof args !== "object" ||
@@ -824,11 +952,12 @@ export function preparedReadableFields(
     );
     if (!entry) return undefined;
     const fields = safeOwnDataValue(entry, "readableFields");
-    if (!Array.isArray(fields) || !Object.isFrozen(fields)) return undefined;
     const policy = requirePolicy(table);
+    if (!Array.isArray(fields) || !Object.isFrozen(fields)) return undefined;
+    if (isAllFieldSelection(fields)) {
+      return policy.allowAnyReadable ? ALL_FIELDS_SELECTION : undefined;
+    }
     if (
-      fields.length === 0 ||
-      fields.length > policy.maxFields ||
       fields.some(
         (field) =>
           typeof field !== "string" ||
@@ -846,18 +975,21 @@ export function preparedReadableFields(
 /** Keep approved top-level record fields and scrub sensitive nested keys. */
 export function filterReadableRecord(
   candidate: unknown,
-  readableFields: readonly string[]
+  readableFields: FieldSelection
 ): unknown {
   if (nodeUtilTypes.isProxy(readableFields)) return null;
-  const approved = new Set(readableFields.map(normalizeFieldName));
   const state = responseTraversalState();
+  if (isAllFieldSelection(readableFields)) {
+    return sanitizeNestedValue(candidate, state, 0);
+  }
+  const approved = new Set(readableFields.map(normalizeFieldName));
   return filterRecordNode(candidate, approved, state, 0);
 }
 
 /** Remove metadata entries for fields the caller is not permitted to discover. */
 export function filterSchemaEntries(
   candidate: unknown,
-  readableFields: readonly string[]
+  readableFields: FieldSelection
 ): Array<Record<string, unknown>> {
   if (
     typeof candidate !== "object" ||
@@ -868,7 +1000,8 @@ export function filterSchemaEntries(
     return [];
   }
   if (nodeUtilTypes.isProxy(readableFields)) return [];
-  const approved = new Set(readableFields.map(normalizeFieldName));
+  const allReadable = isAllFieldSelection(readableFields);
+  const approved = allReadable ? undefined : new Set(readableFields.map(normalizeFieldName));
   const output: Array<Record<string, unknown>> = [];
   const state = responseTraversalState();
   const view = responseArrayView(candidate);
@@ -895,7 +1028,10 @@ export function filterSchemaEntries(
     } catch {
       continue;
     }
-    if (!approved.has(field) || isSensitiveFieldName(field)) continue;
+    // A wildcard readable set leaves `approved` undefined; the sensitive-name
+    // check is then the only thing keeping user_password and its siblings out
+    // of schema metadata.
+    if ((approved && !approved.has(field)) || isSensitiveFieldName(field)) continue;
     const sanitized = sanitizeNestedValue(entry, state, 1);
     if (
       typeof sanitized !== "object" ||
@@ -912,12 +1048,36 @@ export function filterSchemaEntries(
 /** Filter the documented Stats API envelope and approved aggregate fields. */
 export function filterAggregateResult(
   candidate: unknown,
-  readableFields: readonly string[]
+  readableFields: FieldSelection
 ): unknown {
   if (nodeUtilTypes.isProxy(readableFields)) return null;
-  const approved = new Set(readableFields.map(normalizeFieldName));
   const state = responseTraversalState();
+  if (isAllFieldSelection(readableFields)) {
+    return sanitizeNestedValue(candidate, state, 0);
+  }
+  const approved = new Set(readableFields.map(normalizeFieldName));
   return filterAggregateNode(candidate, approved, state, 0);
+}
+
+
+
+export function runWithFieldPolicyConfiguration<T>(
+  configuration: FieldPolicyConfigurationInput | undefined,
+  callback: () => T
+): T {
+  return FIELD_POLICY_CONFIGURATION_SCOPE.run(configuration ?? Object.freeze({}), callback);
+}
+
+/** True when a field selection means ServiceNow should return all fields. */
+export function isAllFieldSelection(selection: readonly string[]): boolean {
+  return selection.length === 1 && selection[0] === FIELD_POLICY_WILDCARD;
+}
+
+/** Convert a policy selection into a Table API sysparm_fields value. */
+export function fieldSelectionToSysparmFields(
+  selection: readonly string[]
+): string | undefined {
+  return isAllFieldSelection(selection) ? undefined : selection.join(",");
 }
 
 /** Sensitive names are denied even if accidentally added to a table policy. */
@@ -939,7 +1099,7 @@ function requirePolicy(tableCandidate: unknown): TableFieldPolicy {
   const policy = policies.get(table);
   if (policy) return policy;
   const fallback = policies.get(FIELD_POLICY_WILDCARD);
-  if (!fallback) throw new FieldPolicyError("unsupported_table");
+  if (!fallback) throw new FieldPolicyError("unsupported_table", { table });
   return Object.freeze({ ...fallback, table });
 }
 
@@ -954,7 +1114,10 @@ function fieldSetAllows(
 function currentTableFieldPolicies(): ReadonlyMap<string, TableFieldPolicy> {
   const configured = readConfiguredFieldPolicyDefinitions();
   if (!configured) return BUILT_IN_TABLE_FIELD_POLICIES;
-  return buildFieldPolicyMap(mergeFieldPolicyDefinitions(POLICY_DEFINITIONS, configured));
+  // Configuration narrows the base; it is the only thing that denies a field.
+  return buildFieldPolicyMap(
+    mergeFieldPolicyDefinitions(FIELD_POLICY_BASE, configured.definitions)
+  );
 }
 
 function mergeFieldPolicyDefinitions(
@@ -965,12 +1128,45 @@ function mergeFieldPolicyDefinitions(
   for (const [table, definition] of Object.entries(configured)) {
     const existing = merged[table];
     merged[table] = {
-      defaults: definition.defaults ?? existing?.defaults ?? GENERIC_DEFAULT_FIELDS,
-      readable: definition.readable ?? existing?.readable ?? definition.defaults ?? GENERIC_DEFAULT_FIELDS,
-      writable: definition.writable ?? existing?.writable ?? [],
+      defaults:
+        definition.defaults ??
+        inheritedDefaults(existing?.defaults, definition.readable),
+      // An entry that states only `defaults` reads exactly those fields.
+      readable: definition.readable ?? existing?.readable ?? definition.defaults,
+      // Omission no longer denies. An operator who states nothing about
+      // writes has not asked for a restriction, and tableAccess already
+      // decided whether this table is reachable at all.
+      writable: definition.writable ?? existing?.writable,
     };
   }
   return merged;
+}
+
+/**
+ * Carry inherited defaults across a configured `readable` replacement.
+ *
+ * Inheriting them wholesale lets a narrowing override keep defaults the new
+ * readable set no longer permits, which the consistency check in
+ * buildFieldPolicyMap then rejects on every request.
+ */
+function inheritedDefaults(
+  existingDefaults: FieldPolicySet | undefined,
+  configuredReadable: FieldPolicySet | undefined
+): FieldPolicySet | undefined {
+  if (configuredReadable === undefined) return existingDefaults;
+  if (configuredReadable === FIELD_POLICY_WILDCARD) {
+    // Widening what may be read says nothing about what to return by default.
+    // Keep the inherited projection; where there is none, fall through to the
+    // bounded generic default rather than manufacturing a wildcard.
+    return existingDefaults === FIELD_POLICY_WILDCARD ? undefined : existingDefaults;
+  }
+  if (existingDefaults === undefined || existingDefaults === FIELD_POLICY_WILDCARD) {
+    return configuredReadable;
+  }
+  const permitted = existingDefaults.filter((field) =>
+    configuredReadable.includes(field)
+  );
+  return permitted.length > 0 ? permitted : configuredReadable;
 }
 
 function buildFieldPolicyMap(
@@ -979,16 +1175,29 @@ function buildFieldPolicyMap(
   return new Map<string, TableFieldPolicy>(
     Object.entries(definitions).map(([tableCandidate, definition]) => {
       const table = normalizePolicyTableName(tableCandidate);
-      const defaults = normalizePolicyFields(definition.defaults, `${table} defaults`);
-      const readable = normalizePolicyFieldSet(definition.readable, `${table} readable`);
-      const writable = normalizePolicyFieldSet(definition.writable, `${table} writable`);
-      const readableFields = readable === FIELD_POLICY_WILDCARD ? defaults : readable;
+      // An unstated set is open. Only an explicit operator list narrows.
+      const readable = normalizePolicyFieldSet(
+        definition.readable ?? FIELD_POLICY_WILDCARD
+      );
+      const writable = normalizePolicyFieldSet(
+        definition.writable ?? FIELD_POLICY_WILDCARD
+      );
+      const defaultsCandidate = normalizePolicyFieldSet(
+        definition.defaults ??
+          (readable === FIELD_POLICY_WILDCARD ? GENERIC_DEFAULT_FIELDS : readable)
+      );
+      const defaults = defaultsCandidate === FIELD_POLICY_WILDCARD ? ALL_FIELDS_SELECTION : defaultsCandidate;
+      const readableFields = readable === FIELD_POLICY_WILDCARD ? [] : readable;
       const writableFields = writable === FIELD_POLICY_WILDCARD ? [] : writable;
-      if (defaults.some((field) => !fieldSetAllows(readableFields, readable === FIELD_POLICY_WILDCARD, field))) {
-        throw new TypeError(`${table} default fields must be readable`);
-      }
-      if (readableFields.length > MAX_FIELDS_PER_OPERATION) {
-        throw new TypeError(`${table} readable fields exceed the maximum`);
+      if (!isAllFieldSelection(defaults)) {
+        for (const field of defaults) {
+          if (!fieldSetAllows(readableFields, readable === FIELD_POLICY_WILDCARD, field)) {
+            // Branded so a contradictory operator policy is classified as a
+            // policy denial instead of escaping the request path as a raw
+            // TypeError.
+            throw new FieldPolicyError("invalid_argument_shape");
+          }
+        }
       }
       return [
         table,
@@ -999,7 +1208,6 @@ function buildFieldPolicyMap(
           writable: writableFields,
           allowAnyReadable: readable === FIELD_POLICY_WILDCARD,
           allowAnyWritable: writable === FIELD_POLICY_WILDCARD,
-          maxFields: MAX_FIELDS_PER_OPERATION,
         }),
       ];
     })
@@ -1007,8 +1215,12 @@ function buildFieldPolicyMap(
 }
 
 function readConfiguredFieldPolicyDefinitions():
-  | Record<string, MutableTableFieldPolicyDefinition>
+  | FieldPolicyConfiguration
   | undefined {
+  const scoped = FIELD_POLICY_CONFIGURATION_SCOPE.getStore();
+  if (scoped && (scoped.fieldPolicy !== undefined || scoped.readableTableFields !== undefined || scoped.writableTableFields !== undefined)) {
+    return normalizeConfiguredFieldPolicy(scoped);
+  }
   const text = process.env[FIELD_POLICY_DEFINITIONS_ENV];
   if (text === undefined || text.trim() === "") return undefined;
   if (text.length > MAX_FIELD_POLICY_DEFINITIONS_TEXT_LENGTH) {
@@ -1020,31 +1232,120 @@ function readConfiguredFieldPolicyDefinitions():
   } catch {
     throw new FieldPolicyError("invalid_argument_shape");
   }
+  return normalizeConfiguredFieldPolicy(parsed);
+}
+
+function normalizeConfiguredFieldPolicy(
+  parsed: unknown
+): FieldPolicyConfiguration | undefined {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed) || nodeUtilTypes.isProxy(parsed)) {
     throw new FieldPolicyError("invalid_argument_shape");
   }
-  const output: Record<string, MutableTableFieldPolicyDefinition> = {};
-  for (const key of Object.keys(parsed)) {
+  const outerRecord = definedOwnProperties(parsed as Record<string, unknown>);
+  const policySource = Object.hasOwn(outerRecord, "fieldPolicy")
+    ? outerRecord.fieldPolicy
+    : outerRecord;
+  if (
+    Object.hasOwn(outerRecord, "readableTableFields") ||
+    Object.hasOwn(outerRecord, "writableTableFields")
+  ) {
+    const definitions: Record<string, MutableTableFieldPolicyDefinition> = {};
+    applyTableFieldList(definitions, outerRecord.readableTableFields, "readable");
+    applyTableFieldList(definitions, outerRecord.writableTableFields, "writable");
+    return Object.freeze({ definitions });
+  }
+  if (policySource === undefined) return undefined;
+  if (typeof policySource !== "object" || policySource === null || Array.isArray(policySource) || nodeUtilTypes.isProxy(policySource)) {
+    throw new FieldPolicyError("invalid_argument_shape");
+  }
+  const record = policySource as Record<string, unknown>;
+  const definitions: Record<string, MutableTableFieldPolicyDefinition> = {};
+  for (const key of Object.keys(record)) {
     const table = normalizePolicyTableName(key);
-    const value = (parsed as Record<string, unknown>)[key];
+    const value = record[key];
     if (typeof value !== "object" || value === null || Array.isArray(value) || nodeUtilTypes.isProxy(value)) {
       throw new FieldPolicyError("invalid_argument_shape");
     }
-    const candidate = value as Record<string, unknown>;
+    const candidate = definedOwnProperties(value as Record<string, unknown>);
     const definition: Record<string, FieldPolicySet> = {};
     if (Object.hasOwn(candidate, "defaults")) {
-      definition.defaults = normalizePolicyFields(candidate.defaults as readonly string[], `${table} defaults`);
+      definition.defaults = normalizePolicyFieldSet(candidate.defaults as FieldPolicySet);
     }
     if (Object.hasOwn(candidate, "readable")) {
-      definition.readable = normalizePolicyFieldSet(candidate.readable as FieldPolicySet, `${table} readable`);
+      definition.readable = normalizePolicyFieldSet(candidate.readable as FieldPolicySet);
     }
     if (Object.hasOwn(candidate, "writable")) {
-      definition.writable = normalizePolicyFieldSet(candidate.writable as FieldPolicySet, `${table} writable`);
+      definition.writable = normalizePolicyFieldSet(candidate.writable as FieldPolicySet);
     }
-    output[table] = Object.freeze(definition) as MutableTableFieldPolicyDefinition;
+    definitions[table] = Object.freeze(definition) as MutableTableFieldPolicyDefinition;
   }
-  return output;
+  return Object.freeze({ definitions });
 }
+
+/**
+ * Drop own keys whose value is `undefined`.
+ *
+ * Policy shape is selected by key presence, and a key materialized with an
+ * `undefined` value is indistinguishable from a stated one to Object.hasOwn.
+ * Normalizing here keeps an object built with optional keys spread in
+ * identical to one that never carried the key at all, so the same policy
+ * cannot mean different things depending on how the caller constructed it.
+ */
+function definedOwnProperties(
+  record: Record<string, unknown>
+): Record<string, unknown> {
+  const defined: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (value !== undefined) defined[key] = value;
+  }
+  return defined;
+}
+
+function applyTableFieldList(
+  definitions: Record<string, MutableTableFieldPolicyDefinition>,
+  candidate: unknown,
+  kind: "readable" | "writable"
+): void {
+  if (candidate === undefined) return;
+  if (!Array.isArray(candidate) || nodeUtilTypes.isProxy(candidate)) {
+    throw new FieldPolicyError("invalid_argument_shape");
+  }
+  for (const entry of candidate) {
+    const normalized = normalizeTableFieldListDefinition(entry);
+    const previous = definitions[normalized.table] ?? {};
+    definitions[normalized.table] = Object.freeze({
+      ...previous,
+      [kind]: normalized.fields,
+    }) as MutableTableFieldPolicyDefinition;
+  }
+}
+
+function normalizeTableFieldListDefinition(
+  candidate: unknown
+): TableFieldListDefinition {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate) || nodeUtilTypes.isProxy(candidate)) {
+    throw new FieldPolicyError("invalid_argument_shape");
+  }
+  const record = candidate as Record<string, unknown>;
+  const table = normalizePolicyTableName(record.table);
+  const fields = normalizePolicyFieldSet(record.fields as FieldPolicySet);
+  return Object.freeze({ table, fields });
+}
+
+function readableSelection(policy: TableFieldPolicy): FieldSelection {
+  return policy.allowAnyReadable ? ALL_FIELDS_SELECTION : policy.readable;
+}
+
+/**
+ * A table policy granting no readable field denies the read outright. An
+ * empty selection would otherwise serialize to an empty sysparm_fields, which
+ * ServiceNow reads as "every field".
+ */
+function requireNonEmptySelection(selection: FieldSelection): FieldSelection {
+  if (selection.length === 0) throw new FieldPolicyError("unreadable_field");
+  return selection;
+}
+
 
 function normalizePolicyTableName(candidate: unknown): string {
   if (candidate === FIELD_POLICY_WILDCARD) return FIELD_POLICY_WILDCARD;
@@ -1080,26 +1381,23 @@ function normalizeResponseFormat(candidate: unknown): ResponseFormat {
 }
 
 function normalizePolicyFieldSet(
-  candidates: FieldPolicySet,
-  label: string
+  candidates: FieldPolicySet
 ): readonly string[] | "*" {
   if (candidates === FIELD_POLICY_WILDCARD) return FIELD_POLICY_WILDCARD;
-  return normalizePolicyFields(candidates, label);
+  return normalizePolicyFields(candidates);
 }
 
 function normalizePolicyFields(
-  candidates: readonly string[],
-  label: string
+  candidates: readonly string[]
 ): readonly string[] {
-  if (!Array.isArray(candidates) || candidates.length > MAX_FIELDS_PER_OPERATION) {
-    throw new TypeError(`${label} is invalid or exceeds the maximum`);
+  // Operator policy is normalized on the request path, so a malformed set
+  // must surface as a branded policy denial rather than a raw TypeError.
+  if (!Array.isArray(candidates) || nodeUtilTypes.isProxy(candidates)) {
+    throw new FieldPolicyError("invalid_argument_shape");
   }
   const fields = candidates.map((field) => normalizeFieldName(field));
   if (new Set(fields).size !== fields.length) {
-    throw new TypeError(`${label} contains duplicate fields`);
-  }
-  if (fields.some(isSensitiveFieldName)) {
-    throw new TypeError(`${label} contains a sensitive field`);
+    throw new FieldPolicyError("invalid_argument_shape");
   }
   return Object.freeze(fields);
 }
@@ -1107,7 +1405,7 @@ function normalizePolicyFields(
 function issuePreparedAccess(
   args: Readonly<Record<string, unknown>>,
   table: string,
-  readableFields: readonly string[]
+  readableFields: FieldSelection
 ): PreparedFieldAccess {
   const normalizedTable = normalizeTableName(table);
   const previous = issuedPreparedEntries(args).filter(
@@ -1115,7 +1413,10 @@ function issuePreparedAccess(
   );
   const entry = Object.freeze({
     table: normalizedTable,
-    readableFields: Object.freeze([...readableFields]),
+    readableFields:
+      isAllFieldSelection(readableFields)
+        ? ALL_FIELDS_SELECTION
+        : Object.freeze([...readableFields]),
   });
   const marker = Object.freeze({
     entries: Object.freeze([...previous, entry]),

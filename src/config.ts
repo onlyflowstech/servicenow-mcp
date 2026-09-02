@@ -6,6 +6,8 @@
  * @module config
  */
 
+import type { MetadataCacheConfigInput } from "./metadata-cache.js";
+
 export type AuthType = "basic" | "oauth" | "apikey";
 export type GrantType = "client_credentials" | "password";
 
@@ -33,6 +35,8 @@ export interface ServiceNowConfig {
   maxConcurrentRequests?: number;
   /** Schema metadata cache TTL in milliseconds (default 300000). */
   schemaCacheTtlMs?: number;
+  /** Per-instance metadata read-through cache configuration. */
+  metadataCache?: MetadataCacheConfigInput;
 }
 
 /**

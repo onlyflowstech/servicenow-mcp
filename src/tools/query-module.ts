@@ -3,12 +3,14 @@
 import { z } from "zod";
 import type { ServiceNowOperations } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
+import { FORCE_RECACHE_PARAM } from "../metadata-cache.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
 import {
   authorizeRawEncodedRead,
   ENCODED_QUERY_MIGRATION_MESSAGE,
 } from "../encoded-query-policy.js";
 import {
+  fieldSelectionToSysparmFields,
   filterReadableRecord,
   preparedReadableFields,
   resolveReadableFields,
@@ -136,6 +138,11 @@ function compatibleInputSchema() {
       .enum(["true", "false", "all"])
       .optional()
       .describe("Display values mode: true, false, or all (default: true)"),
+    force_recache: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("For metadata tables, bypass the per-instance metadata cache and refresh from ServiceNow."),
   }).strict(ENCODED_QUERY_MIGRATION_MESSAGE);
 }
 
@@ -314,7 +321,9 @@ async function executeQuery(
     );
     const params = buildTableParams({
       query: queryWithStableOrder,
-      fields: (rawPlan?.outputFields ?? readableFields).join(","),
+      fields: rawPlan?.outputFields
+        ? rawPlan.outputFields.join(",")
+        : fieldSelectionToSysparmFields(readableFields),
       // Fetch one bounded sentinel row so a missing total-count header never
       // turns an exactly full final page into speculative continuation.
       limit: args.limit + 1,
@@ -323,6 +332,9 @@ async function executeQuery(
       displayValue: args.display_value ?? config.displayValue,
       noCount: true,
     });
+    if (args.force_recache) {
+      params[FORCE_RECACHE_PARAM] = "true";
+    }
 
     const resp = await client.getWithMeta(`/api/now/table/${args.table}`, params);
     const rawResults = Array.isArray(resp.data?.result) ? resp.data.result : [];

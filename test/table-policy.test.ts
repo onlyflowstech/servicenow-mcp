@@ -5,7 +5,6 @@ import {
   authorizeTableAccess,
   authorizeTableAccessPlan,
   createTableAccessPolicy,
-  isHardDeniedTable,
   normalizeTableName,
   tableAccessPolicyFromEnvironment,
 } from "../src/table-policy.js";
@@ -75,9 +74,12 @@ describe("SNSDK-29 table policy", () => {
     expect(
       authorizeTableAccess(policy, { operation: "read", table: "problem" }, "sn_get")
     ).toBe("problem");
-    expect(() =>
+    // "*" means every table. The MCP keeps no built-in denials; ServiceNow
+    // evaluates its own ACLs per authenticated user on the read itself.
+    expect(
       authorizeTableAccess(policy, { operation: "read", table: "sys_user_password" }, "sn_query")
-    ).toThrow(TablePolicyError);
+    ).toBe("sys_user_password");
+    // Read access still never implies write access.
     expect(() =>
       authorizeTableAccess(policy, { operation: "write", table: "u_custom_table" }, "sn_update")
     ).toThrow(TablePolicyError);
@@ -99,9 +101,9 @@ describe("SNSDK-29 table policy", () => {
     expect(() =>
       authorizeTableAccess(policy, { operation: "read", table: "u_custom_table" }, "sn_query")
     ).toThrow(TablePolicyError);
-    expect(() =>
+    expect(
       authorizeTableAccess(policy, { operation: "write", table: "oauth_token" }, "sn_update")
-    ).toThrow(TablePolicyError);
+    ).toBe("oauth_token");
   });
 
   it("lets explicit wildcard targets narrow tools and related-table closure", () => {
@@ -142,25 +144,49 @@ describe("SNSDK-29 table policy", () => {
     });
   });
 
+  // The MCP carries no built-in table denials: the per-profile tableAccess
+  // config is the sole MCP-side authority, and ServiceNow's own per-user ACLs
+  // are the real boundary. These tables were formerly denied unconditionally;
+  // they now follow exactly the same rules as every other table.
   it.each([
     "sys_user_password",
-    "SYS_AUTH_PROFILE",
+    "sys_auth_profile",
     "oauth_token",
     "sys_encryption_key",
     "sys_security_acl_role",
     "discovery_credentials_custom",
-  ])("hard-denies %s at configuration and decision time", (table) => {
-    expect(isHardDeniedTable(table)).toBe(true);
-    expect(() => createTableAccessPolicy({ readTables: [table] })).toThrow(
-      /prohibited/u
-    );
-    expect(() => createTableAccessPolicy({ writeTables: [table] })).toThrow(
-      /prohibited/u
-    );
+  ])("lets tableAccess alone decide %s", (table) => {
+    // Not granted -> denied, like any unlisted table.
     expect(() =>
       authorizeTableAccess(
-        { readTables: [table], writeTables: [] },
+        createTableAccessPolicy({ readTables: ["incident"], targets: exactTargets("incident") }),
         { operation: "read", table },
+        "sn_query"
+      )
+    ).toThrow(TablePolicyError);
+
+    // Explicitly granted -> allowed. Configuration is accepted, not rejected.
+    const granted = createTableAccessPolicy({
+      readTables: [table],
+      targets: exactTargets(table),
+    });
+    expect(granted.readTables).toEqual([table]);
+    expect(
+      authorizeTableAccess(granted, { operation: "read", table }, "sn_query")
+    ).toBe(table);
+
+    // A read grant still never implies a write grant.
+    expect(() =>
+      authorizeTableAccess(granted, { operation: "write", table }, "sn_update")
+    ).toThrow(TablePolicyError);
+  });
+
+  it("still rejects a forged policy object that was never issued here", () => {
+    // Removing the deny list must not weaken the issued-policy check.
+    expect(() =>
+      authorizeTableAccess(
+        { readTables: ["incident"], writeTables: [] },
+        { operation: "read", table: "incident" },
         "sn_query"
       )
     ).toThrow(TablePolicyError);
@@ -253,7 +279,7 @@ describe("SNSDK-29 table policy", () => {
           ...exactTargets("incident"),
         ],
       })
-    ).toThrow(/prohibited/u);
+    ).toThrow(/same operation permission/u);
 
     expect(() =>
       createTableAccessPolicy({
@@ -287,20 +313,22 @@ describe("SNSDK-29 table policy", () => {
       })
     ).toThrow(/same operation permission/u);
 
-    expect(() =>
-      createTableAccessPolicy({
-        readTables: ["task", "sys_user_password"],
-        targets: [
-          {
-            table: "task",
-            kind: "canonical",
-            tools: ["sn_query"],
-            closureComplete: true,
-            relatedTables: ["task", "sys_user_password"],
-          },
-        ],
-      })
-    ).toThrow(/prohibited/u);
+    // Formerly rejected because sys_user_password was hard-denied. The closure
+    // check survives on its own terms: both tables carry the read grant, so the
+    // target is now accepted.
+    const closure = createTableAccessPolicy({
+      readTables: ["task", "sys_user_password"],
+      targets: [
+        {
+          table: "task",
+          kind: "canonical",
+          tools: ["sn_query"],
+          closureComplete: true,
+          relatedTables: ["task", "sys_user_password"],
+        },
+      ],
+    });
+    expect(closure.readTables).toEqual(["sys_user_password", "task"]);
 
     const policy = createTableAccessPolicy({
       readTables: ["task", "incident"],
@@ -422,7 +450,6 @@ describe("complete registered-tool table plans", () => {
     ],
     ["sn_discover", { type: "plugins" }, [["read", "v_plugin"]]],
     ["sn_atf", { action: "results" }, [["read", "sys_atf_test_result"]]],
-    ["sn_script", {}, []],
   ] as const)("classifies %s before handler access", (tool, args, expected) => {
     const plan = resolveToolTableAccess(tool, args);
     expect(plan.requests.map(({ operation, table }) => [operation, table])).toEqual(

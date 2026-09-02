@@ -4,6 +4,7 @@ import type { ServiceNowOperations } from "../src/client.js";
 import { createEncodedQueryAccessPolicy } from "../src/encoded-query-policy.js";
 import {
   MAX_FIELDS_PER_OPERATION,
+  fieldSelectionToSysparmFields,
   resolveReadableFields,
 } from "../src/field-policy.js";
 import {
@@ -80,9 +81,14 @@ const dictionaryRows = [
 const incidentReadableFields = resolveReadableFields("incident", {
   fields: "all",
 });
+// An open readable set enumerates every column, so no `elementIN` clause is
+// emitted. An operator-narrowed readable set still produces one.
+const incidentElementClause = fieldSelectionToSysparmFields(incidentReadableFields)
+  ? `^elementIN${incidentReadableFields.join(",")}`
+  : "";
 const dictionaryQuery =
-  "name=incident^internal_type!=collection^elementIN" +
-  incidentReadableFields.join(",") +
+  "name=incident^internal_type!=collection" +
+  incidentElementClause +
   "^ORDERBYelement^ORDERBYsys_id";
 const dictionaryRequest = {
   sysparm_query: dictionaryQuery,
@@ -145,6 +151,7 @@ describe("SNSDK-46 sn_schema module", () => {
     expect(schema.parse({ table: "incident" })).toEqual({
       table: "incident",
       fields_only: false,
+      force_recache: false,
       limit: 500,
       offset: 0,
     });
@@ -157,6 +164,7 @@ describe("SNSDK-46 sn_schema module", () => {
     ).toEqual({
       table: "incident",
       fields_only: true,
+      force_recache: false,
       limit: 500,
       offset: 0,
       profile: "production",
@@ -244,6 +252,8 @@ describe("SNSDK-46 sn_schema module", () => {
     expect(Object.isFrozen(access.args)).toBe(true);
     expect(Object.isFrozen(access.requests)).toBe(true);
 
+    // A table with no field-policy entry is no longer denied here; whether it
+    // is reachable is decided by the profile's tableAccess grant.
     expect(() =>
       schemaToolModule.resolveAccess(
         {
@@ -255,7 +265,7 @@ describe("SNSDK-46 sn_schema module", () => {
         },
         policy()
       )
-    ).toThrow("Field access denied by policy");
+    ).not.toThrow();
   });
 
   it("returns sorted representative metadata and excludes unauthorized fields", async () => {
@@ -281,7 +291,7 @@ describe("SNSDK-46 sn_schema module", () => {
       "/api/now/table/sys_dictionary",
       fullDictionaryRequest
     );
-    expect(dictionaryQuery).not.toMatch(/password|u_unapproved/u);
+    expect(dictionaryQuery).not.toMatch(/password/u);
     expect(responseData(result)).toEqual([
       {
         field: "caller_id",
@@ -307,21 +317,31 @@ describe("SNSDK-46 sn_schema module", () => {
         mandatory: "true",
         reference: null,
       },
+      // Enumerated now that the built-in readable list no longer withholds
+      // columns. Sensitive names are still removed.
+      {
+        field: "u_unapproved",
+        label: "Unapproved",
+        type: "string",
+        max_length: "255",
+        mandatory: "false",
+        reference: null,
+      },
     ]);
     expect(JSON.stringify(responseData(result))).not.toMatch(
-      /password|Must never|u_unapproved/u
+      /password|Must never/u
     );
     expect(result.structuredContent).toEqual({
       data: { fields: responseData(result) },
       metadata: {
         kind: "collection",
-        record_count: 3,
+        record_count: 4,
         limits: { max_records: 1000, max_bytes: 100000 },
         pagination: {
           mode: "offset",
           limit: 500,
           offset: 0,
-          returned: 3,
+          returned: 4,
           has_more: false,
           order_by: ["field", "sys_id"],
         },
@@ -347,10 +367,13 @@ describe("SNSDK-46 sn_schema module", () => {
       services(fake.operations)
     );
 
+    // The built-in readable list no longer withholds columns, so an
+    // unapproved-looking name is enumerated. Sensitive names are still removed.
     expect(responseData(result)).toEqual([
       "caller_id",
       "number",
       "short_description",
+      "u_unapproved",
     ]);
   });
 
@@ -448,10 +471,38 @@ describe("SNSDK-46 sn_schema module", () => {
       services(fake.operations)
     );
     expect(responseData(second)).toEqual(["short_description"]);
+    // `u_unapproved` is now an approved name, so the ACL-visible page set is
+    // one longer and the walk continues rather than ending here.
     expect(second.structuredContent).toMatchObject({
       metadata: {
         pagination: {
           offset: 1,
+          returned: 1,
+          has_more: true,
+          next_offset: 2,
+        },
+      },
+    });
+
+    const thirdAccess = schemaToolModule.resolveAccess(
+      {
+        table: "incident",
+        fields_only: true,
+        limit: 1,
+        offset: 2,
+        profile: "production",
+      },
+      policy()
+    );
+    const third = await schemaToolModule.invoke(
+      thirdAccess.args,
+      services(fake.operations)
+    );
+    expect(responseData(third)).toEqual(["u_unapproved"]);
+    expect(third.structuredContent).toMatchObject({
+      metadata: {
+        pagination: {
+          offset: 2,
           returned: 1,
           has_more: false,
         },

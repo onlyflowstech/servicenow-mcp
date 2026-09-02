@@ -112,7 +112,10 @@ describe("SNSDK-32 encoded-query policy construction", () => {
   it.each([
     { tool: "sn_aggregate" },
     { tool: "sn_batch" },
-    { table: "sys_user_password" },
+    // Formerly rejected because sys_user_password was hard-denied. Table
+    // reachability is now a tableAccess question, so the shape check here is
+    // exercised with a malformed identifier instead.
+    { table: "Bad-Table" },
     { fields: ["password"] },
     { fields: [] },
     { operators: [] },

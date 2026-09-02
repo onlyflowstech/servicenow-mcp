@@ -17,6 +17,7 @@ describe("sn_query schema", () => {
     const parsed = querySchema.parse({ table: "incident" });
     expect(parsed).toEqual({
       table: "incident",
+      force_recache: false,
       limit: 20,
       response_format: "concise",
       max_response_bytes: 100000,

@@ -96,29 +96,38 @@ describe("sn_query default field selection", () => {
     );
   });
 
-  it("fails closed for a table without an explicit field policy", async () => {
+  it("gives a table without an explicit field policy the bounded generic default", async () => {
+    // Field policy no longer denies a table it has no entry for: reachability
+    // is decided by the profile `tableAccess` grant. What it still guarantees
+    // is that an unspecified read stays a bounded projection.
     const { client, getWithMeta } = metaClient([]);
-    await expect(
-      queryHandler(
-        querySchema.parse({ table: "u_custom_widget" }),
-        client,
-        config
-      )
-    ).rejects.toThrow("Field access denied by policy");
-    expect(getWithMeta).not.toHaveBeenCalled();
+    await queryHandler(
+      querySchema.parse({ table: "u_custom_widget" }),
+      client,
+      config
+    );
+    const params = getWithMeta.mock.calls[0][1] as Record<string, string>;
+    expect(params.sysparm_fields).toBe("sys_id");
   });
 
-  it('maps fields="all" to the finite readable policy', async () => {
+  it('drops sysparm_fields for fields="all" and keeps it bounded by default', async () => {
+    // "all" on a granted table now means every column, so the projection is
+    // omitted rather than enumerated. The default read stays bounded.
     const { client, getWithMeta } = metaClient([]);
     await queryHandler(
       querySchema.parse({ table: "incident", fields: "all" }),
       client,
       config
     );
-    const params = getWithMeta.mock.calls[0][1] as Record<string, string>;
-    expect(params.sysparm_fields).toBe(
-      resolveReadableFields("incident", { fields: "all" }).join(",")
-    );
+    expect(resolveReadableFields("incident", { fields: "all" })).toEqual(["*"]);
+    expect(
+      (getWithMeta.mock.calls[0][1] as Record<string, string>).sysparm_fields
+    ).toBeUndefined();
+
+    await queryHandler(querySchema.parse({ table: "incident" }), client, config);
+    expect(
+      (getWithMeta.mock.calls[1][1] as Record<string, string>).sysparm_fields
+    ).toBe(resolveReadableFields("incident").join(","));
   });
 
   it("passes explicit fields through unchanged", async () => {
@@ -324,22 +333,21 @@ describe("sn_get default field selection", () => {
     );
   });
 
-  it("fails closed for a table without an explicit field policy", async () => {
+  it("gives a table without an explicit field policy the bounded generic default", async () => {
     const { client, get } = getClient();
-    await expect(
-      getHandler(
-        getSchema.parse({
-          table: "u_custom_widget",
-          sys_id: "11111111111111111111111111111111",
-        }),
-        client,
-        config
-      )
-    ).rejects.toThrow("Field access denied by policy");
-    expect(get).not.toHaveBeenCalled();
+    await getHandler(
+      getSchema.parse({
+        table: "u_custom_widget",
+        sys_id: "11111111111111111111111111111111",
+      }),
+      client,
+      config
+    );
+    const params = get.mock.calls[0][1] as Record<string, string>;
+    expect(params.sysparm_fields).toBe("sys_id");
   });
 
-  it('maps fields="all" to the finite readable policy', async () => {
+  it('drops sysparm_fields for fields="all"', async () => {
     const { client, get } = getClient();
     await getHandler(
       getSchema.parse({ table: "incident", sys_id: "11111111111111111111111111111111", fields: "all" }),
@@ -347,9 +355,7 @@ describe("sn_get default field selection", () => {
       config
     );
     const params = get.mock.calls[0][1] as Record<string, string>;
-    expect(params.sysparm_fields).toBe(
-      resolveReadableFields("incident", { fields: "all" }).join(",")
-    );
+    expect(params.sysparm_fields).toBeUndefined();
   });
 
   it("strips empty fields from the record", async () => {
@@ -382,11 +388,17 @@ describe("sn_create response shape", () => {
       client,
       config
     );
+    // The write response projection is no longer bounded by a built-in
+    // readable list, so a field the fixture returns is carried through.
     expect(parseText(result)).toEqual({
       sys_id: "2".repeat(32),
       number: "INC0010001",
       table: "incident",
-      record: { short_description: "Server down", active: false },
+      record: {
+        short_description: "Server down",
+        active: false,
+        reopen_count: 0,
+      },
     });
   });
 });

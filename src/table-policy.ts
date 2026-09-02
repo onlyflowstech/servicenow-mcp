@@ -2,10 +2,12 @@
  * Fail-closed ServiceNow table authorization for SNSDK-29.
  *
  * Policies contain separate read and write allowlists. Each allowlist accepts
- * exact table names or the literal "*" to allow every non-hard-denied table for
- * that operation. A built-in hard denial for credential, authentication,
- * encryption, and security-policy tables is applied both while configuration is
- * loaded and at every decision.
+ * exact table names or the literal "*" to allow every table for that operation.
+ * The per-profile configuration is the sole MCP-side authority over which
+ * tables are reachable: this module carries no built-in table denials, because
+ * ServiceNow evaluates its own ACLs per authenticated user on every request and
+ * a second hard-coded layer here would silently override what an operator
+ * deliberately configured.
  *
  * @module table-policy
  */
@@ -70,45 +72,6 @@ const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 const TOOL_NAME = /^sn_[a-z0-9_]{1,61}$/u;
 const TABLE_ALLOWLIST_WILDCARD = "*";
 
-/** Exact families that must never become remotely accessible by configuration. */
-const HARD_DENIED_EXACT = new Set([
-  "discovery_credentials",
-  "discovery_credentials_affinity",
-  "ecc_agent_credential",
-  "oauth_credential",
-  "oauth_entity",
-  "oauth_requestor_profile",
-  "oauth_token",
-  "sys_certificate",
-  "sys_credentials",
-  "sys_db_view",
-  "sys_db_view_table",
-  "sys_encryption_context",
-  "sys_encryption_key",
-  "sys_group_has_role",
-  "sys_security_acl",
-  "sys_security_acl_role",
-  "sys_table_alias",
-  "sys_table_rotation",
-  "sys_user_has_role",
-  "sys_user_password",
-  "sys_user_role",
-  "sys_user_token",
-]);
-
-const HARD_DENIED_PREFIXES = Object.freeze([
-  "discovery_credentials_",
-  "oauth_",
-  "sys_auth_",
-  "sys_credential_",
-  "sys_encryption_",
-  "sys_kmf_",
-  "sys_mfa_",
-  "sys_security_acl_",
-  "sys_user_password_",
-  "sys_user_token_",
-]);
-
 const ISSUED_TABLE_POLICY_ERRORS = new WeakSet<object>();
 const ISSUED_TABLE_POLICIES = new WeakSet<object>();
 
@@ -150,20 +113,6 @@ export function normalizeTableName(candidate: unknown): string {
   return normalized;
 }
 
-/** True for tables whose remote exposure is prohibited regardless of config. */
-export function isHardDeniedTable(candidate: unknown): boolean {
-  let table: string;
-  try {
-    table = normalizeTableName(candidate);
-  } catch {
-    return true;
-  }
-  return (
-    HARD_DENIED_EXACT.has(table) ||
-    HARD_DENIED_PREFIXES.some((prefix) => table.startsWith(prefix))
-  );
-}
-
 /** Validate, canonicalize, deduplicate, and deeply freeze one table policy. */
 export function createTableAccessPolicy(
   input: TableAccessPolicyInput
@@ -180,11 +129,11 @@ export function createTableAccessPolicy(
   return policy;
 }
 
-/** Parse comma-separated process configuration; missing variables deny all. */
-export function tableAccessPolicyFromEnvironment(
+/** Parse comma-separated process configuration as profile-local policy input. */
+export function tableAccessPolicyInputFromEnvironment(
   environment: TablePolicyEnvironment = process.env as TablePolicyEnvironment
-): TableAccessPolicy {
-  return createTableAccessPolicy({
+): TableAccessPolicyInput {
+  return Object.freeze({
     readTables: parseEnvironmentAllowlist(
       environment.SN_ALLOWED_READ_TABLES,
       "SN_ALLOWED_READ_TABLES"
@@ -195,6 +144,13 @@ export function tableAccessPolicyFromEnvironment(
     ),
     targets: parseEnvironmentTargets(environment.SN_TABLE_ACCESS_TARGETS),
   });
+}
+
+/** Parse comma-separated process configuration; missing variables deny all. */
+export function tableAccessPolicyFromEnvironment(
+  environment: TablePolicyEnvironment = process.env as TablePolicyEnvironment
+): TableAccessPolicy {
+  return createTableAccessPolicy(tableAccessPolicyInputFromEnvironment(environment));
 }
 
 /** Throw a branded safe denial unless the exact operation/table is allowed. */
@@ -214,7 +170,6 @@ export function authorizeTableAccess(
     }
     const table = normalizeTableName(request.table);
     const authorizedTool = normalizeToolName(tool);
-    if (isHardDeniedTable(table)) throw new TablePolicyError();
     const allowlist =
       operation === "read"
         ? policy.readTables
@@ -227,7 +182,7 @@ export function authorizeTableAccess(
     }
     if (!target.tools.includes(authorizedTool)) throw new TablePolicyError();
     for (const relatedTable of target.relatedTables) {
-      if (isHardDeniedTable(relatedTable) || !allowlistGrantsTable(allowlist, relatedTable)) {
+      if (!allowlistGrantsTable(allowlist, relatedTable)) {
         throw new TablePolicyError();
       }
     }
@@ -290,11 +245,7 @@ function normalizeAllowlist(
       tables.add(TABLE_ALLOWLIST_WILDCARD);
       continue;
     }
-    const table = normalizeTableName(entry);
-    if (isHardDeniedTable(table)) {
-      throw new TypeError(`${label} table allowlist contains a prohibited table`);
-    }
-    tables.add(table);
+    tables.add(normalizeTableName(entry));
   }
   return Object.freeze([...tables].sort());
 }
@@ -365,9 +316,6 @@ function normalizeTargets(
     );
     if (!relatedTables.includes(table)) {
       throw new TypeError("table access target must include its requested table");
-    }
-    if (relatedTables.some(isHardDeniedTable)) {
-      throw new TypeError("table access target reaches a prohibited table");
     }
     if (kind !== "canonical" && relatedTables.length < 2) {
       throw new TypeError("indirect table targets must identify a backing table");

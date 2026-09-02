@@ -22,6 +22,8 @@ import {
   parsePositiveIntegerEnv,
   parseTimeoutMs,
 } from "./config.js";
+import { tableAccessPolicyInputFromEnvironment, type TableAccessPolicyInput } from "./table-policy.js";
+import { metadataCacheConfigFromEnvironment, type MetadataCacheConfigInput } from "./metadata-cache.js";
 import { ServiceNowClient } from "./client.js";
 import {
   EnvironmentProfileEncryptionKeyProvider,
@@ -70,6 +72,16 @@ export interface Profile {
   maxConcurrentRequests?: number;
   /** Schema cache TTL in ms (default 300000; env fallback SN_SCHEMA_CACHE_TTL_MS) */
   schemaCacheTtlMs?: number;
+  /** Per-profile table access rules. Missing rules intentionally deny all tables. */
+  tableAccess?: TableAccessPolicyInput;
+  /** Per-profile legacy field policy object, matching SN_FIELD_POLICY_DEFINITIONS. */
+  fieldPolicy?: unknown;
+  /** Per-profile readable fields: [{ table, fields }]. Missing readable fields means all fields are readable. */
+  readableTableFields?: unknown;
+  /** Per-profile writable fields: [{ table, fields }]. Missing writable fields means all fields are writable. */
+  writableTableFields?: unknown;
+  /** Per-instance metadata cache configuration (default TTL 24h). */
+  metadataCache?: MetadataCacheConfigInput;
 }
 
 export interface ProfileConfig {
@@ -98,6 +110,7 @@ const PROFILE_KEYS = new Set([
   "instance", "username", "credential", "scope", "scope_sys_id",
   "vendor_code", "description", "authType", "clientId", "clientSecret",
   "grantType", "apiKey", "apiKeyHeader", "timeoutMs", "maxConcurrentRequests", "schemaCacheTtlMs",
+  "tableAccess", "fieldPolicy", "readableTableFields", "writableTableFields", "metadataCache",
 ]);
 
 export interface ProfileManagerOptions {
@@ -298,6 +311,7 @@ export class ProfileManager {
       schemaCacheTtlMs:
         profile.schemaCacheTtlMs ??
         parsePositiveIntegerEnv(process.env.SN_SCHEMA_CACHE_TTL_MS, "SN_SCHEMA_CACHE_TTL_MS", { max: 3_600_000 }),
+      ...resolvedMetadataCache(profile),
     });
   }
 
@@ -518,6 +532,20 @@ export class ProfileManager {
       profile.schemaCacheTtlMs = schemaCacheTtlMs;
     }
 
+    const tableAccess = tableAccessPolicyInputFromEnvironment();
+    if (
+      tableAccess.readTables !== undefined ||
+      tableAccess.writeTables !== undefined ||
+      tableAccess.targets !== undefined
+    ) {
+      profile.tableAccess = tableAccess;
+    }
+
+    const metadataCache = metadataCacheConfigFromEnvironment();
+    if (Object.keys(metadataCache).length > 0) {
+      profile.metadataCache = metadataCache;
+    }
+
     return {
       version: CONFIG_VERSION,
       profiles: Object.assign(Object.create(null), {
@@ -607,6 +635,15 @@ export class ProfileManager {
 
 // ── Module-level helpers ───────────────────────────────────────────
 
+function resolvedMetadataCache(profile: Profile): { readonly metadataCache?: MetadataCacheConfigInput } {
+  const environmentCache = metadataCacheConfigFromEnvironment();
+  const merged = Object.freeze({
+    ...environmentCache,
+    ...(profile.metadataCache ?? {}),
+  });
+  return Object.keys(merged).length === 0 ? Object.freeze({}) : Object.freeze({ metadataCache: merged });
+}
+
 function validatePersistedCredentialSource(
   value: CredentialSource | undefined,
   field: string
@@ -684,6 +721,21 @@ function canonicalizeProfile(profile: Profile): Profile {
 
 function immutableProfileSnapshot(profile: Profile): Profile {
   const snapshot: Profile = { ...profile };
+  if (snapshot.tableAccess !== undefined) {
+    snapshot.tableAccess = deepFreezeJsonClone(snapshot.tableAccess);
+  }
+  if (snapshot.fieldPolicy !== undefined) {
+    snapshot.fieldPolicy = deepFreezeJsonClone(snapshot.fieldPolicy);
+  }
+  if (snapshot.readableTableFields !== undefined) {
+    snapshot.readableTableFields = deepFreezeJsonClone(snapshot.readableTableFields);
+  }
+  if (snapshot.writableTableFields !== undefined) {
+    snapshot.writableTableFields = deepFreezeJsonClone(snapshot.writableTableFields);
+  }
+  if (snapshot.metadataCache !== undefined) {
+    snapshot.metadataCache = deepFreezeJsonClone(snapshot.metadataCache);
+  }
   for (const field of ["credential", "clientSecret", "apiKey"] as const) {
     const source = snapshot[field];
     if (source !== undefined && typeof source !== "string") {
@@ -691,6 +743,19 @@ function immutableProfileSnapshot(profile: Profile): Profile {
     }
   }
   return Object.freeze(snapshot);
+}
+
+function deepFreezeJsonClone<T>(value: T): T {
+  const clone = JSON.parse(JSON.stringify(value)) as T;
+  return deepFreeze(clone);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value !== "object" || value === null) return value;
+  for (const nested of Object.values(value as Record<string, unknown>)) {
+    deepFreeze(nested);
+  }
+  return Object.freeze(value);
 }
 
 function validateProfileName(name: string): void {
@@ -1137,7 +1202,13 @@ function parseRelDepth(value: string | undefined): number {
   return isNaN(parsed) ? 3 : parsed;
 }
 
-function credentialFingerprint(config: ServiceNowConfig): string {
+/**
+ * Stable, non-reversible discriminator for the exact credential material a
+ * resolved configuration will present to ServiceNow. Two configurations that
+ * differ in any credential input produce different fingerprints, so it is
+ * usable wherever per-identity state must not be shared. Never log it.
+ */
+export function credentialFingerprint(config: ServiceNowConfig): string {
   const hash = createHash("sha256");
   for (const value of [
     config.instance,

@@ -14,6 +14,7 @@ import { types as nodeUtilTypes } from "node:util";
 
 import { z } from "zod";
 
+import { isSensitiveFieldName } from "./field-policy.js";
 import { escapeQueryValue } from "./utils.js";
 
 export const MAX_STRUCTURED_QUERY_CONDITIONS = 32;
@@ -30,6 +31,7 @@ const MAX_SNAPSHOT_ARRAY_LENGTH = MAX_STRUCTURED_QUERY_CONDITIONS;
 const MAX_SNAPSHOT_DEPTH = 12;
 const MAX_SNAPSHOT_NODES = 2_048;
 const FIELD_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
+const FIELD_POLICY_WILDCARD = "*";
 const FORBIDDEN_UNICODE_CATEGORY = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 
 export type StructuredQueryFailureReason =
@@ -231,7 +233,7 @@ export interface StructuredQueryPlan {
 interface CompileState {
   conditionCount: number;
   readonly referencedFields: Set<string>;
-  readonly readableFields: ReadonlySet<string>;
+  readonly readableFields?: ReadonlySet<string>;
 }
 
 interface SnapshotState {
@@ -414,13 +416,20 @@ function escapeScalar(
 }
 
 function authorizeField(field: string, state: CompileState): void {
-  if (!state.readableFields.has(field)) {
+  // A sensitive name is never usable as a filter or ordering field, whatever
+  // the readable set says. Response filtering strips the value, but a query
+  // that can filter on it still leaks it one comparison at a time through the
+  // row count. This check is field-level and independent of table policy.
+  if (isSensitiveFieldName(field)) {
+    throw new StructuredQueryError("unauthorized_field");
+  }
+  if (state.readableFields && !state.readableFields.has(field)) {
     throw new StructuredQueryError("unauthorized_field");
   }
   state.referencedFields.add(field);
 }
 
-function snapshotReadableFields(candidate: unknown): ReadonlySet<string> {
+function snapshotReadableFields(candidate: unknown): ReadonlySet<string> | undefined {
   let isPlainArray = false;
   try {
     isPlainArray =
@@ -436,11 +445,17 @@ function snapshotReadableFields(candidate: unknown): ReadonlySet<string> {
   }
   const snapshot = snapshotStructuredValue(candidate, snapshotState(), 0);
   const parsed = z
-    .array(fieldNameSchema)
+    .array(z.union([fieldNameSchema, z.literal(FIELD_POLICY_WILDCARD)]))
     .min(1)
     .max(MAX_STRUCTURED_QUERY_CONDITIONS)
     .safeParse(snapshot);
   if (!parsed.success || new Set(parsed.data).size !== parsed.data.length) {
+    throw new StructuredQueryError("invalid_shape");
+  }
+  if (parsed.data.length === 1 && parsed.data[0] === FIELD_POLICY_WILDCARD) {
+    return undefined;
+  }
+  if (parsed.data.includes(FIELD_POLICY_WILDCARD)) {
     throw new StructuredQueryError("invalid_shape");
   }
   return new Set(parsed.data);

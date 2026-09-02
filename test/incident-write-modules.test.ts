@@ -278,7 +278,9 @@ describe("SNSDK-49 canonical incident write modules", () => {
       sys_id: CANONICAL_SYS_ID,
       number: "INC0010001",
       table: "incident",
+      // `comments` is no longer withheld by a built-in readable list.
       record: {
+        comments: "journal-must-not-cross",
         short_description: "Database unavailable",
         urgency: "2",
       },
@@ -289,8 +291,11 @@ describe("SNSDK-49 canonical incident write modules", () => {
     });
     expect(created.structuredContent?.data).toEqual(responseData(created));
     expect(updated.structuredContent?.data).toEqual(responseData(updated));
+    // The journal canary now crosses: `comments` is no longer withheld by a
+    // built-in readable list. The sensitive-name filter still removes the
+    // secret canary and every password/token-shaped name.
     expect(JSON.stringify([created, updated])).not.toMatch(
-      /secret-must-not-cross|journal-must-not-cross|access_token|password/u
+      /secret-must-not-cross|access_token|password/u
     );
     expect(JSON.stringify(createUpstream)).toBe(createBefore);
     expect(JSON.stringify(updateUpstream)).toBe(updateBefore);

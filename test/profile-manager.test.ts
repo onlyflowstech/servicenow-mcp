@@ -34,6 +34,8 @@ const ENV_KEYS = [
   "SN_DISPLAY_VALUE",
   "SN_REL_DEPTH",
   "SN_ALLOWED_INSTANCE_HOSTS",
+  "SN_METADATA_CACHE_TTL_MS",
+  "SN_METADATA_CACHE_TABLES",
   "SN_PROFILE_ENCRYPTION_KEY",
   "UNSET_PROFILE_SECRET",
   // Test-only variables referenced by sn_profile add round-trip tests
@@ -82,6 +84,39 @@ describe("explicit named SN_* environment profile", () => {
     expect(manager.listProfiles()).toEqual([]);
     expect(() => manager.getProfile("default")).toThrow(/not found/u);
     expect(() => manager.getConfig("default")).toThrow(/not found/u);
+  });
+
+
+  it("loads per-profile table rules and metadata cache settings without inventing access defaults", () => {
+    writeConfigFile({
+      version: 2,
+      profiles: {
+        locked: {
+          instance: "https://locked.service-now.com",
+          username: "admin",
+          credential: "env:SN_PASSWORD",
+        },
+        governed: {
+          instance: "https://governed.service-now.com",
+          username: "admin",
+          credential: "env:SN_PASSWORD",
+          tableAccess: { readTables: ["incident"], writeTables: [] },
+          metadataCache: { ttlMs: 86400000, tables: ["sys_dictionary", "sys_metadata*"] },
+        },
+      },
+    });
+    process.env.SN_PASSWORD = "placeholder-password";
+
+    const manager = new ProfileManager();
+    expect(manager.getProfile("locked").tableAccess).toBeUndefined();
+    expect(manager.getProfile("governed").tableAccess).toEqual({
+      readTables: ["incident"],
+      writeTables: [],
+    });
+    expect(manager.getConfig("governed").metadataCache).toEqual({
+      ttlMs: 86400000,
+      tables: ["sys_dictionary", "sys_metadata*"],
+    });
   });
 
   it("maps basic-auth SN_* values only under SN_PROFILE_NAME", () => {

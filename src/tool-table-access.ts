@@ -204,9 +204,6 @@ export function resolveToolTableAccess(
         return discoveryResolution(args);
       case "sn_atf":
         return atfResolution(args, encodedQueryAccess);
-      case "sn_script":
-        // The published compatibility stub performs no ServiceNow access.
-        return resolution(args, []);
       case "sn_nl":
         // Natural-language composition can select reads or writes only after
         // parsing inside the handler. Until that parser emits a typed access

@@ -41,7 +41,7 @@ const TEST_TABLE_ACCESS = Object.freeze({
     Object.freeze({
       table: "incident",
       kind: "canonical" as const,
-      tools: Object.freeze(["sn_query", "sn_script"]),
+      tools: Object.freeze(["sn_query"]),
       closureComplete: true as const,
       relatedTables: Object.freeze(["incident"]),
     }),
@@ -677,7 +677,7 @@ describe("immutable execution context", () => {
   });
 
   it("declares an explicit typed context parameter on every handler", () => {
-    expect(tools).toHaveLength(17);
+    expect(tools).toHaveLength(16);
     for (const tool of tools) {
       expect(tool.handler.length, tool.definition.name).toBe(4);
     }
@@ -1097,19 +1097,47 @@ describe("registry context and audit boundary", () => {
       retryAfterSeconds: null,
     });
 
+    // sn_script previously served as the always-failing handler here. It is no
+    // longer a published tool, so use an explicit module that returns an error
+    // result to keep covering the handler_returned_error audit path.
+    const erroringModule = defineServiceNowToolModule({
+      runtime: "servicenow",
+      definition: {
+        name: "sn_handler_error_probe",
+        description: "Handler that always returns an error result.",
+        annotations: {
+          title: "Handler error probe",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      inputSchema: withRequiredProfile(z.object({})),
+      outputSchema: withResolvedProfileOutput(z.object({ value: z.string() })),
+      requirements: {
+        permissions: ["read"],
+        tables: { kind: "none" },
+        apis: [],
+        fieldPolicies: [],
+        capabilities: ["probe:handler-error"],
+      },
+      resolveAccess: (args) => ({ args, requests: [] }),
+      handler: async (): Promise<CallToolResult> => ({
+        content: [{ type: "text", text: "probe handler returned an error" }],
+        isError: true,
+      }),
+    });
     const handlerManager = fakeProfileManager();
     const handlerFailure = testDependencies();
     const handlerHarness = await harness(
       handlerManager.manager,
-      handlerFailure.dependencies
+      handlerFailure.dependencies,
+      [erroringModule]
     );
     const handlerResult = await handlerHarness.client.callTool({
-      name: "sn_script",
-      arguments: {
-        profile: "alpha",
-        code: "gs.info('test')",
-        confirm: false,
-      },
+      name: "sn_handler_error_probe",
+      arguments: { profile: "alpha" },
     });
 
     expect(handlerResult.isError).toBe(true);
@@ -1118,7 +1146,7 @@ describe("registry context and audit boundary", () => {
     expect(handlerFailure.records[0]).toMatchObject({
       outcome: "handler_error",
       reason: "handler_returned_error",
-      tool: "sn_script",
+      tool: "sn_handler_error_probe",
       profile: "alpha",
       errorCategory: "internal",
       retry: "do_not_retry",

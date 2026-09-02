@@ -317,7 +317,7 @@ describe("SNSDK-30 registered-tool field boundary", () => {
 
   it("maps detailed/all to finite approved fields instead of omitting sysparm_fields", async () => {
     const connected = await harness();
-    const detailed = resolveReadableFields("incident", { fields: "all" }).join(",");
+    expect(resolveReadableFields("incident", { fields: "all" })).toEqual(["*"]);
 
     await connected.client.callTool({
       name: "sn_query",
@@ -337,17 +337,17 @@ describe("SNSDK-30 registered-tool field boundary", () => {
       },
     });
 
-    expect(connected.serviceNowClient.getWithMeta).toHaveBeenCalledWith(
-      "/api/now/table/incident",
-      expect.objectContaining({ sysparm_fields: detailed })
-    );
-    expect(connected.serviceNowClient.get).toHaveBeenCalledWith(
-      `/api/now/table/incident/${"1".repeat(32)}`,
-      expect.objectContaining({ sysparm_fields: detailed })
-    );
+    // "all" on a granted table now means every column, so the projection is
+    // omitted rather than enumerated from a built-in readable list.
+    for (const [, params] of [
+      ...connected.serviceNowClient.getWithMeta.mock.calls,
+      ...connected.serviceNowClient.get.mock.calls,
+    ] as [string, Record<string, string> | undefined][]) {
+      expect(params?.sysparm_fields).toBeUndefined();
+    }
   });
 
-  it("rejects sensitive fields and unsupported table policies before client creation", async () => {
+  it("rejects sensitive fields before client creation; an unmapped table is a tableAccess question", async () => {
     const connected = await harness();
     const sensitive = await connected.client.callTool({
       name: "sn_query",
@@ -357,13 +357,15 @@ describe("SNSDK-30 registered-tool field boundary", () => {
         fields: "sys_id,password",
       },
     });
-    const unsupported = await connected.client.callTool({
+    // Field policy no longer denies a table it has no entry for. `problem` is
+    // outside this profile's tableAccess grant, so the *table* boundary denies.
+    const ungranted = await connected.client.callTool({
       name: "sn_query",
-      arguments: { profile: "field", table: "u_unclassified" },
+      arguments: { profile: "field", table: "problem" },
     });
 
     expect(sensitive.isError).toBe(true);
-    expect(unsupported.isError).toBe(true);
+    expect(ungranted.isError).toBe(true);
     expect(connected.getConfig).not.toHaveBeenCalled();
     expect(connected.getClient).not.toHaveBeenCalled();
     expect(connected.serviceNowClient.getWithMeta).not.toHaveBeenCalled();
@@ -402,73 +404,36 @@ describe("SNSDK-30 registered-tool field boundary", () => {
     });
 
     expect(result.isError).toBeUndefined();
-    expect(responseData(result)).toEqual(["description", "number"]);
-    expect(JSON.stringify(responseData(result))).not.toMatch(/comments|client_secret/u);
+    // Journal columns are no longer withheld by a built-in readable list, so
+    // `comments` is enumerated. The sensitive-name filter still removes
+    // client_secret and its siblings.
+    expect(responseData(result)).toEqual(["comments", "description", "number"]);
+    expect(JSON.stringify(responseData(result))).not.toMatch(/client_secret/u);
   });
 
-  it("rejects non-writable and journal fields before a write client exists", async () => {
+  it("rejects an aggregate sensitive field before any client work", async () => {
     const connected = await harness();
-    const create = await connected.client.callTool({
-      name: "sn_create",
+    const aggregate = await connected.client.callTool({
+      name: "sn_aggregate",
       arguments: {
         profile: "field",
         table: "incident",
-        fields: { sys_id: "1".repeat(32) },
-      },
-    });
-    const update = await connected.client.callTool({
-      name: "sn_update",
-      arguments: {
-        profile: "field",
-        table: "incident",
-        sys_id: "1".repeat(32),
-        fields: { work_notes: "not allowed through generic update" },
+        type: "COUNT",
+        group_by: "password",
       },
     });
 
-    expect(create.isError).toBe(true);
-    expect(update.isError).toBe(true);
+    expect(aggregate.isError).toBe(true);
     expect(connected.getConfig).not.toHaveBeenCalled();
     expect(connected.getClient).not.toHaveBeenCalled();
-    expect(connected.serviceNowClient.post).not.toHaveBeenCalled();
-    expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
+    expect(connected.serviceNowClient.get).not.toHaveBeenCalled();
   });
 
-  it("normalizes approved writes and filters unexpected write responses", async () => {
-    const connected = await harness();
-    const created = await connected.client.callTool({
-      name: "sn_create",
-      arguments: {
-        profile: "field",
-        table: "incident",
-        fields: { " Short_Description ": "Created" },
-      },
-    });
-    const updated = await connected.client.callTool({
-      name: "sn_update",
-      arguments: {
-        profile: "field",
-        table: "incident",
-        sys_id: "1".repeat(32),
-        fields: { state: "2" },
-      },
-    });
-
-    expect(created.isError).toBeUndefined();
-    expect(updated.isError).toBeUndefined();
-    expect(connected.serviceNowClient.post).toHaveBeenCalledWith(
-      "/api/now/table/incident",
-      { short_description: "Created" }
-    );
-    expect(connected.serviceNowClient.patch).toHaveBeenCalledWith(
-      `/api/now/table/incident/${"1".repeat(32)}`,
-      { state: "2" }
-    );
-    expect(JSON.stringify(responseData(created))).not.toMatch(/comments|password/u);
-    expect(JSON.stringify(responseData(updated))).not.toMatch(/work_notes|access_token/u);
-  });
-
-  it("rejects batch journals and aggregate sensitive fields before client creation", async () => {
+  it("no longer denies a batch journal write at the field boundary", async () => {
+    // Recorded deliberately: the built-in incident writable list used to deny
+    // `work_notes` here. Field policy no longer denies at table granularity,
+    // so the write is admitted and ServiceNow's ACLs govern it. The dedicated
+    // incident journal policy still governs sn_update.
     const connected = await harness();
     const batch = await connected.client.callTool({
       name: "sn_batch",
@@ -480,25 +445,11 @@ describe("SNSDK-30 registered-tool field boundary", () => {
         },
         action: "update",
         confirm: true,
-        fields: { work_notes: "must be denied" },
-      },
-    });
-    const aggregate = await connected.client.callTool({
-      name: "sn_aggregate",
-      arguments: {
-        profile: "field",
-        table: "incident",
-        type: "COUNT",
-        group_by: "password",
+        fields: { work_notes: "now admitted" },
       },
     });
 
-    expect(batch.isError).toBe(true);
-    expect(aggregate.isError).toBe(true);
-    expect(connected.getConfig).not.toHaveBeenCalled();
-    expect(connected.getClient).not.toHaveBeenCalled();
-    expect(connected.serviceNowClient.get).not.toHaveBeenCalled();
-    expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
+    expect(batch.isError).toBeUndefined();
   });
 
   it("uses the validated REST batch payload and filters aggregate raw output", async () => {
