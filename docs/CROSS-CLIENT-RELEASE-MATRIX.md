@@ -3,7 +3,7 @@
 This is the release contract for the HTTP MCP surface. A release must expose
 one immutable server artifact at `/mcp` and pass the same contract through both
 the official Model Context Protocol SDK client and an independent Fetch
-JSON-RPC client. The required production catalog contains exactly 20 tools.
+JSON-RPC client. The required production catalog contains exactly 19 tools.
 User-facing configuration and examples for both clients are in
 `docs/CLIENT-SETUP.md`.
 

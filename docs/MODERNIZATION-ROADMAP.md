@@ -53,15 +53,18 @@ The repository is not greenfield. As of this review:
 - Missing project gates: dedicated lint and typecheck scripts, HTTP transport
   tests, and remote-runtime tests
 
-Existing tools:
+Existing tools (19 published in 2.0):
 
-`sn_query`, `sn_get`, `sn_create`, `sn_update`, `sn_delete`, `sn_batch`,
-`sn_aggregate`, `sn_schema`, `sn_health`, `sn_attach`, `sn_relationships`,
-`sn_syslog`, `sn_codesearch`, `sn_discover`, `sn_atf`, `sn_nl`, `sn_script`, and
-`sn_profile`.
+`sn_query`, `sn_get`, `sn_create`, `sn_update`, `sn_incident_add_comment`,
+`sn_incident_add_work_note`, `sn_delete`, `sn_batch`, `sn_aggregate`,
+`sn_schema`, `sn_health`, `sn_attach`, `sn_relationships`, `sn_syslog`,
+`sn_codesearch`, `sn_discover`, `sn_atf`, `sn_nl`, and `sn_profile`.
 
-`sn_script` is an intentionally unavailable stub rather than a working script
-execution capability.
+`sn_script` is **not** published in 2.0. It shipped in 1.0.0 as an
+intentionally unavailable stub that returned an error without calling
+ServiceNow, and it has been withdrawn from the advertised catalog rather than
+shipping a tool that can only fail. Background-script execution remains future
+state; see the roadmap entry in `README.md`.
 
 ## Confirmed product decisions
 

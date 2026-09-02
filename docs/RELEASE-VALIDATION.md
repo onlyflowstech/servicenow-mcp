@@ -26,7 +26,7 @@ npm audit --omit=dev --audit-level=moderate
 
 The unit and protocol commands are deliberately separate release records even
 though the complete unit suite contains the focused protocol cases. The
-protocol gate includes the all-20-tool missing-profile rejection matrix through
+protocol gate includes the all-19-tool missing-profile rejection matrix through
 the official SDK and independent Fetch clients, plus the catalog-wide resolved
 profile/result/audit contract. The profile gate covers encryption,
 secret-reference resolution, operator administration, and profile isolation.
@@ -65,7 +65,7 @@ bearer header in argv. In the local UI:
 
 1. Select Streamable HTTP and enter the exact `MCP_URL` shown by the launcher.
 2. Enter the bearer directly from the approved secret store in the local UI.
-3. Run `tools/list`; verify exactly 20 tools and required non-empty `profile`
+3. Run `tools/list`; verify exactly 19 tools and required non-empty `profile`
    schemas.
 4. Call `sn_profile` once without `profile` and verify rejection.
 5. Call it again with the exact `MCP_PROFILE`; verify

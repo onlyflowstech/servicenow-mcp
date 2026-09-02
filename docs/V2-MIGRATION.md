@@ -1,7 +1,264 @@
-# V2 HTTP migration
+# Migrating to 2.0
 
-V2 is an authenticated, single-owner HTTP service. It intentionally removes
-the V1 local-process launch contract.
+2.0 is an authenticated, single-owner HTTP service. It intentionally removes
+the 1.x local-process launch contract. Every published release before it is
+`1.0.0`, so this guide is written for a 1.0.0 install.
+
+## Breaking changes at a glance
+
+| # | Change | Before (1.0.0) | After (2.0.0) |
+|---|--------|----------------|---------------|
+| 1 | Transport | stdio; the client spawns `servicenow-mcp` | Streamable HTTP at `/mcp` with a bearer; the client connects to a URL |
+| 2 | Profile selection | implicit, from `SN_*` in the client's env | every tool call carries an explicit `profile` |
+| 3 | Table access | any table the credential could reach | deny-by-default per profile; explicit allowlist plus target entries |
+| 4 | Attachments | host `file_path` / `output_path` | inline base64 both directions; no host filesystem access, and no flag restores it |
+| 5 | Queries | raw ServiceNow encoded queries | structured filters; raw reads are opt-in per tool/table |
+| 6 | Incident journals | `sn_update` accepted `comments` / `work_notes` | dedicated `sn_incident_add_comment` / `sn_incident_add_work_note` |
+| 7 | Tool surface | 17 tools, one `bin` | 19 tools, three `bin` entries; `sn_script` withdrawn |
+| 8 | Field selection limit | `MAX_FIELDS_PER_OPERATION` was `32`; over-selection raised `excessive_field_selection` | limit is `10_000`; `excessive_field_selection` is removed from the exported `FieldPolicyFailureReason` union |
+| 9 | Capabilities | `tools` only | adds `prompts` (`servicenow-mcp.add-profile`) |
+
+Each is expanded below. Items 1-3 require action on every install; the rest
+apply only if you used the affected surface.
+
+## Also new in 2.0
+
+- **Inline base64 attachments.** `sn_attach` uploads and downloads file content
+  in the tool call itself, with no host filesystem access on either side. See
+  breaking change 4 — this is the replacement for the removed path arguments.
+- **`servicenow-mcp-setup`.** A bootstrap that generates local auth material,
+  registers the clients whose CLI can hold a bearer by reference, emits
+  copy-pasteable config for the rest, writes least-privilege table-access rules
+  onto a profile, and diagnoses an install end to end with `doctor`.
+- **`servicenow-mcp.add-profile` prompt.** A guided profile-creation flow that
+  never asks for a secret in chat.
+- **Append-only incident journal tools.** `sn_incident_add_comment` and
+  `sn_incident_add_work_note`.
+- **Metadata caching.** Optional per-instance caching of dictionary and schema
+  reads, off by default for tables you do not name.
+
+### 1. Transport
+
+**Before** — client config launched a process:
+
+```json
+{
+  "mcpServers": {
+    "servicenow": {
+      "command": "npx",
+      "args": ["-y", "@onlyflows/servicenow-mcp"],
+      "env": { "SN_INSTANCE": "https://yourinstance.service-now.com", "SN_USER": "u", "SN_PASSWORD": "p" }
+    }
+  }
+}
+```
+
+**After** — run the service, then point the client at its URL. Delete the
+`command`, `args`, and `env` keys entirely; there is no stdio fallback,
+compatibility flag, or alternate executable.
+
+```json
+{
+  "mcpServers": {
+    "servicenow-mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:3000/mcp",
+      "headers": { "Authorization": "Bearer ${SERVICENOW_MCP_BEARER_TOKEN}" }
+    }
+  }
+}
+```
+
+Per-client syntax, including the clients that need an `mcp-remote` bridge, is
+in [CLIENT-SETUP.md](CLIENT-SETUP.md#7-mcp-client-configuration).
+`servicenow-mcp-setup` generates the bearer and registers the clients it can.
+
+### 2. Explicit profile on every call
+
+**Before:** `{"table": "incident", "limit": 5}`
+
+**After:** `{"profile": "dev", "table": "incident", "limit": 5}`
+
+There is no default, active, current, or session-selected profile, and no
+switch operation. Missing, empty, unknown, or invalid names fail before
+credential resolution or ServiceNow client construction. Successful results
+carry the resolved name in `structuredContent.profile`.
+
+### 3. Deny-by-default table access
+
+**Before:** no MCP-side table policy; the integration account's ACLs were the
+only boundary.
+
+**After:** a profile with no rules denies every tool call. Grant explicitly:
+
+```sh
+servicenow-mcp-setup grant --profile dev --read incident,problem --write incident
+```
+
+`SN_ALLOWED_READ_TABLES`, `SN_ALLOWED_WRITE_TABLES`, and
+`SN_TABLE_ACCESS_TARGETS` configure the `SN_PROFILE_NAME` environment profile,
+and **only when `~/.servicenow-mcp/config.json` does not exist**. If you have a
+profile file, those variables are ignored and the rules must live on the
+profile. `servicenow-mcp-setup doctor` reports this case explicitly.
+
+### 4. Attachments: no host filesystem paths
+
+`sn_attach` no longer accepts `file_path` or `output_path`. The tool holds no
+filesystem access at all — there is no `readFileSync`, no path parameter, and
+no flag that restores the old behavior. Uploads take inline base64; downloads
+return inline base64.
+
+This is deliberate hardening, not a regression. The server touches no host
+filesystem, so behavior is identical whether it runs on a desktop or in a
+container. Under the old contract a `file_path` that worked on a laptop
+silently failed once the same server ran in a container against the same
+client — exactly the kind of environment-dependent break that makes an install
+hard to trust.
+
+**Upload — before:**
+
+```json
+{ "action": "upload", "table": "incident", "sys_id": "…", "file_path": "/local/report.pdf" }
+```
+
+**Upload — after.** Encode the file yourself and send the bytes inline:
+
+```json
+{
+  "profile": "dev",
+  "action": "upload",
+  "table": "incident",
+  "sys_id": "0123456789abcdef0123456789abcdef",
+  "file_name": "report.pdf",
+  "content_base64": "JVBERi0xLjcKJc…"
+}
+```
+
+`file_name` must be a safe leaf name — no directory separators. To produce the
+payload:
+
+```sh
+base64 report.pdf                 # macOS / BSD
+base64 -w0 report.pdf             # GNU coreutils, single line
+```
+
+`base64` wraps at 76 columns by default. That is fine: the tool tolerates
+whitespace in `content_base64`, so either form works.
+
+**Download — before:**
+
+```json
+{ "action": "download", "table": "incident", "sys_id": "…", "output_path": "/local/out.pdf" }
+```
+
+**Download — after.** The result carries the bytes; decode them client-side:
+
+```json
+{
+  "profile": "dev",
+  "action": "download",
+  "table": "incident",
+  "sys_id": "0123456789abcdef0123456789abcdef",
+  "attachment_sys_id": "…"
+}
+```
+
+The result returns `content_base64`, `file_name`, `content_type`, and
+`size_bytes`. Write the file yourself:
+
+```sh
+# from a saved result document
+jq -r '.structuredContent.content_base64' result.json | base64 -d > out.pdf
+```
+
+Download also requires the owning `table` and record `sys_id`; both are
+policy-authorized and verified against ServiceNow's attachment metadata before
+any bytes are returned.
+
+**Size.** Both directions travel inside the 1 MiB `/mcp` JSON request envelope,
+and base64 inflates a file by roughly a third on the way in, so the effective
+ceiling is well under a megabyte — far below the 10 MiB decoded cap the tool
+also enforces, which is therefore never the binding constraint over HTTP. The
+tool's own `content_base64` schema description carries the current figure;
+read it there rather than from this guide, because reconciling the two limits
+is still in flight for 2.0. An oversized upload is rejected with HTTP `413`
+before the tool runs. Treat `sn_attach` as suitable for logs, configs,
+screenshots, and small documents rather than bulk transfer.
+
+### 5. Structured queries
+
+**Before:** `{"query": "active=true^priority=1"}`
+
+**After:**
+
+```json
+{
+  "profile": "dev",
+  "table": "incident",
+  "structured_query": {
+    "filter": {
+      "type": "group",
+      "operator": "and",
+      "conditions": [
+        { "type": "equality", "field": "active", "operator": "eq", "value": true },
+        { "type": "equality", "field": "priority", "operator": "eq", "value": 1 }
+      ]
+    }
+  }
+}
+```
+
+Condition types are `equality`, `set`, `range`, `between`, `text`, and `null`;
+groups nest three levels deep at most. Field names are restricted to
+`^[a-z][a-z0-9_]{0,79}$`, so dot-walking is not expressible.
+
+`sn_batch` now requires `structured_query.filter`. Create, update, delete, ATF,
+aggregate, and syslog have no raw encoded-query input at all. Raw reads on
+`sn_query` are opt-in through `SN_ENCODED_QUERY_READ_POLICY`, described at the
+end of this document.
+
+### 6. Incident journal fields
+
+**Before:** `sn_update` on `incident` with `{"comments": "…"}`.
+
+**After:** `sn_incident_add_comment` with `{profile, sys_id, content}` for a
+customer-visible comment, or `sn_incident_add_work_note` for an internal note.
+`sn_update` rejects both fields before credentials are resolved.
+
+### 7. Tool surface and executables
+
+17 tools become 19: `sn_incident_add_comment`, `sn_incident_add_work_note`, and
+`sn_profile` are added, and `sn_script` is removed. `sn_script` never executed
+anything in 1.0.0 — it returned an explanatory error — so removing it changes
+`tools/list` but no working behavior. Use `sn_query` and `sn_batch` instead.
+
+One `bin` becomes three:
+
+- `servicenow-mcp` — the Streamable HTTP service (and `servicenow-mcp setup`)
+- `servicenow-mcp-profile` — out-of-band profile administration
+- `servicenow-mcp-setup` — bootstrap, client config, grants, and diagnosis
+
+### 8. Field-selection limit
+
+`MAX_FIELDS_PER_OPERATION` rises from `32` to `10_000`, and
+`excessive_field_selection` is removed from the exported
+`FieldPolicyFailureReason` union. Code that switched on that member no longer
+compiles, and a selection that previously failed now succeeds.
+
+### 9. New `prompts` capability
+
+The server advertises `prompts` and registers `servicenow-mcp.add-profile`,
+which guides safe profile creation without asking for secrets in chat. This is
+additive, but it changes the advertised capability set, which matters if you
+assert on it.
+
+### Client behavior
+
+`MCP_MAX_CONCURRENT_REQUESTS` defaults to `2` and there is no admission queue:
+a third concurrent request receives HTTP `503` immediately. Clients and agents
+must cap their own parallelism at two and honor `Retry-After` on `429` and
+`503`. See
+[client behavior requirements](CLIENT-SETUP.md#client-behavior-requirements).
 
 ## Required client change
 
@@ -48,6 +305,23 @@ authentication-specific ServiceNow secret directly into the service process.
 Do not put either value in shell input, command arguments, dotenv files, or
 history.
 
+> **The `SN_*` variables above build a profile only when
+> `~/.servicenow-mcp/config.json` does not exist.** Once you create a profile
+> with `servicenow-mcp-profile`, that file exists, `SN_PROFILE_NAME` stops
+> constructing a profile, and `SN_ALLOWED_READ_TABLES` /
+> `SN_ALLOWED_WRITE_TABLES` / `SN_TABLE_ACCESS_TARGETS` stop applying — the
+> server then denies every call. Put the rules on the profile instead:
+> `servicenow-mcp-setup grant --profile dev --read incident --write incident`.
+> `servicenow-mcp-setup doctor` detects exactly this situation.
+
+For the recommended local path, use the bootstrap instead:
+
+```bash
+servicenow-mcp-setup                 # generates ~/.servicenow-mcp/server.env
+set -a; source ~/.servicenow-mcp/server.env; set +a
+servicenow-mcp
+```
+
 Production uses `npm start`. Local development uses `npm run dev`, which builds
 and starts the same HTTP-only entrypoint with source maps enabled.
 
@@ -59,7 +333,7 @@ Optional runtime settings:
 | `MCP_PORT` | `3000` | Listen port |
 | `MCP_ALLOWED_HOSTS` | bind/socket authorities | Comma-separated exact public `Host` authorities; include ports when clients send them. The container's reserved loopback-only health authority is internal and must not be added. |
 | `MCP_ALLOWED_ORIGINS` | deny browser origins | Comma-separated exact HTTP(S) origins; requests without `Origin` remain allowed |
-| `MCP_MAX_CONCURRENT_REQUESTS` | `2` | Concurrent admitted `/mcp` requests (1–1024 syntactically); excess work receives HTTP 503 and is never queued, and startup rejects values above the combined 512 MiB estimate (maximum 2 with default limits) |
+| `MCP_MAX_CONCURRENT_REQUESTS` | `2` | Concurrent admitted `/mcp` requests (1–1024 syntactically); excess work receives HTTP 503 and is never queued. Startup **throws** for values above the combined 512 MiB estimate — with the shipped 1 MiB body limit the maximum is 2, and `3` refuses to start |
 | `MCP_MAX_CONNECTIONS` | `128` | Accepted TCP connections (1–4096); excess sockets are dropped, and unread early-rejection bodies are limited to a 16 KiB/100 ms drain before destruction |
 | `MCP_SHUTDOWN_GRACE_MS` | `10000` | Drain deadline for SIGINT/SIGTERM (1–300000 ms) |
 | `MCP_PRE_AUTH_RATE_CAPACITY` | `240` | Direct-source request capacity per refill period (1–1000000) |
@@ -74,10 +348,19 @@ requests per 60 seconds per direct socket source, 4096 retained sources) and
 authenticated bucket (120 requests per 60 seconds per owner/client identity,
 128 retained identities). Capacity, refill period, and retained-key bounds are
 operator-configurable only within the validated ranges above. It does not trust
-forwarded-address headers. A rejected request is
-HTTP 429 with a bounded `Retry-After` header and
-`{"error":"rate_limited"}` body. The limits are process-local and reset on
-restart. Health probes are exempt from the MCP source bucket so exhausted
+forwarded-address headers. A rejected request is HTTP 429 with a bounded
+`Retry-After` header and this body:
+
+```json
+{
+  "error": "rate_limited",
+  "message": "Rate limited. Retry after the number of seconds in retry_after_seconds or the Retry-After header.",
+  "retry_after_seconds": 1
+}
+```
+
+`retry_after_seconds` always matches the `Retry-After` header. The limits are
+process-local and reset on restart. Health probes are exempt from the MCP source bucket so exhausted
 client traffic cannot change liveness or readiness semantics.
 
 Each authenticated `/mcp` `POST` accepts one JSON-RPC message in a JSON body of
@@ -100,16 +383,46 @@ in RSS, so request JSON plus ServiceNow JSON/text receives a 64× safety factor.
 One ExecutionContext can consume at most 1 MiB of ServiceNow JSON/text in total
 across parallel calls; declared bytes are reserved atomically and streamed
 bytes are charged before `JSON.parse`. Raw attachment downloads preserve a
-separate cumulative 10 MiB limit with an 8× allowance for Buffer, base64/UTF-16,
-and JSON serialization.
+separate cumulative 10 MiB memory budget with an 8× allowance for Buffer,
+base64/UTF-16, and JSON serialization. That figure is an internal memory
+reservation, not a usable attachment size.
 
 The constructor enforces `concurrency × (((request MiB + 1 MiB) × 64) +
 (10 MiB × 8)) <= 512 MiB`. Defaults therefore estimate 208 MiB per request and
-416 MiB for concurrency 2; concurrency 3 fails startup. OAuth token and error
-bodies are capped at 64 KiB within the remaining default headroom. This is a
-conservative admission estimate rather than a hard process heap/RSS limit, so
-reduce `MCP_MAX_CONCURRENT_REQUESTS` when the deployment memory budget requires
-more headroom for other application state.
+416 MiB for concurrency 2; concurrency 3 needs 624 MiB and **fails startup**.
+OAuth token and error bodies are capped at 64 KiB within the remaining default
+headroom. This is a conservative admission estimate rather than a hard process
+heap/RSS limit, so reduce `MCP_MAX_CONCURRENT_REQUESTS` when the deployment
+memory budget requires more headroom for other application state.
+
+Body size and concurrency trade directly against each other:
+
+| `maxBodyBytes` | Highest concurrency that starts | Effect |
+|---|---|---|
+| 1 MiB (shipped default) | 2 | 416 MiB budgeted; the intended configuration |
+| 1.75 MiB | 2 | 512 MiB — exactly at the ceiling |
+| **2 MiB** | **1** | **Single-flight: every tool call serializes** |
+| 5.75 MiB | 1 | the last value that starts at all |
+| above 5.75 MiB | none | startup fails at any concurrency |
+
+Above 5.75 MiB the failure is a constructor `throw`, not a clamp, and its
+message — *"HTTP maxConcurrentRequests and maxBodyBytes exceed the estimated
+body-memory ceiling"* — names the two settings but not the ceiling, the
+arithmetic, or a working value. At 2 MiB there is no failure at all: the
+runtime simply cannot start above concurrency 1, so every request serializes
+with no warning and no log line. One large upload then blocks every other tool
+call, and nothing connects the cause to the effect.
+
+**`maxBodyBytes` is not operator-configurable in the shipped executable.**
+`src/index.ts` builds the request policy with only `allowedHosts` and
+`allowedOrigins`, so the limit is always 1 MiB and no environment variable
+changes it. Both thresholds above bind embedders calling `createHttpRuntime`
+directly. For an operator, the only reachable form of this failure is
+`MCP_MAX_CONCURRENT_REQUESTS=3`.
+
+A 10 MiB attachment is unreachable over HTTP at any concurrency: base64
+inflates it to about 13.33 MiB on the wire, budgeting roughly 997 MiB against a
+512 MiB ceiling. Raising the body limit is not a path to it.
 
 Request and tool completion events are written as JSON Lines on stderr. They
 contain bounded correlation, latency, outcome/reason, and status fields. Raw
@@ -122,7 +435,7 @@ must monitor these records as evidence of telemetry loss.
 
 ## Profile-call change
 
-Every one of the 20 `sn_*` tools now requires a non-empty `profile` argument.
+Every one of the 19 `sn_*` tools now requires a non-empty `profile` argument.
 Missing, empty, unknown, or invalid profiles fail before ServiceNow client or
 credential initialization. There is no omitted-profile or session-active
 fallback.
@@ -159,11 +472,12 @@ for command syntax and recovery guidance.
 V2 attachment transfers do not accept host `file_path` or `output_path`
 arguments. For upload, send a safe leaf `file_name` and `content_base64`; for
 download, read `content_base64` from the tool result and decode it client-side.
-Both directions enforce a 10 MiB decoded-content cap. Base64 uploads must also
-fit in the 1 MiB `/mcp` JSON request envelope, which is the lower practical
-transport limit. List, upload, and download require the owning `table` and
-record `sys_id`; downloads verify those values against ServiceNow attachment
-metadata before returning bytes.
+The 1 MiB `/mcp` JSON request envelope, not the tool schema's advertised cap,
+sets the practical size limit; see
+[Attachments: no host filesystem paths](#4-attachments-no-host-filesystem-paths)
+for worked before/after examples. List, upload, and download require the owning
+`table` and record `sys_id`; downloads verify those values against ServiceNow
+attachment metadata before returning bytes.
 
 ## Shutdown
 
@@ -185,8 +499,13 @@ SBOM, scanning, and version-identification commands.
 
 ## Table-policy change
 
-V2 denies table access unless the service operator configures the table name or
-the literal `*` in `SN_ALLOWED_READ_TABLES` or `SN_ALLOWED_WRITE_TABLES`. Both
+V2 denies table access unless the service operator configures per-profile table
+rules. File-backed profiles use a `tableAccess` object in
+`~/.servicenow-mcp/config.json`; the explicit `SN_PROFILE_NAME` environment
+profile maps `SN_ALLOWED_READ_TABLES` and `SN_ALLOWED_WRITE_TABLES` into that
+one profile only when no profile file exists. A profile with no table rules
+denies all. Use exact table names or the literal `*` for a broad non-hard-denied
+grant. Both
 variables are comma-separated and default to an empty allowlist. Read and write grants
 are independent: a table listed for reads is not writable, and a table listed
 for writes is not implicitly readable. Every caller-addressable name must also

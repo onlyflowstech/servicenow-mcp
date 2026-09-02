@@ -30,6 +30,7 @@ describe("HTTP-only package contract", () => {
     expect(packageJson.bin).toEqual({
       "servicenow-mcp": "./dist/index.js",
       "servicenow-mcp-profile": "./dist/profile-admin.js",
+      "servicenow-mcp-setup": "./dist/setup.js",
     });
     expect(packageJson.scripts?.start).toBe("node dist/index.js");
     expect(packageJson.scripts?.dev).toBe(

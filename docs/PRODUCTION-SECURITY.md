@@ -171,10 +171,12 @@ set, route it through controlled DNS, and review changes before deployment.
 DNS policy must cover UDP and TCP resolution, or the platform's approved
 encrypted resolver transport, so a fallback path cannot bypass the allowlist.
 
-ServiceNow table allowlists are a separate application-data boundary:
-`SN_ALLOWED_READ_TABLES`, `SN_ALLOWED_WRITE_TABLES`, and
-`SN_TABLE_ACCESS_TARGETS` do not grant network reachability. Conversely,
-network reachability to an instance does not authorize a table or tool.
+ServiceNow table allowlists are a separate application-data boundary.
+Per-profile `tableAccess` rules authorize application data; `SN_ALLOWED_READ_TABLES`,
+`SN_ALLOWED_WRITE_TABLES`, and `SN_TABLE_ACCESS_TARGETS` are mapped only into
+the explicit `SN_PROFILE_NAME` environment profile when no profile file exists.
+These rules do not grant network reachability. Conversely, network reachability
+to an instance does not authorize a table or tool.
 
 ## Canonical deployment example
 
@@ -201,7 +203,16 @@ SN_ALLOWED_INSTANCE_HOSTS=acme.service-now.com
 SN_ALLOWED_READ_TABLES=incident,problem,change_request
 SN_ALLOWED_WRITE_TABLES=incident,change_request
 SN_TABLE_ACCESS_TARGETS=<runtime-config:reviewed-target-catalog>
+SN_METADATA_CACHE_TTL_MS=86400000
+SN_METADATA_CACHE_TABLES=sys_glide_object,sys_dictionary,sys_db_object,sys_app,sys_plugins,sys_metadata*,sys_flow*
 ```
+
+`sys_properties` is deliberately absent from that list. Rows in it are
+ACL-restricted per user and routinely hold integration secrets in the `value`
+column, and a cache hit is served without re-contacting ServiceNow, so the
+caller's ACLs are not evaluated on the hit. Do not add it, and review any
+table you do add against the same two questions: are its rows ACL-restricted
+per user, and would a stale or cross-identity answer be a disclosure?
 
 For a named profile, keep the secret out of JSON and reference the same
 canonical runtime secret:

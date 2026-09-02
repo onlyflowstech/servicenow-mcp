@@ -58,7 +58,7 @@ npm run smoke
 The smoke client uses the official MCP Streamable HTTP client and verifies:
 
 - initialization and discovery over `/mcp`;
-- exactly 20 tools;
+- exactly 19 tools;
 - every discovered schema requires a non-empty `profile`;
 - `sn_profile` returns `structuredContent.profile` without credentials;
 - a version health check and a bounded incident query return that same resolved

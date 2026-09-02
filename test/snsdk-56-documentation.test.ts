@@ -79,7 +79,9 @@ describe("SNSDK-56 documentation contract", () => {
       "bounded audit events",
       "sn_incident_add_comment",
       "Table access is deny-by-default",
-      "Optional AI-platform setup paths",
+      // Renamed from "Optional AI-platform setup paths" for 2.0: the section
+      // now documents all six supported clients rather than optional extras.
+      "MCP client configuration",
       "no stdio fallback",
       "provider-neutral module contract",
     ]) {
@@ -135,7 +137,14 @@ describe("SNSDK-56 documentation contract", () => {
     expect(guide).toContain("Claude Code over Streamable HTTP");
     expect(guide).toContain('"type": "http"');
     expect(guide).toContain('"url": "${SERVICENOW_MCP_URL}"');
-    expect(guide).toContain('"Authorization": "Bearer ${MCP_BEARER_TOKEN}"');
+    // Client config must reference the CLIENT-side variable. `MCP_BEARER_TOKEN`
+    // lives in server.env beside SN_PROFILE_ENCRYPTION_KEY; setup writes the
+    // client copy as SERVICENOW_MCP_BEARER_TOKEN (src/setup.ts:145,218).
+    // Documenting the server name here set an unset variable client-side and
+    // invited users to source server.env — leaking the encryption key.
+    expect(guide).toContain(
+      '"Authorization": "Bearer ${SERVICENOW_MCP_BEARER_TOKEN}"'
+    );
     expect(guide).toContain("https://code.claude.com/docs/en/mcp#environment-variable-expansion-in-mcpjson");
     expect(guide).toContain(
       "logs a warning and leaves the `${VAR}` placeholder unexpanded"

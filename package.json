@@ -1,12 +1,13 @@
 {
   "name": "@onlyflows/servicenow-mcp",
-  "version": "1.2.0",
-  "description": "HTTP-only ServiceNow MCP server with 20 tools for CRUD, CMDB traversal, ATF testing, and explicit multi-instance profiles.",
+  "version": "2.0.0",
+  "description": "HTTP-only ServiceNow MCP server with 19 tools for CRUD, CMDB traversal, ATF testing, and explicit multi-instance profiles.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
     "servicenow-mcp": "./dist/index.js",
-    "servicenow-mcp-profile": "./dist/profile-admin.js"
+    "servicenow-mcp-profile": "./dist/profile-admin.js",
+    "servicenow-mcp-setup": "./dist/setup.js"
   },
   "scripts": {
     "prebuild": "node scripts/clean-dist.mjs",
