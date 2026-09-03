@@ -10,6 +10,18 @@
  * force refresh by passing the internal sysparm_force_recache=true parameter,
  * which is stripped before upstream I/O.
  *
+ * The freshness probe compares sys_updated_on, which ServiceNow evaluates in
+ * the session user's timezone, so the probe timestamp is formatted in that
+ * timezone rather than UTC. The zone is resolved per identity from
+ * sys_user.time_zone, falling back to the glide.sys.default.tz property; when
+ * it cannot be resolved, caching is disabled for that identity rather than
+ * assuming UTC and serving silently stale metadata.
+ *
+ * Deletions are not detected by the probe, which sees updates only. A row
+ * deleted upstream stays visible for at most one TTL: a successful probe
+ * refreshes recency for eviction but never extends expiresAt, so the entry
+ * still expires on schedule and forces a genuine refetch.
+ *
  * @module metadata-cache
  */
 
@@ -18,6 +30,7 @@ import type {
   ServiceNowOperations,
 } from "./client.js";
 import { parsePositiveIntegerEnv } from "./config.js";
+import { escapeQueryValue } from "./utils.js";
 
 export const DEFAULT_METADATA_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 /**
@@ -73,6 +86,23 @@ const MAX_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const MAX_METADATA_CACHE_SCOPES = 64;
 export const MAX_METADATA_CACHE_ENTRIES_PER_SCOPE = 512;
 
+/**
+ * Resolved ServiceNow session timezone per cache scope.
+ *
+ * A timezone NAME is cached, never a numeric offset: an offset is wrong for
+ * half the year, and a cached one silently reintroduces the skew at every DST
+ * transition -- the longer the TTL, the longer it stays wrong. The offset is
+ * computed from the name for the specific instant being compared.
+ *
+ * Keyed by the same scope as the metadata cache, so it discriminates instance
+ * AND credential identity: two profiles on one instance can authenticate as
+ * accounts in different timezones, and sharing a resolution between them would
+ * corrupt the freshness window for both.
+ */
+const SCOPED_TIME_ZONES = new Map<string, Promise<string | undefined>>();
+const TIME_ZONE_WARNED_SCOPES = new Set<string>();
+const DEFAULT_TIME_ZONE_PROPERTY = "glide.sys.default.tz";
+
 interface MetadataCacheEnvironment {
   readonly SN_METADATA_CACHE_TTL_MS?: string;
   readonly SN_METADATA_CACHE_TABLES?: string;
@@ -105,11 +135,15 @@ export function createMetadataCacheConfig(
 /**
  * @param scope Cache partition key. Must identify the ServiceNow instance
  *   *and* the credential identity reading from it -- see the module docstring.
+ * @param sessionUserName ServiceNow user_name this scope authenticates as.
+ *   Required to resolve the session timezone; without it the freshness probe
+ *   cannot be made correct, so caching is disabled for the scope.
  */
 export function createCachedServiceNowOperations(
   operations: ServiceNowOperations,
   scope: string,
-  config: MetadataCacheConfigInput | undefined
+  config: MetadataCacheConfigInput | undefined,
+  sessionUserName?: string
 ): ServiceNowOperations {
   if (config === undefined && process.env.NODE_ENV === "test") {
     return operations;
@@ -120,11 +154,23 @@ export function createCachedServiceNowOperations(
   Object.defineProperties(cached, {
     get: {
       value: async <T = Jsonish>(path: string, params?: Record<string, string>) =>
-        (await cachedGetWithMeta<T>(operations, scopedCache, cacheConfig, path, params)).data,
+        (
+          await cachedGetWithMeta<T>(
+            operations,
+            scopedCache,
+            cacheConfig,
+            path,
+            params,
+            { scope, sessionUserName }
+          )
+        ).data,
     },
     getWithMeta: {
       value: <T = Jsonish>(path: string, params?: Record<string, string>) =>
-        cachedGetWithMeta<T>(operations, scopedCache, cacheConfig, path, params),
+        cachedGetWithMeta<T>(operations, scopedCache, cacheConfig, path, params, {
+          scope,
+          sessionUserName,
+        }),
     },
     post: { value: operations.post.bind(operations) },
     patch: { value: operations.patch.bind(operations) },
@@ -135,12 +181,18 @@ export function createCachedServiceNowOperations(
   return Object.freeze(cached);
 }
 
+interface CacheIdentity {
+  readonly scope: string;
+  readonly sessionUserName: string | undefined;
+}
+
 async function cachedGetWithMeta<T>(
   operations: ServiceNowOperations,
   cache: Map<string, CacheEntry>,
   config: MetadataCacheConfig,
   path: string,
-  params?: Record<string, string>
+  params: Record<string, string> | undefined,
+  identity: CacheIdentity
 ): Promise<RequestResult<T>> {
   // Strip the internal flag before any upstream call, including the
   // passthrough: sysparm_force_recache is this module's own parameter and must
@@ -151,12 +203,25 @@ async function cachedGetWithMeta<T>(
     return operations.getWithMeta<T>(path, cleanParams);
   }
 
+  // The freshness probe compares sys_updated_on in the session user's
+  // timezone. Without knowing that timezone the probe is wrong by the offset,
+  // so caching is disabled for this identity rather than assuming UTC.
+  const timeZone = await sessionTimeZone(operations, identity);
+  if (timeZone === undefined) {
+    return operations.getWithMeta<T>(path, cleanParams);
+  }
+
   const key = cacheKey(path, cleanParams);
   const now = Date.now();
   const existing = cache.get(key);
   if (existing && existing.expiresAt <= now) cache.delete(key);
   if (!forceRecache && existing && existing.expiresAt > now) {
-    const changed = await hasChangedSince(operations, match, existing.lastSyncedAt);
+    const changed = await hasChangedSince(
+      operations,
+      match,
+      existing.lastSyncedAt,
+      timeZone
+    );
     if (!changed) {
       // Re-insert to mark the entry most recently used for eviction order.
       cache.delete(key);
@@ -197,13 +262,14 @@ function evictOldest(entries: Map<string, unknown>, limit: number): void {
 async function hasChangedSince(
   operations: ServiceNowOperations,
   table: string,
-  lastSyncedAt: number
+  lastSyncedAt: number,
+  timeZone: string
 ): Promise<boolean> {
   try {
     const response = await operations.get<{ result?: unknown[] }>(
       `/api/now/table/${table}`,
       {
-        sysparm_query: `sys_updated_on>${serviceNowDateTime(lastSyncedAt)}`,
+        sysparm_query: `sys_updated_on>${serviceNowDateTime(lastSyncedAt, timeZone)}`,
         sysparm_fields: "sys_id,sys_updated_on",
         sysparm_limit: "1",
         sysparm_no_count: "true",
@@ -278,8 +344,143 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function serviceNowDateTime(epochMs: number): string {
-  return new Date(epochMs).toISOString().slice(0, 19).replace("T", " ");
+/**
+ * Format an instant as ServiceNow's `YYYY-MM-DD HH:mm:ss` in the given zone.
+ *
+ * The offset is derived from the zone NAME for this specific instant, so a
+ * timestamp on either side of a DST transition resolves to the offset actually
+ * in force then. This is why the name is what gets cached.
+ */
+function serviceNowDateTime(epochMs: number, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date(epochMs));
+  const field = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((part) => part.type === type)?.value ?? "00";
+  return (
+    `${field("year")}-${field("month")}-${field("day")} ` +
+    `${field("hour")}:${field("minute")}:${field("second")}`
+  );
+}
+
+/** True when Intl recognizes the name, so a bad value never silently formats. */
+function isUsableTimeZone(candidate: unknown): candidate is string {
+  if (typeof candidate !== "string" || candidate.trim() === "") return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate.trim() });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve, and memoize per scope, the timezone the session user's
+ * `sys_updated_on` comparisons are evaluated in.
+ *
+ * Chain: the user's own `sys_user.time_zone`, then the instance default in
+ * `glide.sys.default.tz`, then unresolved. `time_zone` is not a required field
+ * and is frequently empty; an empty value means "inherit the system default"
+ * and must never be read as UTC, which is the very error this fixes.
+ */
+async function sessionTimeZone(
+  operations: ServiceNowOperations,
+  identity: CacheIdentity
+): Promise<string | undefined> {
+  const existing = SCOPED_TIME_ZONES.get(identity.scope);
+  if (existing) {
+    SCOPED_TIME_ZONES.delete(identity.scope);
+    SCOPED_TIME_ZONES.set(identity.scope, existing);
+    return existing;
+  }
+  const pending = resolveSessionTimeZone(operations, identity);
+  SCOPED_TIME_ZONES.set(identity.scope, pending);
+  evictOldest(SCOPED_TIME_ZONES, MAX_METADATA_CACHE_SCOPES);
+  return pending;
+}
+
+async function resolveSessionTimeZone(
+  operations: ServiceNowOperations,
+  identity: CacheIdentity
+): Promise<string | undefined> {
+  const resolved =
+    (await userTimeZone(operations, identity.sessionUserName)) ??
+    (await instanceDefaultTimeZone(operations));
+  if (resolved === undefined) warnTimeZoneUnresolved(identity);
+  return resolved;
+}
+
+async function userTimeZone(
+  operations: ServiceNowOperations,
+  sessionUserName: string | undefined
+): Promise<string | undefined> {
+  if (typeof sessionUserName !== "string" || sessionUserName.trim() === "") {
+    return undefined;
+  }
+  return firstUsableValue(operations, "/api/now/table/sys_user", {
+    sysparm_query: `user_name=${escapeQueryValue(sessionUserName.trim())}`,
+    sysparm_fields: "time_zone",
+    sysparm_limit: "1",
+  }, "time_zone");
+}
+
+async function instanceDefaultTimeZone(
+  operations: ServiceNowOperations
+): Promise<string | undefined> {
+  return firstUsableValue(operations, "/api/now/table/sys_properties", {
+    sysparm_query: `name=${DEFAULT_TIME_ZONE_PROPERTY}`,
+    sysparm_fields: "value",
+    sysparm_limit: "1",
+  }, "value");
+}
+
+async function firstUsableValue(
+  operations: ServiceNowOperations,
+  path: string,
+  params: Record<string, string>,
+  field: string
+): Promise<string | undefined> {
+  try {
+    const response = await operations.get<{ result?: unknown[] }>(path, {
+      ...params,
+      sysparm_display_value: "false",
+      sysparm_exclude_reference_link: "true",
+    });
+    const row = Array.isArray(response?.result) ? response.result[0] : undefined;
+    if (typeof row !== "object" || row === null) return undefined;
+    const value = (row as Record<string, unknown>)[field];
+    return isUsableTimeZone(value) ? value.trim() : undefined;
+  } catch {
+    // An unreadable lookup is indistinguishable from an empty one here, and
+    // both mean the same thing: the probe cannot be made correct.
+    return undefined;
+  }
+}
+
+/**
+ * Report the degradation once per scope. Names the account, never the scope
+ * key -- that carries the credential fingerprint.
+ */
+function warnTimeZoneUnresolved(identity: CacheIdentity): void {
+  if (TIME_ZONE_WARNED_SCOPES.has(identity.scope)) return;
+  TIME_ZONE_WARNED_SCOPES.add(identity.scope);
+  const account =
+    typeof identity.sessionUserName === "string" && identity.sessionUserName.trim() !== ""
+      ? `account "${identity.sessionUserName.trim()}"`
+      : "an account with no configured user name";
+  process.stderr.write(
+    `[servicenow-mcp] WARNING: metadata caching is disabled for ${account}: the ` +
+      `ServiceNow session timezone could not be resolved. Grant read access to ` +
+      `sys_user (time_zone) and sys_properties (${DEFAULT_TIME_ZONE_PROPERTY}), or ` +
+      `set the account's timezone, to re-enable it.\n`
+  );
 }
 
 function validateTtlMs(value: unknown): number {
