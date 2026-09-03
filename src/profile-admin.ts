@@ -229,21 +229,73 @@ async function readCredentialSource(
     ["encrypted", "reference"],
     "credential source"
   );
-  if (mode === "reference") {
-    const provider = required(values, "--provider");
-    const reference = validateSensitiveInput(
-      await io.readSensitive(`${field} reference`)
-    );
-    return secretReference(provider, reference);
+  if (mode === "reference" && !values.has("--provider")) {
+    throw new Error("Required option is missing: --provider");
   }
-  if (values.has("--provider")) {
+  if (mode === "encrypted" && values.has("--provider")) {
     throw new Error("Provider is valid only for a reference source");
   }
-  const plaintext = await io.readSensitive(field);
-  return encryptCredential(validateSensitiveInput(plaintext), profile, field, keyProvider);
+  const captured = await captureProfileSecret(io, field, mode);
+  return materializeProfileSecret(captured, {
+    mode,
+    ...(mode === "reference" ? { provider: required(values, "--provider") } : {}),
+  }, profile, field, keyProvider);
 }
 
-function requiredSecretFields(
+/** How a captured secret is stored: encrypted at rest, or a provider reference. */
+export type CredentialSourceMode = SourceMode;
+
+export interface ProfileSecretPlacement {
+  readonly mode: CredentialSourceMode;
+  /** Secret provider, required when mode is "reference". */
+  readonly provider?: string;
+}
+
+/**
+ * A secret captured from the operator but not yet stored.
+ *
+ * For "encrypted" this holds the plaintext; for "reference" it holds the
+ * *name* of the variable that supplies it. Both are validated on capture. The
+ * value is deliberately separated from persistence so a caller can verify the
+ * credential against the live instance before anything reaches disk — which is
+ * what keeps an aborted or failed setup from leaving a half-written profile.
+ */
+export interface CapturedProfileSecret {
+  readonly field: ProfileSecretField;
+  readonly mode: CredentialSourceMode;
+  readonly value: string;
+}
+
+/** Read one secret through the protected prompt or bounded stdin. */
+export async function captureProfileSecret(
+  io: ProfileAdminIO,
+  field: ProfileSecretField,
+  mode: CredentialSourceMode
+): Promise<CapturedProfileSecret> {
+  const label = mode === "reference" ? `${field} reference` : field;
+  const value = validateSensitiveInput(await io.readSensitive(label));
+  return Object.freeze({ field, mode, value });
+}
+
+/** Convert a captured secret into the form persisted in the profile file. */
+export function materializeProfileSecret(
+  captured: CapturedProfileSecret,
+  placement: ProfileSecretPlacement,
+  profile: string,
+  field: ProfileSecretField,
+  keyProvider: ProfileEncryptionKeyProvider
+): CredentialSource {
+  if (placement.mode === "reference") {
+    if (!placement.provider?.trim()) {
+      throw new Error("Required option is missing: --provider");
+    }
+    return secretReference(placement.provider, captured.value);
+  }
+  return encryptCredential(captured.value, profile, field, keyProvider);
+}
+
+/** Secret fields a profile of this shape must carry. */
+export function requiredSecretFields(
   authType: AuthType,
   grantType: GrantType
 ): ProfileSecretField[] {
@@ -254,7 +306,8 @@ function requiredSecretFields(
     : ["clientSecret"];
 }
 
-function validateCreateMetadata(
+/** Non-secret metadata a profile of this shape must carry. */
+export function validateCreateMetadata(
   profile: Profile,
   fields: readonly ProfileSecretField[]
 ): void {
@@ -266,7 +319,8 @@ function validateCreateMetadata(
   }
 }
 
-function safeProfileView(name: string, profile: Profile): object {
+/** Non-secret profile summary: source kinds only, never a reference name. */
+export function safeProfileView(name: string, profile: Profile): object {
   return {
     name,
     instance: profile.instance,

@@ -20,40 +20,64 @@ npm install -g @onlyflows/servicenow-mcp
 servicenow-mcp-setup
 ```
 
-`servicenow-mcp-setup` writes owner-only files under `~/.servicenow-mcp/`
-(mode `0600`, directory `0700`), generates the MCP bearer and owner/client
-identifiers, registers the clients whose CLI can hold a bearer by reference
-(Codex and Claude Code today), and prints the next commands. It never asks for
-a ServiceNow credential and never puts a secret in argv or shell history.
+Run bare on a terminal, `servicenow-mcp-setup` walks you through the whole
+thing in one command: it generates the local auth material, asks for your
+instance and credential, **verifies that credential against the instance**,
+asks which tables to grant, writes the profile, and registers any supported
+client whose CLI is installed. The credential is entered at a hidden prompt —
+never an argument, never shell history — and nothing is written to the profile
+until the instance has accepted it, so a typo or a wrong password leaves
+nothing behind.
 
-Then finish the connection:
+```
+ServiceNow MCP setup
+
+Profile name [dev]:
+ServiceNow instance (for example dev12345.service-now.com): dev12345.service-now.com
+Authentication [basic/oauth/apikey]: basic
+ServiceNow username: integration.user
+Store the credential encrypted on disk, or reference an environment variable? [encrypted/reference]:
+
+Enter each secret. Input is hidden.
+credential:
+
+Verifying against the instance...
+  ok  https://dev12345.service-now.com accepted the credential.
+
+Table access is deny-by-default: a profile with no rules denies every
+tool call. Grant the narrowest set that does the job.
+
+Tables to allow for READS [incident]: incident,problem
+Tables to allow for WRITES (blank for none): incident
+
+Register this server with codex and claude-code? [Y/n]:
+
+Setup complete.
+```
+
+Then start the service and verify:
 
 ```bash
-# 1. Create one explicit ServiceNow profile. The credential is read at a
-#    non-echoed prompt or from bounded stdin, never from the command line.
-servicenow-mcp-profile create \
-  --name dev \
-  --instance https://yourinstance.service-now.com \
-  --auth-type oauth \
-  --client-id <non-secret-oauth-client-id> \
-  --source reference \
-  --provider env
-
-# 2. Grant least-privilege table access. REQUIRED: a profile with no rules
-#    denies every tool call.
-servicenow-mcp-setup grant --profile dev --read incident,problem --write incident
-
-# 3. Start the service.
-set -a; source ~/.servicenow-mcp/server.env; set +a; servicenow-mcp
-
-# 4. Verify the whole path and get an exact remedy for anything broken.
+set -a; source ~/.servicenow-mcp/server.env; set +a; servicenow-mcp &
 servicenow-mcp-setup doctor --profile dev
 ```
 
-The server listens at `http://127.0.0.1:3000/mcp` by default.
+`npx @onlyflows/servicenow-mcp@latest setup` runs the same wizard without a
+global install, and `servicenow-mcp setup` is an alias for
+`servicenow-mcp-setup`.
 
-`npx @onlyflows/servicenow-mcp@latest setup` runs the same bootstrap without a
-global install, and `servicenow-mcp setup` is an alias for `servicenow-mcp-setup`.
+### Scripted setup
+
+Pass any flag, or run without a terminal, and the wizard steps aside for the
+original non-interactive behavior — so CI and provisioning scripts are
+unaffected. `--non-interactive` forces it explicitly:
+
+```bash
+servicenow-mcp-setup --non-interactive --clients none --json
+servicenow-mcp-profile create --name dev --instance https://yourinstance.service-now.com \
+  --auth-type oauth --client-id <client-id> --source reference --provider env
+servicenow-mcp-setup grant --profile dev --read incident,problem --write incident
+```
 
 ### The `servicenow-mcp-setup` commands
 
@@ -765,27 +789,34 @@ servicenow-mcp-setup grant --profile dev --read change_request --related change_
 ```
 
 Allowlist entries may be exact table names or the literal `*` to allow every
-non-hard-denied table for that operation. Table names are trimmed, lowercased,
-deduplicated, and must be valid ServiceNow identifiers.
+table for that operation. Table names are trimmed, lowercased, deduplicated,
+and must be valid ServiceNow identifiers.
+
+> **`tableAccess` is the sole table-level authority.** There is no longer a
+> built-in list of tables the server refuses unconditionally. A profile that
+> grants a table gets it, subject only to ServiceNow's own per-user ACLs — so a
+> grant of `sys_script`, `sys_user_role`, or a credential table is honored.
+> Writing `sys_script` is server-side script execution under the integration
+> account. Least privilege now lives entirely in the grant and in the roles you
+> give that account; grant the narrowest set that does the job, and prefer an
+> account whose ServiceNow roles cannot reach what the grant does not need.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SN_ALLOWED_READ_TABLES` | ❌ | deny all | Tables permitted for read operations on the explicit `SN_PROFILE_NAME` environment profile only. Use `*` to allow all non-hard-denied readable tables. |
-| `SN_ALLOWED_WRITE_TABLES` | ❌ | deny all | Tables permitted for create, update, incident journal append, delete, upload, and confirmed batch operations on the explicit `SN_PROFILE_NAME` environment profile only. Use `*` to allow all non-hard-denied writable tables. Write permission never implies read permission. |
+| `SN_ALLOWED_READ_TABLES` | ❌ | deny all | Tables permitted for read operations on the explicit `SN_PROFILE_NAME` environment profile only. Use `*` to allow every readable table. |
+| `SN_ALLOWED_WRITE_TABLES` | ❌ | deny all | Tables permitted for create, update, incident journal append, delete, upload, and confirmed batch operations on the explicit `SN_PROFILE_NAME` environment profile only. Use `*` to allow every writable table. Write permission never implies read permission. |
 | `SN_TABLE_ACCESS_TARGETS` | Required for exact allowlisted caller-addressable tables; optional with `*` | `[]` | Trusted JSON classification with `table`, exact permitted `tools`, `kind` (`canonical`, `alias`, `view`, or `extension`), literal `closureComplete: true`, and the complete backing/ancestor/descendant `relatedTables` closure. With `*`, omitted target entries use the wildcard operation grant; explicit target entries can still narrow tools and validate related-table closure. |
 | `SN_FIELD_POLICY_DEFINITIONS` | Required for custom/generic table fields | built-in finite policy | Trusted JSON object keyed by table name or `*`. Each entry may define `defaults`, `readable`, and `writable`; `readable`/`writable` accept exact field arrays or `"*"`. Sensitive field names are still denied. Use `{"*":{"defaults":["sys_id"],"readable":"*","writable":[]}}` for broad read-only custom-table exploration. Use `writable:"*"` only for intentional broad mutation access. |
 | `SN_ENCODED_QUERY_READ_POLICY` | ❌ | deny all | Trusted JSON object containing bounded `rules` for an exact `sn_query`/table pair. Each rule requires `maxLength`, `maxTerms`, readable `fields`, supported `operators`, `maxLimit`, `maxOffset`, and `maxResponseBytes`. No rule can authorize a write or another tool. |
 
-Credential, authentication, encryption, and security-policy tables remain
-hard-denied even when `*` is configured. Invalid or prohibited policy configuration fails
-startup. A composed tool is admitted only when its complete backing-table plan
-is allowed before the first ServiceNow client access. Every related target must
-have the same read or write permission, so a base table, alias, view, or
-extension cannot bypass an unlisted or hard-denied backing or descendant table.
+Invalid policy configuration fails startup. A composed tool is admitted only
+when its complete backing-table plan is allowed before the first ServiceNow
+client access. Every related target must have the same read or write
+permission, so a base table, alias, view, or extension cannot bypass an
+unlisted backing or descendant table.
 Related permission does not make a dependency directly caller-addressable
-without its own target entry. Table access is necessary but not sufficient:
-field access is also deny-by-default unless the table is covered by the built-in
-field policy or `SN_FIELD_POLICY_DEFINITIONS` exact/`*` fallback. Build the
+without its own target entry. Field policy narrows what a granted table exposes; it does not deny a table the
+operator granted. Sensitive-looking field names remain excluded regardless. Build the
 complete target catalog from approved ServiceNow metadata and treat it as
 trusted startup configuration; omit a target when reachability cannot be proven
 complete. File-backed profile example:

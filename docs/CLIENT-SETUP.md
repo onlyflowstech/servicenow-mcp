@@ -7,18 +7,45 @@ select a default or active ServiceNow profile.
 
 ## Quickstart: zero to a working connection
 
-Five commands. Nothing here puts a secret in argv or shell history.
+Two commands. Nothing here puts a secret in argv or shell history.
 
 ```sh
-# 1. Install.
 npm install -g @onlyflows/servicenow-mcp
-
-# 2. Generate owner-only local auth material and register the clients whose
-#    CLI can hold a bearer by reference (Codex and Claude Code today).
 servicenow-mcp-setup
+```
 
-# 3. Create one explicit ServiceNow profile. The credential is read at a
-#    non-echoed prompt or from bounded stdin, never from the command line.
+Run bare on a terminal, `servicenow-mcp-setup` is a guided wizard. It
+generates the local auth material, prompts for the instance and credential,
+verifies that credential against the instance with one bounded authenticated
+read, prompts for table access, writes the profile with its grant already
+attached, and registers any supported client whose CLI is installed.
+
+Three properties are worth knowing:
+
+- **The credential is entered at a hidden prompt.** Never an argument, never
+  shell history, never echoed.
+- **Nothing is written to the profile until the instance accepts the
+  credential.** A wrong password, a hibernating instance, or an abort leaves no
+  half-written profile behind.
+- **The profile and its table-access rules are written together**, so there is
+  never a window in which a profile exists that denies every call.
+
+Then start the service and verify end to end:
+
+```sh
+set -a; source ~/.servicenow-mcp/server.env; set +a; servicenow-mcp &
+servicenow-mcp-setup doctor --profile dev
+```
+
+### Scripted setup
+
+Pass any flag, or run without a terminal, and the wizard steps aside for the
+non-interactive behavior, so CI and provisioning are unaffected.
+`--non-interactive` forces it explicitly. The equivalent scripted sequence:
+
+```sh
+servicenow-mcp-setup --non-interactive --clients none --json
+
 servicenow-mcp-profile create \
   --name dev \
   --instance https://yourinstance.service-now.com \
@@ -27,14 +54,14 @@ servicenow-mcp-profile create \
   --source reference \
   --provider env
 
-# 4. Grant that profile least-privilege table access. THIS STEP IS REQUIRED:
-#    a profile with no rules denies every tool call.
 servicenow-mcp-setup grant --profile dev --read incident,problem --write incident
-
-# 5. Start the service, then verify the whole path.
-set -a; source ~/.servicenow-mcp/server.env; set +a; servicenow-mcp &
-servicenow-mcp-setup doctor --profile dev
 ```
+
+Note that the scripted path does **not** verify the credential against the
+instance — only the wizard does. `doctor` cannot either: it resolves a
+credential locally and exercises the MCP endpoint, but never asks ServiceNow
+whether the credential is accepted. After a scripted setup, the first real
+proof is an `sn_profile` call followed by a bounded `sn_query`.
 
 `doctor` checks the Node version, file ownership and modes, profile
 completeness, credential resolution, table-access rules, and the live endpoint,
@@ -95,9 +122,12 @@ tools are `sn_query,sn_get,sn_aggregate,sn_schema` for a read grant and those
 plus `sn_create,sn_update` for a write grant — `sn_delete`, `sn_batch`, and
 `sn_atf` are never granted implicitly and must be named with `--tools`.
 
-`grant` refuses `*` and refuses the hard-denied credential, authentication,
-encryption, and security-policy table families. A wildcard allowlist skips both
-the per-tool binding and the related-table closure check; configure one
+`grant` refuses `*` and rejects anything that is not a valid table name. It
+does **not** refuse any particular table: `tableAccess` is the sole table-level
+authority, so a grant of `sys_script`, `sys_user_role`, or a credential table is
+honored and bounded only by the integration account's ServiceNow roles. Grant
+the narrowest set that does the job. A wildcard allowlist additionally skips
+both the per-tool binding and the related-table closure check; configure one
 deliberately in the profile file after reading `PRODUCTION-SECURITY.md`.
 
 Restart the service after changing a profile.

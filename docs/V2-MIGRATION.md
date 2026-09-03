@@ -515,8 +515,11 @@ rules. File-backed profiles use a `tableAccess` object in
 `~/.servicenow-mcp/config.json`; the explicit `SN_PROFILE_NAME` environment
 profile maps `SN_ALLOWED_READ_TABLES` and `SN_ALLOWED_WRITE_TABLES` into that
 one profile only when no profile file exists. A profile with no table rules
-denies all. Use exact table names or the literal `*` for a broad non-hard-denied
-grant. Both
+denies all. Use exact table names or the literal `*` for a broad grant. There is
+no built-in list of tables the server refuses unconditionally: `tableAccess`
+plus ServiceNow's own per-user ACLs decide everything, so a granted table is
+reachable and least privilege lives in the grant and in the integration
+account's roles. Both
 variables are comma-separated and default to an empty allowlist. Read and write grants
 are independent: a table listed for reads is not writable, and a table listed
 for writes is not implicitly readable. Every caller-addressable name must also
@@ -547,10 +550,12 @@ export SN_FIELD_POLICY_DEFINITIONS='{"*":{"defaults":["sys_id"],"readable":"*","
 Use `writable:"*"` only when broad mutation access is intentional; write field
 wildcards do not imply read field access or table write access.
 
-The service normalizes identifiers, rejects malformed or wildcard entries, and
-refuses to start when a built-in credential, authentication, encryption, or
-security-policy table is configured. Multi-table tools must have their complete
-operation plan authorized before the first ServiceNow client access. `sn_nl`
+The service normalizes identifiers and rejects malformed entries. It does not
+refuse any particular table: since 2.0 there is no built-in deny list, so a
+credential, authentication, or role-grant table configured in `tableAccess` is
+granted, bounded only by the integration account's ServiceNow roles.
+Multi-table tools must have their complete operation plan authorized before the
+first ServiceNow client access. `sn_nl`
 and ATF `run`/`run-suite` are temporarily denied at this boundary because they
 do not yet expose complete typed side-effect plans; select typed CRUD/query
 tools or non-executing ATF actions directly.

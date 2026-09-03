@@ -12,8 +12,17 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { ProfileEncryptionKeyProvider } from "../src/profile-credentials.js";
 import { ProfileManager } from "../src/profile-manager.js";
-import { runSetupCli, type ProbeRequest, type ProbeResponse } from "../src/setup.js";
+import { createToolError } from "../src/tool-error.js";
+import {
+  classifyVerificationFailure,
+  runSetupCli,
+  type ProbeRequest,
+  type ProbeResponse,
+  type SetupCliDependencies,
+  type WizardPrompter,
+} from "../src/setup.js";
 
 const POSIX = process.platform !== "win32";
 
@@ -681,5 +690,552 @@ describe("setup doctor", () => {
     const service = report.checks.find((check) => check.name === "service");
     expect(service?.ok).toBe(false);
     expect(service?.remedy).toContain("servicenow-mcp");
+  });
+});
+
+// ── wizard ─────────────────────────────────────────────────────────
+
+interface ScriptedPrompter extends WizardPrompter {
+  readonly notes: string[];
+  readonly rejections: string[];
+  remaining(): number;
+}
+
+/**
+ * Replays a scripted set of answers through the real validation and choice
+ * logic, so a rejected answer consumes the next scripted line exactly as a
+ * re-prompt would at a terminal.
+ */
+function scriptedPrompter(
+  script: readonly string[],
+  secrets: readonly string[] = ["hunter2"]
+): ScriptedPrompter {
+  const queue = [...script];
+  const secretQueue = [...secrets];
+  const notes: string[] = [];
+  const rejections: string[] = [];
+  const next = (): string => {
+    const value = queue.shift();
+    if (value === undefined) throw new Error("prompter script exhausted");
+    return value;
+  };
+  return {
+    notes,
+    rejections,
+    remaining: () => queue.length,
+    async ask(_question, options = {}) {
+      for (;;) {
+        const raw = next();
+        const value = raw === "" ? (options.default ?? "") : raw;
+        if (options.choices && !options.choices.includes(value)) {
+          rejections.push(`not a choice: ${value}`);
+          continue;
+        }
+        const problem = options.validate?.(value);
+        if (problem !== undefined) {
+          rejections.push(problem);
+          continue;
+        }
+        return value;
+      }
+    },
+    async confirm(_question, defaultYes) {
+      const raw = next().trim().toLowerCase();
+      if (raw === "") return defaultYes;
+      return raw === "y" || raw === "yes";
+    },
+    async secret() {
+      const value = secretQueue.shift();
+      if (value === undefined) throw new Error("secret script exhausted");
+      return value;
+    },
+    note(text) {
+      notes.push(text);
+    },
+    close() {},
+  };
+}
+
+const FIXED_KEY: ProfileEncryptionKeyProvider = {
+  getKey: () => Buffer.alloc(32, 7),
+};
+
+const ACCEPTS: SetupCliDependencies["verifyCredential"] = async (config) => ({
+  ok: true,
+  detail: `${config.instance} accepted the credential.`,
+});
+
+describe("setup wizard", () => {
+  let home: string;
+  let manager: ProfileManager;
+
+  beforeEach(() => {
+    home = newHome("sn-mcp-wizard-");
+    mkdirSync(join(home, ".servicenow-mcp"), { recursive: true, mode: 0o700 });
+    manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+  });
+
+  async function runWizard(
+    script: readonly string[],
+    overrides: Partial<SetupCliDependencies> = {},
+    secrets: readonly string[] = ["hunter2"]
+  ): Promise<{ prompter: ScriptedPrompter; out: string }> {
+    const prompter = scriptedPrompter(script, secrets);
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: true,
+      prompter,
+      profileManager: manager,
+      keyProvider: FIXED_KEY,
+      verifyCredential: ACCEPTS,
+      resolveParentTable: async () => undefined,
+      commandExists: () => false,
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: (value) => io.err.push(value),
+      ...overrides,
+    });
+    return { prompter, out: io.out.join("") };
+  }
+
+  const CUSTOM = "Enter a custom list";
+  const JUST_INCIDENT = "Just incident";
+  const NONE = "None";
+
+  const HAPPY = [
+    "dev",                          // profile name
+    "dev00001.service-now.com",     // instance
+    "basic",                        // auth
+    "encrypted",                    // credential storage, asked before secrets
+    "integration.user",             // username
+    CUSTOM,                         // READS selection
+    "incident,problem",             // custom read list
+    JUST_INCIDENT,                  // WRITES selection
+  ];
+
+  it("walks from nothing to a written, granted, verified profile", async () => {
+    const { out } = await runWizard(HAPPY);
+
+    const profile = new ProfileManager({
+      configFilePath: profileConfigPath(home),
+    }).getProfile("dev");
+
+    expect(profile.instance).toBe("https://dev00001.service-now.com");
+    expect(profile.authType).toBe("basic");
+    expect(profile.username).toBe("integration.user");
+    expect(profile.credential).toMatchObject({ type: "encrypted" });
+
+    // The grant is written with the profile, so there is never a window in
+    // which the profile exists with no table rules.
+    expect(profile.tableAccess?.readTables).toEqual(["incident", "problem"]);
+    expect(profile.tableAccess?.writeTables).toEqual(["incident"]);
+    const incident = profile.tableAccess?.targets?.find((t) => t.table === "incident");
+    expect(incident?.closureComplete).toBe(true);
+    expect(incident?.tools).toContain("sn_update");
+    expect(incident?.tools).not.toContain("sn_delete");
+
+    expect(out).toContain("Setup complete.");
+    expect(out).toContain("servicenow-mcp-setup doctor --profile dev");
+    // Never echoes the secret anywhere.
+    expect(out).not.toContain("hunter2");
+  });
+
+  it("bootstraps owner-only env files as part of the flow", async () => {
+    await runWizard(HAPPY);
+    if (POSIX) {
+      expect(statSync(serverEnvPath(home)).mode & 0o777).toBe(0o600);
+      expect(statSync(clientEnvPath(home)).mode & 0o777).toBe(0o600);
+      expect(statSync(headerFilePath(home)).mode & 0o777).toBe(0o600);
+    }
+    expect(readEnv(serverEnvPath(home)).MCP_BEARER_TOKEN).toBeTruthy();
+  });
+
+  it("re-prompts on a bad instance instead of exiting", async () => {
+    const { prompter } = await runWizard([
+      "dev",
+      "not a url",                   // rejected: not an absolute URL
+      "dev12345.servicenow.com",     // rejected: the missing-hyphen typo
+      "https://evil.example.com",    // rejected: not a ServiceNow domain
+      "dev00001.service-now.com",    // accepted
+      "basic",
+      "encrypted",
+      "integration.user",
+      JUST_INCIDENT,
+      NONE,
+    ]);
+    expect(prompter.rejections.length).toBe(3);
+    expect(prompter.rejections[1]).toMatch(/looks like a typo/u);
+    expect(prompter.rejections[2]).toMatch(/not a ServiceNow domain/u);
+    expect(prompter.remaining()).toBe(0);
+  });
+
+  it("re-prompts on an unusable table name", async () => {
+    const { prompter } = await runWizard([
+      "dev",
+      "dev00001.service-now.com",
+      "basic",
+      "encrypted",
+      "integration.user",
+      CUSTOM,
+      "Incident Table",              // rejected: not a table name
+      "*",                           // rejected: wildcard in a custom list
+      "incident",                    // accepted
+      NONE,
+    ]);
+    expect(prompter.rejections[0]).toMatch(/is not a ServiceNow table name/u);
+    expect(prompter.rejections[1]).toMatch(/does not accept "\*"/u);
+  });
+
+  it("writes nothing when the credential is rejected and the operator stops", async () => {
+    const attempts: string[] = [];
+    await expect(
+      runWizard(
+        [...HAPPY.slice(0, 5), "n"],
+        {
+          verifyCredential: async (config) => {
+            attempts.push(config.instance);
+            return {
+              ok: false,
+              detail: "dev00001.service-now.com rejected the credential (HTTP 401).",
+              remedy: "Check the username and password.",
+            };
+          },
+        }
+      )
+    ).rejects.toThrow(/No profile was written/u);
+
+    expect(attempts).toHaveLength(1);
+    expect(() =>
+      new ProfileManager({ configFilePath: profileConfigPath(home) }).getProfile("dev")
+    ).toThrow(/not found/u);
+  });
+
+  it("retries verification and continues once it succeeds", async () => {
+    let calls = 0;
+    const { out } = await runWizard(
+      [...HAPPY.slice(0, 5), "y", ...HAPPY.slice(5)],
+      {
+        verifyCredential: async (config) => {
+          calls += 1;
+          return calls === 1
+            ? { ok: false, detail: "rejected", remedy: "check it" }
+            : { ok: true, detail: `${config.instance} accepted the credential.` };
+        },
+      }
+    );
+    expect(calls).toBe(2);
+    expect(out).toContain("Setup complete.");
+  });
+
+  it("treats an authenticated-but-denied probe as success and says why", async () => {
+    const { prompter } = await runWizard(HAPPY, {
+      verifyCredential: async () => ({
+        ok: true,
+        authenticatedButDenied: true,
+        detail: "accepted the credential but denied reading sys_user (HTTP 403).",
+      }),
+    });
+    expect(prompter.notes.join("\n")).toMatch(/metadata\n\s*caching will stay disabled/u);
+    expect(
+      new ProfileManager({ configFilePath: profileConfigPath(home) }).getProfile("dev")
+    ).toBeTruthy();
+  });
+
+  it("refuses to clobber an existing profile and re-prompts for a name", async () => {
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "existing",
+      credential: "env:SN_PASSWORD",
+    });
+
+    const { prompter } = await runWizard([
+      "profile",                      // add another profile
+      "dev",                          // rejected: already exists
+      "staging",                      // accepted
+      "dev00001.service-now.com",
+      "basic",
+      "encrypted",
+      "integration.user",
+      JUST_INCIDENT,
+      NONE,
+    ]);
+
+    expect(prompter.rejections[0]).toMatch(/already exists/u);
+    const reloaded = new ProfileManager({ configFilePath: profileConfigPath(home) });
+    expect(reloaded.getProfile("dev").username).toBe("existing");
+    expect(reloaded.getProfile("staging").username).toBe("integration.user");
+  });
+
+  it("offers the parent table without requiring the operator to know it", async () => {
+    await runWizard(
+      [
+        "dev",
+        "dev00001.service-now.com",
+        "basic",
+        "encrypted",
+        "integration.user",
+        CUSTOM,
+        "change_request",
+        NONE,
+        "y",                          // yes, declare task as a backing table
+      ],
+      { resolveParentTable: async (_config, table) => (table === "change_request" ? "task" : undefined) }
+    );
+
+    const profile = new ProfileManager({
+      configFilePath: profileConfigPath(home),
+    }).getProfile("dev");
+    // The parent joins the allowlist because the closure requires it, but it
+    // gets no target, so it never becomes directly readable.
+    expect(profile.tableAccess?.readTables).toEqual(["change_request", "task"]);
+    expect(profile.tableAccess?.targets?.map((t) => t.table)).toEqual(["change_request"]);
+  });
+
+  it("declining the parent still produces a valid self-only closure", async () => {
+    await runWizard(
+      [
+        "dev",
+        "dev00001.service-now.com",
+        "basic",
+        "encrypted",
+        "integration.user",
+        CUSTOM,
+        "change_request",
+        NONE,
+        "n",
+      ],
+      { resolveParentTable: async () => "task" }
+    );
+    const profile = new ProfileManager({
+      configFilePath: profileConfigPath(home),
+    }).getProfile("dev");
+    expect(profile.tableAccess?.readTables).toEqual(["change_request"]);
+  });
+
+  it("captures an OAuth client secret without a username", async () => {
+    await runWizard(
+      [
+        "dev",
+        "dev00001.service-now.com",
+        "oauth",
+        "client_credentials",
+        "encrypted",
+        "abc123-client-id",
+        JUST_INCIDENT,
+        NONE,
+      ],
+      {},
+      ["oauth-client-secret"]
+    );
+    const profile = new ProfileManager({
+      configFilePath: profileConfigPath(home),
+    }).getProfile("dev");
+    expect(profile.authType).toBe("oauth");
+    expect(profile.clientId).toBe("abc123-client-id");
+    expect(profile.clientSecret).toMatchObject({ type: "encrypted" });
+    expect(profile.username).toBeUndefined();
+  });
+
+  it("stores a secret_ref when the operator chooses a reference", async () => {
+    await runWizard(
+      [
+        "dev",
+        "dev00001.service-now.com",
+        "basic",
+        "reference",
+        "env",
+        "integration.user",
+        JUST_INCIDENT,
+        NONE,
+      ],
+      {},
+      ["SN_DEV_PASSWORD"]
+    );
+    const profile = new ProfileManager({
+      configFilePath: profileConfigPath(home),
+    }).getProfile("dev");
+    expect(profile.credential).toMatchObject({
+      type: "secret_ref",
+      provider: "env",
+      reference: "SN_DEV_PASSWORD",
+    });
+  });
+
+  it("leaves no profile behind when the operator aborts mid-flow", async () => {
+    await expect(
+      runWizard(["dev", "dev00001.service-now.com", "basic"])
+    ).rejects.toThrow(/script exhausted/u);
+    expect(
+      new ProfileManager({ configFilePath: profileConfigPath(home) }).listProfiles()
+    ).toEqual([]);
+  });
+});
+
+describe("setup wizard opt-out", () => {
+  it("keeps the non-interactive path when stdin is not a terminal", async () => {
+    const home = newHome("sn-mcp-wizard-tty-");
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: false,
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: (value) => io.err.push(value),
+      commandExists: () => false,
+    });
+    // The established bootstrap output, not the wizard.
+    expect(io.out.join("")).toContain("Next steps");
+    expect(io.out.join("")).not.toContain("Setup complete.");
+    expect(existsSync(serverEnvPath(home))).toBe(true);
+  });
+
+  it("keeps the non-interactive path under --non-interactive on a terminal", async () => {
+    const home = newHome("sn-mcp-wizard-flag-");
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv: ["--non-interactive"],
+      env: { HOME: home },
+      interactive: true,
+      prompter: scriptedPrompter([]),
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: (value) => io.err.push(value),
+      commandExists: () => false,
+    });
+    expect(io.out.join("")).toContain("Next steps");
+  });
+
+  it("keeps the non-interactive path whenever any other flag is present", async () => {
+    const home = newHome("sn-mcp-wizard-flags-");
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv: ["--clients", "none", "--json"],
+      env: { HOME: home },
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: (value) => io.err.push(value),
+    });
+    expect(JSON.parse(io.out.join(""))).toMatchObject({ status: "configured" });
+  });
+});
+
+describe("credential verification diagnosis", () => {
+  const config = {
+    instance: "https://dev00001.service-now.com",
+    user: "integration.user",
+    password: "s3cr3t-zx9-value",
+    displayValue: "true",
+    relDepth: 1,
+  } as const;
+
+  const diagnose = (error: unknown, overrides: Record<string, unknown> = {}) =>
+    classifyVerificationFailure(error, { ...config, ...overrides } as never);
+
+  it("names a rejected credential and keeps the host, not the secret", () => {
+    const result = diagnose(createToolError("authentication", "retry_after_correction"));
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("dev00001.service-now.com");
+    expect(result.detail).toContain("401");
+    expect(result.remedy).toMatch(/username and password/u);
+    expect(JSON.stringify(result)).not.toContain("s3cr3t-zx9-value");
+  });
+
+  it("tailors the 401 remedy to OAuth", () => {
+    const result = diagnose(createToolError("authentication", "retry_after_correction"), {
+      authType: "oauth",
+    });
+    expect(result.remedy).toMatch(/OAuth client id and secret/u);
+  });
+
+  it("treats an ACL denial as a successful authentication", () => {
+    const result = diagnose(createToolError("authorization", "retry_after_correction"));
+    expect(result.ok).toBe(true);
+    expect(result.authenticatedButDenied).toBe(true);
+    expect(result.detail).toContain("accepted the credential");
+  });
+
+  it("points a 404 at the instance name rather than the credential", () => {
+    const result = diagnose(createToolError("not_found", "do_not_retry"));
+    expect(result.ok).toBe(false);
+    expect(result.remedy).toMatch(/hibernating developer instance|mistyped subdomain/u);
+  });
+
+  it("names DNS failure as a typo", () => {
+    const result = diagnose(new Error("getaddrinfo ENOTFOUND dev00001.service-now.com"));
+    expect(result.detail).toMatch(/does not resolve in DNS/u);
+    expect(result.remedy).toMatch(/typo/u);
+  });
+
+  it("names a dropped connection as a likely IP access control list", () => {
+    const result = diagnose(new Error("connect ECONNREFUSED 10.0.0.1:443"));
+    expect(result.remedy).toMatch(/IP access control/u);
+  });
+
+  it("names an untrusted certificate without suggesting it be disabled", () => {
+    const result = diagnose(new Error("unable to verify the first certificate"));
+    expect(result.detail).toMatch(/certificate/u);
+    expect(result.remedy).toMatch(/Install the issuing CA/u);
+    expect(result.remedy).not.toMatch(/NODE_TLS_REJECT_UNAUTHORIZED|rejectUnauthorized/u);
+  });
+
+  it("falls back to the raw reason when nothing matches", () => {
+    const result = diagnose(new Error("something unusual"));
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("something unusual");
+    expect(result.remedy).toBeTruthy();
+  });
+});
+
+describe("setup wizard re-run", () => {
+  it("re-registers clients without touching an existing profile", async () => {
+    const home = newHome("sn-mcp-wizard-rerun-");
+    mkdirSync(join(home, ".servicenow-mcp"), { recursive: true, mode: 0o700 });
+    const manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "existing",
+      credential: "env:SN_PASSWORD",
+      tableAccess: {
+        readTables: ["incident"],
+        targets: [
+          {
+            table: "incident",
+            kind: "canonical",
+            tools: ["sn_query"],
+            closureComplete: true,
+            relatedTables: ["incident"],
+          },
+        ],
+      },
+    });
+    const before = readFileSync(profileConfigPath(home), "utf8");
+
+    const io = capture();
+    const calls: string[] = [];
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: true,
+      prompter: scriptedPrompter(["clients", "y"]),
+      profileManager: manager,
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: (value) => io.err.push(value),
+      commandExists: (command) => command === "codex",
+      runCommand: (command, args) => {
+        calls.push(`${command} ${args[1]}`);
+        return args[1] === "get" ? { status: 1 } : { status: 0 };
+      },
+    });
+
+    expect(calls).toEqual(["codex get", "codex add"]);
+    expect(io.out.join("")).toContain("Clients   codex");
+    // The profile file is untouched, byte for byte.
+    expect(readFileSync(profileConfigPath(home), "utf8")).toBe(before);
   });
 });

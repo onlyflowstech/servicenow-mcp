@@ -31,8 +31,33 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { credentialSourceKind } from "./profile-credentials.js";
-import { ProfileManager } from "./profile-manager.js";
+import { createInterface } from "node:readline/promises";
+
+import { ServiceNowClient } from "./client.js";
+import type { AuthType, GrantType, ServiceNowConfig } from "./config.js";
+import {
+  createProtectedInputIO,
+  materializeProfileSecret,
+  requiredSecretFields,
+  safeProfileView,
+  validateCreateMetadata,
+  type CapturedProfileSecret,
+  type CredentialSourceMode,
+  type ProfileAdminIO,
+} from "./profile-admin.js";
+import {
+  EnvironmentProfileEncryptionKeyProvider,
+  credentialSourceKind,
+  type ProfileEncryptionKeyProvider,
+  type ProfileSecretField,
+} from "./profile-credentials.js";
+import {
+  ProfileManager,
+  instanceHostError,
+  normalizeInstanceUrl,
+  type Profile,
+} from "./profile-manager.js";
+import { trustedToolErrorDescriptor } from "./tool-error.js";
 import {
   createTableAccessPolicy,
   type TableAccessPolicyInput,
@@ -55,6 +80,63 @@ export interface SetupCliDependencies {
   readonly profileManager?: ProfileManager;
   /** Injected for tests; defaults to global fetch. */
   readonly probe?: (url: string, init: ProbeRequest) => Promise<ProbeResponse>;
+  /** Injected for tests; defaults to a readline/TTY prompter. */
+  readonly prompter?: WizardPrompter;
+  /** Force the interactive decision; defaults to a TTY check. */
+  readonly interactive?: boolean;
+  /** Injected for tests; defaults to one bounded authenticated ServiceNow read. */
+  readonly verifyCredential?: (
+    config: ServiceNowConfig
+  ) => Promise<CredentialVerification>;
+  /** Injected for tests; defaults to reading sys_db_object.super_class. */
+  readonly resolveParentTable?: (
+    config: ServiceNowConfig,
+    table: string
+  ) => Promise<string | undefined>;
+  /** Injected for tests; defaults to the environment key provider. */
+  readonly keyProvider?: ProfileEncryptionKeyProvider;
+  /** Injected for tests; defaults to the protected stdin/stderr reader. */
+  readonly secretIo?: ProfileAdminIO;
+}
+
+export interface AskOptions {
+  readonly default?: string;
+  readonly choices?: readonly string[];
+  /** Return a message to reject and re-prompt; return undefined to accept. */
+  readonly validate?: (value: string) => string | undefined;
+}
+
+/** Terminal interaction surface. Secrets go through `secret`, never `ask`. */
+export interface WizardPrompter {
+  ask(question: string, options?: AskOptions): Promise<string>;
+  confirm(question: string, defaultYes: boolean): Promise<boolean>;
+  /**
+   * Read one secret without echoing it. The prompter owns stdin, so this is
+   * the only correct place to do it: a reader attached elsewhere while this
+   * runs will echo every keystroke.
+   */
+  secret(label: string): Promise<string>;
+  note(text: string): void;
+  close(): void;
+}
+
+/** Outcome of one bounded authenticated read against the target instance. */
+export interface CredentialVerification {
+  readonly ok: boolean;
+  /** Short reason, shown to the operator. Never contains a secret. */
+  readonly detail: string;
+  /** What to change. Present only on failure. */
+  readonly remedy?: string;
+  /** True when the instance authenticated us but denied the probe read. */
+  readonly authenticatedButDenied?: boolean;
+}
+
+/** Raised when the operator aborts; nothing has been written to the profile. */
+export class WizardAbort extends Error {
+  constructor() {
+    super("Setup cancelled. No profile was written.");
+    this.name = "WizardAbort";
+  }
 }
 
 interface CommandResult {
@@ -107,6 +189,7 @@ interface InitOptions {
   readonly rotateEncryptionKey: boolean;
   readonly allowInsecureHttp: boolean;
   readonly json: boolean;
+  readonly nonInteractive: boolean;
   readonly endpoint: string;
   readonly clients: readonly ClientTarget[];
 }
@@ -185,10 +268,768 @@ export async function runSetupCli(
     case "doctor":
       await runDoctor(parseDoctorArguments(args), home, env, dependencies, out);
       return;
-    case "init":
-      await runInit(parseInitArguments(args), home, env, dependencies, out, err);
+    case "init": {
+      const options = parseInitArguments(args);
+      if (shouldRunWizard(options, args, dependencies)) {
+        await runWizard(options, home, env, dependencies, out);
+        return;
+      }
+      await runInit(options, home, env, dependencies, out, err);
       return;
+    }
   }
+}
+
+// ── wizard ─────────────────────────────────────────────────────────
+
+const WIZARD_PROBE_TABLE = "sys_user";
+const DEFAULT_READ_TABLES = "incident";
+const TABLE_ALLOWLIST_WILDCARD = "*";
+const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
+
+/**
+ * One command from nothing to a working connection.
+ *
+ * Order matters for safety: env files first (idempotent, no operator data),
+ * then everything else collected in memory, and the profile written **once**
+ * at the end with its table-access rules already attached. Nothing reaches the
+ * profile file until the credential has been verified against the instance, so
+ * an abort or a wrong password leaves no half-written profile behind.
+ */
+async function runWizard(
+  options: InitOptions,
+  home: string,
+  env: NodeJS.ProcessEnv,
+  dependencies: SetupCliDependencies,
+  out: (value: string) => void
+): Promise<void> {
+  const paths = resolvePaths(home);
+  const prompter =
+    dependencies.prompter ??
+    createTtyPrompter({
+      input: process.stdin,
+      output: process.stdout,
+      ...(dependencies.secretIo ? { secretIo: dependencies.secretIo } : {}),
+    });
+  const manager = dependencies.profileManager ?? profileManagerFor(home);
+
+  try {
+    prompter.note(
+      "ServiceNow MCP setup\n\n" +
+        "This walks through one ServiceNow connection end to end. Nothing is\n" +
+        "written to the profile until your credential is verified against the\n" +
+        "instance. Press Ctrl+C at any point to stop; nothing will be saved.\n"
+    );
+
+    // 1. Local auth material. Idempotent, so this is silent.
+    const values = loadOrCreateBootstrapValues(paths, options);
+    writeSecureEnvFile(paths.serverEnv, values);
+    writeSecureEnvFile(paths.clientEnv, {
+      [CLIENT_BEARER_ENV]: values.MCP_BEARER_TOKEN,
+    });
+    writeSecureFile(
+      paths.headerFile,
+      `# ServiceNow MCP bearer header for mcp-remote --header-file.\n` +
+        `Authorization: Bearer ${values.MCP_BEARER_TOKEN}\n`
+    );
+
+    // 2. Re-run safety: never clobber an existing profile without being told.
+    const existing = existingProfileNames(manager);
+    if (existing.length > 0) {
+      prompter.note(`Existing profiles: ${existing.join(", ")}\n`);
+      const choice = await prompter.ask(
+        "Add another profile, or just re-register MCP clients?",
+        { default: "profile", choices: ["profile", "clients"] }
+      );
+      if (choice === "clients") {
+        const only = await registerClientsInteractively(
+          prompter,
+          options,
+          env,
+          values,
+          dependencies
+        );
+        out(renderClientOnlySummary(paths, options, only, home));
+        return;
+      }
+      prompter.note("Existing profiles are left untouched.\n");
+    }
+
+    const name = await askProfileName(prompter, existing);
+    const instance = await askInstance(prompter);
+    const authType = await askAuthType(prompter);
+    const grantType: GrantType =
+      authType === "oauth"
+        ? ((await prompter.ask("OAuth grant type", {
+            default: "client_credentials",
+            choices: ["client_credentials", "password"],
+          })) as GrantType)
+        : "client_credentials";
+
+    // Asked here, before any secret is in hand. A mistyped answer to a
+    // question adjacent to a credential prompt echoes the credential, so the
+    // last thing before the hidden prompts is deliberately not this question.
+    const mode = (await prompter.ask("How should the credential be stored?", {
+      default: "encrypted",
+      choices: ["encrypted", "reference"],
+    })) as CredentialSourceMode;
+    const provider =
+      mode === "reference"
+        ? await prompter.ask("Secret provider", { default: "env", choices: ["env"] })
+        : undefined;
+
+    const profile: Profile = { instance, authType };
+    if (authType === "basic" || grantType === "password") {
+      profile.username = await prompter.ask("ServiceNow username", {
+        validate: (value) =>
+          value.trim() === "" ? "A username is required for this auth mode." : undefined,
+      });
+    }
+    if (authType === "oauth") {
+      profile.grantType = grantType;
+      profile.clientId = await prompter.ask("OAuth client id (not a secret)", {
+        validate: (value) =>
+          value.trim() === "" ? "A client id is required for OAuth." : undefined,
+      });
+    }
+    if (authType === "apikey") {
+      profile.apiKeyHeader = await prompter.ask("API key header", {
+        default: "x-sn-apikey",
+      });
+    }
+
+    const fields = requiredSecretFields(authType, grantType);
+    validateCreateMetadata(profile, fields);
+
+    // 3. Capture the secrets. Never echoed, never in argv, never logged.
+    prompter.note(
+      mode === "reference"
+        ? "\nEnter the NAME of the environment variable holding each secret.\n" +
+            "Input is hidden."
+        : "\nEnter each secret now. Input is hidden — nothing you type from here\n" +
+            "is displayed."
+    );
+    const captured: CapturedProfileSecret[] = [];
+    for (const field of fields) {
+      captured.push(
+        Object.freeze({ field, mode, value: await prompter.secret(field) })
+      );
+    }
+
+    // 4. Verify against the live instance before anything is persisted.
+    const config = wizardConfig(profile, captured, mode, env);
+    const verify = dependencies.verifyCredential ?? verifyCredentialAgainstInstance;
+    prompter.note("\nVerifying against the instance...");
+    let verification = await verify(config);
+    while (!verification.ok) {
+      prompter.note(`\n  FAILED  ${verification.detail}`);
+      if (verification.remedy) prompter.note(`  -> ${verification.remedy}`);
+      if (!(await prompter.confirm("\nRetry with the same settings?", true))) {
+        throw new WizardAbort();
+      }
+      verification = await verify(config);
+    }
+    prompter.note(`  ok  ${verification.detail}`);
+    if (verification.authenticatedButDenied) {
+      prompter.note(
+        `  note  this account cannot read ${WIZARD_PROBE_TABLE}, so metadata\n` +
+          "        caching will stay disabled for it. Not a setup failure."
+      );
+    }
+
+    // 5. Table access. A profile without rules denies every call.
+    const tableAccess = await askTableAccess(prompter, config, dependencies);
+
+    // 6. One write, with the rules already attached — never a rules-less window.
+    const keyProvider = dependencies.keyProvider ?? new EnvironmentProfileEncryptionKeyProvider();
+    for (const secret of captured) {
+      profile[secret.field] = materializeProfileSecret(
+        secret,
+        { mode, ...(provider === undefined ? {} : { provider }) },
+        name,
+        secret.field,
+        keyProvider
+      );
+    }
+    profile.tableAccess = tableAccess;
+    manager.addProfile(name, profile);
+
+    prompter.note(
+      `\nWrote profile ${name}.\n${JSON.stringify(safeProfileView(name, profile), null, 2)}\n`
+    );
+
+    // 7. Client configuration.
+    const registered = await registerClientsInteractively(
+      prompter,
+      options,
+      env,
+      values,
+      dependencies
+    );
+
+    out(renderWizardSummary(paths, options, name, tableAccess, registered, home));
+  } finally {
+    prompter.close();
+  }
+}
+
+function existingProfileNames(manager: ProfileManager): readonly string[] {
+  try {
+    return manager.listProfiles().map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+async function askProfileName(
+  prompter: WizardPrompter,
+  existing: readonly string[]
+): Promise<string> {
+  return prompter.ask("Profile name", {
+    default: existing.includes("dev") ? "" : "dev",
+    validate: (value) => {
+      const name = value.trim();
+      if (name === "") return "A profile name is required.";
+      if (existing.includes(name)) {
+        return `Profile "${name}" already exists. Choose another name, or remove it with servicenow-mcp-profile remove --name ${name}.`;
+      }
+      return undefined;
+    },
+  });
+}
+
+const SERVICENOW_SUFFIXES = Object.freeze([".service-now.com", ".servicenowservices.com"]);
+
+async function askInstance(prompter: WizardPrompter): Promise<string> {
+  const answer = await prompter.ask(
+    "ServiceNow instance (for example dev12345.service-now.com)",
+    { validate: instanceProblem }
+  );
+  return normalizeInstanceUrl(answer);
+}
+
+/**
+ * Accept a bare host or a full URL. `.servicenow.com` is the common typo for
+ * `.service-now.com` and is worth naming precisely rather than reporting as a
+ * generic domain rejection after a failed probe.
+ */
+export function instanceProblem(value: string): string | undefined {
+  let normalized: string;
+  try {
+    normalized = normalizeInstanceUrl(value);
+  } catch (error) {
+    return describeError(error);
+  }
+  const host = new URL(normalized).hostname.toLowerCase();
+  if (SERVICENOW_SUFFIXES.some((suffix) => host.endsWith(suffix))) return undefined;
+  if (/\.servicenow\.com$/u.test(host)) {
+    return `"${host}" looks like a typo: ServiceNow instances are *.service-now.com, with a hyphen.`;
+  }
+  // Falls back to the server's own rule, which honors SN_ALLOWED_INSTANCE_HOSTS.
+  const problem = instanceHostError(normalized);
+  if (problem === undefined) return undefined;
+  return (
+    `"${host}" is not a ServiceNow domain. Expected *.service-now.com or ` +
+    "*.servicenowservices.com. For a self-hosted or custom-domain instance, set " +
+    "SN_ALLOWED_INSTANCE_HOSTS before running setup."
+  );
+}
+
+async function askAuthType(prompter: WizardPrompter): Promise<AuthType> {
+  return (await prompter.ask("Authentication", {
+    default: "basic",
+    choices: ["basic", "oauth", "apikey"],
+  })) as AuthType;
+}
+
+/** Build a throwaway config for verification. Never persisted. */
+function wizardConfig(
+  profile: Profile,
+  captured: readonly CapturedProfileSecret[],
+  mode: CredentialSourceMode,
+  env: NodeJS.ProcessEnv
+): ServiceNowConfig {
+  const plaintext = (field: ProfileSecretField): string => {
+    const entry = captured.find((candidate) => candidate.field === field);
+    if (entry === undefined) return "";
+    // A reference stores a variable NAME; resolve it exactly as the server will.
+    return mode === "reference" ? (env[entry.value] ?? "") : entry.value;
+  };
+  return {
+    instance: profile.instance,
+    user: profile.username ?? "",
+    password: plaintext("credential"),
+    displayValue: "true",
+    relDepth: 1,
+    ...(profile.authType ? { authType: profile.authType } : {}),
+    ...(profile.clientId ? { clientId: profile.clientId } : {}),
+    ...(profile.grantType ? { grantType: profile.grantType } : {}),
+    ...(profile.apiKeyHeader ? { apiKeyHeader: profile.apiKeyHeader } : {}),
+    clientSecret: plaintext("clientSecret"),
+    apiKey: plaintext("apiKey"),
+    timeoutMs: 15_000,
+  };
+}
+
+/**
+ * One bounded authenticated read. This is the check `doctor` structurally
+ * cannot make: doctor resolves a credential locally, this proves ServiceNow
+ * accepts it.
+ */
+async function verifyCredentialAgainstInstance(
+  config: ServiceNowConfig
+): Promise<CredentialVerification> {
+  const client = new ServiceNowClient(config, { maxRetries: 0 });
+  try {
+    await client.get(`/api/now/table/${WIZARD_PROBE_TABLE}`, {
+      sysparm_limit: "1",
+      sysparm_fields: "user_name",
+    });
+    return Object.freeze({
+      ok: true,
+      detail: `${config.instance} accepted the credential.`,
+    });
+  } catch (error) {
+    return classifyVerificationFailure(error, config);
+  }
+}
+
+/** Map a probe failure onto the thing the operator must actually change. */
+export function classifyVerificationFailure(
+  error: unknown,
+  config: ServiceNowConfig
+): CredentialVerification {
+  const descriptor = trustedToolErrorDescriptor(error);
+  const host = safeHost(config.instance);
+
+  if (descriptor?.category === "authentication") {
+    return Object.freeze({
+      ok: false,
+      detail: `${host} rejected the credential (HTTP 401).`,
+      remedy:
+        config.authType === "oauth"
+          ? "Check the OAuth client id and secret, and that the client is active on the instance."
+          : "Check the username and password. A ServiceNow account locked out or requiring a password reset also returns 401.",
+    });
+  }
+  if (descriptor?.category === "authorization") {
+    // The credential authenticated; the instance refused this specific read.
+    return Object.freeze({
+      ok: true,
+      authenticatedButDenied: true,
+      detail: `${host} accepted the credential but denied reading ${WIZARD_PROBE_TABLE} (HTTP 403).`,
+    });
+  }
+  if (descriptor?.category === "not_found") {
+    return Object.freeze({
+      ok: false,
+      detail: `${host} has no Table API at the expected path (HTTP 404).`,
+      remedy:
+        "Confirm the instance URL. A hibernating developer instance and a mistyped subdomain both look like this.",
+    });
+  }
+  if (descriptor?.category === "rate_limit") {
+    return Object.freeze({
+      ok: false,
+      detail: `${host} rate-limited the request (HTTP 429).`,
+      remedy: "Wait for the instance rate limit to clear, then retry.",
+    });
+  }
+  if (descriptor?.category === "timeout") {
+    return Object.freeze({
+      ok: false,
+      detail: `${host} did not respond before the timeout.`,
+      remedy:
+        "The instance may be waking from hibernation, or an IP access control list may be dropping this host. Retry, then check the instance's IP Address Access Control.",
+    });
+  }
+
+  const message = describeError(error);
+  if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/iu.test(message)) {
+    return Object.freeze({
+      ok: false,
+      detail: `${host} does not resolve in DNS.`,
+      remedy: "Check the instance name for a typo. Enter just the host, for example dev12345.service-now.com.",
+    });
+  }
+  if (/ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|socket hang up/iu.test(message)) {
+    return Object.freeze({
+      ok: false,
+      detail: `${host} refused or dropped the connection.`,
+      remedy:
+        "This is what an instance-side IP access control list looks like from here. Check the instance's IP Address Access Control, and any outbound proxy or firewall on this machine.",
+    });
+  }
+  if (/certificate|self-signed|CERT_|unable to verify/iu.test(message)) {
+    return Object.freeze({
+      ok: false,
+      detail: `${host} presented a TLS certificate this machine does not trust.`,
+      remedy: "Install the issuing CA on this machine. Do not disable certificate verification.",
+    });
+  }
+  return Object.freeze({
+    ok: false,
+    detail: `${host} could not be reached: ${message}`,
+    remedy: "Check the instance URL and this machine's outbound network access.",
+  });
+}
+
+function safeHost(instance: string): string {
+  try {
+    return new URL(instance).host;
+  } catch {
+    return "the instance";
+  }
+}
+
+async function askTableAccess(
+  prompter: WizardPrompter,
+  config: ServiceNowConfig,
+  dependencies: SetupCliDependencies
+): Promise<TableAccessPolicyInput> {
+  prompter.note(
+    "\nTable access is deny-by-default: a profile with no rules denies every\n" +
+      "tool call. Grant the narrowest set that does the job; you can add more\n" +
+      "later with servicenow-mcp-setup grant.\n"
+  );
+  const read = await askTableSelection(prompter, "READS", DEFAULT_READ_TABLES);
+  const write = await askTableSelection(prompter, "WRITES", "");
+
+  const related = new Map<string, readonly string[]>();
+  for (const table of new Set([...read, ...write])) {
+    if (table === TABLE_ALLOWLIST_WILDCARD) continue;
+    const parent = await lookupParentTable(config, table, dependencies);
+    if (parent === undefined || parent === table) continue;
+    prompter.note(`\n  ${table} extends ${parent}.`);
+    const include = await prompter.confirm(
+      `  Declare ${parent} as a backing table of ${table}? ` +
+        `This adds ${parent} to the allowlist without making it directly readable.`,
+      false
+    );
+    if (include) related.set(table, [parent]);
+  }
+
+  const options: GrantOptions = Object.freeze({
+    profile: "",
+    read,
+    write,
+    related,
+    replace: true,
+    dryRun: false,
+    json: false,
+  });
+  return buildTableAccess(Object.freeze({}), options);
+}
+
+const COMMON_ITSM_TABLES = "incident,change_request,problem,task,sys_user";
+
+/**
+ * Offer the shapes operators actually want, including the wildcard. `*` is a
+ * supported configuration, so it is presented plainly with its consequence
+ * rather than hidden or argued against.
+ */
+async function askTableSelection(
+  prompter: WizardPrompter,
+  operation: "READS" | "WRITES",
+  fallback: string
+): Promise<readonly string[]> {
+  const noneLabel = operation === "WRITES" ? "None" : "None";
+  const choices = [
+    "Just incident",
+    `Common ITSM set (${COMMON_ITSM_TABLES})`,
+    "All tables (*)",
+    "Enter a custom list",
+    noneLabel,
+  ];
+  const choice = await prompter.ask(`Tables to allow for ${operation}`, {
+    default: fallback === "" ? noneLabel : choices[0],
+    choices,
+  });
+
+  if (choice === noneLabel) return Object.freeze([]);
+  if (choice === choices[0]) return Object.freeze(["incident"]);
+  if (choice === choices[1]) return parseTableList(COMMON_ITSM_TABLES, operation);
+  if (choice === choices[2]) {
+    prompter.note(
+      `\n  "*" grants every table for ${operation.toLowerCase()}. ServiceNow's own\n` +
+        "  per-user ACLs are then the only remaining boundary, so the integration\n" +
+        "  account's roles become the whole control. It also skips the per-tool\n" +
+        "  binding and the related-table closure check.\n"
+    );
+    return Object.freeze(["*"]);
+  }
+  return askCustomTableList(prompter, operation);
+}
+
+async function askCustomTableList(
+  prompter: WizardPrompter,
+  operation: string
+): Promise<readonly string[]> {
+  const label = `Comma-separated tables for ${operation}`;
+  const answer = await prompter.ask(label, {
+    validate: (value) => {
+      if (value.trim() === "") return "Enter at least one table name.";
+      try {
+        parseTableList(value, label);
+        return undefined;
+      } catch (error) {
+        return describeError(error);
+      }
+    },
+  });
+  return parseTableList(answer, label);
+}
+
+/**
+ * Report the table this one extends, so the operator is not required to know
+ * ServiceNow's inheritance graph. Best effort: a failure here is not a setup
+ * failure, because the self-only closure the wizard writes is valid on its own.
+ */
+async function lookupParentTable(
+  config: ServiceNowConfig,
+  table: string,
+  dependencies: SetupCliDependencies
+): Promise<string | undefined> {
+  const resolve = dependencies.resolveParentTable ?? defaultParentTable;
+  try {
+    return await resolve(config, table);
+  } catch {
+    return undefined;
+  }
+}
+
+async function defaultParentTable(
+  config: ServiceNowConfig,
+  table: string
+): Promise<string | undefined> {
+  if (!TABLE_NAME.test(table)) return undefined;
+  const client = new ServiceNowClient(config, { maxRetries: 0 });
+  const response = await client.get<{ result?: unknown[] }>(
+    "/api/now/table/sys_db_object",
+    {
+      sysparm_query: `name=${table}`,
+      sysparm_fields: "name,super_class",
+      sysparm_limit: "1",
+      sysparm_display_value: "true",
+      sysparm_exclude_reference_link: "true",
+    }
+  );
+  const row = Array.isArray(response?.result) ? response.result[0] : undefined;
+  if (typeof row !== "object" || row === null) return undefined;
+  const value = (row as Record<string, unknown>).super_class;
+  const parent =
+    typeof value === "string"
+      ? value
+      : typeof value === "object" && value !== null
+        ? (value as Record<string, unknown>).display_value
+        : undefined;
+  if (typeof parent !== "string") return undefined;
+  const normalized = parent.trim().toLowerCase();
+  return TABLE_NAME.test(normalized) ? normalized : undefined;
+}
+
+async function registerClientsInteractively(
+  prompter: WizardPrompter,
+  options: InitOptions,
+  env: NodeJS.ProcessEnv,
+  values: Readonly<Record<string, string>>,
+  dependencies: SetupCliDependencies
+): Promise<readonly string[]> {
+  const commandExists = dependencies.commandExists ?? defaultCommandExists;
+  const runCommand = dependencies.runCommand ?? defaultRunCommand;
+  const available = AUTO_REGISTERED_CLIENTS.filter((client) =>
+    commandExists(client === "codex" ? "codex" : "claude")
+  );
+  if (available.length === 0) return Object.freeze([]);
+  if (
+    !(await prompter.confirm(
+      `\nRegister this server with ${available.join(" and ")}?`,
+      true
+    ))
+  ) {
+    return Object.freeze([]);
+  }
+  const context: RegistrationContext = {
+    commandExists,
+    runCommand,
+    env: { ...env, [CLIENT_BEARER_ENV]: values.MCP_BEARER_TOKEN },
+  };
+  const configured: string[] = [];
+  for (const client of available) {
+    const result = registerClient(client, options.endpoint, options.force, context);
+    if (result.ok) configured.push(client);
+    else prompter.note(`  skipped ${client}: ${result.reason}`);
+  }
+  return Object.freeze(configured);
+}
+
+function renderWizardSummary(
+  paths: ResolvedPaths,
+  options: InitOptions,
+  profile: string,
+  tableAccess: TableAccessPolicyInput,
+  registered: readonly string[],
+  home: string
+): string {
+  const short = (path: string): string => displayPath(path, home);
+  const lines = [
+    "",
+    "Setup complete.",
+    "",
+    `Profile   ${profile}`,
+    `Reads     ${(tableAccess.readTables ?? []).join(", ") || "(none)"}`,
+    `Writes    ${(tableAccess.writeTables ?? []).join(", ") || "(none)"}`,
+    `Endpoint  ${options.endpoint}`,
+    `Clients   ${registered.length > 0 ? registered.join(", ") : "(none registered)"}`,
+    "",
+    "Start the service:",
+    `  set -a; source ${shellQuote(short(paths.serverEnv))}; set +a; servicenow-mcp`,
+    "",
+    "Then verify it end to end:",
+    `  servicenow-mcp-setup doctor --profile ${profile}`,
+    "",
+  ];
+  if (registered.length === 0) {
+    lines.push(
+      "Configure a client by hand:",
+      "  servicenow-mcp-setup client --client all",
+      ""
+    );
+  }
+  lines.push(
+    "Every client should hold at most 2 requests in flight; the service admits",
+    "MCP_MAX_CONCURRENT_REQUESTS (default 2) and answers the rest with HTTP 503.",
+    ""
+  );
+  return `${lines.join("\n")}\n`;
+}
+
+function renderClientOnlySummary(
+  paths: ResolvedPaths,
+  options: InitOptions,
+  registered: readonly string[],
+  home: string
+): string {
+  return (
+    `\nClients   ${registered.length > 0 ? registered.join(", ") : "(none registered)"}\n` +
+    `Endpoint  ${options.endpoint}\n\n` +
+    `Start the service:\n` +
+    `  set -a; source ${shellQuote(displayPath(paths.serverEnv, home))}; set +a; servicenow-mcp\n\n` +
+    `Configure any remaining client by hand:\n` +
+    `  servicenow-mcp-setup client --client all\n`
+  );
+}
+
+interface PrompterStreams {
+  readonly input: NodeJS.ReadStream;
+  readonly output: NodeJS.WriteStream;
+  readonly secretIo?: ProfileAdminIO;
+}
+
+/**
+ * Detach every reader currently attached to the input stream and return a
+ * function that puts them back exactly as they were.
+ *
+ * readline installs its own data/keypress handling and echoes what it reads.
+ * Leaving it attached during a hidden read renders the secret in the terminal
+ * under a prompt that says input is hidden — reproduced against a pty, and the
+ * reason this exists. Snapshot-and-restore rather than close-and-recreate so
+ * later prompts continue on the same interface.
+ */
+function detachInputReaders(input: NodeJS.ReadStream): () => void {
+  const saved: Array<[string, (...args: unknown[]) => void]> = [];
+  for (const event of ["data", "keypress", "readable"]) {
+    for (const listener of input.listeners(event)) {
+      saved.push([event, listener as (...args: unknown[]) => void]);
+    }
+    input.removeAllListeners(event);
+  }
+  return () => {
+    for (const [event, listener] of saved) input.on(event, listener);
+  };
+}
+
+/** Readline prompter. It owns stdin, including the handoff for secrets. */
+export function createTtyPrompter(streams: PrompterStreams): WizardPrompter {
+  const { input, output } = streams;
+  const rl = createInterface({ input, output });
+  const secretIo = streams.secretIo ?? createProtectedInputIO(input, output);
+  let closed = false;
+  return {
+    async ask(question: string, options: AskOptions = {}): Promise<string> {
+      for (;;) {
+        const answer = (await rl.question(renderQuestion(question, options))).trim();
+        const resolved = resolveChoice(answer, options);
+        if (resolved === undefined) {
+          output.write(`  Enter a number, or one of: ${options.choices?.join(", ")}\n`);
+          continue;
+        }
+        const problem = options.validate?.(resolved);
+        if (problem !== undefined) {
+          output.write(`  ${problem}\n`);
+          continue;
+        }
+        return resolved;
+      }
+    },
+    async confirm(question: string, defaultYes: boolean): Promise<boolean> {
+      const answer = (
+        await rl.question(`${question} [${defaultYes ? "Y/n" : "y/N"}]: `)
+      )
+        .trim()
+        .toLowerCase();
+      if (answer === "") return defaultYes;
+      return answer === "y" || answer === "yes";
+    },
+    async secret(label: string): Promise<string> {
+      rl.pause();
+      const restore = detachInputReaders(input);
+      try {
+        return await secretIo.readSensitive(label);
+      } finally {
+        restore();
+        rl.resume();
+      }
+    },
+    note(text: string): void {
+      output.write(`${text}\n`);
+    },
+    close(): void {
+      if (!closed) {
+        closed = true;
+        rl.close();
+      }
+    },
+  };
+}
+
+/** Render a closed set as a numbered menu; everything else as one line. */
+function renderQuestion(question: string, options: AskOptions): string {
+  if (!options.choices || options.choices.length === 0) {
+    return options.default ? `${question} [${options.default}]: ` : `${question}: `;
+  }
+  const lines = [`${question}:`];
+  options.choices.forEach((choice, index) => {
+    const marker = choice === options.default ? " (default)" : "";
+    lines.push(`  ${index + 1}) ${choice}${marker}`);
+  });
+  const defaultIndex = options.default ? options.choices.indexOf(options.default) + 1 : 0;
+  lines.push(defaultIndex > 0 ? `Choice [${defaultIndex}]: ` : "Choice: ");
+  return lines.join("\n");
+}
+
+/** Accept either the ordinal or the literal value of a closed set. */
+export function resolveChoice(answer: string, options: AskOptions): string | undefined {
+  const raw = answer.trim();
+  if (!options.choices || options.choices.length === 0) {
+    return raw === "" ? (options.default ?? "") : raw;
+  }
+  if (raw === "") return options.default;
+  if (/^\d+$/u.test(raw)) {
+    const index = Number(raw) - 1;
+    return options.choices[index];
+  }
+  return options.choices.includes(raw) ? raw : undefined;
 }
 
 // ── init ───────────────────────────────────────────────────────────
@@ -562,32 +1403,7 @@ function runGrant(
     ? Object.freeze({})
     : (current.tableAccess ?? Object.freeze({}));
 
-  const readTables = new Set([...(existing.readTables ?? []), ...options.read]);
-  const writeTables = new Set([...(existing.writeTables ?? []), ...options.write]);
-  const targets = mergeTargets(existing.targets, options, readTables, writeTables);
-
-  // A target asserts that relatedTables is its complete reachable closure, and
-  // the policy loader requires every one of those tables to carry the same
-  // operation permission. They stay out of `targets`, so they are reachable
-  // through the target but never directly addressable by a caller.
-  for (const target of targets) {
-    if (readTables.has(target.table)) {
-      for (const related of target.relatedTables) readTables.add(related);
-    }
-    if (writeTables.has(target.table)) {
-      for (const related of target.relatedTables) writeTables.add(related);
-    }
-  }
-
-  const tableAccess: TableAccessPolicyInput = Object.freeze({
-    readTables: sorted(readTables),
-    writeTables: sorted(writeTables),
-    targets,
-  });
-
-  // Validate against the real decision-time policy loader rather than a copy
-  // of its rules, so a rejected grant fails here instead of at first tool call.
-  createTableAccessPolicy(tableAccess);
+  const tableAccess = buildTableAccess(existing, options);
 
   if (options.dryRun) {
     out(
@@ -616,6 +1432,43 @@ function runGrant(
   );
 }
 
+/**
+ * Build and validate one `tableAccess` object. Shared by `grant` and the
+ * wizard so there is a single definition of what a grant means.
+ */
+function buildTableAccess(
+  existing: TableAccessPolicyInput,
+  options: GrantOptions
+): TableAccessPolicyInput {
+  const readTables = new Set([...(existing.readTables ?? []), ...options.read]);
+  const writeTables = new Set([...(existing.writeTables ?? []), ...options.write]);
+  const targets = mergeTargets(existing.targets, options, readTables, writeTables);
+
+  // A target asserts that relatedTables is its complete reachable closure, and
+  // the policy loader requires every one of those tables to carry the same
+  // operation permission. They stay out of `targets`, so they are reachable
+  // through the target but never directly addressable by a caller.
+  for (const target of targets) {
+    if (readTables.has(target.table)) {
+      for (const related of target.relatedTables) readTables.add(related);
+    }
+    if (writeTables.has(target.table)) {
+      for (const related of target.relatedTables) writeTables.add(related);
+    }
+  }
+
+  const tableAccess: TableAccessPolicyInput = Object.freeze({
+    readTables: sorted(readTables),
+    writeTables: sorted(writeTables),
+    targets,
+  });
+
+  // Validate against the real decision-time policy loader rather than a copy
+  // of its rules, so a rejected grant fails here instead of at first tool call.
+  createTableAccessPolicy(tableAccess);
+  return tableAccess;
+}
+
 function sorted(values: ReadonlySet<string>): readonly string[] {
   return Object.freeze([...values].sort());
 }
@@ -630,6 +1483,7 @@ function mergeTargets(
   for (const target of existing ?? []) byTable.set(target.table, target);
 
   for (const table of new Set([...options.read, ...options.write])) {
+    if (table === TABLE_ALLOWLIST_WILDCARD) continue;
     const tools = new Set(byTable.get(table)?.tools ?? []);
     if (options.tools) {
       for (const tool of options.tools) tools.add(tool);
@@ -1153,6 +2007,28 @@ function parseFlags(args: readonly string[], spec: FlagSpec, usage: string): Par
   return Object.freeze({ flags, values, repeated });
 }
 
+/**
+ * The wizard is what a bare, interactive invocation does. Any other flag keeps
+ * the established non-interactive behavior byte for byte, so every documented
+ * command and every CI caller is unaffected. `--endpoint` is allowed through
+ * because it only tells the wizard which endpoint to advertise.
+ */
+function shouldRunWizard(
+  options: InitOptions,
+  args: readonly string[],
+  dependencies: SetupCliDependencies
+): boolean {
+  if (options.nonInteractive) return false;
+  if (dependencies.prompter !== undefined) return dependencies.interactive !== false;
+  if (dependencies.interactive === false) return false;
+  const onlyEndpoint = args.every(
+    (arg, index) =>
+      arg === "--endpoint" || (index > 0 && args[index - 1] === "--endpoint")
+  );
+  if (!onlyEndpoint) return false;
+  return dependencies.interactive ?? (Boolean(process.stdin.isTTY) && Boolean(process.stdout.isTTY));
+}
+
 function parseInitArguments(args: readonly string[]): InitOptions {
   const usage = renderInitHelp();
   const parsed = parseFlags(
@@ -1164,6 +2040,7 @@ function parseInitArguments(args: readonly string[]): InitOptions {
         "--json",
         "--rotate-encryption-key",
         "--allow-insecure-http",
+        "--non-interactive",
       ]),
       value: new Set(["--endpoint", "--clients"]),
     },
@@ -1178,6 +2055,7 @@ function parseInitArguments(args: readonly string[]): InitOptions {
     rotateEncryptionKey: parsed.flags.has("--rotate-encryption-key"),
     allowInsecureHttp,
     json: parsed.flags.has("--json"),
+    nonInteractive: parsed.flags.has("--non-interactive"),
     endpoint,
     clients: parseClients(parsed.values.get("--clients") ?? "auto"),
   });
@@ -1279,6 +2157,14 @@ function parseTableList(value: string | undefined, option: string): readonly str
         `${option} does not accept "*". A wildcard grant skips the per-tool binding and the ` +
           "related-table closure check; configure it deliberately in the profile file and read " +
           "docs/PRODUCTION-SECURITY.md first."
+      );
+    }
+    // Check the shape here so a typo is rejected at the prompt that produced
+    // it, rather than by the policy loader after every question is answered.
+    if (!TABLE_NAME.test(table)) {
+      throw new Error(
+        `"${table}" is not a ServiceNow table name. Names are lowercase, start with a ` +
+          "letter, and contain only letters, digits, and underscores."
       );
     }
     if (!tables.includes(table)) tables.push(table);
@@ -1614,7 +2500,9 @@ function renderSetupHelp(): string {
     "Usage: servicenow-mcp-setup <command> [options]",
     "",
     "Commands:",
-    "  (default)  Generate owner-only local env files and register clients.",
+    "  (default)  Walk through a complete setup: local auth material, a",
+    "             ServiceNow profile with its credential verified against the",
+    "             instance, table access, and client registration.",
     "  client     Print copy-pasteable configuration for one or more MCP clients.",
     "  grant      Add least-privilege table access rules to an existing profile.",
     "  doctor     Diagnose a local install and print the remedy for each failure.",
@@ -1627,9 +2515,13 @@ function renderInitHelp(): string {
   return [
     "Usage: servicenow-mcp-setup [options]",
     "",
-    "Generates owner-only env files under ~/.servicenow-mcp/ with a bearer token,",
-    "owner/client identifiers, and a profile encryption key, then registers the",
-    "clients whose CLI can reference the bearer instead of storing it.",
+    "Run bare on a terminal, this is a guided wizard: it generates the local",
+    "auth material, prompts for the instance and credential, verifies that",
+    "credential against the instance, prompts for table access, writes the",
+    "profile with its grant attached, and registers supported clients.",
+    "",
+    "With any flag, or without a terminal, it only generates the env files and",
+    "registers clients \u2014 the established non-interactive behavior.",
     "",
     "Options:",
     "  --endpoint URL            MCP endpoint to advertise (default http://127.0.0.1:3000/mcp)",
@@ -1639,6 +2531,10 @@ function renderInitHelp(): string {
     "  --allow-insecure-http     Permit a non-loopback http:// endpoint behind a trusted proxy",
     "  --dry-run                 Report what would be written and exit",
     "  --json                    Machine-readable output",
+    "  --non-interactive         Skip the guided wizard even on a terminal",
+    "",
+    "Run bare on a terminal to be walked through instance, credential,",
+    "table access, and client registration in one command.",
   ].join("\n");
 }
 
