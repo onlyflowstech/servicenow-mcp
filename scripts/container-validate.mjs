@@ -140,7 +140,10 @@ function assertImageMetadata(metadata) {
   assert(config.User === "10001:10001", "image user must be numeric non-root");
   assert(
     JSON.stringify(config.Entrypoint) ===
-      JSON.stringify(["/nodejs/bin/node", "/app/dist/index.js"]),
+      JSON.stringify(["/nodejs/bin/node", "/app/dist/http-entrypoint.js"]),
+    // dist/index.js is the stdio entrypoint: in a container it would start a
+    // server with no stdin, do nothing, and look healthy. The image serves the
+    // dormant HTTP transport, so that is what it must launch.
     "image entrypoint is invalid"
   );
   assert(config.StopSignal === "SIGTERM", "image stop signal is invalid");
