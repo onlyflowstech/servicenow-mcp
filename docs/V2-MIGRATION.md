@@ -1,14 +1,21 @@
 # Migrating to 2.0
 
-2.0 is an authenticated, single-owner HTTP service. It intentionally removes
-the 1.x local-process launch contract. Every published release before it is
+2.0 is a local, single-owner stdio server, the same launch shape as 1.x: your
+client spawns `servicenow-mcp` and speaks to it over that process's stdin and
+stdout. Nothing listens on a port. Every published release before it is
 `1.0.0`, so this guide is written for a 1.0.0 install.
+
+**Your transport does not change.** A 1.0.0 client entry that launches the
+package still launches it. What changes is what the server expects once it is
+running: every call names a profile, and table access is granted rather than
+inherited from the credential. Those two are the migration; the rest apply only
+if you used the affected surface.
 
 ## Breaking changes at a glance
 
 | # | Change | Before (1.0.0) | After (2.0.0) |
 |---|--------|----------------|---------------|
-| 1 | Transport | stdio; the client spawns `servicenow-mcp` | Streamable HTTP at `/mcp`; the client connects to a URL. A bearer token is optional and off by default |
+| 1 | Transport | stdio; the client spawns `servicenow-mcp` | unchanged — stdio; the client spawns `servicenow-mcp` |
 | 2 | Profile selection | implicit, from `SN_*` in the client's env | every tool call carries an explicit `profile` |
 | 3 | Table access | any table the credential could reach | deny-by-default per profile; explicit allowlist plus target entries |
 | 4 | Attachments | host `file_path` / `output_path` | inline base64 both directions; no host filesystem access, and no flag restores it |
@@ -18,8 +25,10 @@ the 1.x local-process launch contract. Every published release before it is
 | 8 | Field selection limit | `MAX_FIELDS_PER_OPERATION` was `32`; over-selection raised `excessive_field_selection` | limit is `10_000`; `excessive_field_selection` is removed from the exported `FieldPolicyFailureReason` union |
 | 9 | Capabilities | `tools` only | adds `prompts` (`servicenow-mcp.add-profile`) |
 
-Each is expanded below. Items 1-3 require action on every install; the rest
-apply only if you used the affected surface.
+Each is expanded below. Items 2 and 3 require action on every install; the rest
+apply only if you used the affected surface. Item 1 is listed because an
+earlier 2.0 pre-release did move to HTTP — if you configured against that, see
+[Transport](#1-transport-unchanged).
 
 ## Also new in 2.0
 
@@ -48,9 +57,10 @@ apply only if you used the affected surface.
   them. Journal content on real instances routinely contains customer PII, so
   asking for all fields on `incident` now returns customer-visible commentary.
 
-### 1. Transport
+### 1. Transport (unchanged)
 
-**Before** — client config launched a process:
+Your 1.0.0 client entry keeps working. The server still runs as a subprocess of
+the client, framed over stdin and stdout:
 
 ```json
 {
@@ -58,34 +68,44 @@ apply only if you used the affected surface.
     "servicenow": {
       "command": "npx",
       "args": ["-y", "@onlyflows/servicenow-mcp"],
-      "env": { "SN_INSTANCE": "https://yourinstance.service-now.com", "SN_USER": "u", "SN_PASSWORD": "p" }
+      "env": { "SN_PROFILE_NAME": "dev", "SN_INSTANCE": "https://yourinstance.service-now.com", "SN_USER": "u", "SN_PASSWORD": "p" }
     }
   }
 }
 ```
 
-**After** — run the service, then point the client at its URL. Delete the
-`command`, `args`, and `env` keys entirely; there is no stdio fallback,
-compatibility flag, or alternate executable.
+The one addition is `SN_PROFILE_NAME`. 1.x inferred a single implicit
+connection from the bare `SN_*` variables; 2.0 requires you to name it, because
+every tool call now carries a profile (breaking change 2) and the name in the
+call has to match something. Bare `SN_*` without `SN_PROFILE_NAME` is refused
+rather than guessed at.
+
+You do not have to keep credentials in your client config. `servicenow-mcp-setup`
+writes them to an owner-only `~/.servicenow-mcp` instead, verifies them against
+your instance before saving, and registers your clients for you — after which
+the client entry carries no secret at all:
 
 ```json
 {
   "mcpServers": {
     "servicenow-mcp": {
-      "type": "http",
-      "url": "http://127.0.0.1:3000/mcp"
+      "type": "stdio",
+      "command": "servicenow-mcp"
     }
   }
 }
 ```
 
-The `/mcp` endpoint is unauthenticated unless you set `MCP_BEARER_TOKEN`. Where
-you have, add `"headers": { "Authorization": "Bearer ${SERVICENOW_MCP_BEARER_TOKEN}" }`
-and export that variable into the client's environment.
+Per-client syntax is in [CLIENT-SETUP.md](CLIENT-SETUP.md#7-mcp-client-configuration).
 
-Per-client syntax, including the clients that need an `mcp-remote` bridge, is
-in [CLIENT-SETUP.md](CLIENT-SETUP.md#7-mcp-client-configuration).
-`servicenow-mcp-setup` registers the clients it can.
+**If you configured against a 2.0 pre-release that served HTTP**, that
+transport still exists but is dormant: no CLI path reaches it, it is not a
+`bin` entry, and setup never registers a client against a URL. Replace a
+`"type": "http"` entry with the stdio entry above. The endpoint, the readiness
+check, and the service you had to keep running are all gone.
+The `/mcp` endpoint is unauthenticated unless you set `MCP_BEARER_TOKEN`. See the
+[enterprise boundary](ENTERPRISE-RELEASE-BOUNDARY.md#the-dormant-http-transport)
+for why it is kept.
 
 ### 2. Explicit profile on every call
 
@@ -248,7 +268,7 @@ anything in 1.0.0 — it returned an explanatory error — so removing it change
 
 One `bin` becomes three:
 
-- `servicenow-mcp` — the Streamable HTTP service (and `servicenow-mcp setup`)
+- `servicenow-mcp` — the stdio server your client spawns (and `servicenow-mcp setup`)
 - `servicenow-mcp-profile` — out-of-band profile administration
 - `servicenow-mcp-setup` — bootstrap, client config, grants, and diagnosis
 
@@ -276,181 +296,48 @@ must cap their own parallelism at two and honor `Retry-After` on `429` and
 
 ## Required client change
 
-Remove any MCP client entry that starts `servicenow-mcp` with a local
-`command`, executable path, or `args`. Local Claude stdio configuration is no
-longer supported. V2 has no stdio compatibility flag, alternate executable, or
-fallback transport.
+**None for the transport.** A 1.0.0 entry that launches `servicenow-mcp` with a
+`command` keeps working — see [Transport](#1-transport-unchanged). Local stdio
+configuration is the supported shape, not a deprecated one.
 
-Configure a standards-compliant MCP Streamable HTTP client with:
+Two things do change inside the calls your client makes:
 
-- URL: `http://127.0.0.1:3000/mcp` by default
-- Header: `Authorization: Bearer <MCP_BEARER_TOKEN>`, only where the service is
-  configured with one; omit it entirely otherwise
+- **Name a profile on every tool call.** See
+  [Profile-call change](#profile-call-change).
+- **Grant table access.** A profile with no rules denies every call. See
+  [Table-policy change](#table-policy-change).
 
-Client configuration syntax varies, but the protocol contract does not depend
-on any AI provider. Use TLS or an approved private-access boundary before
-binding outside loopback.
+The simplest path is to let setup do it:
 
-For complete official SDK and independent Fetch examples using the same
-endpoint, explicit profile selection on every invocation, two isolated named
-profiles, and safe result/audit verification, see
+```bash
+npm install -g @onlyflows/servicenow-mcp
+servicenow-mcp-setup
+```
+
+It asks for your instance and credential, verifies the credential against the
+instance before writing anything, asks which tables to grant, writes an
+owner-only profile, and registers the clients whose CLI it can find. Your
+client entry then carries no credential at all.
+
+For official SDK and independent examples, explicit profile selection, two
+isolated named profiles, and safe result/audit verification, see
 [V2 service and client setup](CLIENT-SETUP.md).
 
-## Start the service
+## Starting the server
 
-`MCP_OWNER_ID` and `MCP_CLIENT_ID` label every audit record and default to
-`local-owner` / `local-client`. `MCP_BEARER_TOKEN` is optional: without it the
-`/mcp` endpoint is unauthenticated and any local process that reaches it has
-whatever access the profiles grant. See
-[Production security boundaries](PRODUCTION-SECURITY.md#http-authentication-is-optional-and-off-by-default).
+You do not. Each registered client spawns its own `servicenow-mcp` when it
+needs one and stops it when the session ends. There is no daemon, no port, no
+readiness probe, and nothing to keep running between sessions.
 
-```bash
-export MCP_OWNER_ID="your-owner-id"
-export MCP_CLIENT_ID="your-client-id"
-export SN_ALLOWED_READ_TABLES="incident,problem,change_request"
-export SN_ALLOWED_WRITE_TABLES="incident,change_request"
-export SN_TABLE_ACCESS_TARGETS='[{"table":"incident","kind":"canonical","tools":["sn_query","sn_get","sn_create","sn_update","sn_incident_add_comment","sn_incident_add_work_note","sn_delete","sn_batch"],"closureComplete":true,"relatedTables":["incident"]},{"table":"problem","kind":"canonical","tools":["sn_query","sn_get"],"closureComplete":true,"relatedTables":["problem"]},{"table":"change_request","kind":"canonical","tools":["sn_query","sn_get"],"closureComplete":true,"relatedTables":["change_request"]}]'
-export SN_PROFILE_NAME="dev"
-export SN_INSTANCE="https://yourinstance.service-now.com"
-export SN_USER="your_username"
-npm run build
-npm start
-```
-
-Before running those non-secret commands, have the approved supervisor,
-orchestrator, keychain, or secret manager inject the authentication-specific
-ServiceNow secret — and `MCP_BEARER_TOKEN`, if the endpoint is to be
-authenticated — directly into the service process.
-Do not put either value in shell input, command arguments, dotenv files, or
-history.
-
-> **The `SN_*` variables above build a profile only when
-> `~/.servicenow-mcp/config.json` does not exist.** Once you create a profile
-> with `servicenow-mcp-profile`, that file exists, `SN_PROFILE_NAME` stops
-> constructing a profile, and `SN_ALLOWED_READ_TABLES` /
-> `SN_ALLOWED_WRITE_TABLES` / `SN_TABLE_ACCESS_TARGETS` stop applying — the
-> server then denies every call. Put the rules on the profile instead:
-> `servicenow-mcp-setup grant --profile dev --read incident --write incident`.
-> `servicenow-mcp-setup doctor` detects exactly this situation.
-
-For the recommended local path, use the bootstrap instead:
+To check an install without a client:
 
 ```bash
-servicenow-mcp-setup                 # generates ~/.servicenow-mcp/server.env
-set -a; source ~/.servicenow-mcp/server.env; set +a
-servicenow-mcp
+servicenow-mcp-setup doctor --profile dev
 ```
 
-Production uses `npm start`. Local development uses `npm run dev`, which builds
-and starts the same HTTP-only entrypoint with source maps enabled.
-
-Optional runtime settings:
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `MCP_HOST` | `127.0.0.1` | Bind host |
-| `MCP_PORT` | `3000` | Listen port |
-| `MCP_ALLOWED_HOSTS` | bind/socket authorities | Comma-separated exact public `Host` authorities; include ports when clients send them. The container's reserved loopback-only health authority is internal and must not be added. |
-| `MCP_ALLOWED_ORIGINS` | deny browser origins | Comma-separated exact HTTP(S) origins; requests without `Origin` remain allowed |
-| `MCP_MAX_CONCURRENT_REQUESTS` | `2` | Concurrent admitted `/mcp` requests (1–1024 syntactically); excess work receives HTTP 503 and is never queued. Startup **throws** for values above the combined 512 MiB estimate — with the shipped 1 MiB body limit the maximum is 2, and `3` refuses to start |
-| `MCP_MAX_CONNECTIONS` | `128` | Accepted TCP connections (1–4096); excess sockets are dropped, and unread early-rejection bodies are limited to a 16 KiB/100 ms drain before destruction |
-| `MCP_SHUTDOWN_GRACE_MS` | `10000` | Drain deadline for SIGINT/SIGTERM (1–300000 ms) |
-| `MCP_PRE_AUTH_RATE_CAPACITY` | `240` | Direct-source request capacity per refill period (1–1000000) |
-| `MCP_PRE_AUTH_RATE_REFILL_MS` | `60000` | Direct-source refill period in milliseconds (1–86400000) |
-| `MCP_PRE_AUTH_RATE_MAX_ENTRIES` | `4096` | Retained digested direct-source buckets (1–100000) |
-| `MCP_IDENTITY_RATE_CAPACITY` | `120` | Owner/client request capacity per refill period (1–1000000) |
-| `MCP_IDENTITY_RATE_REFILL_MS` | `60000` | Owner/client refill period in milliseconds (1–86400000) |
-| `MCP_IDENTITY_RATE_MAX_ENTRIES` | `128` | Retained digested owner/client buckets (1–100000) |
-
-The `/mcp` endpoint defaults to a bounded pre-authentication bucket (240
-requests per 60 seconds per direct socket source, 4096 retained sources) and
-authenticated bucket (120 requests per 60 seconds per owner/client identity,
-128 retained identities). Capacity, refill period, and retained-key bounds are
-operator-configurable only within the validated ranges above. It does not trust
-forwarded-address headers. A rejected request is HTTP 429 with a bounded
-`Retry-After` header and this body:
-
-```json
-{
-  "error": "rate_limited",
-  "message": "Rate limited. Retry after the number of seconds in retry_after_seconds or the Retry-After header.",
-  "retry_after_seconds": 1
-}
-```
-
-`retry_after_seconds` always matches the `Retry-After` header. The limits are
-process-local and reset on restart. Health probes are exempt from the MCP source bucket so exhausted
-client traffic cannot change liveness or readiness semantics.
-
-Each authenticated `/mcp` `POST` accepts one JSON-RPC message in a JSON body of
-at most 1 MiB. Oversized bodies are rejected with HTTP 413. Malformed JSON and
-JSON-RPC batch arrays are rejected with HTTP 400 before MCP server construction
-or tool dispatch; clients must send batch items as separate HTTP requests. The
-effective defaults are 15 seconds to read the body, 120 seconds end to end for
-an admitted request, 10 seconds for headers, 30 seconds for the Node request,
-and 5 seconds for keep-alive.
-
-Configured browser origins receive exact-origin CORS responses for `POST` and
-the `Accept`, `Authorization`, `Content-Type`, and `Mcp-Protocol-Version`
-headers; preflight is HTTP 204 and `X-Request-Id` is exposed. An omitted
-`MCP_ALLOWED_ORIGINS` denies every request that carries `Origin`, while
-non-browser requests without `Origin` continue to work.
-
-Admission uses a combined estimate backed by hostile JSON measurements. A
-900,001-byte array of 300,000 empty objects expanded 22.4× on the heap and 54×
-in RSS, so request JSON plus ServiceNow JSON/text receives a 64× safety factor.
-One ExecutionContext can consume at most 1 MiB of ServiceNow JSON/text in total
-across parallel calls; declared bytes are reserved atomically and streamed
-bytes are charged before `JSON.parse`. Raw attachment downloads preserve a
-separate cumulative 10 MiB memory budget with an 8× allowance for Buffer,
-base64/UTF-16, and JSON serialization. That figure is an internal memory
-reservation, not a usable attachment size.
-
-The constructor enforces `concurrency × (((request MiB + 1 MiB) × 64) +
-(10 MiB × 8)) <= 512 MiB`. Defaults therefore estimate 208 MiB per request and
-416 MiB for concurrency 2; concurrency 3 needs 624 MiB and **fails startup**.
-OAuth token and error bodies are capped at 64 KiB within the remaining default
-headroom. This is a conservative admission estimate rather than a hard process
-heap/RSS limit, so reduce `MCP_MAX_CONCURRENT_REQUESTS` when the deployment
-memory budget requires more headroom for other application state.
-
-Body size and concurrency trade directly against each other:
-
-| `maxBodyBytes` | Highest concurrency that starts | Effect |
-|---|---|---|
-| 1 MiB (shipped default) | 2 | 416 MiB budgeted; the intended configuration |
-| 1.75 MiB | 2 | 512 MiB — exactly at the ceiling |
-| **2 MiB** | **1** | **Single-flight: every tool call serializes** |
-| 5.75 MiB | 1 | the last value that starts at all |
-| above 5.75 MiB | none | startup fails at any concurrency |
-
-Above 5.75 MiB the failure is a constructor `throw`, not a clamp, and its
-message — *"HTTP maxConcurrentRequests and maxBodyBytes exceed the estimated
-body-memory ceiling"* — names the two settings but not the ceiling, the
-arithmetic, or a working value. At 2 MiB there is no failure at all: the
-runtime simply cannot start above concurrency 1, so every request serializes
-with no warning and no log line. One large upload then blocks every other tool
-call, and nothing connects the cause to the effect.
-
-**`maxBodyBytes` is not operator-configurable in the shipped executable.**
-`src/index.ts` builds the request policy with only `allowedHosts` and
-`allowedOrigins`, so the limit is always 1 MiB and no environment variable
-changes it. Both thresholds above bind embedders calling `createHttpRuntime`
-directly. For an operator, the only reachable form of this failure is
-`MCP_MAX_CONCURRENT_REQUESTS=3`.
-
-A 10 MiB attachment is unreachable over HTTP at any concurrency: base64
-inflates it to about 13.33 MiB on the wire, budgeting roughly 997 MiB against a
-512 MiB ceiling. Raising the body limit is not a path to it.
-
-Request and tool completion events are written as JSON Lines on stderr. They
-contain bounded correlation, latency, outcome/reason, and status fields. Raw
-owner/client identifiers are hashed, and request headers, URL/query strings,
-bodies, credentials, tokens, config, and exception text are structurally
-excluded. Stderr delivery is nonblocking and retains at most 256 pending lines
-during backpressure. Excess events are dropped and later summarized as
-`{"type":"telemetry_dropped","count":N}` after stderr drains, so collectors
-must monitor these records as evidence of telemetry loss.
+That verifies the Node version, that `servicenow-mcp` resolves on `PATH` — the
+command every client is registered with — the config directory and file modes,
+the profile, its credential resolution, and its table-access rules.
 
 ## Profile-call change
 
@@ -498,23 +385,19 @@ for worked before/after examples. List, upload, and download require the owning
 `table` and record `sys_id`; downloads verify those values against ServiceNow
 attachment metadata before returning bytes.
 
-## Shutdown
+## Lifecycle and shutdown
 
-`GET`/`HEAD /health/live` reports process liveness without contacting
-ServiceNow. `GET`/`HEAD /health/ready` reports whether startup has completed and
-the runtime can admit MCP work; it changes to 503 before shutdown draining.
+The server's lifetime is its client's. The client spawns it, and it exits when
+stdin closes or the client stops it. There is no health endpoint, no readiness
+gate, no drain period, and nothing to signal — a stopped client leaves nothing
+behind.
 
-The executable handles both SIGINT and SIGTERM. It stops accepting new HTTP
-work, drains accepted requests for `MCP_SHUTDOWN_GRACE_MS`, closes owned MCP
-resources, and force-closes remaining connections when the bound expires.
-Repeated signals share the same shutdown operation.
-
-The production OCI artifact runs as numeric UID/GID `10001:10001`, supports a
-read-only root filesystem, and receives all profiles, keys, owner auth, and
-ServiceNow credentials at runtime. See
-[Production container deployment](CONTAINER-DEPLOYMENT.md) for pinned builds,
-least-privilege run flags, profile mounts, two-client validation, provenance,
-SBOM, scanning, and version-identification commands.
+The health contract, the `MCP_SHUTDOWN_GRACE_MS` drain, and the OCI artifact
+all belong to the
+[dormant HTTP transport](ENTERPRISE-RELEASE-BOUNDARY.md#the-dormant-http-transport)
+and do not apply to a 2.0 install. They are documented in
+[Production container deployment](CONTAINER-DEPLOYMENT.md) for the enterprise
+shape that will use them.
 
 ## Table-policy change
 
