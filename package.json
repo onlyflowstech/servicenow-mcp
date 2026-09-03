@@ -5,9 +5,9 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "servicenow-mcp": "./dist/index.js",
-    "servicenow-mcp-profile": "./dist/profile-admin.js",
-    "servicenow-mcp-setup": "./dist/setup.js"
+    "servicenow-mcp": "dist/index.js",
+    "servicenow-mcp-profile": "dist/profile-admin.js",
+    "servicenow-mcp-setup": "dist/setup.js"
   },
   "scripts": {
     "prebuild": "node scripts/clean-dist.mjs",
@@ -47,7 +47,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/onlyflowstech/servicenow-mcp"
+    "url": "git+https://github.com/onlyflowstech/servicenow-mcp.git"
   },
   "homepage": "https://github.com/onlyflowstech/servicenow-mcp#readme",
   "bugs": {

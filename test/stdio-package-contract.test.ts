@@ -93,9 +93,12 @@ describe("stdio-only package contract", () => {
     };
 
     expect(packageJson.bin).toEqual({
-      "servicenow-mcp": "./dist/index.js",
-      "servicenow-mcp-profile": "./dist/profile-admin.js",
-      "servicenow-mcp-setup": "./dist/setup.js",
+      // npm canonicalizes bin paths without the leading "./" (npm pkg fix).
+      // Publishing with the "./" form made npm rewrite package.json during
+      // publish and warn that it had corrected errors.
+      "servicenow-mcp": "dist/index.js",
+      "servicenow-mcp-profile": "dist/profile-admin.js",
+      "servicenow-mcp-setup": "dist/setup.js",
     });
     expect(packageJson.scripts?.start).toBe("node dist/index.js");
     expect(packageJson.scripts?.dev).toBe(

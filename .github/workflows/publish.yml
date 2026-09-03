@@ -74,13 +74,25 @@ jobs:
       - portable-release
       - inspector-toolchain
     runs-on: ubuntu-latest
+    # Published through npm trusted publishing (OIDC): npm verifies this
+    # workflow's identity and issues a short-lived credential, so there is no
+    # long-lived NPM_TOKEN to store, leak, or rotate, and no 2FA-bypass token
+    # to obtain. id-token: write is what lets the runner mint the OIDC token.
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Trusted publishing needs npm >= 11.5.1 and Node >= 22.14.0.
+          node-version: 22.14.0
           registry-url: https://registry.npmjs.org
+      # Node 22 ships npm 10.x, which predates trusted publishing.
+      - run: npm install --global npm@latest
+      - run: npm --version
       - run: npm ci --engine-strict
+      # No NODE_AUTH_TOKEN: the OIDC exchange supplies the credential.
+      # Provenance is attested automatically for a public repository, so
+      # --provenance is not passed explicitly.
       - run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
