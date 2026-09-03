@@ -3,6 +3,11 @@
 /**
  * Interactive-safe local bootstrap for @onlyflows/servicenow-mcp.
  *
+ * The server speaks stdio: a client spawns the packaged binary and talks to it
+ * over the child's stdin/stdout. There is no service to start, no port, and no
+ * endpoint, so setup's job ends at a registered client, a verified credential,
+ * and a profile that grants exactly the tables the operator chose.
+ *
  * Four subcommands, none of which ever accept, print, or log a secret value:
  *
  * - `init` (default) generates the owner-only local env file, registers the
@@ -21,17 +26,15 @@
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
-  closeSync,
   existsSync,
   mkdirSync,
-  openSync,
   readFileSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 
 import { createInterface } from "node:readline/promises";
 
@@ -80,8 +83,6 @@ export interface SetupCliDependencies {
   ) => CommandResult;
   /** Injected for tests; defaults to the real profile store under `home`. */
   readonly profileManager?: ProfileManager;
-  /** Injected for tests; defaults to global fetch. */
-  readonly probe?: (url: string, init: ProbeRequest) => Promise<ProbeResponse>;
   /** Injected for tests; defaults to a readline/TTY prompter. */
   readonly prompter?: WizardPrompter;
   /** Force the interactive decision; defaults to a TTY check. */
@@ -97,17 +98,6 @@ export interface SetupCliDependencies {
   ) => Promise<string | undefined>;
   /** Injected for tests; defaults to the environment key provider. */
   readonly keyProvider?: ProfileEncryptionKeyProvider;
-  /**
-   * Injected for tests; defaults to spawning the packaged server detached.
-   * Returns the log path so a failed start can be diagnosed without the
-   * operator re-running anything.
-   */
-  readonly startService?: (
-    env: NodeJS.ProcessEnv,
-    logPath: string
-  ) => { readonly pid: number | undefined };
-  /** Injected for tests; how long to wait for the service to answer /health/ready. */
-  readonly readyTimeoutMs?: number;
   /** Injected for tests; defaults to the protected stdin/stderr reader. */
   readonly secretIo?: ProfileAdminIO;
 }
@@ -159,18 +149,6 @@ interface CommandResult {
   readonly error?: Error;
 }
 
-export interface ProbeRequest {
-  readonly method: string;
-  readonly headers?: Readonly<Record<string, string>>;
-  readonly body?: string;
-  readonly timeoutMs: number;
-}
-
-export interface ProbeResponse {
-  readonly status: number;
-  readonly body: string;
-}
-
 type Subcommand = "init" | "client" | "grant" | "doctor";
 
 type ClientTarget =
@@ -200,15 +178,12 @@ interface InitOptions {
   readonly dryRun: boolean;
   readonly force: boolean;
   readonly rotateEncryptionKey: boolean;
-  readonly allowInsecureHttp: boolean;
   readonly json: boolean;
   readonly nonInteractive: boolean;
-  readonly endpoint: string;
   readonly clients: readonly ClientTarget[];
 }
 
 interface ClientOptions {
-  readonly endpoint: string;
   readonly clients: readonly ClientTarget[];
 }
 
@@ -225,30 +200,21 @@ interface GrantOptions {
 
 interface DoctorOptions {
   readonly profile?: string;
-  readonly endpoint: string;
-  readonly offline: boolean;
   readonly json: boolean;
 }
 
-const DEFAULT_ENDPOINT = "http://127.0.0.1:3000/mcp";
 const CONFIG_RELATIVE_DIR = ".servicenow-mcp";
 const SERVER_ENV_RELATIVE_PATH = `${CONFIG_RELATIVE_DIR}/server.env`;
 const PROFILE_CONFIG_RELATIVE_PATH = `${CONFIG_RELATIVE_DIR}/config.json`;
 const MCP_SERVER_NAME = "servicenow-mcp";
 const ENCRYPTION_KEY_ENV = "SN_PROFILE_ENCRYPTION_KEY";
+/** The command every registered client is told to spawn. */
+const SERVER_COMMAND = "servicenow-mcp";
 /**
- * Turns HTTP authentication on when the operator sets it in `server.env`.
- *
- * Setup never generates it. It is read here so `doctor` can present the same
- * credential the service is running with, rather than reporting a spurious 401
- * against an install that has deliberately opted back in.
- */
-const SERVER_BEARER_ENV = "MCP_BEARER_TOKEN";
-/**
- * What `server.env` must contain for the service to start and for its audit
- * records to carry a stable identity. `MCP_BEARER_TOKEN` is deliberately absent:
- * the service runs without it, so a missing bearer is a deployment choice
- * rather than a broken install.
+ * What `server.env` must hold for a spawned server to attribute its audit
+ * records to a stable identity. The server reads this file itself at startup:
+ * the client that spawns it supplies its own environment and will not have
+ * sourced anything.
  */
 const REQUIRED_SERVER_ENV_VALUES: readonly string[] = Object.freeze([
   "MCP_OWNER_ID",
@@ -258,35 +224,33 @@ const REQUIRED_SERVER_ENV_VALUES: readonly string[] = Object.freeze([
 /**
  * Stated wherever setup reports what it built.
  *
- * The service ships unauthenticated, which is a property of the deployment the
- * operator has to know without reading the docs first. Buried or softened, it
- * reads as "setup succeeded"; the point is that a local process is now inside
- * the boundary.
+ * There is no port and nothing listening, so the boundary is not a network one
+ * and saying "unauthenticated" would name the wrong risk. What is true is that
+ * every client registered below can spawn a server that acts as you, with the
+ * full reach of these profiles' grants. That is the sentence an operator has to
+ * read without opening the docs first.
  */
-const UNAUTHENTICATED_NOTICE: readonly string[] = Object.freeze([
-  "This endpoint is UNAUTHENTICATED. Any process running as you on this",
-  "machine can reach it and use every table your profiles grant.",
+const STDIO_BOUNDARY_NOTICE: readonly string[] = Object.freeze([
+  "The server runs as you. Each registered client starts its own copy on",
+  "demand and speaks to it over that process's stdin/stdout. Nothing listens",
+  "on a port, and nothing off this machine can reach it.",
   "",
-  "What still protects it: it listens on 127.0.0.1 only, so nothing off this",
-  "machine can connect, and it rejects Host/Origin values it does not",
-  "recognise, so a web page you visit cannot drive it. Neither of those stops",
-  "another program on this machine.",
+  "So the boundary is the client list and the grants: any client registered",
+  "here can read and write every table your profiles allow, as your ServiceNow",
+  "account. Keep the grants narrow, and remove a client you no longer use with",
+  '"claude mcp remove servicenow-mcp" or "codex mcp remove servicenow-mcp".',
   "",
-  "To require a bearer token instead, add a random value of 32 characters or",
-  "more to server.env as MCP_BEARER_TOKEN, restart the service, and send it as",
-  '"Authorization: Bearer <token>" from every client. See',
-  "docs/PRODUCTION-SECURITY.md.",
+  "No ServiceNow credential is copied into a client configuration file. The",
+  "spawned server reads the profile and its encryption key from the owner-only",
+  "~/.servicenow-mcp directory.",
 ]);
 
 /** Printed under every client recipe, because none of them carries a credential. */
-const AUTHENTICATION_FOOTNOTE =
-  "Authentication is off by default, so nothing above sends a credential.\n" +
-  "If you set MCP_BEARER_TOKEN in server.env, every client must also send\n" +
-  '"Authorization: Bearer <that value>" — through the client\'s own header\n' +
-  "configuration, or for mcp-remote through --header-file.\n";
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "[::1]", "localhost"]);
+const CREDENTIAL_FOOTNOTE =
+  "Nothing above carries a ServiceNow credential. The spawned server reads the\n" +
+  "profile and its encryption key from ~/.servicenow-mcp, which is owner-only,\n" +
+  "so no secret reaches a client configuration file.\n";
 const MINIMUM_NODE_MAJOR = 20;
-const PROBE_TIMEOUT_MS = 5_000;
 
 /** Tables addressable by a read grant when `--tools` is not given. */
 const DEFAULT_READ_TOOLS: readonly string[] = Object.freeze([
@@ -379,7 +343,7 @@ async function runWizard(
         "instance. Press Ctrl+C at any point to stop; nothing will be saved.\n"
     );
 
-    // 1. Local service material. Idempotent, so this is silent.
+    // 1. Local identity and key material. Idempotent, so this is silent.
     const values = loadOrCreateBootstrapValues(paths, options);
     writeSecureEnvFile(paths.serverEnv, values);
 
@@ -405,7 +369,7 @@ async function runWizard(
           env,
           dependencies
         );
-        out(renderClientOnlySummary(paths, options, only, home));
+        out(renderClientOnlySummary(only, home));
         return;
       }
       prompter.note("Existing profiles are left untouched.\n");
@@ -539,207 +503,38 @@ async function runWizard(
       dependencies
     );
 
-    // 8. Start the service and verify, so setup ends with a working install
-    //    rather than commands for the operator to copy.
-    const service = await startAndVerifyInteractively(
-      prompter,
-      options,
-      paths,
-      values,
-      env,
-      name,
-      home,
-      dependencies
-    );
+    // 8. Verify the install the way `doctor` does, so setup ends by reporting
+    //    the same facts rather than commands for the operator to copy. There
+    //    is nothing to start: a registered client spawns the server itself.
+    const checks = runInstallChecks(paths, home, env, dependencies, name);
+    prompter.note(`\n${renderDoctorText(checks)}`);
 
-    out(
-      renderWizardSummary(paths, options, name, tableAccess, registered, home, service)
-    );
+    out(renderWizardSummary(name, tableAccess, registered, home, checks));
   } finally {
     prompter.close();
   }
 }
 
 /**
- * A path safe to paste into a shell.
+ * The checks that decide whether this install actually works.
  *
- * `displayPath` renders `~/...` for readability, but a tilde inside quotes is
- * not expanded — `. '~/x'` fails with "no such file or directory". Emit
- * "$HOME/..." instead, which is both readable and correct when pasted.
+ * Shared by the wizard's final report and by `doctor`, so what setup says and
+ * what `doctor` says can never drift apart.
  */
-function shellPathLiteral(path: string, home: string): string {
-  return path.startsWith(`${home}/`)
-    ? `"$HOME${path.slice(home.length)}"`
-    : shellQuote(path);
-}
-
-/** Outcome of the optional start-and-verify step at the end of the wizard. */
-interface ServiceStartOutcome {
-  readonly started: boolean;
-  readonly alreadyRunning: boolean;
-  readonly ready: boolean;
-  readonly logPath: string;
-}
-
-const SERVICE_READY_TIMEOUT_MS = 20_000;
-const SERVICE_READY_POLL_MS = 250;
-
-/**
- * Start the packaged server detached and wait for readiness.
- *
- * The service is spawned with the bootstrap values rather than the operator's
- * environment, because `server.env` is exactly what it needs and requiring a
- * `source` first would make setup depend on a step setup is supposed to remove.
- */
-async function startAndVerifyInteractively(
-  prompter: WizardPrompter,
-  options: InitOptions,
+function runInstallChecks(
   paths: ResolvedPaths,
-  values: Readonly<Record<string, string>>,
-  env: NodeJS.ProcessEnv,
-  profile: string,
   home: string,
-  dependencies: SetupCliDependencies
-): Promise<ServiceStartOutcome> {
-  const logPath = join(dirname(paths.serverEnv), "service.log");
-  const probe = dependencies.probe ?? defaultProbe;
-  const readyUrl = new URL("/health/ready", options.endpoint).toString();
-
-  const alreadyReady = await isReady(probe, readyUrl);
-  if (alreadyReady) {
-    prompter.note("\n  ok  the service is already running on this endpoint.");
-    return Object.freeze({
-      started: false,
-      alreadyRunning: true,
-      ready: true,
-      logPath,
-    });
-  }
-
-  if (!(await prompter.confirm("\nStart the service now and verify it", true))) {
-    return Object.freeze({
-      started: false,
-      alreadyRunning: false,
-      ready: false,
-      logPath,
-    });
-  }
-
-  prompter.note("\nStarting the service...");
-  const serviceEnv: NodeJS.ProcessEnv = { ...env, ...values };
-  const start = dependencies.startService ?? defaultStartService;
-  let pid: number | undefined;
-  try {
-    ({ pid } = start(serviceEnv, logPath));
-  } catch (error) {
-    prompter.note(
-      `  FAILED  could not start the service: ${describeError(error)}\n` +
-        `  Start it by hand:\n` +
-        `    set -a; source ${shellPathLiteral(paths.serverEnv, home)}; set +a; servicenow-mcp`
-    );
-    return Object.freeze({
-      started: false,
-      alreadyRunning: false,
-      ready: false,
-      logPath,
-    });
-  }
-
-  const readyTimeoutMs = dependencies.readyTimeoutMs ?? SERVICE_READY_TIMEOUT_MS;
-  const ready = await waitForReady(probe, readyUrl, readyTimeoutMs);
-  if (!ready) {
-    prompter.note(
-      `  FAILED  the service did not become ready within ` +
-        `${Math.round(readyTimeoutMs / 1000)}s.\n` +
-        `  Its output is in ${shellQuote(logPath)}.\n` +
-        `  A port already in use and a missing value in server.env both look\n` +
-        `  like this; the log says which.`
-    );
-    return Object.freeze({
-      started: true,
-      alreadyRunning: false,
-      ready: false,
-      logPath,
-    });
-  }
-
-  prompter.note(
-    `  ok  the service is ready at ${options.endpoint}` +
-      `${pid === undefined ? "" : ` (pid ${pid})`}.`
-  );
-
-  // Reuse doctor's own checks rather than a parallel set, so what setup
-  // reports and what `doctor` reports can never drift apart.
-  const checks: Check[] = [
+  env: NodeJS.ProcessEnv,
+  dependencies: SetupCliDependencies,
+  profile: string | undefined
+): readonly Check[] {
+  return Object.freeze([
     checkNodeVersion(),
+    checkServerCommand(dependencies),
     checkDirectoryMode(paths.configDir),
     ...checkEnvFile(paths.serverEnv, REQUIRED_SERVER_ENV_VALUES),
     ...checkProfiles(paths, home, env, dependencies, profile),
-    ...(await checkEndpoint(options.endpoint, paths, dependencies)),
-  ];
-  prompter.note(`\n${renderDoctorText(checks)}`);
-
-  return Object.freeze({
-    started: true,
-    alreadyRunning: false,
-    ready: true,
-    logPath,
-  });
-}
-
-async function isReady(
-  probe: NonNullable<SetupCliDependencies["probe"]>,
-  readyUrl: string
-): Promise<boolean> {
-  try {
-    const response = await probe(readyUrl, {
-      method: "GET",
-      timeoutMs: PROBE_TIMEOUT_MS,
-    });
-    return response.status === 200;
-  } catch {
-    return false;
-  }
-}
-
-async function waitForReady(
-  probe: NonNullable<SetupCliDependencies["probe"]>,
-  readyUrl: string,
-  timeoutMs: number
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (await isReady(probe, readyUrl)) return true;
-    if (Date.now() >= deadline) return false;
-    await new Promise((resolve) => setTimeout(resolve, SERVICE_READY_POLL_MS));
-  }
-}
-
-/**
- * Spawn the packaged server detached, with stdio to a log file.
- *
- * `dist/index.js` sits beside this module, so the server is resolved relative
- * to the running CLI rather than from PATH — a globally linked setup must not
- * silently start a different installation.
- */
-function defaultStartService(
-  env: NodeJS.ProcessEnv,
-  logPath: string
-): { readonly pid: number | undefined } {
-  const entrypoint = join(__dirname, "index.js");
-  const log = openSync(logPath, "a", 0o600);
-  try {
-    chmodSync(logPath, 0o600);
-    const child = spawn(process.execPath, [entrypoint], {
-      env,
-      detached: true,
-      stdio: ["ignore", log, log],
-    });
-    child.unref();
-    return { pid: child.pid };
-  } finally {
-    closeSync(log);
-  }
+  ]);
 }
 
 function existingProfileNames(manager: ProfileManager): readonly string[] {
@@ -1120,7 +915,7 @@ async function registerClientsInteractively(
   const context: RegistrationContext = { commandExists, runCommand, env };
   const configured: string[] = [];
   for (const client of available) {
-    const result = registerClient(client, options.endpoint, options.force, context);
+    const result = registerClient(client, options.force, context);
     if (result.ok) configured.push(client);
     else prompter.note(`  skipped ${client}: ${result.reason}`);
   }
@@ -1128,15 +923,13 @@ async function registerClientsInteractively(
 }
 
 function renderWizardSummary(
-  paths: ResolvedPaths,
-  options: InitOptions,
   profile: string,
   tableAccess: TableAccessPolicyInput,
   registered: readonly string[],
   home: string,
-  service: ServiceStartOutcome
+  checks: readonly Check[]
 ): string {
-  const short = (path: string): string => displayPath(path, home);
+  const failed = checks.filter((check) => !check.ok).length;
   const lines = [
     "",
     "Setup complete.",
@@ -1144,51 +937,25 @@ function renderWizardSummary(
     `Profile   ${profile}`,
     `Reads     ${(tableAccess.readTables ?? []).join(", ") || "(none)"}`,
     `Writes    ${(tableAccess.writeTables ?? []).join(", ") || "(none)"}`,
-    `Endpoint  ${options.endpoint}`,
+    `Transport stdio (each client spawns its own ${SERVER_COMMAND})`,
     `Clients   ${registered.length > 0 ? registered.join(", ") : "(none registered)"}`,
     "",
   ];
 
-  if (service.ready) {
+  if (failed > 0) {
     lines.push(
-      service.alreadyRunning
-        ? "The service was already running and answered its readiness check."
-        : "The service is running and answered its readiness check.",
-      "",
-      `Service log  ${short(service.logPath)}`,
+      `${failed} check${failed === 1 ? "" : "s"} above still need attention; the`,
+      "remedies are printed with them.",
       ""
     );
-
-    if (registered.length > 0) {
-      lines.push(`Start ${registered.join(" or ")} and it will connect.`, "");
-    }
-
+  } else if (registered.length > 0) {
     lines.push(
-      "Re-check everything at any time:",
-      `  servicenow-mcp-setup doctor --profile ${profile}`,
-      ""
-    );
-    if (service.started) {
-      lines.push(
-        "It runs detached and will not survive a reboot. To manage it under",
-        "launchd, systemd or a container, stop it and start it there instead.",
-        ""
-      );
-    }
-  } else {
-    lines.push(
-      service.started
-        ? "The service was started but did not become ready; see the log above."
-        : "The service is not running yet.",
-      "",
-      "Start it:",
-      `  set -a; source ${shellPathLiteral(paths.serverEnv, home)}; set +a; servicenow-mcp`,
-      "",
-      "Then verify it end to end:",
-      `  servicenow-mcp-setup doctor --profile ${profile}`,
+      `Start ${registered.join(" or ")} and it will launch the server itself.`,
+      "There is nothing to keep running between sessions.",
       ""
     );
   }
+
   if (registered.length === 0) {
     lines.push(
       "Configure a client by hand:",
@@ -1196,26 +963,24 @@ function renderWizardSummary(
       ""
     );
   }
-  lines.push(...UNAUTHENTICATED_NOTICE, "");
+
   lines.push(
-    "Every client should hold at most 2 requests in flight; the service admits",
-    "MCP_MAX_CONCURRENT_REQUESTS (default 2) and answers the rest with HTTP 503.",
+    "Re-check everything at any time:",
+    `  servicenow-mcp-setup doctor --profile ${profile}`,
     ""
   );
+  lines.push(...STDIO_BOUNDARY_NOTICE, "");
   return `${lines.join("\n")}\n`;
 }
 
 function renderClientOnlySummary(
-  paths: ResolvedPaths,
-  options: InitOptions,
   registered: readonly string[],
   home: string
 ): string {
+  void home;
   return (
     `\nClients   ${registered.length > 0 ? registered.join(", ") : "(none registered)"}\n` +
-    `Endpoint  ${options.endpoint}\n\n` +
-    `Start the service:\n` +
-    `  set -a; source ${shellPathLiteral(paths.serverEnv, home)}; set +a; servicenow-mcp\n\n` +
+    `Transport stdio (each client spawns its own ${SERVER_COMMAND})\n\n` +
     `Configure any remaining client by hand:\n` +
     `  servicenow-mcp-setup client --client all\n`
   );
@@ -1368,7 +1133,7 @@ async function runInit(
       skippedClients.push(`${client} (no CLI to register with)`);
       continue;
     }
-    const registration = registerClient(client, options.endpoint, options.force, {
+    const registration = registerClient(client, options.force, {
       commandExists,
       runCommand,
       env,
@@ -1384,19 +1149,20 @@ async function runInit(
   const report = {
     status: "configured",
     files: { server_env: paths.serverEnv },
-    endpoint: options.endpoint,
-    authentication: "none",
+    transport: "stdio",
+    server_command: SERVER_COMMAND,
     clients: configuredClients,
     skipped_clients: skippedClients,
-    start_command: `set -a; source ${shellQuote(paths.serverEnv)}; set +a; servicenow-mcp`,
     profile_command:
       "servicenow-mcp-profile create --name dev --instance https://yourinstance.service-now.com --auth-type oauth --client-id <client-id> --source reference --provider env",
     grant_command:
       "servicenow-mcp-setup grant --profile dev --read incident --write incident",
     doctor_command: "servicenow-mcp-setup doctor --profile dev",
     notes: [
-      "The MCP endpoint is unauthenticated: any local process that can reach it has the access these profiles grant. Set MCP_BEARER_TOKEN in the server env file to require a bearer token.",
+      "Each registered client spawns its own server over stdio. Nothing listens on a port, and there is no service to start or keep running.",
+      "Any registered client can read and write every table these profiles grant, as the configured ServiceNow account. The client list and the grants are the boundary.",
       "Generated owner/client IDs are stored in an owner-only env file, not in client config. They label audit records; they are not credentials.",
+      "The spawned server reads that env file itself, so no secret is copied into a client configuration file.",
       "A profile with no tableAccess rules denies every tool call; run the grant command before first use.",
       "Create ServiceNow profiles with servicenow-mcp-profile; protected values are prompted or read from bounded stdin, never argv.",
     ],
@@ -1423,9 +1189,30 @@ interface RegistrationContext {
   readonly env: NodeJS.ProcessEnv;
 }
 
+/**
+ * Resolve the command a client should spawn.
+ *
+ * `servicenow-mcp` on PATH is the normal case and the one worth registering:
+ * it survives a reinstall and reads the same in every client's config. When it
+ * does not resolve — a project-local install, or a global bin directory the
+ * client's own PATH will not have — registering it anyway would produce a
+ * client that fails to launch with nothing to point at. So fall back to this
+ * CLI's own sibling entrypoint, which is unambiguous and always correct.
+ */
+function resolveServerLaunch(
+  commandExists: (command: string) => boolean
+): { readonly command: string; readonly args: readonly string[] } {
+  if (commandExists(SERVER_COMMAND)) {
+    return Object.freeze({ command: SERVER_COMMAND, args: Object.freeze([]) });
+  }
+  return Object.freeze({
+    command: process.execPath,
+    args: Object.freeze([join(__dirname, "index.js")]),
+  });
+}
+
 function registerClient(
   client: ClientTarget,
-  endpoint: string,
   force: boolean,
   context: RegistrationContext
 ): { ok: true } | { ok: false; reason: string } {
@@ -1433,10 +1220,11 @@ function registerClient(
   if (!context.commandExists(binary)) {
     return { ok: false, reason: `${binary} CLI not found` };
   }
+  const launch = resolveServerLaunch(context.commandExists);
   const result =
     client === "codex"
-      ? configureCodex(endpoint, force, context)
-      : configureClaudeCode(endpoint, force, context);
+      ? configureCodex(launch, force, context)
+      : configureClaudeCode(launch, force, context);
   if (result.status === 0) return { ok: true };
   return {
     ok: false,
@@ -1444,8 +1232,9 @@ function registerClient(
   };
 }
 
+/** `codex mcp add <name> -- <command> [args...]` registers a stdio server. */
 function configureCodex(
-  endpoint: string,
+  launch: { readonly command: string; readonly args: readonly string[] },
   force: boolean,
   context: RegistrationContext
 ): CommandResult {
@@ -1461,13 +1250,17 @@ function configureCodex(
   }
   return context.runCommand(
     "codex",
-    ["mcp", "add", MCP_SERVER_NAME, "--url", endpoint],
+    ["mcp", "add", MCP_SERVER_NAME, "--", launch.command, ...launch.args],
     context.env
   );
 }
 
+/**
+ * `claude mcp add <name> -- <command> [args...]` registers a stdio server;
+ * stdio is the default transport, so `--transport` is deliberately omitted.
+ */
 function configureClaudeCode(
-  endpoint: string,
+  launch: { readonly command: string; readonly args: readonly string[] },
   force: boolean,
   context: RegistrationContext
 ): CommandResult {
@@ -1487,7 +1280,7 @@ function configureClaudeCode(
   }
   return context.runCommand(
     "claude",
-    ["mcp", "add", "--transport", "http", "--scope", "user", MCP_SERVER_NAME, endpoint],
+    ["mcp", "add", "--scope", "user", MCP_SERVER_NAME, "--", launch.command, ...launch.args],
     context.env
   );
 }
@@ -1495,9 +1288,7 @@ function configureClaudeCode(
 // ── client ─────────────────────────────────────────────────────────
 
 function runClient(options: ClientOptions, out: (value: string) => void): void {
-  const sections = options.clients.map((client) =>
-    renderClientConfiguration(client, options.endpoint)
-  );
+  const sections = options.clients.map((client) => renderClientConfiguration(client));
   out(`${sections.join("\n")}\n`);
 }
 
@@ -1507,33 +1298,40 @@ interface ResolvedPaths {
   readonly profileConfig: string;
 }
 
-function renderClientConfiguration(client: ClientTarget, endpoint: string): string {
+/**
+ * Every client here speaks stdio natively, so each recipe is the same shape:
+ * a command to spawn. The mcp-remote bridge that HTTP required is gone, and
+ * with it the only reason a client config ever had to hold a bearer token.
+ */
+function renderClientConfiguration(client: ClientTarget): string {
   const heading = `## ${client}\n`;
+  const jsonEntry = (key: "mcpServers" | "servers"): string =>
+    indent(
+      JSON.stringify(
+        { [key]: { [MCP_SERVER_NAME]: { command: SERVER_COMMAND, args: [] } } },
+        null,
+        2
+      )
+    );
   switch (client) {
     case "codex":
       return (
         `${heading}\n` +
-        `  codex mcp add ${MCP_SERVER_NAME} --url ${endpoint}\n\n` +
-        `${AUTHENTICATION_FOOTNOTE}`
+        `  codex mcp add ${MCP_SERVER_NAME} -- ${SERVER_COMMAND}\n\n` +
+        `Equivalent ~/.codex/config.toml entry:\n\n` +
+        `${indent(
+          `[mcp_servers.${MCP_SERVER_NAME}]\ncommand = "${SERVER_COMMAND}"\nargs = []`
+        )}\n\n` +
+        `${CREDENTIAL_FOOTNOTE}`
       );
     case "claude-code":
       return (
         `${heading}\n` +
-        `  claude mcp add --transport http --scope user \\\n` +
-        `    ${MCP_SERVER_NAME} ${endpoint}\n\n` +
+        `  claude mcp add --scope user ${MCP_SERVER_NAME} -- ${SERVER_COMMAND}\n\n` +
+        `stdio is the default, so there is no transport flag to pass.\n\n` +
         `Equivalent .mcp.json entry:\n\n` +
-        `${indent(
-          JSON.stringify(
-            {
-              mcpServers: {
-                [MCP_SERVER_NAME]: { type: "http", url: endpoint },
-              },
-            },
-            null,
-            2
-          )
-        )}\n\n` +
-        `${AUTHENTICATION_FOOTNOTE}`
+        `${jsonEntry("mcpServers")}\n\n` +
+        `${CREDENTIAL_FOOTNOTE}`
       );
     case "claude-desktop":
     case "cursor":
@@ -1545,50 +1343,34 @@ function renderClientConfiguration(client: ClientTarget, endpoint: string): stri
           : client === "cursor"
             ? "~/.cursor/mcp.json (global) or .cursor/mcp.json (per project)"
             : "~/.codeium/windsurf/mcp_config.json";
-      const bridge = JSON.stringify(
-        {
-          mcpServers: {
-            [MCP_SERVER_NAME]: {
-              command: "npx",
-              args: ["-y", "mcp-remote", endpoint, "--transport", "http-only", "--allow-http"],
-            },
-          },
-        },
-        null,
-        2
-      );
-      const native =
-        client === "cursor"
-          ? `\nCursor 1.0 and newer can also address the endpoint directly:\n\n${indent(
-              JSON.stringify(
-                { mcpServers: { [MCP_SERVER_NAME]: { url: endpoint } } },
-                null,
-                2
-              )
-            )}\n`
-          : "";
       return (
         `${heading}\n` +
         `Config file:\n  ${location}\n\n` +
-        `This client speaks stdio, so bridge it with mcp-remote:\n\n` +
-        `${indent(bridge)}\n` +
-        `Drop --allow-http once the endpoint is HTTPS.\n${native}\n` +
-        `${AUTHENTICATION_FOOTNOTE}`
+        `${jsonEntry("mcpServers")}\n\n` +
+        `${CREDENTIAL_FOOTNOTE}`
       );
     }
-    case "vscode": {
-      const config = JSON.stringify(
-        { servers: { [MCP_SERVER_NAME]: { type: "http", url: endpoint } } },
-        null,
-        2
-      );
+    case "vscode":
       return (
         `${heading}\n` +
         `Config file:\n  .vscode/mcp.json (workspace) or the user-level mcp.json\n\n` +
-        `${indent(config)}\n` +
-        `${AUTHENTICATION_FOOTNOTE}`
+        `${indent(
+          JSON.stringify(
+            {
+              servers: {
+                [MCP_SERVER_NAME]: {
+                  type: "stdio",
+                  command: SERVER_COMMAND,
+                  args: [],
+                },
+              },
+            },
+            null,
+            2
+          )
+        )}\n\n` +
+        `${CREDENTIAL_FOOTNOTE}`
       );
-    }
   }
 }
 
@@ -1631,7 +1413,8 @@ function runGrant(
       `--related "<table>=<t1>,<t2>" when a table extends or views another one;\n` +
       `related tables join the allowlist but get no target, so a caller cannot\n` +
       `address them directly.\n` +
-      `Restart the service for the change to take effect.\n`
+      `Restart the MCP client for the change to take effect: it reads the\n` +
+      `profile when it launches the server.\n`
   );
 }
 
@@ -1734,18 +1517,7 @@ async function runDoctor(
   out: (value: string) => void
 ): Promise<void> {
   const paths = resolvePaths(home);
-  const checks: Check[] = [];
-
-  checks.push(checkNodeVersion());
-  checks.push(checkDirectoryMode(paths.configDir));
-  checks.push(...checkEnvFile(paths.serverEnv, REQUIRED_SERVER_ENV_VALUES));
-  checks.push(...checkProfiles(paths, home, env, dependencies, options.profile));
-  checks.push(checkAuthentication(paths));
-
-  if (!options.offline) {
-    checks.push(...(await checkEndpoint(options.endpoint, paths, dependencies)));
-  }
-
+  const checks = runInstallChecks(paths, home, env, dependencies, options.profile);
   const failed = checks.filter((check) => !check.ok);
   if (options.json) {
     out(
@@ -1762,42 +1534,38 @@ async function runDoctor(
 }
 
 /**
- * Report which boundary this install is actually running behind.
+ * Prove the command registered clients spawn can actually be found.
  *
- * Deliberately not a failure in either direction. Running without a bearer is
- * the supported default, so failing on it would train operators to ignore a red
- * line; saying nothing would let an operator finish a clean `doctor` run still
- * believing the port is authenticated. So it always reports, and names what the
- * unauthenticated case does and does not protect.
+ * This is the check a listening service did not need and a spawned one cannot
+ * do without: a client that cannot resolve the command fails at launch with an
+ * error that says nothing about why. It replaces the endpoint probe, and is
+ * strictly more informative, because there is no running process whose absence
+ * could be mistaken for a broken install.
+ *
+ * PATH here is this shell's, which is the best available proxy. A GUI client
+ * launched from the desktop may hold a different one, so the remedy names the
+ * absolute-path registration that removes the question entirely.
  */
-function checkAuthentication(paths: ResolvedPaths): Check {
-  const name = "http authentication";
-  if (serverBearerToken(paths) !== undefined) {
+function checkServerCommand(dependencies: SetupCliDependencies): Check {
+  const name = "server command";
+  const commandExists = dependencies.commandExists ?? defaultCommandExists;
+  if (commandExists(SERVER_COMMAND)) {
     return {
       name,
       ok: true,
-      detail: `${SERVER_BEARER_ENV} is set; the service requires a bearer token`,
+      detail: `${SERVER_COMMAND} resolves on PATH; clients spawn it over stdio`,
     };
   }
+  const fallback = join(__dirname, "index.js");
   return {
     name,
-    ok: true,
-    detail:
-      `${SERVER_BEARER_ENV} is not set; the endpoint is unauthenticated and any ` +
-      `local process that reaches it has the access these profiles grant. ` +
-      `Loopback binding and the Host/Origin allowlists are what remain. ` +
-      `Set ${SERVER_BEARER_ENV} in the server env file to require a bearer token.`,
+    ok: false,
+    detail: `${SERVER_COMMAND} is not on this PATH`,
+    remedy:
+      `Install the package globally (npm i -g @onlyflows/servicenow-mcp), or register ` +
+      `the entrypoint by absolute path instead: claude mcp add --scope user ` +
+      `${MCP_SERVER_NAME} -- ${process.execPath} ${fallback}`,
   };
-}
-
-/** The configured bearer, if the operator has opted back into authentication. */
-function serverBearerToken(paths: ResolvedPaths): string | undefined {
-  if (!existsSync(paths.serverEnv)) return undefined;
-  try {
-    return parseEnvFile(readFileSync(paths.serverEnv, "utf8"))[SERVER_BEARER_ENV];
-  } catch {
-    return undefined;
-  }
 }
 
 function checkNodeVersion(): Check {
@@ -2024,7 +1792,7 @@ function credentialRemedy(
   }
   return (
     `The value is a secret_ref, so the referenced environment variable must be set in ` +
-    `this process and in the service process. Run "servicenow-mcp-profile inspect --name ` +
+    `this process and in the process the client spawns. Run "servicenow-mcp-profile inspect --name ` +
     `${profile}" to confirm the source, then export the variable your operator injects.`
   );
 }
@@ -2071,111 +1839,6 @@ function checkTableAccess(
     ok: true,
     detail: `${readCount} read, ${writeCount} write, ${targets.length} target(s)`,
   };
-}
-
-async function checkEndpoint(
-  endpoint: string,
-  paths: ResolvedPaths,
-  dependencies: SetupCliDependencies
-): Promise<readonly Check[]> {
-  const probe = dependencies.probe ?? defaultProbe;
-  const readyUrl = new URL("/health/ready", endpoint).toString();
-  const checks: Check[] = [];
-
-  let ready: ProbeResponse;
-  try {
-    ready = await probe(readyUrl, { method: "GET", timeoutMs: PROBE_TIMEOUT_MS });
-  } catch (error) {
-    return [
-      {
-        name: "service",
-        ok: false,
-        detail: `${readyUrl}: ${describeError(error)}`,
-        remedy: `Start it: set -a; source ${shellQuote(paths.serverEnv)}; set +a; servicenow-mcp`,
-      },
-    ];
-  }
-  if (ready.status !== 200) {
-    checks.push({
-      name: "service",
-      ok: false,
-      detail: `${readyUrl} returned HTTP ${ready.status}`,
-      remedy:
-        ready.status === 503
-          ? "The runtime is starting or draining. Retry, and check stderr for a startup failure."
-          : "Check the service logs on stderr.",
-    });
-    return checks;
-  }
-  checks.push({ name: "service", ok: true, detail: `${readyUrl} ready` });
-
-  // Sent only when the operator has opted back into authentication. An
-  // unauthenticated service ignores the header either way, so probing without
-  // one is the honest test of what a client will actually experience.
-  const bearer = serverBearerToken(paths);
-
-  let handshake: ProbeResponse;
-  try {
-    handshake = await probe(endpoint, {
-      method: "POST",
-      headers: {
-        accept: "application/json, text/event-stream",
-        ...(bearer === undefined ? {} : { authorization: `Bearer ${bearer}` }),
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-06-18",
-          capabilities: {},
-          clientInfo: { name: "servicenow-mcp-doctor", version: "2" },
-        },
-      }),
-      timeoutMs: PROBE_TIMEOUT_MS,
-    });
-  } catch (error) {
-    checks.push({
-      name: "mcp handshake",
-      ok: false,
-      detail: `${endpoint}: ${describeError(error)}`,
-      remedy: "Confirm the endpoint host and port match MCP_HOST/MCP_PORT in the server env file.",
-    });
-    return checks;
-  }
-
-  checks.push(describeHandshake(endpoint, handshake));
-  return checks;
-}
-
-function describeHandshake(endpoint: string, response: ProbeResponse): Check {
-  if (response.status === 200) {
-    return { name: "mcp handshake", ok: true, detail: `${endpoint} initialized` };
-  }
-  const remedies: Readonly<Record<number, string>> = Object.freeze({
-    401: "The service is running with a bearer token that the server env file does not have, or does not have the one it does. Restart the service from that file.",
-    403: "The request Origin was rejected. Set MCP_ALLOWED_ORIGINS to the exact origin, or call without an Origin header.",
-    421: "The Host authority was rejected. Add it to MCP_ALLOWED_HOSTS exactly, including the port.",
-    429: "Rate limited. Wait for the Retry-After interval, or raise MCP_IDENTITY_RATE_CAPACITY.",
-    503: "All request slots are busy. MCP_MAX_CONCURRENT_REQUESTS defaults to 2 and cannot safely be raised; the client must retry.",
-  });
-  return {
-    name: "mcp handshake",
-    ok: false,
-    detail: `${endpoint} returned HTTP ${response.status}`,
-    remedy: remedies[response.status] ?? "Check the JSON-RPC error body and the service logs on stderr.",
-  };
-}
-
-async function defaultProbe(url: string, init: ProbeRequest): Promise<ProbeResponse> {
-  const response = await fetch(url, {
-    method: init.method,
-    ...(init.headers ? { headers: { ...init.headers } } : {}),
-    ...(init.body === undefined ? {} : { body: init.body }),
-    signal: AbortSignal.timeout(init.timeoutMs),
-  });
-  return Object.freeze({ status: response.status, body: await response.text() });
 }
 
 // ── argument parsing ───────────────────────────────────────────────
@@ -2243,10 +1906,9 @@ function parseFlags(args: readonly string[], spec: FlagSpec, usage: string): Par
 }
 
 /**
- * The wizard is what a bare, interactive invocation does. Any other flag keeps
- * the established non-interactive behavior byte for byte, so every documented
- * command and every CI caller is unaffected. `--endpoint` is allowed through
- * because it only tells the wizard which endpoint to advertise.
+ * The wizard is what a bare, interactive invocation does. Any flag keeps the
+ * established non-interactive behavior byte for byte, so every documented
+ * command and every CI caller is unaffected.
  */
 function shouldRunWizard(
   options: InitOptions,
@@ -2256,11 +1918,7 @@ function shouldRunWizard(
   if (options.nonInteractive) return false;
   if (dependencies.prompter !== undefined) return dependencies.interactive !== false;
   if (dependencies.interactive === false) return false;
-  const onlyEndpoint = args.every(
-    (arg, index) =>
-      arg === "--endpoint" || (index > 0 && args[index - 1] === "--endpoint")
-  );
-  if (!onlyEndpoint) return false;
+  if (args.length > 0) return false;
   return dependencies.interactive ?? (Boolean(process.stdin.isTTY) && Boolean(process.stdout.isTTY));
 }
 
@@ -2274,24 +1932,18 @@ function parseInitArguments(args: readonly string[]): InitOptions {
         "--force",
         "--json",
         "--rotate-encryption-key",
-        "--allow-insecure-http",
         "--non-interactive",
       ]),
-      value: new Set(["--endpoint", "--clients"]),
+      value: new Set(["--clients"]),
     },
     usage
   );
-  const endpoint = parsed.values.get("--endpoint") ?? DEFAULT_ENDPOINT;
-  const allowInsecureHttp = parsed.flags.has("--allow-insecure-http");
-  validateEndpoint(endpoint, allowInsecureHttp);
   return Object.freeze({
     dryRun: parsed.flags.has("--dry-run"),
     force: parsed.flags.has("--force"),
     rotateEncryptionKey: parsed.flags.has("--rotate-encryption-key"),
-    allowInsecureHttp,
     json: parsed.flags.has("--json"),
     nonInteractive: parsed.flags.has("--non-interactive"),
-    endpoint,
     clients: parseClients(parsed.values.get("--clients") ?? "auto"),
   });
 }
@@ -2300,13 +1952,10 @@ function parseClientArguments(args: readonly string[]): ClientOptions {
   const usage = renderClientHelp();
   const parsed = parseFlags(
     args,
-    { boolean: new Set(["--allow-insecure-http"]), value: new Set(["--endpoint", "--client"]) },
+    { boolean: new Set([]), value: new Set(["--client"]) },
     usage
   );
-  const endpoint = parsed.values.get("--endpoint") ?? DEFAULT_ENDPOINT;
-  validateEndpoint(endpoint, parsed.flags.has("--allow-insecure-http"));
   return Object.freeze({
-    endpoint,
     clients: parseClients(parsed.values.get("--client") ?? "all"),
   });
 }
@@ -2348,17 +1997,13 @@ function parseDoctorArguments(args: readonly string[]): DoctorOptions {
   const parsed = parseFlags(
     args,
     {
-      boolean: new Set(["--offline", "--json", "--allow-insecure-http"]),
-      value: new Set(["--profile", "--endpoint"]),
+      boolean: new Set(["--json"]),
+      value: new Set(["--profile"]),
     },
     usage
   );
-  const endpoint = parsed.values.get("--endpoint") ?? DEFAULT_ENDPOINT;
-  validateEndpoint(endpoint, parsed.flags.has("--allow-insecure-http"));
   return Object.freeze({
     ...(parsed.values.has("--profile") ? { profile: parsed.values.get("--profile") } : {}),
-    endpoint,
-    offline: parsed.flags.has("--offline"),
     json: parsed.flags.has("--json"),
   });
 }
@@ -2433,32 +2078,6 @@ function parseRelated(entries: readonly string[]): ReadonlyMap<string, readonly 
     related.set(table, Object.freeze([...(related.get(table) ?? []), ...tables]));
   }
   return related;
-}
-
-function validateEndpoint(endpoint: string, allowInsecureHttp: boolean): void {
-  let url: URL;
-  try {
-    url = new URL(endpoint);
-  } catch {
-    throw new Error(
-      `"${endpoint}" is not an absolute URL. Use the full endpoint, for example ${DEFAULT_ENDPOINT}.`
-    );
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error(`"${endpoint}" must use http:// or https://.`);
-  }
-  if (url.username || url.password || url.search || url.hash) {
-    throw new Error(`"${endpoint}" must not contain credentials, a query string, or a fragment.`);
-  }
-  if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname) && !allowInsecureHttp) {
-    throw new Error(
-      `"${endpoint}" would carry MCP traffic — and any bearer token — in cleartext to ` +
-        `${url.hostname}. The service is also unauthenticated unless MCP_BEARER_TOKEN is ` +
-        "set, so taking it off loopback exposes it to the network. Use https://, keep the " +
-        "endpoint on loopback, or pass --allow-insecure-http when a trusted proxy " +
-        "terminates TLS in front of it."
-    );
-  }
 }
 
 // ── file handling ──────────────────────────────────────────────────
@@ -2538,7 +2157,7 @@ function loadOrCreateBootstrapValues(
     );
   }
 
-  // --force regenerates the bearer and identifiers but never the encryption key.
+  // --force regenerates the owner/client identifiers but never the encryption key.
   if (options.force) {
     return Object.freeze({
       ...generated,
@@ -2551,20 +2170,17 @@ function loadOrCreateBootstrapValues(
 }
 
 /**
- * No `MCP_BEARER_TOKEN`: HTTP authentication is opt-in, and generating a token
- * setup does not wire into any client would only produce an install that
- * answers 401. An operator who wants one adds it to `server.env` by hand.
- *
  * The owner/client identifiers are not secrets. They label every audit record,
  * so they are generated per install to keep records from two installs
  * distinguishable.
+ *
+ * No listen address: nothing listens. A client spawns the server on demand and
+ * the pipe between them is the whole transport.
  */
 function generateBootstrapValues(): Readonly<Record<string, string>> {
   return Object.freeze({
     MCP_OWNER_ID: `owner-${randomToken(12)}`,
     MCP_CLIENT_ID: `client-${randomToken(12)}`,
-    MCP_HOST: "127.0.0.1",
-    MCP_PORT: "3000",
     [ENCRYPTION_KEY_ENV]: randomBytes(32).toString("base64url"),
   });
 }
@@ -2578,7 +2194,7 @@ function writeSecureEnvFile(path: string, values: Readonly<Record<string, string
 
 /**
  * `mode` on writeFileSync applies only when the file is created, so an existing
- * world-readable file would keep its mode and then receive a fresh bearer.
+ * world-readable file would keep its mode and then receive a fresh key.
  * chmod unconditionally after the write.
  */
 function writeSecureFile(path: string, content: string): void {
@@ -2671,7 +2287,8 @@ function renderDryRunReport(paths: ResolvedPaths, options: InitOptions): unknown
   return {
     status: "dry-run",
     would_write: [paths.serverEnv],
-    endpoint: options.endpoint,
+    transport: "stdio",
+    server_command: SERVER_COMMAND,
     clients: options.clients,
   };
 }
@@ -2682,7 +2299,7 @@ function renderDryRunText(paths: ResolvedPaths, home: string, options: InitOptio
     `Dry run: nothing was written.\n\n` +
     `Would write\n` +
     `  ${short(paths.serverEnv)}\n\n` +
-    `Endpoint  ${options.endpoint}\n` +
+    `Transport stdio (each client spawns its own ${SERVER_COMMAND})\n` +
     `Clients   ${options.clients.length > 0 ? options.clients.join(", ") : "(none)"}\n`
   );
 }
@@ -2701,9 +2318,10 @@ function renderInitText(
     "",
     "Wrote (owner-only, mode 0600, directory 0700)",
     `  ${short(paths.serverEnv)}`,
-    "      owner/client IDs, listen address, profile encryption key",
+    "      owner/client IDs, profile encryption key",
+    "      The spawned server reads this file itself; no client holds a secret.",
     "",
-    `Endpoint  ${options.endpoint}`,
+    `Transport stdio (each client spawns its own ${SERVER_COMMAND})`,
     "",
     "Clients",
   ];
@@ -2721,11 +2339,10 @@ function renderInitText(
     "  2. Grant least-privilege table access. A profile with no rules denies every call:",
     "       servicenow-mcp-setup grant --profile dev --read incident,problem --write incident",
     "",
-    "  3. Start the service:",
-    `       set -a; source ${shellQuote(paths.serverEnv)}; set +a; servicenow-mcp`,
-    "",
-    "  4. Verify end to end:",
+    "  3. Verify the install:",
     "       servicenow-mcp-setup doctor --profile dev",
+    "",
+    "     Then start a registered client; it launches the server itself.",
     ""
   );
   if (manual.length > 0) {
@@ -2735,13 +2352,8 @@ function renderInitText(
       ""
     );
   }
-  lines.push(...UNAUTHENTICATED_NOTICE, "");
-  lines.push(
-    "Every client should hold at most 2 requests in flight. The service admits",
-    "MCP_MAX_CONCURRENT_REQUESTS (default 2) and answers the rest with HTTP 503;",
-    "there is no queue. See docs/CLIENT-SETUP.md.",
-    ""
-  );
+  lines.push(...STDIO_BOUNDARY_NOTICE, "");
+  lines.push("See docs/CLIENT-SETUP.md.", "");
   return `${lines.join("\n")}\n`;
 }
 
@@ -2791,11 +2403,9 @@ function renderInitHelp(): string {
     "registers clients \u2014 the established non-interactive behavior.",
     "",
     "Options:",
-    "  --endpoint URL            MCP endpoint to advertise (default http://127.0.0.1:3000/mcp)",
     `  --clients LIST            auto | all | none | ${ALL_CLIENTS.join(",")}`,
     "  --force                   Regenerate the owner/client identifiers (keeps the encryption key)",
     "  --rotate-encryption-key   Also regenerate SN_PROFILE_ENCRYPTION_KEY; refused if profiles exist",
-    "  --allow-insecure-http     Permit a non-loopback http:// endpoint behind a trusted proxy",
     "  --dry-run                 Report what would be written and exit",
     "  --json                    Machine-readable output",
     "  --non-interactive         Skip the guided wizard even on a terminal",
@@ -2807,13 +2417,14 @@ function renderInitHelp(): string {
 
 function renderClientHelp(): string {
   return [
-    "Usage: servicenow-mcp-setup client [--client LIST] [--endpoint URL]",
+    "Usage: servicenow-mcp-setup client [--client LIST]",
     "",
     "Prints copy-pasteable MCP client configuration. No file is written.",
+    "Every client is configured as a stdio server: it spawns servicenow-mcp",
+    "itself and speaks JSON-RPC over that process's stdin/stdout.",
     "",
     "Options:",
     `  --client LIST     all (default) | ${ALL_CLIENTS.join(",")}`,
-    "  --endpoint URL    MCP endpoint (default http://127.0.0.1:3000/mcp)",
   ].join("\n");
 }
 
@@ -2847,16 +2458,15 @@ function renderGrantHelp(): string {
 
 function renderDoctorHelp(): string {
   return [
-    "Usage: servicenow-mcp-setup doctor [--profile NAME] [--endpoint URL] [--offline]",
+    "Usage: servicenow-mcp-setup doctor [--profile NAME]",
     "",
-    "Checks Node version, config file ownership and modes, profile completeness,",
-    "credential resolution, table access, and the live MCP endpoint. Exits non-zero",
-    "when any check fails. Never prints a secret value.",
+    "Checks Node version, that the servicenow-mcp command clients spawn resolves",
+    "on PATH, config file ownership and modes, profile completeness, credential",
+    "resolution, and table access. Exits non-zero when any check fails. Never",
+    "prints a secret value, and never touches the network.",
     "",
     "Options:",
     "  --profile NAME    Check only this profile (default: every configured profile)",
-    "  --endpoint URL    MCP endpoint to probe (default http://127.0.0.1:3000/mcp)",
-    "  --offline         Skip the network probes",
     "  --json            Machine-readable output",
   ].join("\n");
 }

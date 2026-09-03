@@ -9,9 +9,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 export const INSPECTOR_VERSION = "2.0.0";
 export const INSPECTOR_NODE_MINIMUM = Object.freeze([22, 19, 0]);
 
+/** The built entrypoint in this checkout, never whatever is on PATH. */
+export const SERVER_ENTRYPOINT = fileURLToPath(
+  new URL("../dist/index.js", import.meta.url)
+);
+
 export function resolveInspectorOptions(environment) {
   const profile = environment.MCP_PROFILE;
-  const endpointValue = environment.MCP_URL;
   if (
     typeof profile !== "string" ||
     profile.length === 0 ||
@@ -20,11 +24,9 @@ export function resolveInspectorOptions(environment) {
   ) {
     throw new Error("MCP_PROFILE must explicitly name one configured profile");
   }
-  if (typeof endpointValue !== "string" || endpointValue.length === 0) {
-    throw new Error("MCP_URL must explicitly identify the protected /mcp endpoint");
-  }
   return Object.freeze({
-    endpoint: validatedMcpEndpoint(endpointValue),
+    command: process.execPath,
+    args: Object.freeze([SERVER_ENTRYPOINT]),
     profile,
   });
 }
@@ -45,6 +47,14 @@ export function assertInspectorNodeVersion(version = process.versions.node) {
   }
 }
 
+/**
+ * Hand the Inspector an environment with nothing sensitive in it.
+ *
+ * Under stdio the Inspector spawns the server, which therefore inherits this
+ * scrubbed environment. That is safe rather than broken: the server reads its
+ * own owner-only `server.env` at startup, so the scrub removes secrets from a
+ * UI process without removing the server's ability to resolve a credential.
+ */
 export function inspectorLaunch(environment) {
   const childEnvironment = { ...environment };
   for (const name of Object.keys(childEnvironment)) {
@@ -83,9 +93,13 @@ export async function launchInspector(options, environment = process.env) {
       "Pinned Inspector is not installed; run npm ci --prefix tools/inspector --engine-strict"
     );
   }
-  console.log("Starting the authenticated local-only MCP Inspector UI.");
-  console.log(`Select Streamable HTTP and enter endpoint ${options.endpoint.href}`);
-  console.log("Enter the MCP bearer in the local Inspector UI from the approved secret store.");
+  console.log("Starting the local-only MCP Inspector UI.");
+  console.log("Select STDIO as the transport, then enter:");
+  console.log(`  Command   ${options.command}`);
+  console.log(`  Arguments ${options.args.join(" ")}`);
+  console.log(
+    "The Inspector spawns that server itself; there is no endpoint and no bearer to enter."
+  );
   console.log(
     `Invoke tools only with explicit profile ${JSON.stringify(options.profile)}; first verify tools/list, missing-profile rejection, and sn_profile.`
   );
@@ -106,31 +120,6 @@ export async function launchInspector(options, environment = process.env) {
       );
     });
   });
-}
-
-function validatedMcpEndpoint(value) {
-  let endpoint;
-  try {
-    endpoint = new URL(value);
-  } catch {
-    throw new Error("MCP_URL is invalid");
-  }
-  if (
-    endpoint.username ||
-    endpoint.password ||
-    endpoint.search ||
-    endpoint.hash ||
-    endpoint.pathname !== "/mcp"
-  ) {
-    throw new Error("MCP_URL must be an exact credential-free /mcp URL");
-  }
-  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(
-    endpoint.hostname
-  );
-  if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && loopback)) {
-    throw new Error("MCP_URL must use HTTPS unless it is loopback-only");
-  }
-  return endpoint;
 }
 
 function isMainModule() {

@@ -1,8 +1,12 @@
 export const INSPECTOR_VERSION: "2.0.0";
 export const INSPECTOR_NODE_MINIMUM: readonly [22, 19, 0];
 
+export const SERVER_ENTRYPOINT: string;
+
 export interface InspectorOptions {
-  readonly endpoint: URL;
+  /** The stdio server command an operator enters in the Inspector UI. */
+  readonly command: string;
+  readonly args: readonly string[];
   readonly profile: string;
 }
 

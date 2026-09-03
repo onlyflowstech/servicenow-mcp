@@ -1,6 +1,8 @@
+export const SERVER_ENTRYPOINT: string;
+
 export interface SmokeOptions {
-  readonly endpoint: URL;
-  readonly token: string;
+  /** Absolute path to the built stdio entrypoint this run spawns. */
+  readonly entrypoint: string;
   readonly profile: string;
   readonly writeEnabled: boolean;
   readonly timeoutMs: number;

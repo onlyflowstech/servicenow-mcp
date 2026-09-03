@@ -21,8 +21,6 @@ import { createToolError } from "../src/tool-error.js";
 import {
   classifyVerificationFailure,
   runSetupCli,
-  type ProbeRequest,
-  type ProbeResponse,
   type SetupCliDependencies,
   type WizardPrompter,
 } from "../src/setup.js";
@@ -79,7 +77,7 @@ describe("setup init", () => {
 
     await runSetupCli({
       home,
-      argv: ["setup", "--endpoint", "http://127.0.0.1:4444/mcp", "--json"],
+      argv: ["setup", "--json"],
       env: { HOME: home },
       writeStdout: (value) => io.out.push(value),
       writeStderr: (value) => io.err.push(value),
@@ -114,24 +112,46 @@ describe("setup init", () => {
       ["claude", "mcp", "add"],
     ]);
 
+    // Both clients are registered as stdio servers: a command to spawn after
+    // "--", and no URL anywhere.
+    const codexAdd = calls[1].args;
     const claudeAdd = calls[3].args;
-    expect(claudeAdd).toContain("--transport");
-    expect(claudeAdd).toContain("http");
-    expect(claudeAdd).toContain("http://127.0.0.1:4444/mcp");
-    // Neither client is handed an Authorization header or a token variable to
-    // read one from; there is nothing to send.
-    expect(claudeAdd).not.toContain("--header");
-    expect(calls[1].args).not.toContain("--bearer-token-env-var");
+    expect(codexAdd).toEqual([
+      "mcp",
+      "add",
+      "servicenow-mcp",
+      "--",
+      "servicenow-mcp",
+    ]);
+    expect(claudeAdd).toEqual([
+      "mcp",
+      "add",
+      "--scope",
+      "user",
+      "servicenow-mcp",
+      "--",
+      "servicenow-mcp",
+    ]);
+    // stdio is each CLI's default transport, so naming one would be noise.
+    expect(claudeAdd).not.toContain("--transport");
+    expect(codexAdd).not.toContain("--url");
+    // Neither client is handed a credential, a header, or a variable to read
+    // one from; the spawned server resolves its own.
     for (const call of calls) {
-      expect(call.args.join(" ")).not.toMatch(/Authorization|BEARER_TOKEN/iu);
+      expect(call.args.join(" ")).not.toMatch(/Authorization|BEARER_TOKEN|http:\/\//iu);
+      expect(call.args).not.toContain("--header");
+      expect(call.args).not.toContain("--bearer-token-env-var");
+      expect(call.args).not.toContain("--env");
+      expect(call.args).not.toContain("-e");
     }
 
     expect(JSON.parse(io.out.join(""))).toMatchObject({
       status: "configured",
-      endpoint: "http://127.0.0.1:4444/mcp",
-      authentication: "none",
+      transport: "stdio",
+      server_command: "servicenow-mcp",
       clients: ["codex", "claude-code"],
     });
+    expect(JSON.stringify(JSON.parse(io.out.join("")))).not.toContain("endpoint");
     expect(io.err.join("")).toBe("");
   });
 
@@ -151,13 +171,16 @@ describe("setup init", () => {
     expect(text).toContain("servicenow-mcp-profile create");
     expect(text).toContain("servicenow-mcp-setup grant");
     expect(text).toContain("servicenow-mcp-setup doctor");
-    expect(text).toContain("MCP_MAX_CONCURRENT_REQUESTS");
     // No secret material in human output. The encryption key is now the only
     // secret in server.env, so it is what this has to prove.
     expect(text).not.toContain(readEnv(serverEnvPath(home)).SN_PROFILE_ENCRYPTION_KEY);
-    // The operator is told, in the default output, what the endpoint is not.
-    expect(text).toContain("UNAUTHENTICATED");
-    expect(text).toContain("MCP_BEARER_TOKEN");
+    // The operator is told, in the default output, what the boundary is: the
+    // client list and the grants, not a port and not a bearer.
+    expect(text).toContain("Transport stdio");
+    expect(text).toContain("The server runs as you.");
+    expect(text).toContain("any client registered");
+    // Nothing suggests a listener, a start command, or a token.
+    expect(text).not.toMatch(/UNAUTHENTICATED|MCP_BEARER_TOKEN|endpoint|Start the service/iu);
   });
 
   it("restores 0600 on a pre-existing world-readable env file", async () => {
@@ -234,27 +257,32 @@ describe("setup init", () => {
     ).rejects.toThrow(/no readable SN_PROFILE_ENCRYPTION_KEY/u);
   });
 
-  it("rejects a cleartext http endpoint that is not loopback", async () => {
+  /**
+   * The 2.0 endpoint flags are refused rather than silently ignored.
+   *
+   * An operator or script carrying them forward is configuring a listener that
+   * no longer exists; failing on the flag says so, where accepting it would
+   * produce an install that looks configured and is not.
+   */
+  it("refuses the endpoint options a listening service needed", async () => {
     const home = newHome("sn-mcp-setup-http-");
-    await expect(
-      runSetupCli({
-        home,
-        argv: ["--endpoint", "http://mcp.internal/mcp"],
-        env: { HOME: home },
-        writeStdout: () => undefined,
-        writeStderr: () => undefined,
-      })
-    ).rejects.toThrow(/cleartext/u);
-
-    await expect(
-      runSetupCli({
-        home,
-        argv: ["--endpoint", "http://mcp.internal/mcp", "--allow-insecure-http", "--dry-run"],
-        env: { HOME: home },
-        writeStdout: () => undefined,
-        writeStderr: () => undefined,
-      })
-    ).resolves.toBeUndefined();
+    for (const argv of [
+      ["--endpoint", "http://127.0.0.1:3000/mcp"],
+      ["--endpoint", "http://mcp.internal/mcp", "--allow-insecure-http"],
+      ["client", "--endpoint", "http://127.0.0.1:3000/mcp"],
+      ["doctor", "--endpoint", "http://127.0.0.1:3000/mcp"],
+      ["doctor", "--offline"],
+    ]) {
+      await expect(
+        runSetupCli({
+          home,
+          argv,
+          env: { HOME: home },
+          writeStdout: () => undefined,
+          writeStderr: () => undefined,
+        })
+      ).rejects.toThrow(/Unknown option --(?:endpoint|allow-insecure-http|offline)/u);
+    }
   });
 
   it("names the offending option in an unknown-option error", async () => {
@@ -316,17 +344,21 @@ describe("setup client", () => {
     ]) {
       expect(text).toContain(`## ${client}`);
     }
-    expect(text).toContain("claude mcp add --transport http --scope user");
-    expect(text).toContain("mcp-remote");
+    // The two CLIs get their exact stdio invocation.
+    expect(text).toContain("claude mcp add --scope user servicenow-mcp -- servicenow-mcp");
+    expect(text).toContain("codex mcp add servicenow-mcp -- servicenow-mcp");
+    // The mcp-remote bridge existed only to reach an HTTP endpoint from a
+    // stdio-only client. Every client speaks stdio directly now.
+    expect(text).not.toContain("mcp-remote");
+    expect(text).not.toContain("--transport");
+    expect(text).not.toMatch(/https?:\/\//u);
 
-    // Every recipe closes with the same note on how to turn authentication
-    // back on. That note is the only place any of them may mention a
-    // credential; the recipes themselves configure none.
+    // Every recipe closes with the same note saying no credential is involved.
+    // That note is the only place any of them may mention one.
     const FOOTNOTE =
-      "Authentication is off by default, so nothing above sends a credential.\n" +
-      "If you set MCP_BEARER_TOKEN in server.env, every client must also send\n" +
-      '"Authorization: Bearer <that value>" — through the client\'s own header\n' +
-      "configuration, or for mcp-remote through --header-file.\n";
+      "Nothing above carries a ServiceNow credential. The spawned server reads the\n" +
+      "profile and its encryption key from ~/.servicenow-mcp, which is owner-only,\n" +
+      "so no secret reaches a client configuration file.\n";
     expect(text.split(FOOTNOTE).length - 1).toBe(6);
     const recipes = text.split(FOOTNOTE).join("");
     expect(recipes).not.toMatch(/Authorization/u);
@@ -334,6 +366,10 @@ describe("setup client", () => {
     expect(recipes).not.toContain(headerFilePath(home));
     expect(recipes).not.toContain("servicenow-mcp-bearer");
     expect(existsSync(serverEnvPath(home))).toBe(false);
+
+    // Every JSON/TOML recipe names the same command a client will spawn.
+    expect(text.split('"command": "servicenow-mcp"').length - 1).toBe(5);
+    expect(text).toContain('command = "servicenow-mcp"');
   });
 
   it("rejects an unknown client by name", async () => {
@@ -559,9 +595,9 @@ describe("setup doctor", () => {
 
   async function doctor(
     argv: readonly string[],
-    probe?: (url: string, init: ProbeRequest) => Promise<ProbeResponse>,
     env: NodeJS.ProcessEnv = { HOME: home },
-    override?: ProfileManager
+    override?: ProfileManager,
+    commandExists: (command: string) => boolean = () => true
   ): Promise<{ status: string; checks: Array<{ name: string; ok: boolean; detail: string; remedy?: string }> }> {
     const io = capture();
     await runSetupCli({
@@ -569,7 +605,7 @@ describe("setup doctor", () => {
       argv,
       env,
       profileManager: override ?? manager,
-      ...(probe ? { probe } : {}),
+      commandExists,
       writeStdout: (value) => io.out.push(value),
     });
     return JSON.parse(io.out.join(""));
@@ -584,7 +620,7 @@ describe("setup doctor", () => {
     });
     vi.stubEnv("SN_PASSWORD", "not-a-real-value");
 
-    const report = await doctor(["doctor", "--profile", "dev", "--offline", "--json"]);
+    const report = await doctor(["doctor", "--profile", "dev", "--json"]);
     const access = report.checks.find((check) => check.name === "profile dev: table access");
     expect(access?.ok).toBe(false);
     expect(access?.detail).toContain("denied");
@@ -612,8 +648,7 @@ describe("setup doctor", () => {
     vi.stubEnv("SN_PASSWORD", "not-a-real-value");
 
     const report = await doctor(
-      ["doctor", "--profile", "bad", "--offline", "--json"],
-      undefined,
+      ["doctor", "--profile", "bad", "--json"],
       { HOME: home },
       new ProfileManager({ configFilePath: profileConfigPath(home) })
     );
@@ -631,7 +666,7 @@ describe("setup doctor", () => {
       credential: "env:SN_MISSING_SECRET",
     });
 
-    const report = await doctor(["doctor", "--profile", "dev", "--offline", "--json"]);
+    const report = await doctor(["doctor", "--profile", "dev", "--json"]);
     const credential = report.checks.find((check) => check.name === "profile dev: credential");
     expect(credential?.ok).toBe(false);
     expect(credential?.detail).toContain("secret_ref source");
@@ -661,7 +696,7 @@ describe("setup doctor", () => {
     });
     vi.stubEnv("SN_PASSWORD", "not-a-real-value");
 
-    const report = await doctor(["doctor", "--offline", "--json"], undefined, {
+    const report = await doctor(["doctor", "--json"], {
       HOME: home,
       SN_ALLOWED_READ_TABLES: "incident",
     });
@@ -670,7 +705,15 @@ describe("setup doctor", () => {
     expect(stale?.remedy).toContain("apply only when no profile file exists");
   });
 
-  it("explains a 401 handshake as a bearer the env file cannot reproduce", async () => {
+  /**
+   * The check that replaced the endpoint probe.
+   *
+   * A listening service could be probed; a spawned one cannot be, because it
+   * does not exist until a client starts it. What can be checked, and what
+   * actually breaks an install, is whether the command clients are told to
+   * spawn resolves at all.
+   */
+  it("passes when the command clients spawn resolves on PATH", async () => {
     await runSetupCli({
       home,
       argv: ["--clients", "none", "--json"],
@@ -679,18 +722,37 @@ describe("setup doctor", () => {
       writeStderr: () => undefined,
     });
 
-    const report = await doctor(["doctor", "--json"], async (url) =>
-      url.endsWith("/health/ready")
-        ? { status: 200, body: "" }
-        : { status: 401, body: "" }
+    const report = await doctor(
+      ["doctor", "--json"],
+      { HOME: home },
+      undefined,
+      (command) => command === "servicenow-mcp"
     );
-    const handshake = report.checks.find((check) => check.name === "mcp handshake");
-    expect(handshake?.ok).toBe(false);
-    expect(handshake?.remedy).toContain("the server env file does not have");
+    const command = report.checks.find((check) => check.name === "server command");
+    expect(command?.ok).toBe(true);
+    expect(command?.detail).toContain("stdio");
+  });
+
+  it("fails with an absolute-path remedy when the command is not on PATH", async () => {
+    await runSetupCli({
+      home,
+      argv: ["--clients", "none", "--json"],
+      env: { HOME: home },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+
+    const report = await doctor(["doctor", "--json"], { HOME: home }, undefined, () => false);
+    const command = report.checks.find((check) => check.name === "server command");
+    expect(command?.ok).toBe(false);
+    expect(command?.detail).toContain("not on this PATH");
+    // The remedy is a registration that cannot depend on the client's PATH.
+    expect(command?.remedy).toContain("npm i -g @onlyflows/servicenow-mcp");
+    expect(command?.remedy).toContain("index.js");
     expect(report.status).toBe("problems");
   });
 
-  it("explains a 503 handshake as the concurrency cap", async () => {
+  it("reports no service, endpoint, or bearer check at all", async () => {
     await runSetupCli({
       home,
       argv: ["--clients", "none", "--json"],
@@ -699,31 +761,18 @@ describe("setup doctor", () => {
       writeStderr: () => undefined,
     });
 
-    const report = await doctor(["doctor", "--json"], async (url) =>
-      url.endsWith("/health/ready")
-        ? { status: 200, body: "" }
-        : { status: 503, body: "" }
+    const report = await doctor(["doctor", "--json"]);
+    const names = report.checks.map((check) => check.name);
+    // These described a listener. Keeping them would report a failure for a
+    // process that is not supposed to be running.
+    expect(names).not.toContain("service");
+    expect(names).not.toContain("mcp handshake");
+    expect(names).not.toContain("http authentication");
+    expect(JSON.stringify(report)).not.toMatch(/MCP_BEARER_TOKEN|health\/ready|127\.0\.0\.1/u);
+    // What remains is everything that can actually be checked locally.
+    expect(names).toEqual(
+      expect.arrayContaining(["node", "server command", "config directory", "server env"])
     );
-    expect(
-      report.checks.find((check) => check.name === "mcp handshake")?.remedy
-    ).toContain("MCP_MAX_CONCURRENT_REQUESTS");
-  });
-
-  it("tells the operator to start the service when nothing is listening", async () => {
-    await runSetupCli({
-      home,
-      argv: ["--clients", "none", "--json"],
-      env: { HOME: home },
-      writeStdout: () => undefined,
-      writeStderr: () => undefined,
-    });
-
-    const report = await doctor(["doctor", "--json"], async () => {
-      throw new Error("connect ECONNREFUSED 127.0.0.1:3000");
-    });
-    const service = report.checks.find((check) => check.name === "service");
-    expect(service?.ok).toBe(false);
-    expect(service?.remedy).toContain("servicenow-mcp");
   });
 });
 
@@ -799,14 +848,6 @@ const ACCEPTS: SetupCliDependencies["verifyCredential"] = async (config) => ({
   detail: `${config.instance} accepted the credential.`,
 });
 
-/** Answer for the wizard's closing "start the service?" confirmation. */
-const DECLINE_START = "n";
-
-/** Nothing is listening, so the wizard offers to start rather than reusing. */
-const NOT_LISTENING: SetupCliDependencies["probe"] = async () => {
-  throw new Error("connect ECONNREFUSED 127.0.0.1:3000");
-};
-
 describe("setup wizard", () => {
   let home: string;
   let manager: ProfileManager;
@@ -822,12 +863,11 @@ describe("setup wizard", () => {
     overrides: Partial<SetupCliDependencies> = {},
     secrets: readonly string[] = ["hunter2"]
   ): Promise<{ prompter: ScriptedPrompter; out: string }> {
-    // The wizard ends by offering to start the service. These cases are about
-    // everything before that, so decline it, and report the endpoint as not
-    // ready. Both are explicit: without the injected probe the wizard would
-    // reach the real 127.0.0.1:3000, and the suite would pass or fail
-    // depending on whether a server happened to be running on this machine.
-    const prompter = scriptedPrompter([...script, DECLINE_START], secrets);
+    // The wizard's last step is a local check pass with nothing to confirm:
+    // a client spawns the server, so there is no service to offer to start
+    // and no endpoint whose reachability could make this suite depend on
+    // whether something happened to be listening on this machine.
+    const prompter = scriptedPrompter(script, secrets);
     const io = capture();
     await runSetupCli({
       home,
@@ -840,7 +880,6 @@ describe("setup wizard", () => {
       verifyCredential: ACCEPTS,
       resolveParentTable: async () => undefined,
       commandExists: () => false,
-      probe: NOT_LISTENING,
       writeStdout: (value) => io.out.push(value),
       writeStderr: (value) => io.err.push(value),
       ...overrides,
@@ -903,15 +942,21 @@ describe("setup wizard", () => {
     expect(existsSync(headerFilePath(home))).toBe(false);
   });
 
-  it("tells the operator the endpoint is unauthenticated", async () => {
+  it("names the boundary a spawned server actually has", async () => {
     const { out } = await runWizard(HAPPY);
-    expect(out).toContain("UNAUTHENTICATED");
-    // Not softened into "simplified": it names who is inside the boundary and
-    // what is left outside it.
-    expect(out).toContain("Any process running as you on this");
-    expect(out).toContain("127.0.0.1");
-    expect(out).toContain("Host/Origin");
-    expect(out).toContain("MCP_BEARER_TOKEN");
+    // Not softened into "it's local, so it's fine": it names who is inside the
+    // boundary, which under stdio is every client that can spawn the server.
+    expect(out).toContain("The server runs as you.");
+    expect(out).toContain("any client registered");
+    expect(out).toContain("Keep the grants narrow");
+    expect(out).toContain("claude mcp remove servicenow-mcp");
+    // And it says where the credential is not: in any client's config.
+    expect(out).toContain("No ServiceNow credential is copied into a client");
+
+    // Nothing describes a listener, a port, or a token the operator must set.
+    expect(out).not.toMatch(
+      /UNAUTHENTICATED|MCP_BEARER_TOKEN|Host\/Origin|127\.0\.0\.1|Endpoint/u
+    );
   });
 
   it("re-prompts on a bad instance instead of exiting", async () => {
@@ -1326,7 +1371,7 @@ describe("setup wizard on a genuinely fresh machine", () => {
     vi.stubEnv("SN_PROFILE_ENCRYPTION_KEY", "");
 
     const io = capture();
-    const prompter = scriptedPrompter([...SCRIPT, DECLINE_START], ["fresh-machine-secret"]);
+    const prompter = scriptedPrompter(SCRIPT, ["fresh-machine-secret"]);
     await runSetupCli({
       home,
       argv: [],
@@ -1336,7 +1381,6 @@ describe("setup wizard on a genuinely fresh machine", () => {
       verifyCredential: async () => ({ ok: true, detail: "accepted" }),
       resolveParentTable: async () => undefined,
       commandExists: () => false,
-      probe: NOT_LISTENING,
       writeStdout: (value) => io.out.push(value),
       writeStderr: (value) => io.err.push(value),
     });
@@ -1380,7 +1424,7 @@ describe("setup wizard on a genuinely fresh machine", () => {
       argv: [],
       env: { HOME: home },
       interactive: true,
-      prompter: scriptedPrompter([...SCRIPT, DECLINE_START], ["returning-user-secret"]),
+      prompter: scriptedPrompter(SCRIPT, ["returning-user-secret"]),
       verifyCredential: async () => ({ ok: true, detail: "accepted" }),
       resolveParentTable: async () => undefined,
       commandExists: () => false,
@@ -1407,7 +1451,7 @@ describe("setup wizard on a genuinely fresh machine", () => {
       argv: [],
       env: { HOME: home },
       interactive: true,
-      prompter: scriptedPrompter([...SCRIPT, "y", DECLINE_START], ["register-secret"]),
+      prompter: scriptedPrompter([...SCRIPT, "y"], ["register-secret"]),
       verifyCredential: async () => ({ ok: true, detail: "accepted" }),
       resolveParentTable: async () => undefined,
       commandExists: () => true,
@@ -1446,7 +1490,7 @@ describe("setup wizard on a genuinely fresh machine", () => {
       },
     } as unknown as ProfileManager;
 
-    const prompter = scriptedPrompter([...SCRIPT, "y", DECLINE_START], ["retry-secret"]);
+    const prompter = scriptedPrompter([...SCRIPT, "y"], ["retry-secret"]);
     await runSetupCli({
       home,
       argv: [],
@@ -1457,7 +1501,6 @@ describe("setup wizard on a genuinely fresh machine", () => {
       verifyCredential: async () => ({ ok: true, detail: "accepted" }),
       resolveParentTable: async () => undefined,
       commandExists: () => false,
-      probe: NOT_LISTENING,
       writeStdout: () => undefined,
       writeStderr: () => undefined,
     });
@@ -1475,12 +1518,12 @@ describe("setup wizard on a genuinely fresh machine", () => {
   });
 });
 
-describe("setup wizard start-and-verify", () => {
+describe("setup wizard closing checks", () => {
   /**
-   * The wizard used to end by printing two commands for the operator to run.
-   * It now starts the service and verifies it, so these cover the three
-   * outcomes: nothing listening and the operator accepts, something already
-   * listening, and a start that never becomes ready.
+   * The wizard used to end by starting a detached service and polling it for
+   * readiness. There is nothing to start now, so it ends by running the same
+   * checks `doctor` runs and printing them. These cover the two outcomes:
+   * everything resolves, and the command clients spawn does not.
    */
   const SCRIPT = [
     "dev",
@@ -1492,116 +1535,73 @@ describe("setup wizard start-and-verify", () => {
     "None",
   ];
 
-  function readyProbe(readyAfter: number): {
-    probe: NonNullable<SetupCliDependencies["probe"]>;
-    calls: () => number;
-  } {
-    let seen = 0;
-    return {
-      calls: () => seen,
-      probe: async (url: string): Promise<ProbeResponse> => {
-        seen += 1;
-        if (seen <= readyAfter) throw new Error("connect ECONNREFUSED");
-        return { status: 200, headers: {}, body: "", url } as ProbeResponse;
-      },
-    };
+  async function wizard(
+    home: string,
+    overrides: Partial<SetupCliDependencies> & { prompter?: ScriptedPrompter } = {}
+  ): Promise<{ prompter: ScriptedPrompter; out: string }> {
+    const prompter = overrides.prompter ?? scriptedPrompter(SCRIPT, ["closing-secret"]);
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: true,
+      prompter,
+      verifyCredential: async () => ({ ok: true, detail: "accepted" }),
+      resolveParentTable: async () => undefined,
+      commandExists: () => false,
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: () => undefined,
+      ...overrides,
+    });
+    return { prompter, out: io.out.join("") };
   }
 
-  it("starts the service and reports it ready", async () => {
-    const home = newHome("sn-mcp-start-");
-    const started: Array<{ hasIdentity: boolean; hasKey: boolean }> = [];
-    const { probe } = readyProbe(1);
-
-    await runSetupCli({
-      home,
-      argv: [],
-      env: { HOME: home },
-      interactive: true,
-      prompter: scriptedPrompter([...SCRIPT, "y"], ["start-secret"]),
-      verifyCredential: async () => ({ ok: true, detail: "accepted" }),
-      resolveParentTable: async () => undefined,
-      commandExists: () => false,
-      probe,
-      startService: (env) => {
-        started.push({
-          hasIdentity: Boolean(env.MCP_OWNER_ID && env.MCP_CLIENT_ID),
-          hasKey: Boolean(env.SN_PROFILE_ENCRYPTION_KEY),
-        });
-        return { pid: 4242 };
-      },
-      writeStdout: () => undefined,
-      writeStderr: () => undefined,
+  it("ends with doctor's own checks rather than a command to run", async () => {
+    const home = newHome("sn-mcp-closing-");
+    const { prompter, out } = await wizard(home, {
+      // Both client CLIs and the server command resolve, so the wizard also
+      // asks whether to register them; "y" is the only extra answer.
+      prompter: scriptedPrompter([...SCRIPT, "y"], ["closing-secret"]),
+      commandExists: () => true,
+      runCommand: () => ({ status: 0 }),
     });
 
-    // Started exactly once, and handed the values setup just provisioned —
-    // the service must not depend on the operator sourcing server.env first.
-    expect(started).toEqual([{ hasIdentity: true, hasKey: true }]);
-  });
-
-  it("reuses a service that is already listening instead of starting another", async () => {
-    const home = newHome("sn-mcp-start-existing-");
-    let startCalls = 0;
-
-    const prompter = scriptedPrompter(SCRIPT, ["existing-secret"]);
-    await runSetupCli({
-      home,
-      argv: [],
-      env: { HOME: home },
-      interactive: true,
-      prompter,
-      verifyCredential: async () => ({ ok: true, detail: "accepted" }),
-      resolveParentTable: async () => undefined,
-      commandExists: () => false,
-      probe: async (url: string) =>
-        ({ status: 200, headers: {}, body: "", url }) as ProbeResponse,
-      startService: () => {
-        startCalls += 1;
-        return { pid: 1 };
-      },
-      writeStdout: () => undefined,
-      writeStderr: () => undefined,
-    });
-
-    // Nothing was started, and the operator was never asked — the script has
-    // no answer for a start confirmation, so a prompt here would throw.
-    expect(startCalls).toBe(0);
+    // Nothing extra was asked: the script has no answer for a start prompt,
+    // so a surviving one would exhaust it.
     expect(prompter.remaining()).toBe(0);
-    expect(prompter.notes.join("\n")).toContain("already running");
-  });
-
-  it("reports a start that never becomes ready, and names the log", async () => {
-    const home = newHome("sn-mcp-start-stuck-");
-
-    const prompter = scriptedPrompter([...SCRIPT, "y"], ["stuck-secret"]);
-    await runSetupCli({
-      home,
-      argv: [],
-      env: { HOME: home },
-      interactive: true,
-      prompter,
-      verifyCredential: async () => ({ ok: true, detail: "accepted" }),
-      resolveParentTable: async () => undefined,
-      commandExists: () => false,
-      probe: async () => {
-        throw new Error("connect ECONNREFUSED");
-      },
-      startService: () => ({ pid: 99 }),
-      readyTimeoutMs: 50,
-      writeStdout: () => undefined,
-      writeStderr: () => undefined,
-    });
 
     const notes = prompter.notes.join("\n");
-    expect(notes).toContain("did not become ready");
-    expect(notes).toContain("service.log");
-    // The profile still exists: a service that will not start must not
-    // discard a credential the instance already accepted.
+    expect(notes).toContain("ServiceNow MCP doctor");
+    expect(notes).toMatch(/ok\s+server command/u);
+    expect(notes).toMatch(/ok\s+profile dev: table access/u);
+    expect(notes).toContain("All checks passed.");
+    // No readiness poll, no log file, no endpoint.
+    expect(notes).not.toMatch(/service\.log|did not become ready|health\/ready/u);
+
+    expect(out).toContain("Setup complete.");
+    expect(out).toContain("Transport stdio");
+    expect(out).toContain("it will launch the server itself");
+  });
+
+  it("reports a server command that will not resolve, and keeps the profile", async () => {
+    const home = newHome("sn-mcp-closing-nopath-");
+    const { out, prompter } = await wizard(home);
+
+    const notes = prompter.notes.join("\n");
+    expect(notes).toMatch(/FAIL\s+server command/u);
+    expect(notes).toContain("not on this PATH");
+    expect(out).toContain("still need attention");
+
+    // The profile survives: a command that is not on PATH must not discard a
+    // credential the instance already accepted.
     const manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
     expect(manager.getProfile("dev").instance).toBe("https://dev00001.service-now.com");
+    expect(manager.getProfile("dev").tableAccess?.readTables).toEqual(["incident"]);
   });
 });
 
-describe("HTTP authentication is opt-in", () => {
+describe("stdio has no authentication boundary to configure", () => {
   const SHELL_MARKER = "# servicenow-mcp: bearer for MCP clients";
   const SCRIPT = [
     "dev",
@@ -1633,7 +1633,6 @@ describe("HTTP authentication is opt-in", () => {
       resolveParentTable: async () => undefined,
       commandExists: () => true,
       runCommand: () => ({ status: 0 }),
-      probe: NOT_LISTENING,
       writeStdout: () => undefined,
       writeStderr: () => undefined,
     });
@@ -1642,7 +1641,7 @@ describe("HTTP authentication is opt-in", () => {
 
   async function runDoctor(
     home: string,
-    argv: readonly string[] = ["doctor", "--offline"]
+    argv: readonly string[] = ["doctor"]
   ): Promise<string> {
     const io = capture();
     await runSetupCli({
@@ -1660,10 +1659,9 @@ describe("HTTP authentication is opt-in", () => {
     const zshrc = join(home, ".zshrc");
     writeFileSync(zshrc, "# existing content\n");
 
-    // One answer for "register clients?" and one for "start the service?".
-    // A surviving export prompt would consume DECLINE_START and then exhaust
-    // the script, so this also proves the question is gone.
-    const prompter = await wizardWith(home, [...SCRIPT, "y", DECLINE_START], "shell-secret");
+    // One answer for "register clients?" and nothing else. A surviving export
+    // or start prompt would exhaust the script, so this proves both are gone.
+    const prompter = await wizardWith(home, [...SCRIPT, "y"], "shell-secret");
 
     expect(prompter.remaining()).toBe(0);
     const body = readFileSync(zshrc, "utf8");
@@ -1671,8 +1669,8 @@ describe("HTTP authentication is opt-in", () => {
     expect(body).not.toContain(SHELL_MARKER);
   });
 
-  it("doctor reports the endpoint as unauthenticated and names what remains", async () => {
-    const home = newHome("sn-mcp-doctor-open-");
+  it("generates no bearer token, and doctor reports none to configure", async () => {
+    const home = newHome("sn-mcp-no-token-");
     await runSetupCli({
       home,
       argv: ["--clients", "none", "--json"],
@@ -1681,17 +1679,30 @@ describe("HTTP authentication is opt-in", () => {
       writeStderr: () => undefined,
     });
 
+    // Setup never wrote one, and never wrote a listen address either.
+    const values = readEnv(serverEnvPath(home));
+    expect(values.MCP_BEARER_TOKEN).toBeUndefined();
+    expect(values.MCP_HOST).toBeUndefined();
+    expect(values.MCP_PORT).toBeUndefined();
+    expect(values.MCP_OWNER_ID).toMatch(/^owner-/u);
+    expect(values.SN_PROFILE_ENCRYPTION_KEY).toBeTruthy();
+
+    // doctor reports no boundary to configure, because there is none: no
+    // check named for authentication or an endpoint, and no token anywhere.
     const text = await runDoctor(home);
-    // Not a failure: this is the supported default, and a permanent red line
-    // teaches operators to ignore it. It must still say what it means.
-    expect(text).toMatch(/ok\s+http authentication/u);
-    expect(text).toContain("the endpoint is unauthenticated");
-    expect(text).toContain("Loopback binding and the Host/Origin allowlists");
-    expect(text).toContain("Set MCP_BEARER_TOKEN in the server env file");
+    expect(text).not.toMatch(/^(?:ok|FAIL)\s+(?:http authentication|service|mcp handshake):/mu);
+    expect(text).not.toContain("MCP_BEARER_TOKEN");
+    expect(text).not.toMatch(/unauthenticated|Authorization/iu);
   });
 
-  it("doctor reports authentication as required once MCP_BEARER_TOKEN is set", async () => {
-    const home = newHome("sn-mcp-doctor-bearer-");
+  /**
+   * A bearer left in `server.env` by a 2.0 install is inert rather than
+   * honored. There is no request to attach it to, so reporting it as an active
+   * boundary would tell an operator they are protected by something that is
+   * not running.
+   */
+  it("ignores a bearer an earlier install left behind", async () => {
+    const home = newHome("sn-mcp-stale-token-");
     await runSetupCli({
       home,
       argv: ["--clients", "none", "--json"],
@@ -1699,7 +1710,7 @@ describe("HTTP authentication is opt-in", () => {
       writeStdout: () => undefined,
       writeStderr: () => undefined,
     });
-    const token = `opt-in-token-${"a".repeat(32)}`;
+    const token = `stale-token-${"a".repeat(32)}`;
     writeFileSync(
       serverEnvPath(home),
       `${readFileSync(serverEnvPath(home), "utf8")}MCP_BEARER_TOKEN='${token}'\n`,
@@ -1707,47 +1718,11 @@ describe("HTTP authentication is opt-in", () => {
     );
 
     const text = await runDoctor(home);
-    expect(text).toMatch(/ok\s+http authentication/u);
-    expect(text).toContain("the service requires a bearer token");
-    expect(text).not.toContain("the endpoint is unauthenticated");
-    // Never the value itself.
     expect(text).not.toContain(token);
-  });
-
-  it("doctor's handshake sends the configured bearer, and none when there is none", async () => {
-    const home = newHome("sn-mcp-doctor-handshake-");
-    await runSetupCli({
-      home,
-      argv: ["--clients", "none", "--json"],
-      env: { HOME: home },
-      writeStdout: () => undefined,
-      writeStderr: () => undefined,
-    });
-
-    const observe = async (): Promise<Array<string | undefined>> => {
-      const seen: Array<string | undefined> = [];
-      await runSetupCli({
-        home,
-        argv: ["doctor", "--json"],
-        env: { HOME: home },
-        probe: async (url: string, init: ProbeRequest): Promise<ProbeResponse> => {
-          if (!url.endsWith("/health/ready")) seen.push(init.headers?.authorization);
-          return { status: 200, body: "" };
-        },
-        writeStdout: () => undefined,
-        writeStderr: () => undefined,
-      });
-      return seen;
-    };
-
-    expect(await observe()).toEqual([undefined]);
-
-    const token = `opt-in-token-${"b".repeat(32)}`;
-    writeFileSync(
-      serverEnvPath(home),
-      `${readFileSync(serverEnvPath(home), "utf8")}MCP_BEARER_TOKEN='${token}'\n`,
-      { mode: 0o600 }
-    );
-    expect(await observe()).toEqual([`Bearer ${token}`]);
+    expect(text).not.toContain("MCP_BEARER_TOKEN");
+    expect(text).not.toMatch(/^(?:ok|FAIL)\s+http authentication:/mu);
+    // And the checks that do exist still ran.
+    expect(text).toContain("ServiceNow MCP doctor");
+    expect(text).toMatch(/^ok\s+server env:/mu);
   });
 });

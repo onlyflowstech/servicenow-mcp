@@ -59,9 +59,9 @@ export const schema = z.object({
   file_name: z.string().trim().min(1).max(255).optional().describe("Leaf filename without path separators (required for upload)"),
   content_base64: z.string().max(MAX_ATTACHMENT_BASE64_LENGTH).optional().describe(
     "Base64 attachment bytes (required for upload). Standard base64 alphabet; line breaks " +
-      "are accepted and trailing '=' padding is optional. Decoded bytes must not exceed 10 MiB, " +
-      "and the whole tool call must also fit the transport request-body limit — over HTTP " +
-      "that defaults to 1 MiB, allowing roughly 760 KiB of attachment; stdio has no such limit."
+      "are accepted and trailing '=' padding is optional. Decoded bytes must not exceed " +
+      "10 MiB. The stdio transport frames messages by newline with no size limit, so that " +
+      "10 MiB is the only ceiling in force."
   ),
   content_type: z.string().max(MAX_CONTENT_TYPE_LENGTH).optional().describe("MIME type for upload, e.g. 'application/pdf' or 'text/plain; charset=utf-8' (default: application/octet-stream)"),
   limit: z.number().int().min(1).max(1000).optional().default(100).describe("Maximum attachments to list (default 100, max 1000)"),

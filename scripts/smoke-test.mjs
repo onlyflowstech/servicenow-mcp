@@ -1,31 +1,31 @@
 #!/usr/bin/env node
 /**
- * Opt-in live smoke test for an already-running V2 HTTP service.
+ * Opt-in live smoke test against the packaged stdio server.
  *
- * Have an approved supervisor inject MCP_BEARER_TOKEN out of band, set the
- * non-secret MCP_URL and MCP_PROFILE values, then run `npm run smoke`.
- * Writes additionally require `--write --confirm-write-profile=<MCP_PROFILE>`.
+ * It spawns `dist/index.js` exactly as an MCP client does, so there is nothing
+ * to start first and no endpoint or bearer to supply. Name the profile in
+ * MCP_PROFILE and run `npm run smoke`. Writes additionally require
+ * `--write --confirm-write-profile=<MCP_PROFILE>`.
+ *
+ * The spawned server resolves its own credential from ~/.servicenow-mcp, so no
+ * secret passes through this script, its arguments, or its environment.
  */
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-const BEARER_TOKEN = /^[A-Za-z0-9._~+/-]+={0,2}$/u;
 const SYS_ID = /^[0-9a-f]{32}$/u;
 const WRITE_CONFIRM_PREFIX = "--confirm-write-profile=";
 
+/** The built entrypoint in this checkout, never whatever is on PATH. */
+export const SERVER_ENTRYPOINT = fileURLToPath(
+  new URL("../dist/index.js", import.meta.url)
+);
+
 export function resolveSmokeOptions(argv, environment) {
-  const token = environment.MCP_BEARER_TOKEN;
   const profile = environment.MCP_PROFILE;
-  const endpointValue = environment.MCP_URL;
-  if (typeof token !== "string" || token.length < 32 || token.length > 4096) {
-    throw new Error("MCP_BEARER_TOKEN must be injected and contain 32-4096 characters");
-  }
-  if (!BEARER_TOKEN.test(token)) {
-    throw new Error("MCP_BEARER_TOKEN is invalid");
-  }
   if (
     typeof profile !== "string" ||
     profile.length === 0 ||
@@ -34,11 +34,7 @@ export function resolveSmokeOptions(argv, environment) {
   ) {
     throw new Error("MCP_PROFILE must explicitly name one configured profile");
   }
-  if (typeof endpointValue !== "string" || endpointValue.length === 0) {
-    throw new Error("MCP_URL must explicitly identify the protected /mcp endpoint");
-  }
 
-  const endpoint = validatedMcpEndpoint(endpointValue);
   const timeoutMs = validatedTimeout(environment.MCP_SMOKE_TIMEOUT_MS);
   const writeFlags = argv.filter((argument) => argument === "--write");
   const confirmations = argv.filter((argument) =>
@@ -67,8 +63,7 @@ export function resolveSmokeOptions(argv, environment) {
   }
 
   return Object.freeze({
-    endpoint,
-    token,
+    entrypoint: SERVER_ENTRYPOINT,
     profile,
     writeEnabled,
     timeoutMs,
@@ -92,11 +87,16 @@ export function extractCreatedSysId(result) {
 }
 
 export async function runSmoke(options) {
-  const transport = new StreamableHTTPClientTransport(options.endpoint, {
-    requestInit: { headers: { authorization: `Bearer ${options.token}` } },
+  // stderr is inherited so the server's structured `mcp_tool` records and any
+  // startup warning land in this run's output rather than being swallowed.
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [options.entrypoint],
+    env: { ...process.env },
+    stderr: "inherit",
   });
   const client = new Client({
-    name: "servicenow-mcp-http-smoke",
+    name: "servicenow-mcp-stdio-smoke",
     version: "2.0.0",
   });
   const checks = [];
@@ -178,7 +178,7 @@ export async function writeRoundTrip(client, checks, profile, timeoutMs = 30_000
   const created = await call(client, "sn_create", {
     profile,
     table: "incident",
-    fields: { short_description: "MCP V2 HTTP smoke test — safe to delete" },
+    fields: { short_description: "MCP stdio smoke test — safe to delete" },
   }, timeoutMs);
   if (created.isError) {
     record(checks, "sn_create incident", false, created.text.slice(0, 120));
@@ -195,7 +195,7 @@ export async function writeRoundTrip(client, checks, profile, timeoutMs = 30_000
     const journaled = await call(client, "sn_incident_add_work_note", {
       profile,
       sys_id: sysId,
-      content: "tested through V2 Streamable HTTP",
+      content: "tested through the stdio transport",
     }, timeoutMs);
     record(
       checks,
@@ -255,31 +255,6 @@ function validatedTimeout(value) {
 function record(checks, name, pass, note = "") {
   checks.push({ name, pass, note });
   console.log(`${pass ? "PASS" : "FAIL"}  ${name}${note ? ` — ${note}` : ""}`);
-}
-
-function validatedMcpEndpoint(value) {
-  let endpoint;
-  try {
-    endpoint = new URL(value);
-  } catch {
-    throw new Error("MCP_URL is invalid");
-  }
-  if (
-    endpoint.username ||
-    endpoint.password ||
-    endpoint.search ||
-    endpoint.hash ||
-    endpoint.pathname !== "/mcp"
-  ) {
-    throw new Error("MCP_URL must be an exact credential-free /mcp URL");
-  }
-  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(
-    endpoint.hostname
-  );
-  if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && loopback)) {
-    throw new Error("MCP_URL must use HTTPS unless it is loopback-only");
-  }
-  return endpoint;
 }
 
 function isMainModule() {

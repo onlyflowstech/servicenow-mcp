@@ -19,6 +19,7 @@ import {
 import {
   extractCreatedSysId,
   resolveSmokeOptions,
+  SERVER_ENTRYPOINT,
   writeRoundTrip,
 } from "../scripts/smoke-test.mjs";
 import { REGISTERED_TOOL_COUNT, toolModules } from "../src/tools/index.js";
@@ -26,11 +27,14 @@ import { REGISTERED_TOOL_COUNT, toolModules } from "../src/tools/index.js";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const read = (path: string): string =>
   readFileSync(resolve(root, path), "utf8");
+/**
+ * A secret that must never survive into a spawned process or an error string.
+ * Both tools speak stdio now, so neither has a target URL or a bearer of its
+ * own; this value exists to prove an inherited one is still stripped.
+ */
 const token = "snsdk57-local-fake-token-0123456789";
 const smokeEnvironment = Object.freeze({
-  MCP_BEARER_TOKEN: token,
   MCP_PROFILE: "release-pdi",
-  MCP_URL: "https://mcp.example.test/mcp",
 });
 const inspectorIntegrity =
   "sha512-uEoeEG7/+ZbrvccPF3EsgbfjcyJ3bWVJXT4pcZtpmDUhA0zdK4T4Tuj2oUphi2Huwl66LqVdo3Mx2PkS2SUHXA==";
@@ -42,7 +46,7 @@ afterEach(() => {
 });
 
 describe("SNSDK-57 explicit smoke profile and write boundary", () => {
-  it("requires a protected URL, injected bearer, and explicit profile", () => {
+  it("requires an explicit profile and spawns the built entrypoint", () => {
     expect(() =>
       resolveSmokeOptions([], { ...smokeEnvironment, MCP_PROFILE: undefined })
     ).toThrow(/MCP_PROFILE/u);
@@ -50,40 +54,33 @@ describe("SNSDK-57 explicit smoke profile and write boundary", () => {
       resolveSmokeOptions([], { ...smokeEnvironment, MCP_PROFILE: " " })
     ).toThrow(/MCP_PROFILE/u);
     expect(() =>
-      resolveSmokeOptions([], { ...smokeEnvironment, MCP_URL: undefined })
-    ).toThrow(/MCP_URL/u);
-    expect(() =>
-      resolveSmokeOptions([], {
-        ...smokeEnvironment,
-        MCP_BEARER_TOKEN: "short",
-      })
-    ).toThrow(/MCP_BEARER_TOKEN/u);
-    expect(() =>
-      resolveSmokeOptions([], {
-        ...smokeEnvironment,
-        MCP_URL: "http://mcp.example.test/mcp",
-      })
-    ).toThrow(/HTTPS/u);
-    expect(() =>
-      resolveSmokeOptions([], {
-        ...smokeEnvironment,
-        MCP_URL: "https://user:password@mcp.example.test/mcp",
-      })
-    ).toThrow(/credential-free/u);
+      resolveSmokeOptions([], { ...smokeEnvironment, MCP_PROFILE: "x".repeat(129) })
+    ).toThrow(/MCP_PROFILE/u);
 
-    const remote = resolveSmokeOptions([], smokeEnvironment);
-    const loopback = resolveSmokeOptions([], {
-      ...smokeEnvironment,
-      MCP_URL: "http://127.0.0.1:3000/mcp",
-    });
-    expect(remote).toMatchObject({
+    const options = resolveSmokeOptions([], smokeEnvironment);
+    expect(options).toMatchObject({
       profile: "release-pdi",
       writeEnabled: false,
       timeoutMs: 30_000,
     });
-    expect(remote.endpoint.href).toBe("https://mcp.example.test/mcp");
-    expect(loopback.endpoint.href).toBe("http://127.0.0.1:3000/mcp");
-    expect(Object.isFrozen(remote)).toBe(true);
+    expect(Object.isFrozen(options)).toBe(true);
+
+    // stdio has no endpoint and no bearer, so neither may reappear as an
+    // option this script would then have to protect.
+    expect(options).not.toHaveProperty("endpoint");
+    expect(options).not.toHaveProperty("token");
+
+    // It spawns this checkout's built server, not whatever is on PATH.
+    expect(options.entrypoint).toBe(SERVER_ENTRYPOINT);
+    expect(options.entrypoint).toBe(resolve(root, "dist/index.js"));
+
+    // An MCP_URL left over from a 2.0 shell is inert rather than honored.
+    expect(
+      resolveSmokeOptions([], {
+        ...smokeEnvironment,
+        MCP_URL: "https://mcp.example.test/mcp",
+      })
+    ).toEqual(options);
   });
 
   it("does not let --write alone enable mutation", () => {
@@ -281,7 +278,10 @@ describe("SNSDK-57 locked local Inspector contract", () => {
   it("passes no target or bearer in argv and removes inherited escape hatches", () => {
     const options = resolveInspectorOptions(smokeEnvironment);
     expect(options.profile).toBe("release-pdi");
-    expect(options.endpoint.href).toBe("https://mcp.example.test/mcp");
+    // The operator is told to enter a stdio command, never a URL or a bearer.
+    expect(options.command).toBe(process.execPath);
+    expect(options.args).toEqual([resolve(root, "dist/index.js")]);
+    expect(options).not.toHaveProperty("endpoint");
 
     const launch = inspectorLaunch({
       PATH: process.env.PATH,
@@ -321,24 +321,32 @@ describe("SNSDK-57 locked local Inspector contract", () => {
     }
   });
 
-  it("rejects unsafe target URL variants without network access", () => {
+  it("ignores any inherited target URL and never reaches the network", () => {
     const fetchProbe = vi.fn(() => {
       throw new Error("network access was not expected");
     });
     vi.stubGlobal("fetch", fetchProbe);
+
+    // A URL cannot steer the Inspector at a different server any more: the
+    // launch target is the built entrypoint in this checkout, full stop.
     for (const endpoint of [
       "http://mcp.example.test/mcp",
       "https://mcp.example.test/mcp?token=x",
-      "https://mcp.example.test/another-path",
       "https://user:password@mcp.example.test/mcp",
+      "file:///etc/passwd",
     ]) {
-      expect(() =>
-        resolveInspectorOptions({
-          MCP_URL: endpoint,
-          MCP_PROFILE: "release-pdi",
-        })
-      ).toThrow();
+      const options = resolveInspectorOptions({
+        MCP_URL: endpoint,
+        MCP_PROFILE: "release-pdi",
+      });
+      expect(options.args).toEqual([resolve(root, "dist/index.js")]);
+      expect(JSON.stringify(options)).not.toContain("mcp.example.test");
     }
+
+    // A missing profile still fails closed.
+    expect(() => resolveInspectorOptions({ MCP_URL: "https://x.test/mcp" })).toThrow(
+      /MCP_PROFILE/u
+    );
     expect(fetchProbe).not.toHaveBeenCalled();
   });
 });

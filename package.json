@@ -1,7 +1,7 @@
 {
   "name": "@onlyflows/servicenow-mcp",
   "version": "2.0.0",
-  "description": "HTTP-only ServiceNow MCP server with 19 tools for CRUD, CMDB traversal, ATF testing, and explicit multi-instance profiles.",
+  "description": "stdio ServiceNow MCP server with 19 tools for CRUD, CMDB traversal, ATF testing, and explicit multi-instance profiles.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -19,7 +19,7 @@
     "dev": "npm run build && node --enable-source-maps dist/index.js",
     "test": "vitest run",
     "test:unit": "vitest run",
-    "test:protocol": "vitest run test/snsdk-53-contract.test.ts test/snsdk-55-release-matrix.test.ts test/http-cross-client.test.ts test/http-compatibility.test.ts test/http-request-policy.test.ts test/http-runtime.test.ts test/http-entrypoint.test.ts test/http-health.test.ts test/http-auth.test.ts test/container-artifact.test.ts",
+    "test:protocol": "vitest run test/snsdk-53-contract.test.ts test/snsdk-55-release-matrix.test.ts test/stdio-runtime.test.ts test/stdio-entrypoint.test.ts test/stdio-package-contract.test.ts test/http-cross-client.test.ts test/http-compatibility.test.ts test/http-request-policy.test.ts test/http-runtime.test.ts test/http-entrypoint.test.ts test/http-health.test.ts test/http-auth.test.ts test/container-artifact.test.ts",
     "test:profile": "vitest run test/profile-credentials.test.ts test/profile-manager.test.ts test/profile-admin.test.ts",
     "test:release": "vitest run test/snsdk-57-release-workflow.test.ts",
     "smoke": "node scripts/smoke-test.mjs",
@@ -37,7 +37,7 @@
     "servicenow",
     "mcp",
     "model-context-protocol",
-    "streamable-http",
+    "stdio",
     "itsm",
     "itom",
     "cmdb",
