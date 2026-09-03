@@ -13,6 +13,8 @@ RUN npm ci --engine-strict --ignore-scripts --no-audit --no-fund
 COPY tsconfig.json ./
 COPY src ./src
 COPY scripts/clean-dist.mjs ./scripts/clean-dist.mjs
+# postbuild: the bin entrypoints are 0644 out of tsc and must be executable.
+COPY scripts/set-bin-mode.mjs ./scripts/set-bin-mode.mjs
 COPY deploy/container-healthcheck.mjs ./deploy/container-healthcheck.mjs
 RUN npm run build \
     && npm prune --omit=dev --ignore-scripts \

@@ -139,6 +139,7 @@ describe("SNSDK-39 production OCI artifact", () => {
       "!src/**",
       "!scripts/",
       "!scripts/clean-dist.mjs",
+      "!scripts/set-bin-mode.mjs",
       "!deploy/",
       "!deploy/container-healthcheck.mjs",
     ]);

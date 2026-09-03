@@ -1038,7 +1038,12 @@ describe.each(clientFactories)("SNSDK-27 %s contract", (_label, createClient) =>
     } finally {
       await client.close();
     }
-  }, _label === "official MCP SDK" ? 10_000 : 5_000);
+    // ~19 tools x 4 profile cases, each a real HTTP round trip against a real
+    // server, run sequentially. The budget has to cover a loaded CI runner, not
+    // a quiet laptop: at 10s/5s this failed in CI while passing locally, which
+    // is a phantom failure rather than a signal. Still bounded, so a genuine
+    // hang is caught.
+  }, 60_000);
 });
 
 describe.each(clientFactories)(
