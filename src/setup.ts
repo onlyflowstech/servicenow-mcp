@@ -46,8 +46,8 @@ import {
   type ProfileAdminIO,
 } from "./profile-admin.js";
 import {
-  EnvironmentProfileEncryptionKeyProvider,
   credentialSourceKind,
+  encryptionKeyProviderFromValue,
   type ProfileEncryptionKeyProvider,
   type ProfileSecretField,
 } from "./profile-credentials.js";
@@ -333,6 +333,13 @@ async function runWizard(
         `Authorization: Bearer ${values.MCP_BEARER_TOKEN}\n`
     );
 
+    // The key just written to server.env is not in this process's environment,
+    // so it must be carried in memory. `values` already holds it, whether it
+    // was generated now or loaded from an earlier bootstrap. Bound and
+    // validated here so a corrupt key fails before anything is prompted for.
+    const keyProvider =
+      dependencies.keyProvider ?? encryptionKeyProviderFromValue(values[ENCRYPTION_KEY_ENV]);
+
     // 2. Re-run safety: never clobber an existing profile without being told.
     const existing = existingProfileNames(manager);
     if (existing.length > 0) {
@@ -441,18 +448,35 @@ async function runWizard(
     const tableAccess = await askTableAccess(prompter, config, dependencies);
 
     // 6. One write, with the rules already attached — never a rules-less window.
-    const keyProvider = dependencies.keyProvider ?? new EnvironmentProfileEncryptionKeyProvider();
-    for (const secret of captured) {
-      profile[secret.field] = materializeProfileSecret(
-        secret,
-        { mode, ...(provider === undefined ? {} : { provider }) },
-        name,
-        secret.field,
-        keyProvider
-      );
-    }
+    //
+    // Retryable without re-prompting: everything needed is already in memory,
+    // so a failure here must not cost the operator the instance, the auth
+    // details, the secret they typed, or the verification round trip.
     profile.tableAccess = tableAccess;
-    manager.addProfile(name, profile);
+    for (;;) {
+      try {
+        for (const secret of captured) {
+          profile[secret.field] = materializeProfileSecret(
+            secret,
+            { mode, ...(provider === undefined ? {} : { provider }) },
+            name,
+            secret.field,
+            keyProvider
+          );
+        }
+        manager.addProfile(name, profile);
+        break;
+      } catch (error) {
+        prompter.note(`\n  FAILED  could not save the profile: ${describeError(error)}`);
+        prompter.note(
+          "  Your answers are still held in memory, including the verified\n" +
+            "  credential. Fix the cause and retry, and nothing needs re-typing."
+        );
+        if (!(await prompter.confirm("\nRetry saving the profile?", true))) {
+          throw new WizardAbort();
+        }
+      }
+    }
 
     prompter.note(
       `\nWrote profile ${name}.\n${JSON.stringify(safeProfileView(name, profile), null, 2)}\n`

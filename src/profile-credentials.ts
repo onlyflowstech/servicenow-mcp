@@ -76,6 +76,25 @@ export class EnvironmentSecretResolver implements SecretResolver {
 }
 
 /** Reads the one canonical profile key setting; it never persists the key. */
+/**
+ * Key provider backed by an explicitly supplied encoded key.
+ *
+ * The environment provider below cannot serve a key this process has just
+ * generated but not exported, which is exactly the setup wizard's position: it
+ * writes the key to `server.env` and then needs it in the same run. Passing the
+ * value directly keeps the secret out of `process.env` as well.
+ *
+ * Decodes on every call so callers receive their own Buffer to zeroize.
+ */
+export function encryptionKeyProviderFromValue(
+  encoded: string
+): ProfileEncryptionKeyProvider {
+  // Validate eagerly so a corrupt key fails before any secret is captured,
+  // rather than after the operator has typed one.
+  decodeEncryptionKey(encoded).fill(0);
+  return Object.freeze({ getKey: () => decodeEncryptionKey(encoded) });
+}
+
 export class EnvironmentProfileEncryptionKeyProvider
   implements ProfileEncryptionKeyProvider
 {

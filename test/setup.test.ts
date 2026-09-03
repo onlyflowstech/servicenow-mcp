@@ -12,7 +12,10 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ProfileEncryptionKeyProvider } from "../src/profile-credentials.js";
+import {
+  encryptionKeyProviderFromValue,
+  type ProfileEncryptionKeyProvider,
+} from "../src/profile-credentials.js";
 import { ProfileManager } from "../src/profile-manager.js";
 import { createToolError } from "../src/tool-error.js";
 import {
@@ -1237,5 +1240,173 @@ describe("setup wizard re-run", () => {
     expect(io.out.join("")).toContain("Clients   codex");
     // The profile file is untouched, byte for byte.
     expect(readFileSync(profileConfigPath(home), "utf8")).toBe(before);
+  });
+});
+
+describe("setup wizard on a genuinely fresh machine", () => {
+  /**
+   * The wizard writes SN_PROFILE_ENCRYPTION_KEY to server.env and then needs it
+   * in the same run. It previously built an environment-backed key provider,
+   * which cannot see a key this process never exported, so every first run
+   * failed with "Profile encryption key is unavailable" after the operator had
+   * already typed everything. No keyProvider is injected here on purpose:
+   * injecting one is what hid the defect.
+   */
+  const SCRIPT = [
+    "dev",
+    "dev00001.service-now.com",
+    "basic",
+    "encrypted",
+    "integration.user",
+    "Just incident",
+    "None",
+  ];
+
+  it("provisions the encryption key and uses it, with nothing in the environment", async () => {
+    const home = newHome("sn-mcp-fresh-");
+    vi.stubEnv("SN_PROFILE_ENCRYPTION_KEY", "");
+
+    const io = capture();
+    const prompter = scriptedPrompter(SCRIPT, ["fresh-machine-secret"]);
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: true,
+      prompter,
+      verifyCredential: async () => ({ ok: true, detail: "accepted" }),
+      resolveParentTable: async () => undefined,
+      commandExists: () => false,
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: (value) => io.err.push(value),
+    });
+
+    // Names the exact regression: the wizard must never report the key it just
+    // wrote as unavailable.
+    expect(prompter.notes.join("\n")).not.toContain(
+      "Profile encryption key is unavailable"
+    );
+
+    // The profile exists and its credential decrypts under the key that the
+    // same run wrote to server.env.
+    const key = readEnv(serverEnvPath(home)).SN_PROFILE_ENCRYPTION_KEY;
+    expect(key).toBeTruthy();
+    const manager = new ProfileManager({
+      configFilePath: profileConfigPath(home),
+      encryptionKeyProvider: encryptionKeyProviderFromValue(key),
+    });
+    expect(manager.resolveCredential(manager.getProfile("dev"))).toBe(
+      "fresh-machine-secret"
+    );
+    expect(io.out.join("")).toContain("Setup complete.");
+  });
+
+  it("reuses the key from an earlier bootstrap rather than minting a new one", async () => {
+    const home = newHome("sn-mcp-fresh-existing-");
+    vi.stubEnv("SN_PROFILE_ENCRYPTION_KEY", "");
+
+    // An earlier non-interactive bootstrap, as a returning user would have.
+    await runSetupCli({
+      home,
+      argv: ["--non-interactive", "--clients", "none", "--json"],
+      env: { HOME: home },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+    const before = readEnv(serverEnvPath(home)).SN_PROFILE_ENCRYPTION_KEY;
+
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: true,
+      prompter: scriptedPrompter(SCRIPT, ["returning-user-secret"]),
+      verifyCredential: async () => ({ ok: true, detail: "accepted" }),
+      resolveParentTable: async () => undefined,
+      commandExists: () => false,
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+
+    const after = readEnv(serverEnvPath(home)).SN_PROFILE_ENCRYPTION_KEY;
+    expect(after).toBe(before);
+    const manager = new ProfileManager({
+      configFilePath: profileConfigPath(home),
+      encryptionKeyProvider: encryptionKeyProviderFromValue(after),
+    });
+    expect(manager.resolveCredential(manager.getProfile("dev"))).toBe(
+      "returning-user-secret"
+    );
+  });
+
+  it("hands client registration the bearer it just provisioned", async () => {
+    // Same write-then-read shape as the key. Verified rather than assumed.
+    const home = newHome("sn-mcp-fresh-bearer-");
+    const seen: Array<string | undefined> = [];
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: true,
+      prompter: scriptedPrompter([...SCRIPT, "y"], ["bearer-check-secret"]),
+      verifyCredential: async () => ({ ok: true, detail: "accepted" }),
+      resolveParentTable: async () => undefined,
+      commandExists: () => true,
+      runCommand: (_command, args, env) => {
+        if (args[1] === "add") seen.push(env.SERVICENOW_MCP_BEARER_TOKEN);
+        return args[1] === "get" ? { status: 1 } : { status: 0 };
+      },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+
+    const onDisk = readEnv(clientEnvPath(home)).SERVICENOW_MCP_BEARER_TOKEN;
+    expect(seen.length).toBe(2);
+    expect(seen.every((value) => value === onDisk)).toBe(true);
+    expect(onDisk).toBeTruthy();
+  });
+
+  it("retries the save without re-prompting and keeps the verified answers", async () => {
+    const home = newHome("sn-mcp-fresh-retry-");
+    mkdirSync(join(home, ".servicenow-mcp"), { recursive: true, mode: 0o700 });
+    const manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+
+    let attempts = 0;
+    const failOnce = {
+      ...manager,
+      listProfiles: () => manager.listProfiles(),
+      getProfile: (name: string) => manager.getProfile(name),
+      addProfile: (name: string, profile: never) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("transient filesystem failure");
+        manager.addProfile(name, profile);
+      },
+    } as unknown as ProfileManager;
+
+    const prompter = scriptedPrompter([...SCRIPT, "y"], ["retry-secret"]);
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: true,
+      prompter,
+      profileManager: failOnce,
+      verifyCredential: async () => ({ ok: true, detail: "accepted" }),
+      resolveParentTable: async () => undefined,
+      commandExists: () => false,
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+
+    expect(attempts).toBe(2);
+    // The retry consumed only the confirm, so no answer was asked for twice.
+    expect(prompter.remaining()).toBe(0);
+    expect(prompter.notes.join("\n")).toMatch(/nothing needs re-typing/u);
+    const key = readEnv(serverEnvPath(home)).SN_PROFILE_ENCRYPTION_KEY;
+    const reloaded = new ProfileManager({
+      configFilePath: profileConfigPath(home),
+      encryptionKeyProvider: encryptionKeyProviderFromValue(key),
+    });
+    expect(reloaded.resolveCredential(reloaded.getProfile("dev"))).toBe("retry-secret");
   });
 });
