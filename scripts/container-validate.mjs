@@ -225,8 +225,12 @@ function requestStatus(url, host) {
 }
 
 function availableHostPort() {
+  // Deliberately not unref()'d: an unreferenced server does not hold the event
+  // loop open, so on a quiet runner Node can exit before the listen callback
+  // fires and leave this promise unsettled — which surfaces as a silent
+  // "exit code 13" (unfinished top-level await) with no diagnostic at all.
+  // The server is closed in the callback, so it does not outlive the lookup.
   const server = createTcpServer();
-  server.unref();
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
