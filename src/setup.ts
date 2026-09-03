@@ -20,6 +20,7 @@
 
 import { randomBytes } from "node:crypto";
 import {
+  appendFileSync,
   chmodSync,
   closeSync,
   existsSync,
@@ -504,8 +505,18 @@ async function runWizard(
       dependencies
     );
 
-    // 8. Start the service and verify, so setup ends with a working install
-    //    rather than two commands for the operator to copy.
+    // 8. Make the bearer available to whatever launches a client. Without
+    //    this the server is healthy and the client still gets 401.
+    const shellExport = await persistBearerExportInteractively(
+      prompter,
+      paths,
+      env,
+      home,
+      registered
+    );
+
+    // 9. Start the service and verify, so setup ends with a working install
+    //    rather than commands for the operator to copy.
     const service = await startAndVerifyInteractively(
       prompter,
       options,
@@ -525,12 +536,128 @@ async function runWizard(
         tableAccess,
         registered,
         home,
-        service
+        service,
+        shellExport
       )
     );
   } finally {
     prompter.close();
   }
+}
+
+const SHELL_PROFILE_MARKER = "# servicenow-mcp: bearer for MCP clients";
+
+/**
+ * Make the bearer available to whatever launches an MCP client.
+ *
+ * Clients hold the literal `${SERVICENOW_MCP_BEARER_TOKEN}` rather than the
+ * token, which keeps the secret out of their config files but means the
+ * variable has to exist in the environment that starts them. Without it the
+ * client sends the placeholder unexpanded and the server answers 401 — with
+ * every server-side check green, because the gap is entirely client-side.
+ */
+function shellProfileFor(env: NodeJS.ProcessEnv, home: string): string | undefined {
+  const shell = env.SHELL ?? "";
+  if (shell.endsWith("/zsh")) return join(home, ".zshrc");
+  if (shell.endsWith("/bash")) {
+    const profile = join(home, ".bash_profile");
+    return existsSync(profile) ? profile : join(home, ".bashrc");
+  }
+  return undefined;
+}
+
+function shellProfileSnippet(clientEnv: string, home: string): string {
+  const path = clientEnv.startsWith(home)
+    ? `"$HOME${clientEnv.slice(home.length)}"`
+    : shellQuote(clientEnv);
+  return (
+    `\n${SHELL_PROFILE_MARKER}\n` +
+    `if [ -f ${path} ]; then\n` +
+    `  set -a; . ${path}; set +a\n` +
+    `fi\n`
+  );
+}
+
+function profileAlreadyExports(path: string): boolean {
+  if (!existsSync(path)) return false;
+  try {
+    return readFileSync(path, "utf8").includes(SHELL_PROFILE_MARKER);
+  } catch {
+    return false;
+  }
+}
+
+/** Outcome of the optional shell-profile step. */
+interface ShellExportOutcome {
+  readonly persisted: boolean;
+  readonly alreadyPresent: boolean;
+  readonly profilePath: string | undefined;
+}
+
+async function persistBearerExportInteractively(
+  prompter: WizardPrompter,
+  paths: ResolvedPaths,
+  env: NodeJS.ProcessEnv,
+  home: string,
+  registered: readonly string[]
+): Promise<ShellExportOutcome> {
+  const profilePath = shellProfileFor(env, home);
+
+  if (profilePath !== undefined && profileAlreadyExports(profilePath)) {
+    return Object.freeze({
+      persisted: false,
+      alreadyPresent: true,
+      profilePath,
+    });
+  }
+
+  if (registered.length === 0 && env[CLIENT_BEARER_ENV]) {
+    return Object.freeze({ persisted: false, alreadyPresent: false, profilePath });
+  }
+
+  prompter.note(
+    `\nYour clients hold the literal \${${CLIENT_BEARER_ENV}} rather than the\n` +
+      "token, so the secret stays out of their config files. That variable has to\n" +
+      "exist in the shell that starts them, or the client sends the placeholder\n" +
+      "unexpanded and gets 401."
+  );
+
+  if (profilePath === undefined) {
+    prompter.note(
+      `  Add this to your shell profile:\n` +
+        `    set -a; . ${shellQuote(paths.clientEnv)}; set +a`
+    );
+    return Object.freeze({ persisted: false, alreadyPresent: false, profilePath });
+  }
+
+  if (
+    !(await prompter.confirm(
+      `\nAdd it to ${displayPath(profilePath, home)} so new shells have it`,
+      true
+    ))
+  ) {
+    prompter.note(
+      `  Skipped. Run this in any shell that starts a client:\n` +
+        `    set -a; . ${shellQuote(paths.clientEnv)}; set +a`
+    );
+    return Object.freeze({ persisted: false, alreadyPresent: false, profilePath });
+  }
+
+  try {
+    appendFileSync(profilePath, shellProfileSnippet(paths.clientEnv, home), {
+      encoding: "utf8",
+    });
+  } catch (error) {
+    prompter.note(
+      `  FAILED  could not write ${displayPath(profilePath, home)}: ${describeError(error)}\n` +
+        `  Add this line by hand:\n` +
+        `    set -a; . ${shellQuote(paths.clientEnv)}; set +a`
+    );
+    return Object.freeze({ persisted: false, alreadyPresent: false, profilePath });
+  }
+
+  prompter.note(`  ok  added to ${displayPath(profilePath, home)}.`);
+  return Object.freeze({ persisted: true, alreadyPresent: false, profilePath });
 }
 
 /** Outcome of the optional start-and-verify step at the end of the wizard. */
@@ -1103,7 +1230,8 @@ function renderWizardSummary(
   tableAccess: TableAccessPolicyInput,
   registered: readonly string[],
   home: string,
-  service: ServiceStartOutcome
+  service: ServiceStartOutcome,
+  shellExport: ShellExportOutcome
 ): string {
   const short = (path: string): string => displayPath(path, home);
   const lines = [
@@ -1125,8 +1253,37 @@ function renderWizardSummary(
         : "The service is running and answered its readiness check.",
       "",
       `Service log  ${short(service.logPath)}`,
-      "",
-      "Re-check it at any time:",
+      ""
+    );
+
+    // The client half. Everything above can be green while a client still
+    // gets 401, because the bearer lives in the environment that starts it.
+    if (registered.length > 0) {
+      if (shellExport.persisted) {
+        lines.push(
+          `Start ${registered.join(" or ")} from a new shell and it will connect.`,
+          "This shell does not have the bearer yet:",
+          `  set -a; . ${shellQuote(short(paths.clientEnv))}; set +a`,
+          ""
+        );
+      } else if (shellExport.alreadyPresent) {
+        lines.push(
+          `Start ${registered.join(" or ")} and it will connect.`,
+          ""
+        );
+      } else {
+        lines.push(
+          `Before starting ${registered.join(" or ")}, give its shell the bearer:`,
+          `  set -a; . ${shellQuote(short(paths.clientEnv))}; set +a`,
+          "",
+          "Without it the client sends the unexpanded placeholder and gets 401.",
+          ""
+        );
+      }
+    }
+
+    lines.push(
+      "Re-check everything at any time:",
       `  servicenow-mcp-setup doctor --profile ${profile}`,
       ""
     );
@@ -1803,6 +1960,7 @@ async function runDoctor(
   checks.push(checkDirectoryMode(paths.configDir));
   checks.push(...checkEnvFile(paths.serverEnv, ["MCP_BEARER_TOKEN", "MCP_OWNER_ID", "MCP_CLIENT_ID"]));
   checks.push(...checkProfiles(paths, home, env, dependencies, options.profile));
+  checks.push(checkClientBearerEnvironment(paths, env, home));
 
   if (!options.offline) {
     checks.push(...(await checkEndpoint(options.endpoint, paths, dependencies)));
@@ -1821,6 +1979,47 @@ async function runDoctor(
     out(renderDoctorText(checks));
   }
   if (failed.length > 0) process.exitCode = 1;
+}
+
+/**
+ * The one failure the server-side checks cannot see.
+ *
+ * Registered clients hold the literal `${SERVICENOW_MCP_BEARER_TOKEN}`, so the
+ * variable has to exist in the environment that starts them. When it does not,
+ * every check above passes and the client still gets 401 — which reads as the
+ * server being broken.
+ */
+function checkClientBearerEnvironment(
+  paths: ResolvedPaths,
+  env: NodeJS.ProcessEnv,
+  home: string
+): Check {
+  const name = "client bearer";
+  if (env[CLIENT_BEARER_ENV]) {
+    return {
+      name,
+      ok: true,
+      detail: `${CLIENT_BEARER_ENV} is set in this environment`,
+    };
+  }
+  const source = `set -a; . ${shellQuote(displayPath(paths.clientEnv, home))}; set +a`;
+  if (!existsSync(paths.clientEnv)) {
+    return {
+      name,
+      ok: false,
+      detail: `${CLIENT_BEARER_ENV} is unset and ${displayPath(paths.clientEnv, home)} is missing`,
+      remedy: "Run: servicenow-mcp-setup",
+    };
+  }
+  return {
+    name,
+    ok: false,
+    detail: `${CLIENT_BEARER_ENV} is not set in this environment`,
+    remedy:
+      `A client started from here sends the unexpanded placeholder and gets 401. ` +
+      `Load it: ${source} — or add that line to your shell profile so every ` +
+      `new shell has it.`,
+  };
 }
 
 function checkNodeVersion(): Check {

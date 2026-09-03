@@ -1409,6 +1409,7 @@ describe("setup wizard on a genuinely fresh machine", () => {
       verifyCredential: async () => ({ ok: true, detail: "accepted" }),
       resolveParentTable: async () => undefined,
       commandExists: () => false,
+      probe: NOT_LISTENING,
       writeStdout: () => undefined,
       writeStderr: () => undefined,
     });
@@ -1549,5 +1550,103 @@ describe("setup wizard start-and-verify", () => {
     // discard a credential the instance already accepted.
     const manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
     expect(manager.getProfile("dev").instance).toBe("https://dev00001.service-now.com");
+  });
+});
+
+describe("bearer reaches the client's environment", () => {
+  const SHELL_MARKER = "# servicenow-mcp: bearer for MCP clients";
+  const SCRIPT = [
+    "dev",
+    "dev00001.service-now.com",
+    "basic",
+    "encrypted",
+    "integration.user",
+    "Just incident",
+    "None",
+  ];
+
+  async function wizardWith(
+    home: string,
+    script: readonly string[],
+    secret: string
+  ): Promise<ScriptedPrompter> {
+    const prompter = scriptedPrompter(script, [secret]);
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home, SHELL: "/bin/zsh" },
+      interactive: true,
+      prompter,
+      profileManager: new ProfileManager({
+        configFilePath: profileConfigPath(home),
+      }),
+      keyProvider: FIXED_KEY,
+      verifyCredential: ACCEPTS,
+      resolveParentTable: async () => undefined,
+      commandExists: () => true,
+      runCommand: () => ({ status: 0 }),
+      probe: NOT_LISTENING,
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+    return prompter;
+  }
+
+  it("appends the export to the shell profile, preserving what is there", async () => {
+    const home = newHome("sn-mcp-shell-");
+    const zshrc = join(home, ".zshrc");
+    writeFileSync(zshrc, "# existing content\n");
+
+    await wizardWith(home, [...SCRIPT, "y", "y", DECLINE_START], "shell-secret");
+
+    const body = readFileSync(zshrc, "utf8");
+    expect(body).toContain("# existing content");
+    expect(body).toContain('"$HOME/.servicenow-mcp/client.env"');
+    expect(body.split(SHELL_MARKER).length - 1).toBe(1);
+  });
+
+  it("does not offer again when the profile already exports it", async () => {
+    const home = newHome("sn-mcp-shell-present-");
+    const zshrc = join(home, ".zshrc");
+    writeFileSync(zshrc, `${SHELL_MARKER}\n# already wired\n`);
+
+    // No answer for the export question: if it were asked, the script would
+    // run out and the prompter would throw.
+    const prompter = await wizardWith(
+      home,
+      [...SCRIPT, "y", DECLINE_START],
+      "already-secret"
+    );
+    expect(prompter.remaining()).toBe(0);
+    expect(readFileSync(zshrc, "utf8").split(SHELL_MARKER).length - 1).toBe(1);
+  });
+
+  it("doctor fails when the bearer is absent and passes when it is present", async () => {
+    const home = newHome("sn-mcp-doctor-bearer-");
+    mkdirSync(join(home, ".servicenow-mcp"), { recursive: true });
+    writeFileSync(clientEnvPath(home), "SERVICENOW_MCP_BEARER_TOKEN='abc'\n", {
+      mode: 0o600,
+    });
+
+    const runDoctor = async (env: NodeJS.ProcessEnv): Promise<string> => {
+      const io = capture();
+      await runSetupCli({
+        home,
+        argv: ["doctor", "--offline"],
+        env,
+        writeStdout: (value) => io.out.push(value),
+        writeStderr: (value) => io.err.push(value),
+      });
+      return io.out.join("");
+    };
+
+    const without = await runDoctor({ HOME: home });
+    expect(without).toContain("client bearer");
+    expect(without).toMatch(/FAIL\s+client bearer/u);
+    // The remedy must name the fix, not merely the symptom.
+    expect(without).toContain("client.env");
+
+    const with_ = await runDoctor({ HOME: home, SERVICENOW_MCP_BEARER_TOKEN: "abc" });
+    expect(with_).toMatch(/ok\s+client bearer/u);
   });
 });
