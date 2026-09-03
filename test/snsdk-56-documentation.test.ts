@@ -31,7 +31,6 @@ describe("SNSDK-56 documentation contract", () => {
   it("ships a fail-closed non-secret environment inventory", () => {
     const example = read(".env.example");
     for (const secret of [
-      "MCP_BEARER_TOKEN",
       "SN_PASSWORD",
       "SN_CLIENT_SECRET",
       "SN_API_KEY",
@@ -40,6 +39,15 @@ describe("SNSDK-56 documentation contract", () => {
       expect(example, secret).toMatch(new RegExp(`^${secret}=$`, "mu"));
       expect(example, secret).not.toMatch(new RegExp(`^${secret}=.+$`, "mu"));
     }
+
+    // MCP_BEARER_TOKEN is the one secret that is not merely uninjected but
+    // optional, so it must not be assigned at all: the service rejects an
+    // empty value at startup, and a live `MCP_BEARER_TOKEN=` line here would
+    // make this file unsourceable. The inventory still has to explain it.
+    expect(example).not.toMatch(/^MCP_BEARER_TOKEN=/mu);
+    expect(example).toContain("# MCP_BEARER_TOKEN=");
+    expect(example).toContain("HTTP authentication is OPT-IN and off by default");
+    expect(example).toContain("the /mcp endpoint is unauthenticated");
 
     expect(example).toContain("supervisor, orchestrator, OS keychain, or secret manager");
     expect(example).toContain("SN_PROFILE_NAME=example-dev");

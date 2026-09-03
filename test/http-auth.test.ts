@@ -4,6 +4,7 @@ import {
   HttpAuthenticationError,
   PrivateBoundaryAuthenticationProvider,
   StaticBearerAuthenticationProvider,
+  UnauthenticatedIdentityProvider,
   authenticateHttpRequest,
   correlationIdFromMcpRequest,
   createAuthenticatedRequestMetadataProvider,
@@ -167,6 +168,83 @@ describe("static bearer HTTP authentication", () => {
           { token: DIRECT_TOKEN, ownerId: "owner-one", clientId: "client-two" },
         ])
     ).toThrow(/tokens/u);
+  });
+});
+
+describe("unauthenticated identity provider", () => {
+  const IDENTITY = { ownerId: "local-owner", clientId: "local-client" };
+
+  it("admits a request with no Authorization header under the configured identity", async () => {
+    const provider = new UnauthenticatedIdentityProvider(IDENTITY);
+
+    const identity = await authenticateHttpRequest(provider, request());
+
+    expect(identity).toEqual(IDENTITY);
+    expect(Object.isFrozen(identity)).toBe(true);
+    expect(Reflect.set(identity, "clientId", "spoofed-client")).toBe(false);
+  });
+
+  it("ignores every caller-supplied credential and identity field", () => {
+    const provider = new UnauthenticatedIdentityProvider(IDENTITY);
+    const hostileRequest = {
+      authorizationHeaders: [`Bearer ${DIRECT_TOKEN}`, `Bearer ${TEST_TOKEN}`],
+      ownerId: "spoofed-owner",
+      clientId: "spoofed-client",
+      headers: {
+        "x-owner-id": "spoofed-owner",
+        "x-client-id": "spoofed-client",
+        "proxy-authorization": `Bearer ${TEST_TOKEN}`,
+      },
+    };
+
+    // Admitting everyone is the point; letting the caller choose who it is
+    // admitted as would corrupt every audit record it goes on to produce.
+    expect(provider.authenticate(hostileRequest)).toEqual(IDENTITY);
+    expect(provider.authenticate(request())).toEqual(IDENTITY);
+    expect(
+      provider.authenticate(request(`Bearer ${DIRECT_TOKEN}`))
+    ).toEqual(IDENTITY);
+  });
+
+  it("snapshots the identity, so a later mutation cannot rewrite it", async () => {
+    const mutable = { ownerId: "local-owner", clientId: "local-client" };
+    const provider = new UnauthenticatedIdentityProvider(mutable);
+    mutable.clientId = "mutated-after-construction";
+
+    expect(await authenticateHttpRequest(provider, request())).toEqual({
+      ownerId: "local-owner",
+      clientId: "local-client",
+    });
+  });
+
+  it("rejects a malformed configured identity at construction", () => {
+    for (const invalid of [
+      { ownerId: "", clientId: "local-client" },
+      { ownerId: "local-owner", clientId: "" },
+      { ownerId: "local-owner", clientId: "line\nbreak" },
+      { ownerId: "x".repeat(129), clientId: "local-client" },
+      { ownerId: 42, clientId: "local-client" } as unknown as typeof IDENTITY,
+    ]) {
+      // A startup failure, never a per-request one: an invalid identity that
+      // survived to request time would reach audit as the unavailable-owner
+      // sentinel and silently detach every record from its operator.
+      expect(() => new UnauthenticatedIdentityProvider(invalid)).toThrow(TypeError);
+    }
+  });
+
+  it("produces request metadata the audit path accepts", async () => {
+    const provider = new UnauthenticatedIdentityProvider(IDENTITY);
+    const identity = await authenticateHttpRequest(provider, request());
+    const metadata = await createAuthenticatedRequestMetadataProvider(identity).resolve({
+      tool: "sn_query",
+      requestId: "rpc-1",
+      authenticatedClientId: "spoofed-client",
+    });
+
+    expect(metadata.identity).toEqual(IDENTITY);
+    expect(metadata.correlationId).toMatch(/^mcp-[a-f0-9]{64}$/u);
+    expect(Object.isFrozen(metadata)).toBe(true);
+    expect(Object.isFrozen(metadata.identity)).toBe(true);
   });
 });
 

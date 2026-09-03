@@ -3,7 +3,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 
-import { StaticBearerAuthenticationProvider } from "../src/http-auth.js";
+import {
+  StaticBearerAuthenticationProvider,
+  UnauthenticatedIdentityProvider,
+} from "../src/http-auth.js";
 import {
   createHttpObservability,
   createHttpRateLimiter,
@@ -386,6 +389,73 @@ describe("SNSDK-26 HTTP runtime wiring", () => {
       clientIdHash: expect.stringMatching(/^sha256:/u),
     });
     expect(JSON.stringify(observed.events)).not.toContain(TOKEN);
+  });
+
+  it("attributes an unauthenticated request to the same identity a bearer would", async () => {
+    // The bearer was never the source of the identity — configuration was. So
+    // removing it must leave every hashed identity in the audit stream byte
+    // for byte what it was, or two installs of the same service become
+    // incomparable the moment authentication is turned off.
+    const run = async (
+      authenticated: boolean
+    ): Promise<readonly StructuredHttpEvent[]> => {
+      const observed = observabilityHarness();
+      const runtime = createHttpRuntime({
+        host: "127.0.0.1",
+        port: 0,
+        authenticationProvider: authenticated
+          ? authenticationProvider()
+          : new UnauthenticatedIdentityProvider(IDENTITY),
+        observability: observed.observability,
+        createServer: () =>
+          createMcpServer({
+            dependencies: {},
+            register: (surface) => {
+              surface.registerTool("sn_identity_probe", {}, async () => ({
+                content: [{ type: "text", text: "ok" }],
+              }));
+            },
+          }),
+      });
+      openRuntimes.push(runtime);
+      const address = await runtime.start();
+      const transport = new StreamableHTTPClientTransport(address.url, {
+        requestInit: authenticated
+          ? { headers: { authorization: `Bearer ${TOKEN}` } }
+          : {},
+      });
+      const client = new Client({ name: "identity-audit-client", version: "1.0.0" });
+      try {
+        await client.connect(transport);
+        await client.callTool({ name: "sn_identity_probe", arguments: {} });
+      } finally {
+        await client.close();
+      }
+      return observed.events;
+    };
+
+    const withBearer = await run(true);
+    const withoutBearer = await run(false);
+
+    const hashes = (events: readonly StructuredHttpEvent[]) =>
+      events
+        .filter((event) => event.type === "http_request")
+        .map((event) => [event.ownerIdHash, event.clientIdHash]);
+
+    // Guards the comparison below against passing because both runs recorded
+    // nothing but nulls.
+    const attributed = hashes(withoutBearer).filter(
+      ([ownerIdHash]) => ownerIdHash !== null
+    );
+    expect(attributed.length).toBeGreaterThan(0);
+    for (const [ownerIdHash, clientIdHash] of attributed) {
+      expect(ownerIdHash).toMatch(/^sha256:/u);
+      expect(clientIdHash).toMatch(/^sha256:/u);
+    }
+    expect(hashes(withoutBearer)).toEqual(hashes(withBearer));
+
+    const toolEvent = withoutBearer.find((event) => event.type === "mcp_tool");
+    expect(toolEvent).toMatchObject({ tool: "sn_identity_probe" });
   });
 
   it("records SDK input rejection as one correlated rejected tool call", async () => {

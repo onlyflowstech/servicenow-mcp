@@ -11,6 +11,70 @@ Public-tunnel products are not a production boundary and must not be started
 automatically. Private ChatGPT connectivity is a separately validated adapter,
 not an application startup side effect.
 
+## HTTP authentication is optional and off by default
+
+**As of 2.0 the `/mcp` endpoint is unauthenticated unless you configure it.**
+The service requires and verifies a bearer token only when `MCP_BEARER_TOKEN`
+is set in its environment. With that variable absent it starts, logs a warning
+to stderr, and serves every request that reaches it.
+
+What that means concretely:
+
+- **Any process running as the service's user can use it.** There is no
+  credential to steal because there is no credential to present. A local
+  program, a malicious dependency in an unrelated project, a script the user
+  pastes into a terminal — each of these can call `/mcp` and exercise whatever
+  ServiceNow access the configured profiles grant, under the operator's own
+  audit identity.
+- **The remaining boundary is narrow and specific.** It is the listen address
+  (`MCP_HOST`, `127.0.0.1` by default), the `Host` and `Origin` allowlists
+  (`MCP_ALLOWED_HOSTS` / `MCP_ALLOWED_ORIGINS`, both fail-closed), the
+  admission and rate limits, and the per-profile table and field policy.
+  Together those stop a remote host and stop a web page in the user's browser.
+  None of them distinguishes one local process from another.
+- **It does not weaken the ServiceNow credential itself.** That still lives in
+  an owner-only `0600` file as a reference or an AES-256-GCM envelope, and
+  `SN_PROFILE_ENCRYPTION_KEY` is still injected separately. The change is that
+  reaching the *service* no longer requires anything, and the service uses that
+  credential on the caller's behalf.
+- **Audit records are unchanged in shape.** `MCP_OWNER_ID` and `MCP_CLIENT_ID`
+  still label every record and default to `local-owner` / `local-client` when
+  unset. They were always configuration rather than proof of identity; with no
+  bearer they attribute a request to the configured owner without establishing
+  that the request came from them.
+
+Do not run unauthenticated off loopback. Binding `MCP_HOST` to a routable
+address without `MCP_BEARER_TOKEN` publishes your ServiceNow access to the
+network.
+
+### Turning authentication on
+
+Set `MCP_BEARER_TOKEN` in the service environment to a random value of 32-4096
+bearer characters (`A-Za-z0-9._~+/-`, optional `=` padding), restart, and send
+it from every client:
+
+```
+Authorization: Bearer <the MCP_BEARER_TOKEN value>
+```
+
+The token is compared as a SHA-256 digest with a timing-safe comparison, before
+MCP parsing, profile lookup, tool dispatch, or any ServiceNow credential
+access. Missing, duplicated, malformed, and unknown tokens all fail identically
+with `401` and `WWW-Authenticate: Bearer`.
+
+An empty `MCP_BEARER_TOKEN` is a startup failure, not a way to switch
+authentication off — a half-applied secret injection stops the service rather
+than quietly opening the port. `servicenow-mcp-setup` does not generate a
+token; provision it the same way as every other runtime secret below.
+
+`servicenow-mcp-setup doctor` reports which of the two modes an install is in
+under the `http authentication` check.
+
+For deployments that terminate TLS at a proxy or expose the endpoint beyond one
+machine — the container, private-ChatGPT, and release-validation paths in this
+repository all do — set `MCP_BEARER_TOKEN`. The rest of this document assumes
+it is set.
+
 ## TLS termination
 
 The Node.js process serves HTTP/1.1 and does not terminate TLS. For every
@@ -28,7 +92,8 @@ load balancer, ingress, or private-access gateway with all of these properties:
   network is not an equivalent trust boundary.
 
 TLS authenticates the endpoint; it does not replace `MCP_BEARER_TOKEN`.
-Browser CORS and `Host` admission likewise do not authenticate a caller.
+Browser CORS and `Host` admission likewise do not authenticate a caller. When
+`MCP_BEARER_TOKEN` is unset, nothing authenticates a caller at all.
 
 ## Reverse proxy and client identity contract
 
@@ -85,8 +150,12 @@ HTTP 400 for malformed input or HTTP 403 for an unapproved origin. There is no
 wildcard or reflected-origin mode.
 
 An MCP CORS preflight additionally requires `POST` and only the documented
-request headers. CORS is a browser boundary, not authorization: the bearer
-token remains required for the subsequent `/mcp` request.
+request headers. CORS is a browser boundary, not authorization: it governs what
+a *browser* will let a page do, and a non-browser client on the same machine
+sends whatever headers it likes. Where `MCP_BEARER_TOKEN` is set, the bearer
+remains required for the subsequent `/mcp` request; where it is not, the
+`Host`/`Origin` allowlists are the only thing a browser has to defeat, and a
+local process has nothing to defeat.
 
 ## Secret injection and storage
 
@@ -130,8 +199,10 @@ tool is inspection-only and returns non-secret metadata.
    deployment contract explicitly guarantees it.
 4. Verify authentication with the explicitly named profile, verify logs and
    diagnostics contain no protected value, then revoke the old credential.
-5. Rotate `MCP_BEARER_TOKEN` by replacing the runtime secret and rolling all
-   replicas as one controlled change. Do not accept both tokens indefinitely.
+5. Rotate `MCP_BEARER_TOKEN`, where it is configured, by replacing the runtime
+   secret and rolling all replicas as one controlled change. Do not accept both
+   tokens indefinitely. Removing the variable does not deny access — it makes
+   the endpoint unauthenticated, so treat "revoke the bearer" as "replace it".
 
 Application JSON-line events are designed to contain bounded identifiers,
 outcomes, reasons, and latency—not request authorization, ServiceNow

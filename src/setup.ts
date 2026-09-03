@@ -5,9 +5,9 @@
  *
  * Four subcommands, none of which ever accept, print, or log a secret value:
  *
- * - `init` (default) generates owner-only local env files, registers the
- *   clients whose CLI can hold a bearer by reference, and prints
- *   copy-pasteable configuration for the clients that cannot.
+ * - `init` (default) generates the owner-only local env file, registers the
+ *   clients that have a CLI, and prints copy-pasteable configuration for the
+ *   clients that do not.
  * - `client` prints that configuration for one named client on demand.
  * - `grant` writes least-privilege `tableAccess` rules onto an existing
  *   profile, which is otherwise only reachable by hand-editing the
@@ -20,7 +20,6 @@
 
 import { randomBytes } from "node:crypto";
 import {
-  appendFileSync,
   chmodSync,
   closeSync,
   existsSync,
@@ -182,7 +181,7 @@ type ClientTarget =
   | "vscode"
   | "windsurf";
 
-/** Clients this bootstrap can register without putting a bearer in argv or client config. */
+/** Clients this bootstrap can register non-interactively through their own CLI. */
 const AUTO_REGISTERED_CLIENTS: readonly ClientTarget[] = Object.freeze([
   "codex",
   "claude-code",
@@ -234,12 +233,57 @@ interface DoctorOptions {
 const DEFAULT_ENDPOINT = "http://127.0.0.1:3000/mcp";
 const CONFIG_RELATIVE_DIR = ".servicenow-mcp";
 const SERVER_ENV_RELATIVE_PATH = `${CONFIG_RELATIVE_DIR}/server.env`;
-const CLIENT_ENV_RELATIVE_PATH = `${CONFIG_RELATIVE_DIR}/client.env`;
-const HEADER_FILE_RELATIVE_PATH = `${CONFIG_RELATIVE_DIR}/client-headers.txt`;
 const PROFILE_CONFIG_RELATIVE_PATH = `${CONFIG_RELATIVE_DIR}/config.json`;
 const MCP_SERVER_NAME = "servicenow-mcp";
-const CLIENT_BEARER_ENV = "SERVICENOW_MCP_BEARER_TOKEN";
 const ENCRYPTION_KEY_ENV = "SN_PROFILE_ENCRYPTION_KEY";
+/**
+ * Turns HTTP authentication on when the operator sets it in `server.env`.
+ *
+ * Setup never generates it. It is read here so `doctor` can present the same
+ * credential the service is running with, rather than reporting a spurious 401
+ * against an install that has deliberately opted back in.
+ */
+const SERVER_BEARER_ENV = "MCP_BEARER_TOKEN";
+/**
+ * What `server.env` must contain for the service to start and for its audit
+ * records to carry a stable identity. `MCP_BEARER_TOKEN` is deliberately absent:
+ * the service runs without it, so a missing bearer is a deployment choice
+ * rather than a broken install.
+ */
+const REQUIRED_SERVER_ENV_VALUES: readonly string[] = Object.freeze([
+  "MCP_OWNER_ID",
+  "MCP_CLIENT_ID",
+]);
+
+/**
+ * Stated wherever setup reports what it built.
+ *
+ * The service ships unauthenticated, which is a property of the deployment the
+ * operator has to know without reading the docs first. Buried or softened, it
+ * reads as "setup succeeded"; the point is that a local process is now inside
+ * the boundary.
+ */
+const UNAUTHENTICATED_NOTICE: readonly string[] = Object.freeze([
+  "This endpoint is UNAUTHENTICATED. Any process running as you on this",
+  "machine can reach it and use every table your profiles grant.",
+  "",
+  "What still protects it: it listens on 127.0.0.1 only, so nothing off this",
+  "machine can connect, and it rejects Host/Origin values it does not",
+  "recognise, so a web page you visit cannot drive it. Neither of those stops",
+  "another program on this machine.",
+  "",
+  "To require a bearer token instead, add a random value of 32 characters or",
+  "more to server.env as MCP_BEARER_TOKEN, restart the service, and send it as",
+  '"Authorization: Bearer <token>" from every client. See',
+  "docs/PRODUCTION-SECURITY.md.",
+]);
+
+/** Printed under every client recipe, because none of them carries a credential. */
+const AUTHENTICATION_FOOTNOTE =
+  "Authentication is off by default, so nothing above sends a credential.\n" +
+  "If you set MCP_BEARER_TOKEN in server.env, every client must also send\n" +
+  '"Authorization: Bearer <that value>" — through the client\'s own header\n' +
+  "configuration, or for mcp-remote through --header-file.\n";
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "[::1]", "localhost"]);
 const MINIMUM_NODE_MAJOR = 20;
 const PROBE_TIMEOUT_MS = 5_000;
@@ -274,7 +318,7 @@ export async function runSetupCli(
 
   switch (subcommand) {
     case "client":
-      runClient(parseClientArguments(args), home, out);
+      runClient(parseClientArguments(args), out);
       return;
     case "grant":
       runGrant(parseGrantArguments(args), home, dependencies, out);
@@ -335,17 +379,9 @@ async function runWizard(
         "instance. Press Ctrl+C at any point to stop; nothing will be saved.\n"
     );
 
-    // 1. Local auth material. Idempotent, so this is silent.
+    // 1. Local service material. Idempotent, so this is silent.
     const values = loadOrCreateBootstrapValues(paths, options);
     writeSecureEnvFile(paths.serverEnv, values);
-    writeSecureEnvFile(paths.clientEnv, {
-      [CLIENT_BEARER_ENV]: values.MCP_BEARER_TOKEN,
-    });
-    writeSecureFile(
-      paths.headerFile,
-      `# ServiceNow MCP bearer header for mcp-remote --header-file.\n` +
-        `Authorization: Bearer ${values.MCP_BEARER_TOKEN}\n`
-    );
 
     // The key just written to server.env is not in this process's environment,
     // so it must be carried in memory. `values` already holds it, whether it
@@ -367,7 +403,6 @@ async function runWizard(
           prompter,
           options,
           env,
-          values,
           dependencies
         );
         out(renderClientOnlySummary(paths, options, only, home));
@@ -501,21 +536,10 @@ async function runWizard(
       prompter,
       options,
       env,
-      values,
       dependencies
     );
 
-    // 8. Make the bearer available to whatever launches a client. Without
-    //    this the server is healthy and the client still gets 401.
-    const shellExport = await persistBearerExportInteractively(
-      prompter,
-      paths,
-      env,
-      home,
-      registered
-    );
-
-    // 9. Start the service and verify, so setup ends with a working install
+    // 8. Start the service and verify, so setup ends with a working install
     //    rather than commands for the operator to copy.
     const service = await startAndVerifyInteractively(
       prompter,
@@ -529,135 +553,24 @@ async function runWizard(
     );
 
     out(
-      renderWizardSummary(
-        paths,
-        options,
-        name,
-        tableAccess,
-        registered,
-        home,
-        service,
-        shellExport
-      )
+      renderWizardSummary(paths, options, name, tableAccess, registered, home, service)
     );
   } finally {
     prompter.close();
   }
 }
 
-const SHELL_PROFILE_MARKER = "# servicenow-mcp: bearer for MCP clients";
-
 /**
- * Make the bearer available to whatever launches an MCP client.
+ * A path safe to paste into a shell.
  *
- * Clients hold the literal `${SERVICENOW_MCP_BEARER_TOKEN}` rather than the
- * token, which keeps the secret out of their config files but means the
- * variable has to exist in the environment that starts them. Without it the
- * client sends the placeholder unexpanded and the server answers 401 — with
- * every server-side check green, because the gap is entirely client-side.
+ * `displayPath` renders `~/...` for readability, but a tilde inside quotes is
+ * not expanded — `. '~/x'` fails with "no such file or directory". Emit
+ * "$HOME/..." instead, which is both readable and correct when pasted.
  */
-function shellProfileFor(env: NodeJS.ProcessEnv, home: string): string | undefined {
-  const shell = env.SHELL ?? "";
-  if (shell.endsWith("/zsh")) return join(home, ".zshrc");
-  if (shell.endsWith("/bash")) {
-    const profile = join(home, ".bash_profile");
-    return existsSync(profile) ? profile : join(home, ".bashrc");
-  }
-  return undefined;
-}
-
-function shellProfileSnippet(clientEnv: string, home: string): string {
-  const path = clientEnv.startsWith(home)
-    ? `"$HOME${clientEnv.slice(home.length)}"`
-    : shellQuote(clientEnv);
-  return (
-    `\n${SHELL_PROFILE_MARKER}\n` +
-    `if [ -f ${path} ]; then\n` +
-    `  set -a; . ${path}; set +a\n` +
-    `fi\n`
-  );
-}
-
-function profileAlreadyExports(path: string): boolean {
-  if (!existsSync(path)) return false;
-  try {
-    return readFileSync(path, "utf8").includes(SHELL_PROFILE_MARKER);
-  } catch {
-    return false;
-  }
-}
-
-/** Outcome of the optional shell-profile step. */
-interface ShellExportOutcome {
-  readonly persisted: boolean;
-  readonly alreadyPresent: boolean;
-  readonly profilePath: string | undefined;
-}
-
-async function persistBearerExportInteractively(
-  prompter: WizardPrompter,
-  paths: ResolvedPaths,
-  env: NodeJS.ProcessEnv,
-  home: string,
-  registered: readonly string[]
-): Promise<ShellExportOutcome> {
-  const profilePath = shellProfileFor(env, home);
-
-  if (profilePath !== undefined && profileAlreadyExports(profilePath)) {
-    return Object.freeze({
-      persisted: false,
-      alreadyPresent: true,
-      profilePath,
-    });
-  }
-
-  if (registered.length === 0 && env[CLIENT_BEARER_ENV]) {
-    return Object.freeze({ persisted: false, alreadyPresent: false, profilePath });
-  }
-
-  prompter.note(
-    `\nYour clients hold the literal \${${CLIENT_BEARER_ENV}} rather than the\n` +
-      "token, so the secret stays out of their config files. That variable has to\n" +
-      "exist in the shell that starts them, or the client sends the placeholder\n" +
-      "unexpanded and gets 401."
-  );
-
-  if (profilePath === undefined) {
-    prompter.note(
-      `  Add this to your shell profile:\n` +
-        `    set -a; . ${shellQuote(paths.clientEnv)}; set +a`
-    );
-    return Object.freeze({ persisted: false, alreadyPresent: false, profilePath });
-  }
-
-  if (
-    !(await prompter.confirm(
-      `\nAdd it to ${displayPath(profilePath, home)} so new shells have it`,
-      true
-    ))
-  ) {
-    prompter.note(
-      `  Skipped. Run this in any shell that starts a client:\n` +
-        `    set -a; . ${shellQuote(paths.clientEnv)}; set +a`
-    );
-    return Object.freeze({ persisted: false, alreadyPresent: false, profilePath });
-  }
-
-  try {
-    appendFileSync(profilePath, shellProfileSnippet(paths.clientEnv, home), {
-      encoding: "utf8",
-    });
-  } catch (error) {
-    prompter.note(
-      `  FAILED  could not write ${displayPath(profilePath, home)}: ${describeError(error)}\n` +
-        `  Add this line by hand:\n` +
-        `    set -a; . ${shellQuote(paths.clientEnv)}; set +a`
-    );
-    return Object.freeze({ persisted: false, alreadyPresent: false, profilePath });
-  }
-
-  prompter.note(`  ok  added to ${displayPath(profilePath, home)}.`);
-  return Object.freeze({ persisted: true, alreadyPresent: false, profilePath });
+function shellPathLiteral(path: string, home: string): string {
+  return path.startsWith(`${home}/`)
+    ? `"$HOME${path.slice(home.length)}"`
+    : shellQuote(path);
 }
 
 /** Outcome of the optional start-and-verify step at the end of the wizard. */
@@ -722,7 +635,7 @@ async function startAndVerifyInteractively(
     prompter.note(
       `  FAILED  could not start the service: ${describeError(error)}\n` +
         `  Start it by hand:\n` +
-        `    set -a; source ${shellQuote(paths.serverEnv)}; set +a; servicenow-mcp`
+        `    set -a; source ${shellPathLiteral(paths.serverEnv, home)}; set +a; servicenow-mcp`
     );
     return Object.freeze({
       started: false,
@@ -760,11 +673,7 @@ async function startAndVerifyInteractively(
   const checks: Check[] = [
     checkNodeVersion(),
     checkDirectoryMode(paths.configDir),
-    ...checkEnvFile(paths.serverEnv, [
-      "MCP_BEARER_TOKEN",
-      "MCP_OWNER_ID",
-      "MCP_CLIENT_ID",
-    ]),
+    ...checkEnvFile(paths.serverEnv, REQUIRED_SERVER_ENV_VALUES),
     ...checkProfiles(paths, home, env, dependencies, profile),
     ...(await checkEndpoint(options.endpoint, paths, dependencies)),
   ];
@@ -1192,7 +1101,6 @@ async function registerClientsInteractively(
   prompter: WizardPrompter,
   options: InitOptions,
   env: NodeJS.ProcessEnv,
-  values: Readonly<Record<string, string>>,
   dependencies: SetupCliDependencies
 ): Promise<readonly string[]> {
   const commandExists = dependencies.commandExists ?? defaultCommandExists;
@@ -1209,11 +1117,7 @@ async function registerClientsInteractively(
   ) {
     return Object.freeze([]);
   }
-  const context: RegistrationContext = {
-    commandExists,
-    runCommand,
-    env: { ...env, [CLIENT_BEARER_ENV]: values.MCP_BEARER_TOKEN },
-  };
+  const context: RegistrationContext = { commandExists, runCommand, env };
   const configured: string[] = [];
   for (const client of available) {
     const result = registerClient(client, options.endpoint, options.force, context);
@@ -1230,8 +1134,7 @@ function renderWizardSummary(
   tableAccess: TableAccessPolicyInput,
   registered: readonly string[],
   home: string,
-  service: ServiceStartOutcome,
-  shellExport: ShellExportOutcome
+  service: ServiceStartOutcome
 ): string {
   const short = (path: string): string => displayPath(path, home);
   const lines = [
@@ -1256,30 +1159,8 @@ function renderWizardSummary(
       ""
     );
 
-    // The client half. Everything above can be green while a client still
-    // gets 401, because the bearer lives in the environment that starts it.
     if (registered.length > 0) {
-      if (shellExport.persisted) {
-        lines.push(
-          `Start ${registered.join(" or ")} from a new shell and it will connect.`,
-          "This shell does not have the bearer yet:",
-          `  set -a; . ${shellQuote(short(paths.clientEnv))}; set +a`,
-          ""
-        );
-      } else if (shellExport.alreadyPresent) {
-        lines.push(
-          `Start ${registered.join(" or ")} and it will connect.`,
-          ""
-        );
-      } else {
-        lines.push(
-          `Before starting ${registered.join(" or ")}, give its shell the bearer:`,
-          `  set -a; . ${shellQuote(short(paths.clientEnv))}; set +a`,
-          "",
-          "Without it the client sends the unexpanded placeholder and gets 401.",
-          ""
-        );
-      }
+      lines.push(`Start ${registered.join(" or ")} and it will connect.`, "");
     }
 
     lines.push(
@@ -1301,7 +1182,7 @@ function renderWizardSummary(
         : "The service is not running yet.",
       "",
       "Start it:",
-      `  set -a; source ${shellQuote(short(paths.serverEnv))}; set +a; servicenow-mcp`,
+      `  set -a; source ${shellPathLiteral(paths.serverEnv, home)}; set +a; servicenow-mcp`,
       "",
       "Then verify it end to end:",
       `  servicenow-mcp-setup doctor --profile ${profile}`,
@@ -1315,6 +1196,7 @@ function renderWizardSummary(
       ""
     );
   }
+  lines.push(...UNAUTHENTICATED_NOTICE, "");
   lines.push(
     "Every client should hold at most 2 requests in flight; the service admits",
     "MCP_MAX_CONCURRENT_REQUESTS (default 2) and answers the rest with HTTP 503.",
@@ -1333,7 +1215,7 @@ function renderClientOnlySummary(
     `\nClients   ${registered.length > 0 ? registered.join(", ") : "(none registered)"}\n` +
     `Endpoint  ${options.endpoint}\n\n` +
     `Start the service:\n` +
-    `  set -a; source ${shellQuote(displayPath(paths.serverEnv, home))}; set +a; servicenow-mcp\n\n` +
+    `  set -a; source ${shellPathLiteral(paths.serverEnv, home)}; set +a; servicenow-mcp\n\n` +
     `Configure any remaining client by hand:\n` +
     `  servicenow-mcp-setup client --client all\n`
   );
@@ -1473,33 +1355,23 @@ async function runInit(
   }
 
   const values = loadOrCreateBootstrapValues(paths, options);
-  const clientEnvValues = Object.freeze({
-    [CLIENT_BEARER_ENV]: values.MCP_BEARER_TOKEN,
-  });
 
   writeSecureEnvFile(paths.serverEnv, values);
-  writeSecureEnvFile(paths.clientEnv, clientEnvValues);
-  writeSecureFile(
-    paths.headerFile,
-    `# ServiceNow MCP bearer header for mcp-remote --header-file.\n` +
-      `Authorization: Bearer ${values.MCP_BEARER_TOKEN}\n`
-  );
 
   const commandExists = dependencies.commandExists ?? defaultCommandExists;
   const runCommand = dependencies.runCommand ?? defaultRunCommand;
   const configuredClients: string[] = [];
   const skippedClients: string[] = [];
-  const childEnv = { ...env, ...clientEnvValues };
 
   for (const client of options.clients) {
     if (!AUTO_REGISTERED_CLIENTS.includes(client)) {
-      skippedClients.push(`${client} (no CLI that keeps the bearer by reference)`);
+      skippedClients.push(`${client} (no CLI to register with)`);
       continue;
     }
     const registration = registerClient(client, options.endpoint, options.force, {
       commandExists,
       runCommand,
-      env: childEnv,
+      env,
     });
     if (registration.ok) configuredClients.push(client);
     else skippedClients.push(`${client} (${registration.reason})`);
@@ -1511,23 +1383,20 @@ async function runInit(
 
   const report = {
     status: "configured",
-    files: {
-      server_env: paths.serverEnv,
-      client_env: paths.clientEnv,
-      client_header_file: paths.headerFile,
-    },
+    files: { server_env: paths.serverEnv },
     endpoint: options.endpoint,
+    authentication: "none",
     clients: configuredClients,
     skipped_clients: skippedClients,
     start_command: `set -a; source ${shellQuote(paths.serverEnv)}; set +a; servicenow-mcp`,
-    client_env_command: `set -a; source ${shellQuote(paths.clientEnv)}; set +a`,
     profile_command:
       "servicenow-mcp-profile create --name dev --instance https://yourinstance.service-now.com --auth-type oauth --client-id <client-id> --source reference --provider env",
     grant_command:
       "servicenow-mcp-setup grant --profile dev --read incident --write incident",
     doctor_command: "servicenow-mcp-setup doctor --profile dev",
     notes: [
-      "Generated bearer and owner/client IDs are stored in owner-only env files, not client config.",
+      "The MCP endpoint is unauthenticated: any local process that can reach it has the access these profiles grant. Set MCP_BEARER_TOKEN in the server env file to require a bearer token.",
+      "Generated owner/client IDs are stored in an owner-only env file, not in client config. They label audit records; they are not credentials.",
       "A profile with no tableAccess rules denies every tool call; run the grant command before first use.",
       "Create ServiceNow profiles with servicenow-mcp-profile; protected values are prompted or read from bounded stdin, never argv.",
     ],
@@ -1592,23 +1461,11 @@ function configureCodex(
   }
   return context.runCommand(
     "codex",
-    [
-      "mcp",
-      "add",
-      MCP_SERVER_NAME,
-      "--url",
-      endpoint,
-      "--bearer-token-env-var",
-      CLIENT_BEARER_ENV,
-    ],
+    ["mcp", "add", MCP_SERVER_NAME, "--url", endpoint],
     context.env
   );
 }
 
-/**
- * Claude Code stores the literal `${VAR}` text and expands it when the config
- * loads, so the bearer never enters argv, the config file, or shell history.
- */
 function configureClaudeCode(
   endpoint: string,
   force: boolean,
@@ -1630,36 +1487,16 @@ function configureClaudeCode(
   }
   return context.runCommand(
     "claude",
-    [
-      "mcp",
-      "add",
-      "--transport",
-      "http",
-      "--scope",
-      "user",
-      // `--header` is variadic (`-H, --header <header...>`), so it must come
-      // after the positionals. Placed before them it consumes the name and the
-      // endpoint as further header values and the CLI reports
-      // "missing required argument 'name'".
-      MCP_SERVER_NAME,
-      endpoint,
-      "--header",
-      `Authorization: Bearer \${${CLIENT_BEARER_ENV}}`,
-    ],
+    ["mcp", "add", "--transport", "http", "--scope", "user", MCP_SERVER_NAME, endpoint],
     context.env
   );
 }
 
 // ── client ─────────────────────────────────────────────────────────
 
-function runClient(
-  options: ClientOptions,
-  home: string,
-  out: (value: string) => void
-): void {
-  const paths = resolvePaths(home);
+function runClient(options: ClientOptions, out: (value: string) => void): void {
   const sections = options.clients.map((client) =>
-    renderClientConfiguration(client, options.endpoint, paths)
+    renderClientConfiguration(client, options.endpoint)
   );
   out(`${sections.join("\n")}\n`);
 }
@@ -1667,55 +1504,36 @@ function runClient(
 interface ResolvedPaths {
   readonly configDir: string;
   readonly serverEnv: string;
-  readonly clientEnv: string;
-  readonly headerFile: string;
   readonly profileConfig: string;
 }
 
-function renderClientConfiguration(
-  client: ClientTarget,
-  endpoint: string,
-  paths: ResolvedPaths
-): string {
+function renderClientConfiguration(client: ClientTarget, endpoint: string): string {
   const heading = `## ${client}\n`;
   switch (client) {
     case "codex":
       return (
         `${heading}\n` +
-        `Export the bearer, then register by env-var reference:\n\n` +
-        `  set -a; source ${shellQuote(paths.clientEnv)}; set +a\n` +
-        `  codex mcp add ${MCP_SERVER_NAME} --url ${endpoint} --bearer-token-env-var ${CLIENT_BEARER_ENV}\n`
+        `  codex mcp add ${MCP_SERVER_NAME} --url ${endpoint}\n\n` +
+        `${AUTHENTICATION_FOOTNOTE}`
       );
     case "claude-code":
       return (
         `${heading}\n` +
-        `Claude Code expands \${VAR} when the config loads, so the literal\n` +
-        `placeholder below keeps the bearer out of argv and out of the config file.\n\n` +
-        `  set -a; source ${shellQuote(paths.clientEnv)}; set +a\n` +
         `  claude mcp add --transport http --scope user \\\n` +
-        `    ${MCP_SERVER_NAME} ${endpoint} \\\n` +
-        `    --header 'Authorization: Bearer \${${CLIENT_BEARER_ENV}}'\n\n` +
+        `    ${MCP_SERVER_NAME} ${endpoint}\n\n` +
         `Equivalent .mcp.json entry:\n\n` +
         `${indent(
           JSON.stringify(
             {
               mcpServers: {
-                [MCP_SERVER_NAME]: {
-                  type: "http",
-                  url: endpoint,
-                  headers: {
-                    Authorization: `Bearer \${${CLIENT_BEARER_ENV}}`,
-                  },
-                },
+                [MCP_SERVER_NAME]: { type: "http", url: endpoint },
               },
             },
             null,
             2
           )
         )}\n\n` +
-        `${CLIENT_BEARER_ENV} must be present in Claude Code's own environment.\n` +
-        `When it is missing, Claude Code loads the config, warns, and sends the\n` +
-        `literal placeholder, which the server rejects with HTTP 401.\n`
+        `${AUTHENTICATION_FOOTNOTE}`
       );
     case "claude-desktop":
     case "cursor":
@@ -1732,16 +1550,7 @@ function renderClientConfiguration(
           mcpServers: {
             [MCP_SERVER_NAME]: {
               command: "npx",
-              args: [
-                "-y",
-                "mcp-remote",
-                endpoint,
-                "--transport",
-                "http-only",
-                "--allow-http",
-                "--header-file",
-                paths.headerFile,
-              ],
+              args: ["-y", "mcp-remote", endpoint, "--transport", "http-only", "--allow-http"],
             },
           },
         },
@@ -1752,16 +1561,7 @@ function renderClientConfiguration(
         client === "cursor"
           ? `\nCursor 1.0 and newer can also address the endpoint directly:\n\n${indent(
               JSON.stringify(
-                {
-                  mcpServers: {
-                    [MCP_SERVER_NAME]: {
-                      url: endpoint,
-                      headers: {
-                        Authorization: `Bearer \${env:${CLIENT_BEARER_ENV}}`,
-                      },
-                    },
-                  },
-                },
+                { mcpServers: { [MCP_SERVER_NAME]: { url: endpoint } } },
                 null,
                 2
               )
@@ -1770,34 +1570,15 @@ function renderClientConfiguration(
       return (
         `${heading}\n` +
         `Config file:\n  ${location}\n\n` +
-        `This client speaks stdio, so bridge it with mcp-remote. --header-file\n` +
-        `reads the bearer from the owner-only file, keeping it out of argv and\n` +
-        `out of the client config:\n\n` +
+        `This client speaks stdio, so bridge it with mcp-remote:\n\n` +
         `${indent(bridge)}\n` +
-        `Drop --allow-http once the endpoint is HTTPS.\n${native}`
+        `Drop --allow-http once the endpoint is HTTPS.\n${native}\n` +
+        `${AUTHENTICATION_FOOTNOTE}`
       );
     }
     case "vscode": {
       const config = JSON.stringify(
-        {
-          inputs: [
-            {
-              type: "promptString",
-              id: "servicenow-mcp-bearer",
-              description: "ServiceNow MCP bearer token",
-              password: true,
-            },
-          ],
-          servers: {
-            [MCP_SERVER_NAME]: {
-              type: "http",
-              url: endpoint,
-              headers: {
-                Authorization: "Bearer ${input:servicenow-mcp-bearer}",
-              },
-            },
-          },
-        },
+        { servers: { [MCP_SERVER_NAME]: { type: "http", url: endpoint } } },
         null,
         2
       );
@@ -1805,8 +1586,7 @@ function renderClientConfiguration(
         `${heading}\n` +
         `Config file:\n  .vscode/mcp.json (workspace) or the user-level mcp.json\n\n` +
         `${indent(config)}\n` +
-        `VS Code prompts once and stores the value in its own secret storage.\n` +
-        `Read the token from ${paths.clientEnv} when it prompts.\n`
+        `${AUTHENTICATION_FOOTNOTE}`
       );
     }
   }
@@ -1958,9 +1738,9 @@ async function runDoctor(
 
   checks.push(checkNodeVersion());
   checks.push(checkDirectoryMode(paths.configDir));
-  checks.push(...checkEnvFile(paths.serverEnv, ["MCP_BEARER_TOKEN", "MCP_OWNER_ID", "MCP_CLIENT_ID"]));
+  checks.push(...checkEnvFile(paths.serverEnv, REQUIRED_SERVER_ENV_VALUES));
   checks.push(...checkProfiles(paths, home, env, dependencies, options.profile));
-  checks.push(checkClientBearerEnvironment(paths, env, home));
+  checks.push(checkAuthentication(paths));
 
   if (!options.offline) {
     checks.push(...(await checkEndpoint(options.endpoint, paths, dependencies)));
@@ -1982,44 +1762,42 @@ async function runDoctor(
 }
 
 /**
- * The one failure the server-side checks cannot see.
+ * Report which boundary this install is actually running behind.
  *
- * Registered clients hold the literal `${SERVICENOW_MCP_BEARER_TOKEN}`, so the
- * variable has to exist in the environment that starts them. When it does not,
- * every check above passes and the client still gets 401 — which reads as the
- * server being broken.
+ * Deliberately not a failure in either direction. Running without a bearer is
+ * the supported default, so failing on it would train operators to ignore a red
+ * line; saying nothing would let an operator finish a clean `doctor` run still
+ * believing the port is authenticated. So it always reports, and names what the
+ * unauthenticated case does and does not protect.
  */
-function checkClientBearerEnvironment(
-  paths: ResolvedPaths,
-  env: NodeJS.ProcessEnv,
-  home: string
-): Check {
-  const name = "client bearer";
-  if (env[CLIENT_BEARER_ENV]) {
+function checkAuthentication(paths: ResolvedPaths): Check {
+  const name = "http authentication";
+  if (serverBearerToken(paths) !== undefined) {
     return {
       name,
       ok: true,
-      detail: `${CLIENT_BEARER_ENV} is set in this environment`,
-    };
-  }
-  const source = `set -a; . ${shellQuote(displayPath(paths.clientEnv, home))}; set +a`;
-  if (!existsSync(paths.clientEnv)) {
-    return {
-      name,
-      ok: false,
-      detail: `${CLIENT_BEARER_ENV} is unset and ${displayPath(paths.clientEnv, home)} is missing`,
-      remedy: "Run: servicenow-mcp-setup",
+      detail: `${SERVER_BEARER_ENV} is set; the service requires a bearer token`,
     };
   }
   return {
     name,
-    ok: false,
-    detail: `${CLIENT_BEARER_ENV} is not set in this environment`,
-    remedy:
-      `A client started from here sends the unexpanded placeholder and gets 401. ` +
-      `Load it: ${source} — or add that line to your shell profile so every ` +
-      `new shell has it.`,
+    ok: true,
+    detail:
+      `${SERVER_BEARER_ENV} is not set; the endpoint is unauthenticated and any ` +
+      `local process that reaches it has the access these profiles grant. ` +
+      `Loopback binding and the Host/Origin allowlists are what remain. ` +
+      `Set ${SERVER_BEARER_ENV} in the server env file to require a bearer token.`,
   };
+}
+
+/** The configured bearer, if the operator has opted back into authentication. */
+function serverBearerToken(paths: ResolvedPaths): string | undefined {
+  if (!existsSync(paths.serverEnv)) return undefined;
+  try {
+    return parseEnvFile(readFileSync(paths.serverEnv, "utf8"))[SERVER_BEARER_ENV];
+  } catch {
+    return undefined;
+  }
 }
 
 function checkNodeVersion(): Check {
@@ -2331,18 +2109,10 @@ async function checkEndpoint(
   }
   checks.push({ name: "service", ok: true, detail: `${readyUrl} ready` });
 
-  const bearer = existsSync(paths.serverEnv)
-    ? parseEnvFile(readFileSync(paths.serverEnv, "utf8")).MCP_BEARER_TOKEN
-    : undefined;
-  if (!bearer) {
-    checks.push({
-      name: "mcp handshake",
-      ok: false,
-      detail: "no MCP_BEARER_TOKEN available locally to test with",
-      remedy: "Run: servicenow-mcp-setup",
-    });
-    return checks;
-  }
+  // Sent only when the operator has opted back into authentication. An
+  // unauthenticated service ignores the header either way, so probing without
+  // one is the honest test of what a client will actually experience.
+  const bearer = serverBearerToken(paths);
 
   let handshake: ProbeResponse;
   try {
@@ -2350,7 +2120,7 @@ async function checkEndpoint(
       method: "POST",
       headers: {
         accept: "application/json, text/event-stream",
-        authorization: `Bearer ${bearer}`,
+        ...(bearer === undefined ? {} : { authorization: `Bearer ${bearer}` }),
         "content-type": "application/json",
       },
       body: JSON.stringify({
@@ -2384,7 +2154,7 @@ function describeHandshake(endpoint: string, response: ProbeResponse): Check {
     return { name: "mcp handshake", ok: true, detail: `${endpoint} initialized` };
   }
   const remedies: Readonly<Record<number, string>> = Object.freeze({
-    401: "The bearer the service is running with differs from the one in the server env file. Restart the service from that file.",
+    401: "The service is running with a bearer token that the server env file does not have, or does not have the one it does. Restart the service from that file.",
     403: "The request Origin was rejected. Set MCP_ALLOWED_ORIGINS to the exact origin, or call without an Origin header.",
     421: "The Host authority was rejected. Add it to MCP_ALLOWED_HOSTS exactly, including the port.",
     429: "Rate limited. Wait for the Retry-After interval, or raise MCP_IDENTITY_RATE_CAPACITY.",
@@ -2682,9 +2452,11 @@ function validateEndpoint(endpoint: string, allowInsecureHttp: boolean): void {
   }
   if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname) && !allowInsecureHttp) {
     throw new Error(
-      `"${endpoint}" would send the MCP bearer token in cleartext to ${url.hostname}. ` +
-        "Use https://, keep the endpoint on loopback, or pass --allow-insecure-http when a " +
-        "trusted proxy terminates TLS in front of it."
+      `"${endpoint}" would carry MCP traffic — and any bearer token — in cleartext to ` +
+        `${url.hostname}. The service is also unauthenticated unless MCP_BEARER_TOKEN is ` +
+        "set, so taking it off loopback exposes it to the network. Use https://, keep the " +
+        "endpoint on loopback, or pass --allow-insecure-http when a trusted proxy " +
+        "terminates TLS in front of it."
     );
   }
 }
@@ -2695,8 +2467,6 @@ function resolvePaths(home: string): ResolvedPaths {
   return Object.freeze({
     configDir: join(home, CONFIG_RELATIVE_DIR),
     serverEnv: join(home, SERVER_ENV_RELATIVE_PATH),
-    clientEnv: join(home, CLIENT_ENV_RELATIVE_PATH),
-    headerFile: join(home, HEADER_FILE_RELATIVE_PATH),
     profileConfig: join(home, PROFILE_CONFIG_RELATIVE_PATH),
   });
 }
@@ -2780,9 +2550,17 @@ function loadOrCreateBootstrapValues(
   return Object.freeze({ ...generated, ...existing });
 }
 
+/**
+ * No `MCP_BEARER_TOKEN`: HTTP authentication is opt-in, and generating a token
+ * setup does not wire into any client would only produce an install that
+ * answers 401. An operator who wants one adds it to `server.env` by hand.
+ *
+ * The owner/client identifiers are not secrets. They label every audit record,
+ * so they are generated per install to keep records from two installs
+ * distinguishable.
+ */
 function generateBootstrapValues(): Readonly<Record<string, string>> {
   return Object.freeze({
-    MCP_BEARER_TOKEN: randomToken(),
     MCP_OWNER_ID: `owner-${randomToken(12)}`,
     MCP_CLIENT_ID: `client-${randomToken(12)}`,
     MCP_HOST: "127.0.0.1",
@@ -2892,7 +2670,7 @@ function describeError(error: unknown): string {
 function renderDryRunReport(paths: ResolvedPaths, options: InitOptions): unknown {
   return {
     status: "dry-run",
-    would_write: [paths.serverEnv, paths.clientEnv, paths.headerFile],
+    would_write: [paths.serverEnv],
     endpoint: options.endpoint,
     clients: options.clients,
   };
@@ -2903,7 +2681,7 @@ function renderDryRunText(paths: ResolvedPaths, home: string, options: InitOptio
   return (
     `Dry run: nothing was written.\n\n` +
     `Would write\n` +
-    `  ${short(paths.serverEnv)}\n  ${short(paths.clientEnv)}\n  ${short(paths.headerFile)}\n\n` +
+    `  ${short(paths.serverEnv)}\n\n` +
     `Endpoint  ${options.endpoint}\n` +
     `Clients   ${options.clients.length > 0 ? options.clients.join(", ") : "(none)"}\n`
   );
@@ -2923,11 +2701,7 @@ function renderInitText(
     "",
     "Wrote (owner-only, mode 0600, directory 0700)",
     `  ${short(paths.serverEnv)}`,
-    "      service bearer, owner/client IDs, profile encryption key",
-    `  ${short(paths.clientEnv)}`,
-    `      ${CLIENT_BEARER_ENV} for clients that read it from the environment`,
-    `  ${short(paths.headerFile)}`,
-    "      Authorization header for mcp-remote --header-file",
+    "      owner/client IDs, listen address, profile encryption key",
     "",
     `Endpoint  ${options.endpoint}`,
     "",
@@ -2961,6 +2735,7 @@ function renderInitText(
       ""
     );
   }
+  lines.push(...UNAUTHENTICATED_NOTICE, "");
   lines.push(
     "Every client should hold at most 2 requests in flight. The service admits",
     "MCP_MAX_CONCURRENT_REQUESTS (default 2) and answers the rest with HTTP 503;",
@@ -3018,7 +2793,7 @@ function renderInitHelp(): string {
     "Options:",
     "  --endpoint URL            MCP endpoint to advertise (default http://127.0.0.1:3000/mcp)",
     `  --clients LIST            auto | all | none | ${ALL_CLIENTS.join(",")}`,
-    "  --force                   Regenerate the bearer and identifiers (keeps the encryption key)",
+    "  --force                   Regenerate the owner/client identifiers (keeps the encryption key)",
     "  --rotate-encryption-key   Also regenerate SN_PROFILE_ENCRYPTION_KEY; refused if profiles exist",
     "  --allow-insecure-http     Permit a non-loopback http:// endpoint behind a trusted proxy",
     "  --dry-run                 Report what would be written and exit",

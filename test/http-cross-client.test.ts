@@ -16,7 +16,10 @@ import {
   fieldSelectionToSysparmFields,
   resolveReadableFields,
 } from "../src/field-policy.js";
-import { StaticBearerAuthenticationProvider } from "../src/http-auth.js";
+import {
+  StaticBearerAuthenticationProvider,
+  UnauthenticatedIdentityProvider,
+} from "../src/http-auth.js";
 import {
   MCP_LIVENESS_PATH,
   MCP_READINESS_PATH,
@@ -225,6 +228,8 @@ async function createHarness(
     readonly readTables?: readonly string[];
     readonly writeTables?: readonly string[];
     readonly targetTools?: readonly string[];
+    /** Defaults to the bearer boundary; set false for the unauthenticated one. */
+    readonly authenticated?: boolean;
   } = {}
 ): Promise<Harness> {
   const profile: Profile = {
@@ -306,7 +311,10 @@ async function createHarness(
   const runtime = createHttpRuntime({
     host: "127.0.0.1",
     port: 0,
-    authenticationProvider: bearerProvider(),
+    authenticationProvider:
+      options.authenticated === false
+        ? new UnauthenticatedIdentityProvider(HARNESS_IDENTITY)
+        : bearerProvider(),
     createServer,
     ...options,
   });
@@ -323,19 +331,24 @@ async function createHarness(
   };
 }
 
+const HARNESS_IDENTITY = Object.freeze({
+  ownerId: "cross-client-owner",
+  clientId: "cross-client-client",
+});
+
 function bearerProvider(): StaticBearerAuthenticationProvider {
-  return new StaticBearerAuthenticationProvider([
-    {
-      token: TOKEN,
-      ownerId: "cross-client-owner",
-      clientId: "cross-client-client",
-    },
-  ]);
+  return new StaticBearerAuthenticationProvider([{ token: TOKEN, ...HARNESS_IDENTITY }]);
 }
 
-function officialClient(url: URL, authorization = AUTHORIZATION): CrossClient {
+/** `null` sends no Authorization header at all, which `undefined` cannot do. */
+function officialClient(
+  url: URL,
+  authorization: string | null = AUTHORIZATION
+): CrossClient {
   const transport = new StreamableHTTPClientTransport(url, {
-    requestInit: { headers: { authorization } },
+    requestInit: {
+      headers: authorization === null ? {} : { authorization },
+    },
   });
   const client = new Client({
     name: "snsdk-27-official-sdk-client",
@@ -1878,6 +1891,55 @@ describe("SNSDK-27 authentication and malformed protocol", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toEqual({ error: "unauthorized" });
     expect(harness.createServer).not.toHaveBeenCalled();
+  });
+
+  it("serves both client kinds with no Authorization header when unauthenticated", async () => {
+    const harness = await createHarness({
+      authenticated: false,
+      readTables: ["incident"],
+    });
+
+    const official = officialClient(harness.url, null);
+    try {
+      const initialized = await official.initialize();
+      expect(initialized.serverInfo.version).toBe(VERSION);
+      assertExactDiscovery(await official.listTools());
+    } finally {
+      await official.close();
+    }
+
+    const response = await fetch(harness.url, {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: LATEST_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: "unauthenticated-fetch-client", version: "1.0.0" },
+        },
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(harness.createServer).toHaveBeenCalled();
+  });
+
+  it("still admits a caller that sends an unrecognised bearer when unauthenticated", async () => {
+    // No credential is checked, so a wrong one is not a rejection — and the
+    // caller must not be able to select an identity by inventing one either.
+    const harness = await createHarness({ authenticated: false });
+    const client = officialClient(harness.url, "Bearer not-a-configured-token");
+
+    try {
+      expect((await client.initialize()).serverInfo.version).toBe(VERSION);
+    } finally {
+      await client.close();
+    }
   });
 
   it("maps malformed JSON and unsupported protocol versions without execution", async () => {

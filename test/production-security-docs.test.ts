@@ -25,8 +25,42 @@ afterEach(() => {
 });
 
 describe("SNSDK-40 production security documentation", () => {
+  it("states plainly that the endpoint is unauthenticated by default", () => {
+    // The failure mode this guards against is a reader finishing the security
+    // guide still believing the port is protected. Softening this into
+    // "simplified setup" would be the bug.
+    expect(guide).toContain("## HTTP authentication is optional and off by default");
+    expect(guide).toContain(
+      "**As of 2.0 the `/mcp` endpoint is unauthenticated unless you configure it.**"
+    );
+
+    // Who is inside the boundary.
+    expect(guide).toMatch(
+      /\*\*Any process running as the service's user can use it\.\*\*/u
+    );
+    expect(guide).toMatch(/None of them distinguishes one local process from another/u);
+
+    // What is left of the boundary, named exactly.
+    expect(guide).toContain("MCP_ALLOWED_HOSTS");
+    expect(guide).toContain("MCP_ALLOWED_ORIGINS");
+    expect(guide).toMatch(/listen address/u);
+
+    // How to turn it back on, with the header a client must send.
+    expect(guide).toContain("### Turning authentication on");
+    expect(guide).toContain("Authorization: Bearer <the MCP_BEARER_TOKEN value>");
+    expect(guide).toMatch(/Set `MCP_BEARER_TOKEN` in the service environment/u);
+    expect(guide).toMatch(/empty `MCP_BEARER_TOKEN` is a startup failure/u);
+
+    // And that audit attribution survives, so records are not silently
+    // detached from their operator.
+    expect(guide).toContain("`local-owner` / `local-client`");
+    expect(guide).toMatch(/Do not run unauthenticated off loopback/u);
+  });
+
   it("covers every production boundary and the explicit denied patterns", () => {
     for (const heading of [
+      "## HTTP authentication is optional and off by default",
+      "### Turning authentication on",
       "## TLS termination",
       "## Reverse proxy and client identity contract",
       "### Exact `Host` behavior",

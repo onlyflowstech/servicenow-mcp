@@ -13,7 +13,12 @@ import {
   encodedQueryAccessPolicyFromEnvironment,
   type EncodedQueryAccessPolicy,
 } from "./encoded-query-policy.js";
-import { StaticBearerAuthenticationProvider } from "./http-auth.js";
+import {
+  StaticBearerAuthenticationProvider,
+  UnauthenticatedIdentityProvider,
+  type HttpAuthenticationProvider,
+  type HttpAuthenticationRequest,
+} from "./http-auth.js";
 import {
   createHttpRuntime,
   MAX_HTTP_CONNECTIONS,
@@ -81,19 +86,59 @@ function createRestrictedPolicyProvider(
   });
 }
 
+/**
+ * Identity used for audit attribution when the operator has not named one.
+ *
+ * These are labels, never credentials: they were always read from configuration
+ * rather than proved by the caller, so defaulting them changes nothing about
+ * who is admitted. They exist so every audit record has a stable, well-formed
+ * `OwnerClientIdentity`.
+ */
+const DEFAULT_OWNER_ID = "local-owner";
+const DEFAULT_CLIENT_ID = "local-client";
+
+/**
+ * Select the HTTP authentication boundary.
+ *
+ * Authentication is opt-in. `MCP_BEARER_TOKEN` turns it on and the service then
+ * requires and verifies that token on every request. With the variable absent
+ * the service serves unauthenticated: any process on this machine that can
+ * reach the listening socket is admitted, and the `Host`/`Origin` allowlists,
+ * loopback binding, admission and rate limits, and the per-profile table policy
+ * are what remain. The warning below is deliberately loud and unconditional;
+ * this is a property of the deployment an operator must be able to see in the
+ * service log.
+ *
+ * Setting `MCP_BEARER_TOKEN` to the empty string is a configuration error
+ * rather than a way to disable authentication, so a half-applied env file fails
+ * to start instead of silently opening the port.
+ */
+function createAuthenticationProvider(): HttpAuthenticationProvider<HttpAuthenticationRequest> {
+  const identity = Object.freeze({
+    ownerId: optionalEnvironmentVariable("MCP_OWNER_ID") ?? DEFAULT_OWNER_ID,
+    clientId: optionalEnvironmentVariable("MCP_CLIENT_ID") ?? DEFAULT_CLIENT_ID,
+  });
+  const token = optionalEnvironmentVariable("MCP_BEARER_TOKEN");
+  if (token === undefined) {
+    process.stderr.write(
+      "[servicenow-mcp] WARNING: MCP_BEARER_TOKEN is not set, so this endpoint " +
+        "is UNAUTHENTICATED. Any process on this machine that can reach it may " +
+        "use every table these profiles grant. Host/Origin allowlists and the " +
+        "listening address are the only remaining boundary. Set " +
+        "MCP_BEARER_TOKEN to require a bearer token.\n"
+    );
+    return new UnauthenticatedIdentityProvider(identity);
+  }
+  return new StaticBearerAuthenticationProvider([{ token, ...identity }]);
+}
+
 async function main(): Promise<void> {
   if (process.argv[2] === "setup") {
     const { runSetupCli } = await import("./setup.js");
     await runSetupCli({ argv: process.argv.slice(2) });
     return;
   }
-  const authenticationProvider = new StaticBearerAuthenticationProvider([
-    {
-      token: requiredEnvironmentVariable("MCP_BEARER_TOKEN"),
-      ownerId: requiredEnvironmentVariable("MCP_OWNER_ID"),
-      clientId: requiredEnvironmentVariable("MCP_CLIENT_ID"),
-    },
-  ]);
+  const authenticationProvider = createAuthenticationProvider();
   const host = optionalEnvironmentVariable("MCP_HOST");
   const port = optionalIntegerEnvironmentVariable("MCP_PORT", 0, 65_535);
   const maxConcurrentRequests = optionalIntegerEnvironmentVariable(
@@ -264,14 +309,6 @@ function createHttpAuditSink(
       requestContext.markToolAuditObserved();
     },
   });
-}
-
-function requiredEnvironmentVariable(name: string): string {
-  const value = process.env[name];
-  if (typeof value !== "string" || value.length === 0) {
-    throw new TypeError(`Required environment variable ${name} is missing`);
-  }
-  return value;
 }
 
 function optionalEnvironmentVariable(name: string): string | undefined {

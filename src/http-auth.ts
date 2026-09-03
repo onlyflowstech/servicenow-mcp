@@ -6,6 +6,12 @@
  * ServiceNow credential access. This module deliberately does not implement a
  * user directory, authorization policy, tenant isolation, or an OAuth server.
  *
+ * Authentication is optional and off by default: the composition root selects
+ * {@link StaticBearerAuthenticationProvider} when `MCP_BEARER_TOKEN` is set and
+ * {@link UnauthenticatedIdentityProvider} when it is not. Every provider here
+ * returns a validated identity, so the rest of the request path cannot tell
+ * which one is installed.
+ *
  * @module http-auth
  */
 
@@ -260,6 +266,44 @@ export class StaticBearerAuthenticationProvider
     }
     if (!selected) throw new HttpAuthenticationError("unauthorized");
     return selected;
+  }
+}
+
+/**
+ * Identity-only provider for an installation configured without HTTP
+ * authentication. Every request is admitted.
+ *
+ * This is not a weaker authentication scheme; it is none. It exists so that a
+ * local single-owner install can run without provisioning a secret, and it is
+ * selected by the composition root only when no bearer is configured.
+ *
+ * What it preserves: the boundary still yields exactly one validated, frozen
+ * `OwnerClientIdentity` per request, so audit records, identity rate limiting,
+ * and the SNSDK-19 request-metadata contract behave exactly as they do under a
+ * bearer. The Authorization header is not read at all, so a caller cannot
+ * nominate an identity by sending one, and neither can any other request field.
+ *
+ * What it gives up: the identity attributes a request to the configured owner
+ * without proving it came from them. Any process that can reach the listening
+ * socket is admitted under it, which leaves the `Host`/`Origin` allowlists,
+ * loopback binding, rate limiting, and the profile table policy as the whole of
+ * the remaining boundary.
+ */
+export class UnauthenticatedIdentityProvider
+  implements HttpAuthenticationProvider<HttpAuthenticationRequest>
+{
+  readonly #identity: AuthenticatedOwnerClientIdentity;
+
+  constructor(identity: OwnerClientIdentity) {
+    // Validated and frozen once, at construction: a malformed configured
+    // identity is a startup failure, never a per-request surprise that would
+    // reach the audit sink through the fallback sentinel.
+    this.#identity = immutableIdentity(identity);
+    Object.freeze(this);
+  }
+
+  authenticate(): AuthenticatedOwnerClientIdentity {
+    return this.#identity;
   }
 }
 

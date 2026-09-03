@@ -37,6 +37,12 @@ function serverEnvPath(home: string): string {
   return join(home, ".servicenow-mcp/server.env");
 }
 
+/**
+ * Files an earlier release wrote to carry the bearer to clients. Setup no
+ * longer creates either. They are named here so their absence can be asserted:
+ * a leftover credential file is worse than none, because it looks authoritative
+ * while nothing reads it.
+ */
 function clientEnvPath(home: string): string {
   return join(home, ".servicenow-mcp/client.env");
 }
@@ -66,7 +72,7 @@ function capture(): { out: string[]; err: string[] } {
 }
 
 describe("setup init", () => {
-  it("writes owner-only files and configures Codex and Claude Code by reference", async () => {
+  it("writes the owner-only server env and registers clients with no credential", async () => {
     const home = newHome("sn-mcp-setup-");
     const io = capture();
     const calls: Array<{ command: string; args: readonly string[] }> = [];
@@ -88,16 +94,18 @@ describe("setup init", () => {
     if (POSIX) {
       expect(statSync(join(home, ".servicenow-mcp")).mode & 0o777).toBe(0o700);
       expect(statSync(serverEnvPath(home)).mode & 0o777).toBe(0o600);
-      expect(statSync(clientEnvPath(home)).mode & 0o777).toBe(0o600);
-      expect(statSync(headerFilePath(home)).mode & 0o777).toBe(0o600);
     }
 
     const server = readEnv(serverEnvPath(home));
-    expect(server.MCP_BEARER_TOKEN).toBeTruthy();
+    // Authentication is opt-in, so no token is generated and no file is left
+    // behind claiming to hold one.
+    expect(server.MCP_BEARER_TOKEN).toBeUndefined();
+    expect(existsSync(clientEnvPath(home))).toBe(false);
+    expect(existsSync(headerFilePath(home))).toBe(false);
+    // The identity that labels every audit record, and the profile key, remain.
+    expect(server.MCP_OWNER_ID).toMatch(/^owner-/u);
+    expect(server.MCP_CLIENT_ID).toMatch(/^client-/u);
     expect(server.SN_PROFILE_ENCRYPTION_KEY).toBeTruthy();
-    expect(readFileSync(headerFilePath(home), "utf8")).toContain(
-      `Authorization: Bearer ${server.MCP_BEARER_TOKEN}`
-    );
 
     expect(calls.map((call) => [call.command, call.args[0], call.args[1]])).toEqual([
       ["codex", "mcp", "get"],
@@ -109,13 +117,19 @@ describe("setup init", () => {
     const claudeAdd = calls[3].args;
     expect(claudeAdd).toContain("--transport");
     expect(claudeAdd).toContain("http");
-    // The literal placeholder, never the token itself.
-    expect(claudeAdd).toContain("Authorization: Bearer ${SERVICENOW_MCP_BEARER_TOKEN}");
-    expect(claudeAdd.join(" ")).not.toContain(server.MCP_BEARER_TOKEN);
+    expect(claudeAdd).toContain("http://127.0.0.1:4444/mcp");
+    // Neither client is handed an Authorization header or a token variable to
+    // read one from; there is nothing to send.
+    expect(claudeAdd).not.toContain("--header");
+    expect(calls[1].args).not.toContain("--bearer-token-env-var");
+    for (const call of calls) {
+      expect(call.args.join(" ")).not.toMatch(/Authorization|BEARER_TOKEN/iu);
+    }
 
     expect(JSON.parse(io.out.join(""))).toMatchObject({
       status: "configured",
       endpoint: "http://127.0.0.1:4444/mcp",
+      authentication: "none",
       clients: ["codex", "claude-code"],
     });
     expect(io.err.join("")).toBe("");
@@ -138,8 +152,12 @@ describe("setup init", () => {
     expect(text).toContain("servicenow-mcp-setup grant");
     expect(text).toContain("servicenow-mcp-setup doctor");
     expect(text).toContain("MCP_MAX_CONCURRENT_REQUESTS");
-    // No secret material in human output.
-    expect(text).not.toContain(readEnv(serverEnvPath(home)).MCP_BEARER_TOKEN);
+    // No secret material in human output. The encryption key is now the only
+    // secret in server.env, so it is what this has to prove.
+    expect(text).not.toContain(readEnv(serverEnvPath(home)).SN_PROFILE_ENCRYPTION_KEY);
+    // The operator is told, in the default output, what the endpoint is not.
+    expect(text).toContain("UNAUTHENTICATED");
+    expect(text).toContain("MCP_BEARER_TOKEN");
   });
 
   it("restores 0600 on a pre-existing world-readable env file", async () => {
@@ -179,7 +197,8 @@ describe("setup init", () => {
     const second = readEnv(serverEnvPath(home));
 
     expect(second.SN_PROFILE_ENCRYPTION_KEY).toBe(first.SN_PROFILE_ENCRYPTION_KEY);
-    expect(second.MCP_BEARER_TOKEN).not.toBe(first.MCP_BEARER_TOKEN);
+    expect(second.MCP_OWNER_ID).not.toBe(first.MCP_OWNER_ID);
+    expect(second.MCP_CLIENT_ID).not.toBe(first.MCP_CLIENT_ID);
   });
 
   it("refuses to rotate the encryption key while a profile file exists", async () => {
@@ -299,9 +318,21 @@ describe("setup client", () => {
     }
     expect(text).toContain("claude mcp add --transport http --scope user");
     expect(text).toContain("mcp-remote");
-    expect(text).toContain("--header-file");
-    expect(text).toContain(headerFilePath(home));
-    expect(text).toContain("${input:servicenow-mcp-bearer}");
+
+    // Every recipe closes with the same note on how to turn authentication
+    // back on. That note is the only place any of them may mention a
+    // credential; the recipes themselves configure none.
+    const FOOTNOTE =
+      "Authentication is off by default, so nothing above sends a credential.\n" +
+      "If you set MCP_BEARER_TOKEN in server.env, every client must also send\n" +
+      '"Authorization: Bearer <that value>" — through the client\'s own header\n' +
+      "configuration, or for mcp-remote through --header-file.\n";
+    expect(text.split(FOOTNOTE).length - 1).toBe(6);
+    const recipes = text.split(FOOTNOTE).join("");
+    expect(recipes).not.toMatch(/Authorization/u);
+    expect(recipes).not.toContain("--header");
+    expect(recipes).not.toContain(headerFilePath(home));
+    expect(recipes).not.toContain("servicenow-mcp-bearer");
     expect(existsSync(serverEnvPath(home))).toBe(false);
   });
 
@@ -639,7 +670,7 @@ describe("setup doctor", () => {
     expect(stale?.remedy).toContain("apply only when no profile file exists");
   });
 
-  it("explains a 401 handshake as a bearer mismatch", async () => {
+  it("explains a 401 handshake as a bearer the env file cannot reproduce", async () => {
     await runSetupCli({
       home,
       argv: ["--clients", "none", "--json"],
@@ -655,7 +686,7 @@ describe("setup doctor", () => {
     );
     const handshake = report.checks.find((check) => check.name === "mcp handshake");
     expect(handshake?.ok).toBe(false);
-    expect(handshake?.remedy).toContain("differs from the one in the server env file");
+    expect(handshake?.remedy).toContain("the server env file does not have");
     expect(report.status).toBe("problems");
   });
 
@@ -859,14 +890,28 @@ describe("setup wizard", () => {
     expect(out).not.toContain("hunter2");
   });
 
-  it("bootstraps owner-only env files as part of the flow", async () => {
+  it("bootstraps the owner-only server env and no credential files", async () => {
     await runWizard(HAPPY);
     if (POSIX) {
       expect(statSync(serverEnvPath(home)).mode & 0o777).toBe(0o600);
-      expect(statSync(clientEnvPath(home)).mode & 0o777).toBe(0o600);
-      expect(statSync(headerFilePath(home)).mode & 0o777).toBe(0o600);
     }
-    expect(readEnv(serverEnvPath(home)).MCP_BEARER_TOKEN).toBeTruthy();
+    const values = readEnv(serverEnvPath(home));
+    expect(values.MCP_OWNER_ID).toMatch(/^owner-/u);
+    expect(values.MCP_CLIENT_ID).toMatch(/^client-/u);
+    expect(values.MCP_BEARER_TOKEN).toBeUndefined();
+    expect(existsSync(clientEnvPath(home))).toBe(false);
+    expect(existsSync(headerFilePath(home))).toBe(false);
+  });
+
+  it("tells the operator the endpoint is unauthenticated", async () => {
+    const { out } = await runWizard(HAPPY);
+    expect(out).toContain("UNAUTHENTICATED");
+    // Not softened into "simplified": it names who is inside the boundary and
+    // what is left outside it.
+    expect(out).toContain("Any process running as you on this");
+    expect(out).toContain("127.0.0.1");
+    expect(out).toContain("Host/Origin");
+    expect(out).toContain("MCP_BEARER_TOKEN");
   });
 
   it("re-prompts on a bad instance instead of exiting", async () => {
@@ -1354,31 +1399,34 @@ describe("setup wizard on a genuinely fresh machine", () => {
     );
   });
 
-  it("hands client registration the bearer it just provisioned", async () => {
-    // Same write-then-read shape as the key. Verified rather than assumed.
-    const home = newHome("sn-mcp-fresh-bearer-");
-    const seen: Array<string | undefined> = [];
+  it("registers clients with no credential in argv or their environment", async () => {
+    const home = newHome("sn-mcp-fresh-register-");
+    const adds: Array<{ args: readonly string[]; env: NodeJS.ProcessEnv }> = [];
     await runSetupCli({
       home,
       argv: [],
       env: { HOME: home },
       interactive: true,
-      prompter: scriptedPrompter([...SCRIPT, "y", DECLINE_START], ["bearer-check-secret"]),
+      prompter: scriptedPrompter([...SCRIPT, "y", DECLINE_START], ["register-secret"]),
       verifyCredential: async () => ({ ok: true, detail: "accepted" }),
       resolveParentTable: async () => undefined,
       commandExists: () => true,
       runCommand: (_command, args, env) => {
-        if (args[1] === "add") seen.push(env.SERVICENOW_MCP_BEARER_TOKEN);
+        if (args[1] === "add") adds.push({ args, env });
         return args[1] === "get" ? { status: 1 } : { status: 0 };
       },
       writeStdout: () => undefined,
       writeStderr: () => undefined,
     });
 
-    const onDisk = readEnv(clientEnvPath(home)).SERVICENOW_MCP_BEARER_TOKEN;
-    expect(seen.length).toBe(2);
-    expect(seen.every((value) => value === onDisk)).toBe(true);
-    expect(onDisk).toBeTruthy();
+    expect(adds.length).toBe(2);
+    for (const add of adds) {
+      expect(add.args.join(" ")).not.toMatch(/Authorization|BEARER_TOKEN/iu);
+      expect(add.env.SERVICENOW_MCP_BEARER_TOKEN).toBeUndefined();
+    }
+    // And nothing was written for a client to read one from.
+    expect(existsSync(clientEnvPath(home))).toBe(false);
+    expect(existsSync(headerFilePath(home))).toBe(false);
   });
 
   it("retries the save without re-prompting and keeps the verified answers", async () => {
@@ -1461,7 +1509,7 @@ describe("setup wizard start-and-verify", () => {
 
   it("starts the service and reports it ready", async () => {
     const home = newHome("sn-mcp-start-");
-    const started: Array<{ hasBearer: boolean; hasKey: boolean }> = [];
+    const started: Array<{ hasIdentity: boolean; hasKey: boolean }> = [];
     const { probe } = readyProbe(1);
 
     await runSetupCli({
@@ -1476,7 +1524,7 @@ describe("setup wizard start-and-verify", () => {
       probe,
       startService: (env) => {
         started.push({
-          hasBearer: Boolean(env.MCP_BEARER_TOKEN),
+          hasIdentity: Boolean(env.MCP_OWNER_ID && env.MCP_CLIENT_ID),
           hasKey: Boolean(env.SN_PROFILE_ENCRYPTION_KEY),
         });
         return { pid: 4242 };
@@ -1487,7 +1535,7 @@ describe("setup wizard start-and-verify", () => {
 
     // Started exactly once, and handed the values setup just provisioned —
     // the service must not depend on the operator sourcing server.env first.
-    expect(started).toEqual([{ hasBearer: true, hasKey: true }]);
+    expect(started).toEqual([{ hasIdentity: true, hasKey: true }]);
   });
 
   it("reuses a service that is already listening instead of starting another", async () => {
@@ -1553,7 +1601,7 @@ describe("setup wizard start-and-verify", () => {
   });
 });
 
-describe("bearer reaches the client's environment", () => {
+describe("HTTP authentication is opt-in", () => {
   const SHELL_MARKER = "# servicenow-mcp: bearer for MCP clients";
   const SCRIPT = [
     "dev",
@@ -1592,61 +1640,114 @@ describe("bearer reaches the client's environment", () => {
     return prompter;
   }
 
-  it("appends the export to the shell profile, preserving what is there", async () => {
+  async function runDoctor(
+    home: string,
+    argv: readonly string[] = ["doctor", "--offline"]
+  ): Promise<string> {
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv,
+      env: { HOME: home },
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: (value) => io.err.push(value),
+    });
+    return io.out.join("");
+  }
+
+  it("leaves the shell profile alone and asks nothing about exporting a token", async () => {
     const home = newHome("sn-mcp-shell-");
     const zshrc = join(home, ".zshrc");
     writeFileSync(zshrc, "# existing content\n");
 
-    await wizardWith(home, [...SCRIPT, "y", "y", DECLINE_START], "shell-secret");
+    // One answer for "register clients?" and one for "start the service?".
+    // A surviving export prompt would consume DECLINE_START and then exhaust
+    // the script, so this also proves the question is gone.
+    const prompter = await wizardWith(home, [...SCRIPT, "y", DECLINE_START], "shell-secret");
 
-    const body = readFileSync(zshrc, "utf8");
-    expect(body).toContain("# existing content");
-    expect(body).toContain('"$HOME/.servicenow-mcp/client.env"');
-    expect(body.split(SHELL_MARKER).length - 1).toBe(1);
-  });
-
-  it("does not offer again when the profile already exports it", async () => {
-    const home = newHome("sn-mcp-shell-present-");
-    const zshrc = join(home, ".zshrc");
-    writeFileSync(zshrc, `${SHELL_MARKER}\n# already wired\n`);
-
-    // No answer for the export question: if it were asked, the script would
-    // run out and the prompter would throw.
-    const prompter = await wizardWith(
-      home,
-      [...SCRIPT, "y", DECLINE_START],
-      "already-secret"
-    );
     expect(prompter.remaining()).toBe(0);
-    expect(readFileSync(zshrc, "utf8").split(SHELL_MARKER).length - 1).toBe(1);
+    const body = readFileSync(zshrc, "utf8");
+    expect(body).toBe("# existing content\n");
+    expect(body).not.toContain(SHELL_MARKER);
   });
 
-  it("doctor fails when the bearer is absent and passes when it is present", async () => {
-    const home = newHome("sn-mcp-doctor-bearer-");
-    mkdirSync(join(home, ".servicenow-mcp"), { recursive: true });
-    writeFileSync(clientEnvPath(home), "SERVICENOW_MCP_BEARER_TOKEN='abc'\n", {
-      mode: 0o600,
+  it("doctor reports the endpoint as unauthenticated and names what remains", async () => {
+    const home = newHome("sn-mcp-doctor-open-");
+    await runSetupCli({
+      home,
+      argv: ["--clients", "none", "--json"],
+      env: { HOME: home },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
     });
 
-    const runDoctor = async (env: NodeJS.ProcessEnv): Promise<string> => {
-      const io = capture();
+    const text = await runDoctor(home);
+    // Not a failure: this is the supported default, and a permanent red line
+    // teaches operators to ignore it. It must still say what it means.
+    expect(text).toMatch(/ok\s+http authentication/u);
+    expect(text).toContain("the endpoint is unauthenticated");
+    expect(text).toContain("Loopback binding and the Host/Origin allowlists");
+    expect(text).toContain("Set MCP_BEARER_TOKEN in the server env file");
+  });
+
+  it("doctor reports authentication as required once MCP_BEARER_TOKEN is set", async () => {
+    const home = newHome("sn-mcp-doctor-bearer-");
+    await runSetupCli({
+      home,
+      argv: ["--clients", "none", "--json"],
+      env: { HOME: home },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+    const token = `opt-in-token-${"a".repeat(32)}`;
+    writeFileSync(
+      serverEnvPath(home),
+      `${readFileSync(serverEnvPath(home), "utf8")}MCP_BEARER_TOKEN='${token}'\n`,
+      { mode: 0o600 }
+    );
+
+    const text = await runDoctor(home);
+    expect(text).toMatch(/ok\s+http authentication/u);
+    expect(text).toContain("the service requires a bearer token");
+    expect(text).not.toContain("the endpoint is unauthenticated");
+    // Never the value itself.
+    expect(text).not.toContain(token);
+  });
+
+  it("doctor's handshake sends the configured bearer, and none when there is none", async () => {
+    const home = newHome("sn-mcp-doctor-handshake-");
+    await runSetupCli({
+      home,
+      argv: ["--clients", "none", "--json"],
+      env: { HOME: home },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+
+    const observe = async (): Promise<Array<string | undefined>> => {
+      const seen: Array<string | undefined> = [];
       await runSetupCli({
         home,
-        argv: ["doctor", "--offline"],
-        env,
-        writeStdout: (value) => io.out.push(value),
-        writeStderr: (value) => io.err.push(value),
+        argv: ["doctor", "--json"],
+        env: { HOME: home },
+        probe: async (url: string, init: ProbeRequest): Promise<ProbeResponse> => {
+          if (!url.endsWith("/health/ready")) seen.push(init.headers?.authorization);
+          return { status: 200, body: "" };
+        },
+        writeStdout: () => undefined,
+        writeStderr: () => undefined,
       });
-      return io.out.join("");
+      return seen;
     };
 
-    const without = await runDoctor({ HOME: home });
-    expect(without).toContain("client bearer");
-    expect(without).toMatch(/FAIL\s+client bearer/u);
-    // The remedy must name the fix, not merely the symptom.
-    expect(without).toContain("client.env");
+    expect(await observe()).toEqual([undefined]);
 
-    const with_ = await runDoctor({ HOME: home, SERVICENOW_MCP_BEARER_TOKEN: "abc" });
-    expect(with_).toMatch(/ok\s+client bearer/u);
+    const token = `opt-in-token-${"b".repeat(32)}`;
+    writeFileSync(
+      serverEnvPath(home),
+      `${readFileSync(serverEnvPath(home), "utf8")}MCP_BEARER_TOKEN='${token}'\n`,
+      { mode: 0o600 }
+    );
+    expect(await observe()).toEqual([`Bearer ${token}`]);
   });
 });

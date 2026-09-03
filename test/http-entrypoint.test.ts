@@ -59,22 +59,97 @@ describe("packaged HTTP entrypoint", () => {
     }
   );
 
-  it("fails closed before listening when MCP authentication is absent", async () => {
+  it("serves unauthenticated and says so when MCP_BEARER_TOKEN is absent", async () => {
     const child = startEntrypoint({
+      MCP_HOST: "127.0.0.1",
+      MCP_PORT: "0",
       SN_INSTANCE: "https://example.service-now.com",
       SN_USER: "entrypoint-user",
       SN_PASSWORD: "unused-entrypoint-password",
     });
     const output = collectStderr(child);
-    const [exitCode] = (await once(child, "exit")) as [number | null];
-    children.delete(child);
+    const url = await waitForListeningUrl(output);
 
-    expect(exitCode).toBe(1);
-    expect(output.value).toBe(
-      "[servicenow-mcp] Fatal HTTP service startup error.\n"
-    );
-    expect(output.value).not.toContain("listening on");
+    // No Authorization header at all, and no MCP_OWNER_ID/MCP_CLIENT_ID either:
+    // the identity that reaches the audit path is defaulted, not demanded.
+    const accepted = await initialize(url);
+    expect(accepted.status).toBe(200);
+    await accepted.arrayBuffer();
+
+    // A caller cannot nominate an identity by sending a token of its own.
+    const withHeader = await initialize(url, "Bearer pretend-to-be-someone-else");
+    expect(withHeader.status).toBe(200);
+    await withHeader.arrayBuffer();
+
+    // The operator has to be able to see this in the log, unprompted.
+    expect(output.value).toContain("UNAUTHENTICATED");
+    expect(output.value).toContain("MCP_BEARER_TOKEN is not set");
+    expect(output.value).toContain("Host/Origin allowlists");
+
+    const exited = waitForExitWithin(child, 1_000);
+    expect(child.kill("SIGTERM")).toBe(true);
+    const [exitCode] = await exited;
+    children.delete(child);
+    expect(exitCode).toBe(0);
   });
+
+  it("requires and verifies the bearer when MCP_BEARER_TOKEN is set", async () => {
+    const child = startEntrypoint({
+      MCP_BEARER_TOKEN: TEST_TOKEN,
+      MCP_OWNER_ID: "entrypoint-owner",
+      MCP_CLIENT_ID: "entrypoint-client",
+      MCP_HOST: "127.0.0.1",
+      MCP_PORT: "0",
+      SN_INSTANCE: "https://example.service-now.com",
+      SN_USER: "entrypoint-user",
+      SN_PASSWORD: "unused-entrypoint-password",
+    });
+    const output = collectStderr(child);
+    const url = await waitForListeningUrl(output);
+
+    expect((await initialize(url)).status).toBe(401);
+    expect((await initialize(url, `Bearer wrong-${TEST_TOKEN}`)).status).toBe(401);
+    const accepted = await initialize(url, `Bearer ${TEST_TOKEN}`);
+    expect(accepted.status).toBe(200);
+    await accepted.arrayBuffer();
+
+    // The opt-in path must not carry the unauthenticated warning.
+    expect(output.value).not.toContain("UNAUTHENTICATED");
+    expect(output.value).not.toContain(TEST_TOKEN);
+
+    const exited = waitForExitWithin(child, 1_000);
+    expect(child.kill("SIGTERM")).toBe(true);
+    const [exitCode] = await exited;
+    children.delete(child);
+    expect(exitCode).toBe(0);
+  });
+
+  it.each([
+    ["too short to be a token", "short"],
+    ["explicitly empty", ""],
+  ])(
+    "fails closed before listening when MCP_BEARER_TOKEN is %s",
+    async (_label, token) => {
+      // Opting in half-way must not silently fall back to serving open.
+      const child = startEntrypoint({
+        MCP_BEARER_TOKEN: token,
+        MCP_HOST: "127.0.0.1",
+        MCP_PORT: "0",
+        SN_INSTANCE: "https://example.service-now.com",
+        SN_USER: "entrypoint-user",
+        SN_PASSWORD: "unused-entrypoint-password",
+      });
+      const output = collectStderr(child);
+      const [exitCode] = (await once(child, "exit")) as [number | null];
+      children.delete(child);
+
+      expect(exitCode).toBe(1);
+      expect(output.value).toBe(
+        "[servicenow-mcp] Fatal HTTP service startup error.\n"
+      );
+      expect(output.value).not.toContain("listening on");
+    }
+  );
 
   it("fails closed before listening when concurrency admission is invalid", async () => {
     const child = startEntrypoint({
@@ -196,6 +271,28 @@ describe("packaged HTTP entrypoint", () => {
     }
   );
 });
+
+function initialize(url: URL, authorization?: string): Promise<Response> {
+  return fetch(url, {
+    method: "POST",
+    headers: {
+      ...(authorization === undefined ? {} : { authorization }),
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+      "mcp-protocol-version": "2025-06-18",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "entrypoint-test", version: "1.0.0" },
+      },
+    }),
+  });
+}
 
 function startEntrypoint(overrides: Record<string, string>): ChildProcess {
   const environment = { ...process.env };
