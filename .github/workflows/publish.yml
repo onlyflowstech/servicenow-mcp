@@ -88,8 +88,11 @@ jobs:
           # Trusted publishing needs npm >= 11.5.1 and Node >= 22.14.0.
           node-version: 22.14.0
           registry-url: https://registry.npmjs.org
-      # Node 22 ships npm 10.x, which predates trusted publishing.
-      - run: npm install --global npm@latest
+      # Node 22 ships npm 10.x, which predates trusted publishing. Pin the 11
+      # line rather than @latest: npm 12 raised its engine floor to Node
+      # ^22.22.2, so @latest silently stops matching the Node pinned above.
+      # 11.5.1 is the documented minimum for trusted publishing.
+      - run: npm install --global npm@^11.5.1
       - run: npm --version
       - run: npm ci --engine-strict
       # No NODE_AUTH_TOKEN: the OIDC exchange supplies the credential.
