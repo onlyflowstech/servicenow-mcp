@@ -342,10 +342,11 @@ The resulting `~/.servicenow-mcp/config.json` looks like this. Note
 }
 ```
 
-Have the approved supervisor, orchestrator, keychain, or secret manager inject
-the values referenced by `SN_PASSWORD_DEV` and `SN_PASSWORD_PROD` into the HTTP
-service process. Do not type either value into a shell command, command
-argument, dotenv file, or command history.
+Have the approved supervisor, orchestrator, keychain, or secret manager provide
+the values referenced by `SN_PASSWORD_DEV` and `SN_PASSWORD_PROD` in the
+environment the server is spawned with, or in `~/.servicenow-mcp/server.env`,
+which the server falls back to. Do not type either value into a shell command,
+command argument, dotenv file, or command history.
 
 Each `targets` entry asserts `closureComplete: true`, meaning `relatedTables`
 lists every backing, ancestor, and descendant table the operation can reach.
