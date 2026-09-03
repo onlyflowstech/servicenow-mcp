@@ -12,6 +12,7 @@
   "scripts": {
     "prebuild": "node scripts/clean-dist.mjs",
     "build": "tsc",
+    "postbuild": "node scripts/set-bin-mode.mjs",
     "typecheck": "tsc --noEmit --pretty false",
     "lint": "eslint --max-warnings 0 src test scripts vitest.config.ts eslint.config.mjs",
     "start": "node dist/index.js",
