@@ -83,12 +83,13 @@ describe("response_format precedence (sn_query)", () => {
   });
 
   it('explicit fields="all" wins over response_format=concise', async () => {
-    // "all" now means every column, so the projection is omitted entirely
-    // rather than enumerated from a built-in readable list.
+    // "all" resolves to the wildcard selection, but the upstream request is
+    // bounded: with no dictionary available the cap falls back to the default
+    // projection rather than dropping sysparm_fields.
     expect(resolveReadableFields("incident", { fields: "all" })).toEqual(["*"]);
     expect(
       await sysparmFields({ table: "incident", fields: "all", response_format: "concise" })
-    ).toBeUndefined();
+    ).toBe(resolveReadableFields("incident").join(","));
   });
 
   it("concise (explicit) uses DEFAULT_FIELDS on a known table", async () => {
@@ -101,10 +102,10 @@ describe("response_format precedence (sn_query)", () => {
     expect(await sysparmFields({ table: "incident" })).toBe(DEFAULT_FIELDS.incident);
   });
 
-  it('detailed matches fields="all" and omits the projection', async () => {
+  it('detailed matches fields="all" and stays bounded', async () => {
     expect(
       await sysparmFields({ table: "incident", response_format: "detailed" })
-    ).toBeUndefined();
+    ).toBe(resolveReadableFields("incident").join(","));
   });
 
   it("concise on an unknown table uses the bounded generic default", async () => {
@@ -129,7 +130,13 @@ describe("response_format precedence (sn_get)", () => {
   async function sysparmFields(args: Record<string, unknown>) {
     const { client, get } = getClient({});
     await getHandler(getSchema.parse({ sys_id: "11111111111111111111111111111111", ...args }), client, config);
-    return (get.mock.calls[0][1] as Record<string, string>).sysparm_fields;
+    // A wildcard selection first resolves the table's columns, so the record
+    // fetch is not necessarily the first call.
+    const recordCall = get.mock.calls.find(
+      ([path]) => !String(path).startsWith("/api/now/table/sys_db_object") &&
+        !String(path).startsWith("/api/now/table/sys_dictionary")
+    );
+    return (recordCall?.[1] as Record<string, string> | undefined)?.sysparm_fields;
   }
 
   it("explicit fields wins over response_format=detailed", async () => {
@@ -141,17 +148,17 @@ describe("response_format precedence (sn_get)", () => {
   it('explicit fields="all" wins over response_format=concise', async () => {
     expect(
       await sysparmFields({ table: "incident", fields: "all", response_format: "concise" })
-    ).toBeUndefined();
+    ).toBe(resolveReadableFields("incident").join(","));
   });
 
   it("omitted response_format defaults to concise (DEFAULT_FIELDS)", async () => {
     expect(await sysparmFields({ table: "incident" })).toBe(DEFAULT_FIELDS.incident);
   });
 
-  it("detailed omits the projection", async () => {
+  it("detailed stays bounded", async () => {
     expect(
       await sysparmFields({ table: "incident", response_format: "detailed" })
-    ).toBeUndefined();
+    ).toBe(resolveReadableFields("incident").join(","));
   });
 });
 
@@ -210,7 +217,14 @@ describe("sn_query max_response_bytes truncation", () => {
   });
 
   it('suggests response_format="concise" when the request was detailed without fields', async () => {
-    const { client } = metaClient(bigRecords());
+    // The bulk has to live in a field the bounded "detailed" projection keeps,
+    // otherwise capping the request removes it and nothing truncates.
+    const { client } = metaClient(
+      Array.from({ length: 10 }, (_, i) => ({
+        sys_id: `sys_${String(i).padStart(3, "0")}`,
+        short_description: "x".repeat(300),
+      }))
+    );
     const result = await queryHandler(
       querySchema.parse({
         table: "incident",

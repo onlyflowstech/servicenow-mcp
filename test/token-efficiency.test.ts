@@ -110,9 +110,10 @@ describe("sn_query default field selection", () => {
     expect(params.sysparm_fields).toBe("sys_id");
   });
 
-  it('drops sysparm_fields for fields="all" and keeps it bounded by default', async () => {
-    // "all" on a granted table now means every column, so the projection is
-    // omitted rather than enumerated. The default read stays bounded.
+  it('bounds the upstream request for fields="all" instead of dropping sysparm_fields', async () => {
+    // "all" resolves to the wildcard selection, but the request is capped so
+    // ServiceNow never returns every column. With no dictionary reachable the
+    // cap falls back to the bounded default projection, never to "all".
     const { client, getWithMeta } = metaClient([]);
     await queryHandler(
       querySchema.parse({ table: "incident", fields: "all" }),
@@ -122,7 +123,7 @@ describe("sn_query default field selection", () => {
     expect(resolveReadableFields("incident", { fields: "all" })).toEqual(["*"]);
     expect(
       (getWithMeta.mock.calls[0][1] as Record<string, string>).sysparm_fields
-    ).toBeUndefined();
+    ).toBe(resolveReadableFields("incident").join(","));
 
     await queryHandler(querySchema.parse({ table: "incident" }), client, config);
     expect(
@@ -347,15 +348,19 @@ describe("sn_get default field selection", () => {
     expect(params.sysparm_fields).toBe("sys_id");
   });
 
-  it('drops sysparm_fields for fields="all"', async () => {
+  it('bounds the upstream request for fields="all"', async () => {
     const { client, get } = getClient();
     await getHandler(
       getSchema.parse({ table: "incident", sys_id: "11111111111111111111111111111111", fields: "all" }),
       client,
       config
     );
-    const params = get.mock.calls[0][1] as Record<string, string>;
-    expect(params.sysparm_fields).toBeUndefined();
+    const recordCall = get.mock.calls.find(
+      ([path]) => !String(path).startsWith("/api/now/table/sys_db_object") &&
+        !String(path).startsWith("/api/now/table/sys_dictionary")
+    );
+    const params = recordCall?.[1] as Record<string, string> | undefined;
+    expect(params?.sysparm_fields).toBe(resolveReadableFields("incident").join(","));
   });
 
   it("strips empty fields from the record", async () => {
@@ -468,5 +473,61 @@ describe("sn_syslog pagination metadata", () => {
     expect(payload.record_count).toBe(1);
     expect(payload.has_more).toBe(false);
     expect(payload.next_offset).toBeUndefined();
+  });
+});
+
+describe("sn_query all-fields cap signalling", () => {
+  function wideClient(columnCount: number) {
+    const columns = Array.from({ length: columnCount }, (_, index) =>
+      `u_col_${String(index).padStart(3, "0")}`
+    );
+    const get = vi.fn(async (path: string) => {
+      if (path === "/api/now/table/sys_db_object") {
+        return { result: [{ name: "incident", super_class: "" }] };
+      }
+      if (path === "/api/now/table/sys_dictionary") {
+        return { result: columns.map((element) => ({ element })) };
+      }
+      return { result: [] };
+    });
+    const getWithMeta = vi.fn(async () => ({
+      data: { result: [] },
+      status: 200,
+      headers: new Headers(),
+    }));
+    return {
+      client: { get, getWithMeta } as unknown as ServiceNowClient,
+      get,
+      getWithMeta,
+      columns,
+    };
+  }
+
+  it("tells the caller when an all-fields request was capped", async () => {
+    // An agent receiving 100 of 300 fields with no signal concludes the other
+    // 200 do not exist.
+    const { client, getWithMeta } = wideClient(300);
+    const result = await queryHandler(
+      querySchema.parse({ table: "incident", fields: "all" }),
+      client,
+      config
+    );
+
+    const sent = (getWithMeta.mock.calls[0][1] as Record<string, string>).sysparm_fields;
+    expect(sent?.split(",")).toHaveLength(100);
+    const hint = parseText(result).hint as string;
+    expect(hint).toContain("capped at 100 of 300");
+    expect(hint).toContain("name them explicitly");
+  });
+
+  it("says nothing when the table fits under the cap", async () => {
+    const { client } = wideClient(20);
+    const result = await queryHandler(
+      querySchema.parse({ table: "incident", fields: "all" }),
+      client,
+      config
+    );
+
+    expect(parseText(result).hint).toBeUndefined();
   });
 });

@@ -1,5 +1,6 @@
 /** Canonical contract-bearing sn_get module. */
 
+import { boundedAllFields } from "./all-fields-cap.js";
 import { types as nodeUtilTypes } from "node:util";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -178,6 +179,16 @@ async function executeGet(
       fields: args.fields,
       responseFormat: args.response_format,
     });
+  // A wildcard selection would drop sysparm_fields and pull every column.
+  const bounded = isAllFieldSelection(readableFields)
+    ? await boundedAllFields(
+        client,
+        args.table,
+        resolveReadableFields(args.table),
+        args.force_recache === true
+      )
+    : undefined;
+  const effectiveFields = bounded ? bounded.fields : readableFields;
   const selector = resolveRecordLookupSelector(args.table, {
     sys_id: args.sys_id,
     identifier: args.identifier,
@@ -185,11 +196,11 @@ async function executeGet(
   const record = await fetchOneRecord(
     args,
     selector,
-    readableFields,
+    effectiveFields,
     client,
     config
   );
-  const filtered = stripEmpty(filterReadableRecord(record, readableFields));
+  const filtered = stripEmpty(filterReadableRecord(record, effectiveFields));
   if (
     typeof filtered !== "object" ||
     filtered === null ||

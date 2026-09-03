@@ -1,5 +1,6 @@
 /** Canonical contract-bearing sn_query module. */
 
+import { allFieldsCapNotice, boundedAllFields } from "./all-fields-cap.js";
 import { z } from "zod";
 import type { ServiceNowOperations } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
@@ -11,6 +12,7 @@ import {
 } from "../encoded-query-policy.js";
 import {
   fieldSelectionToSysparmFields,
+  isAllFieldSelection,
   filterReadableRecord,
   preparedReadableFields,
   resolveReadableFields,
@@ -285,6 +287,17 @@ async function executeQuery(
     ) {
       throw new StructuredQueryError("invalid_shape");
     }
+    // A wildcard selection would drop sysparm_fields and pull every column,
+    // which errors on a wide table rather than returning a trimmed record.
+    const bounded = isAllFieldSelection(readableFields)
+      ? await boundedAllFields(
+          client,
+          args.table,
+          resolveReadableFields(args.table),
+          args.force_recache === true
+        )
+      : undefined;
+    const effectiveFields = bounded ? bounded.fields : readableFields;
     const structuredPlan =
       args.structured_query === undefined
         ? undefined
@@ -323,7 +336,7 @@ async function executeQuery(
       query: queryWithStableOrder,
       fields: rawPlan?.outputFields
         ? rawPlan.outputFields.join(",")
-        : fieldSelectionToSysparmFields(readableFields),
+        : fieldSelectionToSysparmFields(effectiveFields),
       // Fetch one bounded sentinel row so a missing total-count header never
       // turns an exactly full final page into speculative continuation.
       limit: args.limit + 1,
@@ -342,7 +355,7 @@ async function executeQuery(
     const consumedRawResults = rawResults.slice(0, args.limit);
     const policyFiltered = filterReadableRecord(
       consumedRawResults,
-      rawPlan?.outputFields ?? readableFields
+      rawPlan?.outputFields ?? effectiveFields
     );
     const results = stripEmpty(Array.isArray(policyFiltered) ? policyFiltered : []);
     const offset = args.offset ?? 0;
@@ -369,6 +382,13 @@ async function executeQuery(
       const nextOffset = offset + args.limit;
       payload.next_offset = nextOffset;
       payload.hint = `More records available. Call sn_query again with offset=${nextOffset}.`;
+    }
+    if (bounded?.capped === true) {
+      // The caller asked for every field and did not get every field. Without
+      // this they would conclude the missing columns do not exist.
+      const notice = allFieldsCapNotice(bounded, args.table);
+      payload.hint =
+        typeof payload.hint === "string" ? `${payload.hint} ${notice}` : notice;
     }
     payload.results = results;
     return ok(enforceByteBudget(payload, results, args, total));
