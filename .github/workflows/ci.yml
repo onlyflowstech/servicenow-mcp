@@ -77,8 +77,13 @@ jobs:
       - run: npm ci --prefix tools/inspector --engine-strict --ignore-scripts
       - run: npm audit --prefix tools/inspector --audit-level=moderate
 
+  # The container serves the dormant HTTP transport, which 2.0 does not ship —
+  # see docs/ENTERPRISE-RELEASE-BOUNDARY.md. Kept running so the image does not
+  # rot, but not required: a red check here must not block a stdio release.
+  # Make it required again when that transport is re-exposed.
   container-release:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

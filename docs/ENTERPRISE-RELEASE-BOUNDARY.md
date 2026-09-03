@@ -91,6 +91,25 @@ boundaries, token lifecycle, consent and revocation model, tenant binding, and
 ServiceNow identity decision. That work belongs to the future product and is
 not implicit in V2.
 
+### The container image, and its CI status
+
+The OCI image serves this transport, not the stdio server 2.0 ships, so it
+launches `dist/http-entrypoint.js`. Running `dist/index.js` there would start a
+stdio server with no stdin attached: it would do nothing and still look
+healthy, which is why the entrypoint is asserted in both the artifact test and
+`scripts/container-validate.mjs`.
+
+The image sets `MCP_HOST=0.0.0.0`, and HTTP authentication is opt-in. That
+combination is a ServiceNow proxy open to the network whose failure mode is a
+*working* deployment, so the entrypoint refuses to start when the host is not
+loopback and no `MCP_BEARER_TOKEN` is set, rather than warning.
+
+`container-release` runs in CI but is **not required**: it validates an
+artifact 2.0 does not ship, and a red check there must not block a stdio
+release. It is kept running so the image does not rot. Make it required again
+when this transport is re-exposed — at which point its failures become
+release-blocking, as they should be.
+
 ## Concrete seams V2 preserves
 
 V2 preserves only the boundaries already needed by its single-owner design.
