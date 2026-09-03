@@ -38,5 +38,26 @@ export default tseslint.config(
         },
       ],
     },
+  },
+  {
+    // Under the stdio transport, stdout carries the JSON-RPC frames. Anything
+    // else written there corrupts the stream and every session fails, with no
+    // error and nothing in a test likely to catch it. Diagnostics go to stderr.
+    // `src/setup.ts` is exempt: it is a CLI, where stdout is the output.
+    name: "servicenow-mcp/stdout-belongs-to-the-protocol",
+    files: ["src/**/*.ts"],
+    ignores: ["src/setup.ts"],
+    rules: {
+      "no-console": "error",
+      "no-restricted-properties": [
+        "error",
+        {
+          object: "process",
+          property: "stdout",
+          message:
+            "stdout carries the MCP protocol under stdio; write diagnostics to process.stderr.",
+        },
+      ],
+    },
   }
 );
