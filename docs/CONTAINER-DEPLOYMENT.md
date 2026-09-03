@@ -1,5 +1,17 @@
 # Production container deployment
 
+> [!IMPORTANT]
+> **This document describes the dormant HTTP transport, not the shipped one.**
+> The product exposes stdio only: an MCP client spawns `servicenow-mcp` and
+> speaks JSON-RPC over that process's stdin and stdout. There is no endpoint to
+> configure, no service to start, and no bearer token to set, and
+> `servicenow-mcp-setup` registers every client that way. The HTTP runtime this
+> document assumes still compiles and is still tested, but nothing on the CLI
+> path reaches it — see
+> [the dormant HTTP transport](ENTERPRISE-RELEASE-BOUNDARY.md#the-dormant-http-transport).
+> Sections about profiles, credentials, table access, field policy, and tool
+> behavior are transport-independent and remain accurate.
+
 The SNSDK-39 artifact is a portable OCI image for the HTTP-only, single-owner
 ServiceNow MCP service. It is not coupled to ChatGPT, Claude, or another AI
 host: any standards-compliant MCP client uses the same authenticated `/mcp`
@@ -94,6 +106,13 @@ The only values baked into the image are non-secret runtime defaults:
 `NODE_ENV=production`, `MCP_HOST=0.0.0.0`, `MCP_PORT=3000`, and the non-root
 home directory. Supply every owner identity, bearer token, ServiceNow setting,
 profile, key, and provider credential at runtime.
+
+> **`MCP_BEARER_TOKEN` is required for a container deployment, but the process
+> will not enforce that for you.** HTTP authentication became opt-in in 2.0: a
+> container started without it serves every request that reaches port 3000, and
+> `MCP_HOST` defaults to `0.0.0.0` in this image. Treat a missing
+> `MCP_BEARER_TOKEN` as a failed deployment. The service logs a warning at
+> startup when it is unauthenticated; alert on it.
 
 ### Secret-managed `SN_*` profile
 

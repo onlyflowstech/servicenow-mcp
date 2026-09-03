@@ -1,5 +1,17 @@
 # Remote operations runbook
 
+> [!IMPORTANT]
+> **This document describes the dormant HTTP transport, not the shipped one.**
+> The product exposes stdio only: an MCP client spawns `servicenow-mcp` and
+> speaks JSON-RPC over that process's stdin and stdout. There is no endpoint to
+> configure, no service to start, and no bearer token to set, and
+> `servicenow-mcp-setup` registers every client that way. The HTTP runtime this
+> document assumes still compiles and is still tested, but nothing on the CLI
+> path reaches it — see
+> [the dormant HTTP transport](ENTERPRISE-RELEASE-BOUNDARY.md#the-dormant-http-transport).
+> Sections about profiles, credentials, table access, field policy, and tool
+> behavior are transport-independent and remain accurate.
+
 This runbook is the operator contract for the private, single-owner ServiceNow
 MCP V2 service. It covers normal operation, degradation, deployment, rollback,
 credential rotation, rate-limit tuning, incident response, and safe support
@@ -250,12 +262,22 @@ in the profile file or support bundle.
 
 ### MCP bearer token
 
+HTTP authentication is opt-in: the process requires a bearer only when
+`MCP_BEARER_TOKEN` is set, and serves every request that reaches it when the
+variable is absent. Confirm which mode a host is in before treating a bearer as
+part of its boundary — `servicenow-mcp-setup doctor` reports it as
+`http authentication`, and the service logs a warning at startup when it is
+unauthenticated. Every deployment covered by this runbook should have it set.
+
 The process accepts one configured bearer token. It has no dual-token overlap
 mode. Coordinate a maintenance window or a parallel **private** endpoint:
 deploy the new token, update the authorized client/connector, verify MCP
 initialize/list, then remove the old private endpoint and revoke the old token.
 Do not create a public tunnel, log either token, or leave both endpoints active
 indefinitely.
+
+**Unsetting `MCP_BEARER_TOKEN` does not revoke access — it removes the check.**
+Rotation replaces the value; it never removes the line.
 
 ## Rate-limit and capacity tuning
 

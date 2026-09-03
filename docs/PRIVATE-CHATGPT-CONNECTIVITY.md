@@ -1,5 +1,17 @@
 # Private ChatGPT connectivity through Secure MCP Tunnel
 
+> [!IMPORTANT]
+> **This document describes the dormant HTTP transport, not the shipped one.**
+> The product exposes stdio only: an MCP client spawns `servicenow-mcp` and
+> speaks JSON-RPC over that process's stdin and stdout. There is no endpoint to
+> configure, no service to start, and no bearer token to set, and
+> `servicenow-mcp-setup` registers every client that way. The HTTP runtime this
+> document assumes still compiles and is still tested, but nothing on the CLI
+> path reaches it — see
+> [the dormant HTTP transport](ENTERPRISE-RELEASE-BOUNDARY.md#the-dormant-http-transport).
+> Sections about profiles, credentials, table access, field policy, and tool
+> behavior are transport-independent and remain accurate.
+
 This guide is the SNSDK-42 operator contract for connecting the private,
 single-owner ServiceNow MCP HTTP service to ChatGPT through an optional Secure
 MCP Tunnel adapter. The adapter runs outside the application and starts an
@@ -114,8 +126,10 @@ npm run container:validate
 ```
 
 Inject all runtime values through the approved secret/config mechanism. For a
-same-host adapter, bind the application to loopback and keep its existing
-bearer authentication enabled:
+same-host adapter, bind the application to loopback and set `MCP_BEARER_TOKEN`.
+HTTP authentication is opt-in as of 2.0, so the bearer boundary this adapter
+depends on exists only because that variable is set; a deployment that omits it
+serves the tunnel client and every other local process alike:
 
 ```text
 MCP_HOST=127.0.0.1

@@ -40,14 +40,26 @@ describe("SNSDK-56 documentation contract", () => {
       expect(example, secret).not.toMatch(new RegExp(`^${secret}=.+$`, "mu"));
     }
 
-    // MCP_BEARER_TOKEN is the one secret that is not merely uninjected but
-    // optional, so it must not be assigned at all: the service rejects an
-    // empty value at startup, and a live `MCP_BEARER_TOKEN=` line here would
-    // make this file unsourceable. The inventory still has to explain it.
-    expect(example).not.toMatch(/^MCP_BEARER_TOKEN=/mu);
-    expect(example).toContain("# MCP_BEARER_TOKEN=");
-    expect(example).toContain("HTTP authentication is OPT-IN and off by default");
-    expect(example).toContain("the /mcp endpoint is unauthenticated");
+    // Nothing about a listener belongs in the inventory any more: there is no
+    // bind address, port, allowlist, or bearer to configure, and a reader who
+    // finds one here would configure something that is never read.
+    for (const absent of [
+      "MCP_BEARER_TOKEN",
+      "MCP_HOST",
+      "MCP_PORT",
+      "MCP_ALLOWED_HOSTS",
+      "MCP_MAX_CONCURRENT_REQUESTS",
+      "MCP_SHUTDOWN_GRACE_MS",
+    ]) {
+      expect(example, absent).not.toContain(absent);
+    }
+
+    // It says what the transport is, and where the server actually reads this
+    // configuration from when a client spawns it.
+    expect(example).toContain("The transport is stdio");
+    expect(example).toContain("~/.servicenow-mcp/server.env");
+    expect(example).toMatch(/^MCP_OWNER_ID=example-owner$/mu);
+    expect(example).toMatch(/^MCP_CLIENT_ID=example-client$/mu);
 
     expect(example).toContain("supervisor, orchestrator, OS keychain, or secret manager");
     expect(example).toContain("SN_PROFILE_NAME=example-dev");
@@ -132,6 +144,83 @@ describe("SNSDK-56 documentation contract", () => {
     expect(guide).toContain('profile: "staging"');
     expect(guide).toContain('devResult.structuredContent.profile === "dev"');
     expect(guide).toContain('stagingResult.structuredContent.profile === "staging"');
+  });
+
+  it("names the boundary a spawned server actually has", () => {
+    const readme = read("README.md");
+    // Not "it's local, so it's fine": the sentence has to say who is inside
+    // the boundary, which under stdio is every client that can spawn it.
+    expect(readme).toContain("**The server runs as you, and the client list is the boundary.**");
+    expect(readme).toContain("every MCP client\n> registered here can spawn the server");
+    expect(readme).toContain("claude mcp remove servicenow-mcp");
+    expect(readme).toContain("No ServiceNow credential is copied into a");
+
+    // The variable table is where an integrator looks first. It must not still
+    // advertise a listener's settings.
+    expect(readme).toMatch(/\| `MCP_OWNER_ID` \| ❌ \| `local-owner` \|/u);
+    expect(readme).toMatch(/\| `MCP_CLIENT_ID` \| ❌ \| `local-client` \|/u);
+    expect(readme).not.toMatch(/\| `MCP_BEARER_TOKEN` \|/u);
+    expect(readme).not.toMatch(/\| `MCP_HOST` \|/u);
+    expect(readme).not.toMatch(/\| `MCP_PORT` \|/u);
+    // And it must name the fallback that makes a spawned server work at all.
+    expect(readme).toContain("~/.servicenow-mcp/server.env");
+  });
+
+  /**
+   * The HTTP-shaped operator guides have not been rewritten for stdio yet.
+   * Each one must therefore say so at the top, so a reader cannot follow a
+   * procedure that no longer has anything to act on.
+   */
+  it("marks every still-HTTP guide as describing the dormant transport", () => {
+    for (const path of [
+      "docs/CLIENT-SETUP.md",
+      "docs/PRODUCTION-SECURITY.md",
+      "docs/OPERATIONS-RUNBOOK.md",
+      "docs/PRIVATE-CHATGPT-CONNECTIVITY.md",
+      "docs/CONTAINER-DEPLOYMENT.md",
+    ]) {
+      const guide = read(path);
+      expect(guide, path).toContain(
+        "**This document describes the dormant HTTP transport, not the shipped one.**"
+      );
+      expect(guide, path).toContain(
+        "ENTERPRISE-RELEASE-BOUNDARY.md#the-dormant-http-transport"
+      );
+      // The banner belongs above the content it qualifies.
+      expect(guide.indexOf("dormant HTTP transport"), path).toBeLessThan(400);
+    }
+  });
+
+  it("still tells the setup reader what the opt-in HTTP bearer would do", () => {
+    const guide = read("docs/CLIENT-SETUP.md");
+    expect(guide).toContain("### Authentication is opt-in");
+    expect(guide).toContain("**The endpoint is unauthenticated by default**");
+    // Names the threat it does not cover, rather than only the ones it does.
+    expect(guide).toContain("It is not safe against other software running as");
+    expect(guide).toContain("Authorization: Bearer <the MCP_BEARER_TOKEN value>");
+    // The bootstrap inventory must no longer promise files it stopped writing.
+    expect(guide).not.toContain("| `~/.servicenow-mcp/client.env` |");
+    expect(guide).not.toContain("| `~/.servicenow-mcp/client-headers.txt` |");
+  });
+
+  it("warns the deployment guides that the boundary they assume is opt-in", () => {
+    // Each of these paths still uses a bearer, and each is now responsible for
+    // saying that the service will not insist on one.
+    expect(read("docs/CONTAINER-DEPLOYMENT.md")).toContain(
+      "**`MCP_BEARER_TOKEN` is required for a container deployment, but the process"
+    );
+    expect(read("docs/PRIVATE-CHATGPT-CONNECTIVITY.md")).toContain(
+      "HTTP authentication is opt-in as of 2.0"
+    );
+    expect(read("docs/OPERATIONS-RUNBOOK.md")).toContain(
+      "**Unsetting `MCP_BEARER_TOKEN` does not revoke access — it removes the check.**"
+    );
+    expect(read("docs/TESTING-OAUTH.md")).toContain(
+      "the rejection checks\nbelow cannot fire"
+    );
+    expect(read("docs/V2-MIGRATION.md")).toContain(
+      "The `/mcp` endpoint is unauthenticated unless you set `MCP_BEARER_TOKEN`."
+    );
   });
 
   it("keeps ChatGPT and Claude Code optional, secret-backed, and explicit-profile", () => {

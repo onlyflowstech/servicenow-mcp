@@ -1,5 +1,17 @@
 # Production security boundaries
 
+> [!IMPORTANT]
+> **This document describes the dormant HTTP transport, not the shipped one.**
+> The product exposes stdio only: an MCP client spawns `servicenow-mcp` and
+> speaks JSON-RPC over that process's stdin and stdout. There is no endpoint to
+> configure, no service to start, and no bearer token to set, and
+> `servicenow-mcp-setup` registers every client that way. The HTTP runtime this
+> document assumes still compiles and is still tested, but nothing on the CLI
+> path reaches it — see
+> [the dormant HTTP transport](ENTERPRISE-RELEASE-BOUNDARY.md#the-dormant-http-transport).
+> Sections about profiles, credentials, table access, field policy, and tool
+> behavior are transport-independent and remain accurate.
+
 This document is the production boundary contract for the ServiceNow MCP V2
 HTTP process. It supplements the container and profile-credential guides; it
 does not turn the application into a TLS terminator, reverse proxy, firewall,

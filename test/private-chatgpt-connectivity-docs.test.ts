@@ -46,7 +46,10 @@ describe("SNSDK-42 private ChatGPT connectivity guide", () => {
     );
     const repositoryLinks = [...guide.matchAll(/\[[^\]]+\]\(([^)]+)\)/gu)]
       .map((match) => match[1])
-      .filter((target) => !target.includes(":"));
+      .filter((target) => !target.includes(":"))
+      // A link may carry a fragment; resolve the document, not the anchor.
+      .map((target) => target.split("#")[0])
+      .filter((target) => target !== "");
     for (const target of repositoryLinks) {
       expect(existsSync(resolve(dirname(guidePath), target))).toBe(true);
     }

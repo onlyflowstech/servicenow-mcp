@@ -51,7 +51,10 @@ npm audit --prefix tools/inspector --audit-level=moderate
 
 Set the non-secret `MCP_URL` to the exact reviewed `/mcp` URL and set
 `MCP_PROFILE` to the named test profile. Have the approved supervisor or secret
-manager inject the bearer into the service and smoke-client processes; do not
+manager inject the bearer into the service and smoke-client processes. Release
+validation always runs against an authenticated service: `MCP_BEARER_TOKEN` is
+optional for the product but required for these gates, and `npm run smoke`
+refuses to start without it. Do not
 put it in shell input or Inspector arguments. On Node.js 22.19 or newer, run:
 
 ```sh

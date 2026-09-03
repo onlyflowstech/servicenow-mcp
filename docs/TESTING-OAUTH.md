@@ -39,9 +39,11 @@ The approved test supervisor, keychain, or secret manager must inject
 before those non-secret commands run. Never type either value into shell input,
 an argument, a dotenv file, or command history.
 
-Startup must fail when the MCP bearer secret, owner ID, or client ID is absent
-or invalid. The service listens at `http://127.0.0.1:3000/mcp` unless
-`MCP_HOST` or `MCP_PORT` is explicitly set.
+These OAuth checks run against an authenticated service, so `MCP_BEARER_TOKEN`
+must be set: without it the endpoint is unauthenticated and the rejection checks
+below cannot fire. Startup must fail when the MCP bearer secret, owner ID, or
+client ID is present but invalid. The service listens at
+`http://127.0.0.1:3000/mcp` unless `MCP_HOST` or `MCP_PORT` is explicitly set.
 
 ## 3. Run the HTTP smoke client
 
@@ -87,7 +89,8 @@ cleanup failure is a failed run and requires authorized manual cleanup.
 - Start the service once with an intentionally invalid ServiceNow client secret.
   The tool call must fail with a sanitized error; the secret must not appear in
   the MCP result, service output, or audit record.
-- Send an absent or invalid MCP bearer header. The HTTP boundary must return a
+- With `MCP_BEARER_TOKEN` configured, send an absent or invalid MCP bearer
+  header. The HTTP boundary must return a
   generic 401 before parsing MCP input or touching any profile credential.
 
 ## 5. Shutdown check

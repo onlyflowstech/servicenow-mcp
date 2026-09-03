@@ -1,5 +1,17 @@
 # V2 service and client setup
 
+> [!IMPORTANT]
+> **This document describes the dormant HTTP transport, not the shipped one.**
+> The product exposes stdio only: an MCP client spawns `servicenow-mcp` and
+> speaks JSON-RPC over that process's stdin and stdout. There is no endpoint to
+> configure, no service to start, and no bearer token to set, and
+> `servicenow-mcp-setup` registers every client that way. The HTTP runtime this
+> document assumes still compiles and is still tested, but nothing on the CLI
+> path reaches it — see
+> [the dormant HTTP transport](ENTERPRISE-RELEASE-BOUNDARY.md#the-dormant-http-transport).
+> Sections about profiles, credentials, table access, field policy, and tool
+> behavior are transport-independent and remain accurate.
+
 This is the shortest complete path from a clean install to two
 provider-neutral clients using the same ServiceNow MCP V2 service. The server
 exposes Streamable HTTP at `/mcp`; it does not expose stdio and it does not
@@ -72,15 +84,21 @@ exits non-zero when a check fails.
 
 | File | Mode | Contents |
 |------|------|----------|
-| `~/.servicenow-mcp/server.env` | `0600` | `MCP_BEARER_TOKEN`, `MCP_OWNER_ID`, `MCP_CLIENT_ID`, `MCP_HOST`, `MCP_PORT`, `SN_PROFILE_ENCRYPTION_KEY` |
-| `~/.servicenow-mcp/client.env` | `0600` | `SERVICENOW_MCP_BEARER_TOKEN` for clients that read the bearer from their own environment |
-| `~/.servicenow-mcp/client-headers.txt` | `0600` | An `Authorization: Bearer …` line for `mcp-remote --header-file` |
+| `~/.servicenow-mcp/server.env` | `0600` | `MCP_OWNER_ID`, `MCP_CLIENT_ID`, `MCP_HOST`, `MCP_PORT`, `SN_PROFILE_ENCRYPTION_KEY` |
 
 The directory is `0700`. Modes are re-applied on every run, so a file that was
 loosened by hand is tightened again rather than silently receiving a fresh
-bearer at the wrong permissions.
+encryption key at the wrong permissions.
 
-`--force` regenerates the bearer and owner/client identifiers. It deliberately
+The bootstrap writes no credential for the MCP endpoint, and no client-side
+credential file. **The endpoint is unauthenticated by default**: any process on
+this machine that can reach it gets whatever ServiceNow access your profiles
+grant. See [Authentication is opt-in](#authentication-is-opt-in) below.
+Releases before 2.0 also wrote `~/.servicenow-mcp/client.env` and
+`~/.servicenow-mcp/client-headers.txt`; nothing reads them now, and you can
+delete them.
+
+`--force` regenerates the owner/client identifiers. It deliberately
 does **not** regenerate `SN_PROFILE_ENCRYPTION_KEY`: that key decrypts every
 AES-256-GCM envelope in `config.json`, and replacing it would make those
 credentials permanently unreadable. `--rotate-encryption-key` exists for a
@@ -89,6 +107,42 @@ clean machine and is refused outright while a profile file is present.
 If you install globally first, `servicenow-mcp setup` and
 `servicenow-mcp-setup` run the same bootstrap. `npx @onlyflows/servicenow-mcp@latest setup`
 works without a global install.
+
+### Authentication is opt-in
+
+The service checks a bearer token only when `MCP_BEARER_TOKEN` is present in
+its environment. `servicenow-mcp-setup` does not generate one, so a default
+install serves every request that reaches it.
+
+That is safe against a remote attacker and against a web page you visit: the
+listener is on `127.0.0.1`, and the `Host`/`Origin` allowlists are fail-closed,
+so a browser cannot drive it. It is not safe against other software running as
+you. A shell script, a build tool, or a compromised dependency in any project
+on the machine can call `/mcp` and read or write every table your profiles
+allow, recorded under your own owner and client identifiers.
+
+To require a token, generate one — 32 to 4096 characters from
+`A-Za-z0-9._~+/-` with optional `=` padding:
+
+```sh
+openssl rand -base64 33 | tr '+/' '-_'
+```
+
+Add it to `~/.servicenow-mcp/server.env` as an `MCP_BEARER_TOKEN` line, in the
+same single-quoted form as the values already there, and confirm the file is
+still mode `0600`. Restart the service, then add this header to every client —
+the per-client sections in
+[MCP client configuration](#7-mcp-client-configuration) show where:
+
+```text
+Authorization: Bearer <the MCP_BEARER_TOKEN value>
+```
+
+An empty `MCP_BEARER_TOKEN=` is refused at startup rather than treated as
+"off", so a half-finished change stops the service instead of quietly opening
+the port. `servicenow-mcp-setup doctor` reports which mode you are in under the
+`http authentication` check, and its `/mcp` handshake probe sends the token
+from `server.env` when there is one.
 
 ### Granting table access
 
@@ -135,14 +189,17 @@ Restart the service after changing a profile.
 ## 1. Configure and start the HTTP service
 
 Use Node.js 20 or newer. Review `.env.example` as a configuration inventory,
-but do not put protected values in it or another repository file. Its bearer,
-password, client-secret, API-key, and encryption-key assignments are
-intentionally empty. Inject those values at process start through the approved
-supervisor, orchestrator, OS keychain, or secret manager.
+but do not put protected values in it or another repository file. Its password,
+client-secret, API-key, and encryption-key assignments are intentionally empty,
+and `MCP_BEARER_TOKEN` is commented out because an empty value is rejected at
+startup rather than meaning "unauthenticated". Inject those values at process
+start through the approved supervisor, orchestrator, OS keychain, or secret
+manager.
 
 For the one-profile environment compatibility path, set the non-secret values
-from `.env.example`, inject `MCP_BEARER_TOKEN` and the authentication-specific
-ServiceNow secret, and keep the explicit `SN_PROFILE_NAME=example-dev`
+from `.env.example`, inject the authentication-specific ServiceNow secret (and
+`MCP_BEARER_TOKEN` if you are protecting the endpoint), and keep the explicit
+`SN_PROFILE_NAME=example-dev`
 mapping. Bare `SN_*` connection values without `SN_PROFILE_NAME` create no
 profile. This path is not the recommended way to maintain two profiles; use
 the protected configuration workflow below for that.
@@ -156,15 +213,19 @@ npm run build
 npm start
 ```
 
-The default endpoint is `http://127.0.0.1:3000/mcp`. Startup fails closed when
-the MCP bearer or owner/client identity is missing or invalid. `/health/live`
-and `/health/ready` are unauthenticated lifecycle probes; they are not
-ServiceNow health checks and do not grant `/mcp` access.
+The default endpoint is `http://127.0.0.1:3000/mcp`. `MCP_OWNER_ID` and
+`MCP_CLIENT_ID` default to `local-owner` and `local-client`; `MCP_BEARER_TOKEN`
+is optional, and startup fails closed when it is present but empty or otherwise
+invalid. Without it the service logs a warning to stderr and serves
+unauthenticated. `/health/live` and `/health/ready` are unauthenticated
+lifecycle probes; they are not ServiceNow health checks and do not grant `/mcp`
+access.
 
 Keep a loopback listener for local use. Before any non-loopback deployment,
 put the process behind the private ingress and operator-managed TLS boundary
-in `PRODUCTION-SECURITY.md`, configure exact Host/Origin admission, and keep
-the MCP bearer enabled. The process does not terminate TLS itself. On SIGINT
+in `PRODUCTION-SECURITY.md`, configure exact Host/Origin admission, and set
+`MCP_BEARER_TOKEN`. Off loopback, an unauthenticated endpoint publishes your
+ServiceNow access to the network. The process does not terminate TLS itself. On SIGINT
 or SIGTERM it stops admission, flips readiness false, drains accepted requests
 up to `MCP_SHUTDOWN_GRACE_MS`, then closes remaining MCP and HTTP resources.
 
@@ -255,7 +316,9 @@ resolver failure must stop before ServiceNow client construction.
 
 ## 3. Connect with the official MCP SDK
 
-Inject `MCP_BEARER_TOKEN`, set the non-secret `MCP_URL` and `MCP_PROFILE`, and
+These two release-gate clients require an authenticated service, so run them
+against a deployment with `MCP_BEARER_TOKEN` set. Inject it, set the non-secret
+`MCP_URL` and `MCP_PROFILE`, and
 run client code without placing any secret in a URL or command argument. Every
 tool invocation includes the selected profile; initialization and discovery
 naturally have no tool arguments.
@@ -469,16 +532,20 @@ these blocks with your own endpoint substituted, and
 
 Two rules apply to every client:
 
-- The bearer must reach the client **by reference** — an environment variable,
-  a `0600` header file, or the client's own secret storage. Never paste it into
-  a config file that is synced or version-controlled, and never pass it as a
-  command-line argument, where any other user on the machine can read it from
-  the process list.
+- **No block below sends a credential**, because the service does not check
+  one. If you have set `MCP_BEARER_TOKEN`, add the `Authorization` header shown
+  for your client and make the token reach it **by reference** — an environment
+  variable, a `0600` header file, or the client's own secret storage. Never
+  paste it into a config file that is synced or version-controlled, and never
+  pass it as a command-line argument, where any other user on the machine can
+  read it from the process list.
 - Every tool call must name a `profile`. There is no default, active, or
   remembered profile.
 
-| Client | Native Streamable HTTP | How the bearer is held |
-|--------|------------------------|------------------------|
+The bearer column applies only after you have opted into authentication.
+
+| Client | Native Streamable HTTP | How to hold a bearer, if you set one |
+|--------|------------------------|--------------------------------------|
 | Claude Code | yes | `${VAR}` expansion in `.mcp.json`, resolved at load |
 | Codex | yes | `--bearer-token-env-var`, name only in config |
 | Cursor | yes (1.0+) | `${env:VAR}` expansion in `headers` |
@@ -558,7 +625,7 @@ overhead. Send large files through ServiceNow's own UI or a separate integration
 |--------|---------|---------------|
 | `429` | Rate limited. Body is `{"error":"rate_limited","message":"…","retry_after_seconds":N}` and the `Retry-After` header carries the same bounded value. Two buckets apply: 240 requests/60 s per direct socket source and 120 requests/60 s per owner/client identity. | Wait `retry_after_seconds`, then retry the same request. |
 | `503` | Admission slots are full, or the runtime is starting or draining. `retry-after: 1`, `connection: close`. | Wait, then retry with reduced parallelism. |
-| `401` | Bearer missing, malformed, or not the one the service is running with. | Do not retry. Re-source the bearer. |
+| `401` | Only reachable when the service runs with `MCP_BEARER_TOKEN` set: the bearer is missing, malformed, duplicated, or not the one the service is running with. An unauthenticated service never returns it. | Do not retry. Re-source the bearer, or confirm which mode the service is in with `servicenow-mcp-setup doctor`. |
 | `421` | `Host` authority not in `MCP_ALLOWED_HOSTS`. | Do not retry. Fix the configured URL or the allowlist. |
 | `403` | `Origin` rejected. `MCP_ALLOWED_ORIGINS` is unset by default, which denies every request carrying an `Origin`. | Do not retry. Add the exact origin, or send no `Origin`. |
 | `413` | Body exceeded 1 MiB. | Do not retry unchanged. Reduce `limit`, narrow `fields`, or split the batch. |
@@ -569,8 +636,9 @@ readiness.
 
 ### Per-client configuration
 
-Every block below preserves the same protected Streamable HTTP `/mcp` endpoint,
-secret-backed bearer boundary, tool schemas, and explicit-profile rule. They
+Every block below preserves the same Streamable HTTP `/mcp` endpoint, tool
+schemas, and explicit-profile rule, and each shows where the `Authorization`
+header goes for a deployment that has opted into `MCP_BEARER_TOKEN`. They
 must not redefine the core server, image, profile schema, policy, handler, or
 result/audit contract.
 
@@ -618,7 +686,17 @@ in `PRIVATE-CHATGPT-CONNECTIVITY.md`. The authoritative product flow is the
 CLI is on `PATH`. To do it by hand:
 
 ```sh
-set -a; source ~/.servicenow-mcp/client.env; set +a
+claude mcp add --transport http --scope user \
+  servicenow-mcp http://127.0.0.1:3000/mcp
+```
+
+`--scope user` makes the server available in every project; use
+`--scope project` to write a checked-in `.mcp.json` instead.
+
+If you have set `MCP_BEARER_TOKEN`, export it to Claude Code's environment as
+`SERVICENOW_MCP_BEARER_TOKEN` and add the header by reference:
+
+```sh
 claude mcp add --transport http --scope user \
   --header 'Authorization: Bearer ${SERVICENOW_MCP_BEARER_TOKEN}' \
   servicenow-mcp http://127.0.0.1:3000/mcp
@@ -626,10 +704,8 @@ claude mcp add --transport http --scope user \
 
 The single quotes matter: the literal `${SERVICENOW_MCP_BEARER_TOKEN}` text is
 what gets stored, and Claude Code expands it when the config loads. The token
-therefore never enters argv, the config file, or shell history. `--scope user`
-makes the server available in every project; use `--scope project` to write a
-checked-in `.mcp.json` instead — safe here precisely because the file holds a
-placeholder rather than a secret.
+therefore never enters argv, the config file, or shell history — which is what
+makes `--scope project` safe with a header configured.
 
 The equivalent `.mcp.json` entry:
 
@@ -647,14 +723,17 @@ The equivalent `.mcp.json` entry:
 }
 ```
 
-`SERVICENOW_MCP_BEARER_TOKEN` must be present in Claude Code's own environment,
-and `SERVICENOW_MCP_URL` must resolve to the same reviewed `/mcp` origin used by
+Omit the `headers` block entirely for an unauthenticated service; a placeholder
+that expands to nothing is worse than no header at all.
+`SERVICENOW_MCP_URL` must resolve to the same reviewed `/mcp` origin used by
 the SDK and Fetch release checks — HTTPS for any non-loopback route. When a
 referenced variable is absent, Claude Code
 logs a warning and leaves the `${VAR}` placeholder unexpanded;
 the MCP configuration still loads, but the server receives the literal
-placeholder and rejects it with HTTP `401`. Treat that warning, or a
-disconnected `/mcp` status, as a failed setup.
+placeholder. Against an authenticated service that is an HTTP `401`; against an
+unauthenticated one it is accepted and the mistake stays hidden until you turn
+authentication on. Treat that warning, or a disconnected `/mcp` status, as a
+failed setup.
 
 Start a new session, run `/mcp` to confirm `servicenow-mcp` is connected, and
 ask Claude to invoke one tool with the profile stated explicitly. The expected
@@ -681,20 +760,18 @@ The current configuration shape and environment-expansion behavior are in the
 `PATH`. By hand:
 
 ```sh
-set -a; source ~/.servicenow-mcp/client.env; set +a
-codex mcp add servicenow-mcp \
-  --url http://127.0.0.1:3000/mcp \
-  --bearer-token-env-var SERVICENOW_MCP_BEARER_TOKEN
+codex mcp add servicenow-mcp --url http://127.0.0.1:3000/mcp
 ```
 
-Only the variable *name* is written to Codex's config. Codex must be launched
-from an environment where `SERVICENOW_MCP_BEARER_TOKEN` is set.
+With `MCP_BEARER_TOKEN` set, export it as `SERVICENOW_MCP_BEARER_TOKEN` and
+add `--bearer-token-env-var SERVICENOW_MCP_BEARER_TOKEN`. Only the variable
+*name* is written to Codex's config, so Codex must then be launched from an
+environment where that variable is set — otherwise every call gets `401`.
 
 #### Claude Desktop and Windsurf
 
-Neither client can send a static `Authorization` header to a Streamable HTTP
-server; both speak stdio. Bridge them with `mcp-remote`, and pass the bearer
-with `--header-file` so it stays out of argv and out of the config file:
+Neither client speaks Streamable HTTP; both speak stdio. Bridge them with
+`mcp-remote`:
 
 ```json
 {
@@ -706,15 +783,19 @@ with `--header-file` so it stays out of argv and out of the config file:
         "mcp-remote",
         "http://127.0.0.1:3000/mcp",
         "--transport", "http-only",
-        "--allow-http",
-        "--header-file", "/Users/you/.servicenow-mcp/client-headers.txt"
+        "--allow-http"
       ]
     }
   }
 }
 ```
 
-Use the absolute path that `servicenow-mcp-setup` printed; `~` is not expanded.
+With `MCP_BEARER_TOKEN` set, append
+`"--header-file", "/Users/you/.servicenow-mcp/client-headers.txt"` and create
+that file yourself with mode `0600` holding a single
+`Authorization: Bearer <token>` line — `--header-file` keeps the token out of
+argv and out of the config file. Setup no longer writes it, so use an absolute
+path of your own; `~` is not expanded.
 Drop `--allow-http` once the endpoint is HTTPS. Config file locations:
 
 - Claude Desktop, macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -735,22 +816,35 @@ in `headers`. Put this in `~/.cursor/mcp.json` (global) or `.cursor/mcp.json`
 {
   "mcpServers": {
     "servicenow-mcp": {
-      "url": "http://127.0.0.1:3000/mcp",
-      "headers": {
-        "Authorization": "Bearer ${env:SERVICENOW_MCP_BEARER_TOKEN}"
-      }
+      "url": "http://127.0.0.1:3000/mcp"
     }
   }
 }
 ```
 
-On an older Cursor, use the `mcp-remote` bridge above instead.
+With `MCP_BEARER_TOKEN` set, add
+`"headers": { "Authorization": "Bearer ${env:SERVICENOW_MCP_BEARER_TOKEN}" }`
+and export that variable into Cursor's environment. On an older Cursor, use the
+`mcp-remote` bridge above instead.
 
 #### VS Code
 
-VS Code supports HTTP servers natively and holds the token in its own secret
-storage via an `inputs` prompt. Put this in `.vscode/mcp.json` for a workspace,
-or the user-level `mcp.json`:
+VS Code supports HTTP servers natively. Put this in `.vscode/mcp.json` for a
+workspace, or the user-level `mcp.json`:
+
+```json
+{
+  "servers": {
+    "servicenow-mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:3000/mcp"
+    }
+  }
+}
+```
+
+With `MCP_BEARER_TOKEN` set, add an `inputs` prompt so VS Code holds the token
+in its own secret storage and the file stays safe to commit:
 
 ```json
 {
@@ -774,13 +868,14 @@ or the user-level `mcp.json`:
 }
 ```
 
-VS Code prompts once and stores the value itself, so this file is safe to commit.
-Read the token from `~/.servicenow-mcp/client.env` when it prompts.
+VS Code prompts once and stores the value itself. Read the token from
+`~/.servicenow-mcp/server.env` when it prompts.
 
 #### Any other Streamable HTTP client
 
-The contract is: `POST` to the `/mcp` URL, `Authorization: Bearer <token>`,
-`accept: application/json, text/event-stream`, one JSON-RPC message per request
+The contract is: `POST` to the `/mcp` URL, `accept: application/json,
+text/event-stream`, `Authorization: Bearer <token>` where the service is
+configured with `MCP_BEARER_TOKEN`, one JSON-RPC message per request
 in a body of at most 1 MiB. There is no `GET`/SSE stream, no session id, and no
 `DELETE`; any method other than `POST` returns `405`. Follow the client-behavior
 requirements above.
@@ -792,7 +887,7 @@ server artifact and endpoint working unchanged.
 ## 8. Migrating clients and extending tools
 
 Remove V1 client entries that launch a local command or pass executable
-arguments. V2 has no stdio fallback; configure the authenticated Streamable
+arguments. V2 has no stdio fallback; configure the Streamable
 HTTP URL and migrate every tool call to an explicit profile as described in
 `V2-MIGRATION.md`.
 

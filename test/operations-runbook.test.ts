@@ -35,7 +35,10 @@ describe("SNSDK-41 remote operations runbook contract", () => {
     expect(packageJson.files).toContain("docs/OPERATIONS-RUNBOOK.md");
     const markdownLinks = [...runbook.matchAll(/\[[^\]]+\]\(([^)]+)\)/gu)]
       .map((match) => match[1])
-      .filter((target) => !target.includes(":"));
+      .filter((target) => !target.includes(":"))
+      // A link may carry a fragment; resolve the document, not the anchor.
+      .map((target) => target.split("#")[0])
+      .filter((target) => target !== "");
     for (const target of markdownLinks) {
       expect(existsSync(resolve(dirname(runbookPath), target))).toBe(true);
     }

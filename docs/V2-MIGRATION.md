@@ -8,7 +8,7 @@ the 1.x local-process launch contract. Every published release before it is
 
 | # | Change | Before (1.0.0) | After (2.0.0) |
 |---|--------|----------------|---------------|
-| 1 | Transport | stdio; the client spawns `servicenow-mcp` | Streamable HTTP at `/mcp` with a bearer; the client connects to a URL |
+| 1 | Transport | stdio; the client spawns `servicenow-mcp` | Streamable HTTP at `/mcp`; the client connects to a URL. A bearer token is optional and off by default |
 | 2 | Profile selection | implicit, from `SN_*` in the client's env | every tool call carries an explicit `profile` |
 | 3 | Table access | any table the credential could reach | deny-by-default per profile; explicit allowlist plus target entries |
 | 4 | Attachments | host `file_path` / `output_path` | inline base64 both directions; no host filesystem access, and no flag restores it |
@@ -26,10 +26,10 @@ apply only if you used the affected surface.
 - **Inline base64 attachments.** `sn_attach` uploads and downloads file content
   in the tool call itself, with no host filesystem access on either side. See
   breaking change 4 — this is the replacement for the removed path arguments.
-- **`servicenow-mcp-setup`.** A bootstrap that generates local auth material,
-  registers the clients whose CLI can hold a bearer by reference, emits
-  copy-pasteable config for the rest, writes least-privilege table-access rules
-  onto a profile, and diagnoses an install end to end with `doctor`.
+- **`servicenow-mcp-setup`.** A bootstrap that generates the local server
+  environment, registers the clients that have a CLI, emits copy-pasteable
+  config for the rest, writes least-privilege table-access rules onto a profile,
+  and diagnoses an install end to end with `doctor`.
 - **`servicenow-mcp.add-profile` prompt.** A guided profile-creation flow that
   never asks for a secret in chat.
 - **Append-only incident journal tools.** `sn_incident_add_comment` and
@@ -73,16 +73,19 @@ compatibility flag, or alternate executable.
   "mcpServers": {
     "servicenow-mcp": {
       "type": "http",
-      "url": "http://127.0.0.1:3000/mcp",
-      "headers": { "Authorization": "Bearer ${SERVICENOW_MCP_BEARER_TOKEN}" }
+      "url": "http://127.0.0.1:3000/mcp"
     }
   }
 }
 ```
 
+The `/mcp` endpoint is unauthenticated unless you set `MCP_BEARER_TOKEN`. Where
+you have, add `"headers": { "Authorization": "Bearer ${SERVICENOW_MCP_BEARER_TOKEN}" }`
+and export that variable into the client's environment.
+
 Per-client syntax, including the clients that need an `mcp-remote` bridge, is
 in [CLIENT-SETUP.md](CLIENT-SETUP.md#7-mcp-client-configuration).
-`servicenow-mcp-setup` generates the bearer and registers the clients it can.
+`servicenow-mcp-setup` registers the clients it can.
 
 ### 2. Explicit profile on every call
 
@@ -281,7 +284,8 @@ fallback transport.
 Configure a standards-compliant MCP Streamable HTTP client with:
 
 - URL: `http://127.0.0.1:3000/mcp` by default
-- Header: `Authorization: Bearer <MCP_BEARER_TOKEN>`
+- Header: `Authorization: Bearer <MCP_BEARER_TOKEN>`, only where the service is
+  configured with one; omit it entirely otherwise
 
 Client configuration syntax varies, but the protocol contract does not depend
 on any AI provider. Use TLS or an approved private-access boundary before
@@ -294,8 +298,11 @@ profiles, and safe result/audit verification, see
 
 ## Start the service
 
-The HTTP runtime fails closed unless the bearer secret and audit identity are
-explicitly configured.
+`MCP_OWNER_ID` and `MCP_CLIENT_ID` label every audit record and default to
+`local-owner` / `local-client`. `MCP_BEARER_TOKEN` is optional: without it the
+`/mcp` endpoint is unauthenticated and any local process that reaches it has
+whatever access the profiles grant. See
+[Production security boundaries](PRODUCTION-SECURITY.md#http-authentication-is-optional-and-off-by-default).
 
 ```bash
 export MCP_OWNER_ID="your-owner-id"
@@ -311,8 +318,9 @@ npm start
 ```
 
 Before running those non-secret commands, have the approved supervisor,
-orchestrator, keychain, or secret manager inject `MCP_BEARER_TOKEN` and the
-authentication-specific ServiceNow secret directly into the service process.
+orchestrator, keychain, or secret manager inject the authentication-specific
+ServiceNow secret — and `MCP_BEARER_TOKEN`, if the endpoint is to be
+authenticated — directly into the service process.
 Do not put either value in shell input, command arguments, dotenv files, or
 history.
 

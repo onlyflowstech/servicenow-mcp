@@ -70,7 +70,7 @@ canonical instance. There is no default, active-profile state, or switch
 operation.
 
 Keep `SN_PROFILE_ENCRYPTION_KEY` in a separate approved key system, distinct
-from the MCP bearer and every ServiceNow credential. A process has one key for
+from the MCP bearer, where one is configured, and every ServiceNow credential. A process has one key for
 the encrypted envelopes in its profile file; profiles that require independent
 key trust domains require separate private service deployments.
 

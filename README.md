@@ -32,33 +32,83 @@ nothing behind.
 ```
 ServiceNow MCP setup
 
-Profile name [dev]:
-ServiceNow instance (for example dev12345.service-now.com): dev12345.service-now.com
-Authentication [basic/oauth/apikey]: basic
-ServiceNow username: integration.user
-Store the credential encrypted on disk, or reference an environment variable? [encrypted/reference]:
+This walks through one ServiceNow connection end to end. Nothing is
+written to the profile until your credential is verified against the
+instance. Press Ctrl+C at any point to stop; nothing will be saved.
 
-Enter each secret. Input is hidden.
+Profile name [dev]: dev
+ServiceNow instance (for example dev12345.service-now.com): dev12345.service-now.com
+Authentication:
+  1) basic (default)
+  2) oauth
+  3) apikey
+Choice [1]: 1
+How should the credential be stored?:
+  1) encrypted (default)
+  2) reference
+Choice [1]: 1
+ServiceNow username: integration.user
+
+Enter each secret now. Input is hidden — nothing you type from here
+is displayed.
 credential:
 
 Verifying against the instance...
   ok  https://dev12345.service-now.com accepted the credential.
 
 Table access is deny-by-default: a profile with no rules denies every
-tool call. Grant the narrowest set that does the job.
+tool call. Grant the narrowest set that does the job; you can add more
+later with servicenow-mcp-setup grant.
 
-Tables to allow for READS [incident]: incident,problem
-Tables to allow for WRITES (blank for none): incident
+Tables to allow for READS:
+  1) Just incident (default)
+  2) Common ITSM set (incident,change_request,problem,task,sys_user)
+  3) All tables (*)
+  4) Enter a custom list
+  5) None
+Choice [1]: 1
 
-Register this server with codex and claude-code? [Y/n]:
+Tables to allow for WRITES:
+  1) Just incident
+  2) Common ITSM set (incident,change_request,problem,task,sys_user)
+  3) All tables (*)
+  4) Enter a custom list
+  5) None (default)
+Choice [5]: 1
+
+Wrote profile dev.
+
+Register this server with codex and claude-code? [Y/n]: y
+
+ServiceNow MCP doctor
+
+ok    node: v22.11.0
+ok    server command: servicenow-mcp resolves on PATH; clients spawn it over stdio
+ok    config directory: ~/.servicenow-mcp (0700)
+ok    profile dev: instance: https://dev12345.service-now.com
+ok    profile dev: credential: basic credential resolves from its encrypted source
+ok    profile dev: table access: 1 read, 1 write, 1 target(s)
+
+All checks passed.
 
 Setup complete.
+
+Profile   dev
+Reads     incident
+Writes    incident
+Transport stdio (each client spawns its own servicenow-mcp)
+Clients   codex, claude-code
+
+Start codex or claude-code and it will launch the server itself.
+There is nothing to keep running between sessions.
 ```
 
-Then start the service and verify:
+There is nothing to start. The server speaks **stdio**: each registered client
+spawns its own copy of `servicenow-mcp` on demand and talks to it over that
+process's stdin and stdout. Setup finishes by running the same checks `doctor`
+runs, so you can re-run them any time:
 
 ```bash
-set -a; source ~/.servicenow-mcp/server.env; set +a; servicenow-mcp &
 servicenow-mcp-setup doctor --profile dev
 ```
 
@@ -88,9 +138,19 @@ servicenow-mcp-setup grant --profile dev --read incident,problem --write inciden
 | `servicenow-mcp-setup grant --profile <name> --read <tables>` | Add table access rules to a profile |
 | `servicenow-mcp-setup doctor` | Diagnose the install and print remedies |
 
-`--force` regenerates the bearer and identifiers but deliberately preserves
+`--force` regenerates the owner/client identifiers but deliberately preserves
 `SN_PROFILE_ENCRYPTION_KEY`, which decrypts every credential envelope in
 `config.json`. Add `--help` to any command for its full options.
+
+> **The server runs as you, and the client list is the boundary.** Nothing
+> listens on a port, so nothing off this machine can reach it and no web page
+> can drive it. What that leaves is the registration: every MCP client
+> registered here can spawn the server and use whatever ServiceNow access your
+> profiles grant, as your integration account. Keep the grants narrow, and
+> remove a client you no longer use with `claude mcp remove servicenow-mcp` or
+> `codex mcp remove servicenow-mcp`. No ServiceNow credential is copied into a
+> client's configuration file — the spawned server reads the profile and its
+> encryption key from the owner-only `~/.servicenow-mcp` directory.
 
 ### Connecting a client
 
@@ -102,25 +162,44 @@ servicenow-mcp-setup client --client claude-desktop
 servicenow-mcp-setup client --client all
 ```
 
-| Client | Native Streamable HTTP | How the bearer is held |
-|--------|------------------------|------------------------|
-| Claude Code | yes | `${VAR}` expansion in `.mcp.json` |
-| Codex | yes | `--bearer-token-env-var` (name only in config) |
-| Cursor | yes (1.0+) | `${env:VAR}` in `headers` |
-| VS Code | yes | `${input:id}`, held in VS Code secret storage |
-| Claude Desktop | no (stdio only) | `mcp-remote --header-file` |
-| Windsurf | no (stdio only) | `mcp-remote --header-file` |
+Every supported client speaks stdio natively, so each one is configured the
+same way: a command to spawn.
+
+```bash
+claude mcp add servicenow-mcp -- servicenow-mcp
+codex mcp add servicenow-mcp -- servicenow-mcp
+```
+
+stdio is the default transport for both CLIs, so there is no transport flag to
+pass. For clients configured by file:
+
+```json
+{
+  "mcpServers": {
+    "servicenow-mcp": { "command": "servicenow-mcp", "args": [] }
+  }
+}
+```
+
+| Client | Configured by | Config location |
+|--------|---------------|-----------------|
+| Claude Code | `claude mcp add` or `.mcp.json` | project or `--scope user` |
+| Codex | `codex mcp add` or `config.toml` | `~/.codex/config.toml` |
+| Cursor | file | `~/.cursor/mcp.json` or `.cursor/mcp.json` |
+| VS Code | file (`"type": "stdio"`) | `.vscode/mcp.json` or user `mcp.json` |
+| Claude Desktop | file | `claude_desktop_config.json` |
+| Windsurf | file | `~/.codeium/windsurf/mcp_config.json` |
+
+No client holds a ServiceNow credential. The spawned server resolves its own
+from `~/.servicenow-mcp`, which is owner-only.
 
 Full per-client blocks are in
 [V2 service and client setup](docs/CLIENT-SETUP.md#7-mcp-client-configuration).
 
-> **Important:** 2.0 is HTTP-only. Do not configure it as a stdio `command`.
-> Run the service, then connect clients to the authenticated `/mcp` URL.
-
-> **Client parallelism:** the service admits 2 concurrent `/mcp` requests and
-> answers the rest with HTTP `503` — there is no queue. Cap agent parallelism
-> at two and honor `Retry-After` on `429` and `503`. See
-> [client behavior requirements](docs/CLIENT-SETUP.md#client-behavior-requirements).
+> **`servicenow-mcp` must be on the spawning client's `PATH`.** A global npm
+> install puts it there. If it is not — a project-local install, or a GUI
+> client with a different `PATH` — register the absolute entrypoint instead;
+> `servicenow-mcp-setup doctor` checks this and prints the exact command.
 
 ### Guided profile creation from your client
 
@@ -138,7 +217,7 @@ encryption keys into chat.
 
 ### What gets installed
 
-- `servicenow-mcp` — starts the Streamable HTTP MCP service
+- `servicenow-mcp` — the MCP server itself, spawned by a client over stdio
 - `servicenow-mcp-profile` — manages profile credentials out of band
 - `servicenow-mcp-setup` — bootstrap, client config, grants, and diagnosis
 
@@ -146,7 +225,8 @@ encryption keys into chat.
 
 The server keeps configuration explicit. A manual run needs:
 
-- MCP endpoint auth: `MCP_BEARER_TOKEN`, `MCP_OWNER_ID`, `MCP_CLIENT_ID`
+- audit identity: `MCP_OWNER_ID` and `MCP_CLIENT_ID` (optional; they label
+  audit records and default to `local-owner`/`local-client`)
 - one named ServiceNow profile, either in `~/.servicenow-mcp/config.json` or
   through `SN_PROFILE_NAME` + `SN_INSTANCE` + auth-specific `SN_*` variables
 - per-profile table access rules; unconfigured access denies everything
@@ -158,9 +238,15 @@ file, `SN_ALLOWED_READ_TABLES`, `SN_ALLOWED_WRITE_TABLES`, and
 (`servicenow-mcp-setup grant`). This is the most common cause of a server that
 denies every call; `servicenow-mcp-setup doctor` detects it.
 
-For a quick environment-only run with no profile file, inject protected values
-from your keychain or secret manager and pass only non-secret values on the
-command line:
+The server reads `~/.servicenow-mcp/server.env` itself at startup, because the
+client that spawns it supplies its own environment and will not have sourced
+anything. A value already present in the environment always wins over that
+file, so container and CI configuration is unaffected.
+
+For a quick environment-only run with no profile file — driving the server by
+hand over a pipe, or from a client that passes environment variables — inject
+protected values from your keychain or secret manager and pass only non-secret
+values on the command line:
 
 ```bash
 MCP_OWNER_ID=local-owner \
@@ -174,9 +260,10 @@ SN_TABLE_ACCESS_TARGETS='[{"table":"incident","kind":"canonical","tools":["sn_qu
 servicenow-mcp
 ```
 
-Do not put `MCP_BEARER_TOKEN`, `SN_PASSWORD`, OAuth client secrets, or API keys
-in command history. Inject them into the service environment from your approved
-secret mechanism.
+Do not put `SN_PASSWORD`, OAuth client secrets, or API keys in command history.
+Inject them into the server's environment from your approved secret mechanism,
+or leave them in the owner-only profile file where the server can resolve them
+without any client seeing them.
 
 ### Source install for development
 
@@ -196,7 +283,7 @@ For local development with a rebuild and source maps:
 npm run dev
 ```
 
-For production container deployment, health checks, runtime flags, and provenance/scanning guidance, see [Production container deployment](docs/CONTAINER-DEPLOYMENT.md).
+Container deployment applies to the dormant HTTP transport rather than a 2.0 stdio install; see [Production container deployment](docs/CONTAINER-DEPLOYMENT.md) and the [enterprise boundary](docs/ENTERPRISE-RELEASE-BOUNDARY.md#the-dormant-http-transport).
 
 ---
 
@@ -311,7 +398,7 @@ runtime-only environment references and are never persisted as plaintext.
 
 ## Authentication
 
-Three ServiceNow auth types are available per profile, selected with `authType` (default: `basic`). Profile configuration is managed out of band by the service operator. This is separate from the required bearer authentication protecting the MCP HTTP endpoint.
+Three ServiceNow auth types are available per profile, selected with `authType` (default: `basic`). Profile configuration is managed out of band by the service operator. This is the only authentication involved: the transport is stdio, so there is no endpoint in front of the server to protect.
 
 > **Heads up:** ServiceNow's [inbound Basic Auth restriction program](https://support.servicenow.com/kb?id=kb_article_view&sysparm_article=KB3096078) is phasing out basic auth for API requests — instances can start hard-rejecting it at any time (exemptions: Web-Service-Access-Only accounts or the `snc_basic_auth_api_access` role). **OAuth is the recommended auth type.** The server prints a startup warning for basic-auth profiles.
 
@@ -414,22 +501,23 @@ deny-by-default table and tool policy:
 
 ## Quick Start
 
-2.0 is an HTTP service and requires Node.js 20 or newer. The shortest path is
+The server speaks stdio and requires Node.js 20 or newer. The shortest path is
 the bootstrap described under [Installation](#installation):
 
 ```bash
 servicenow-mcp-setup
-set -a; source ~/.servicenow-mcp/server.env; set +a
-servicenow-mcp
 ```
 
+That registers your clients; each one spawns the server when it needs it.
+
 The rest of this section is the manual environment path, for a deployment that
-injects everything from a supervisor or secret manager.
+injects everything from a supervisor or secret manager, or for driving the
+server by hand over a pipe.
 
 Use [`.env.example`](.env.example) only as a non-secret configuration
 inventory. Its protected-value assignments are intentionally empty; inject
-bearer tokens and ServiceNow secrets through a supervisor, orchestrator,
-keychain, or secret manager rather than filling a repository dotenv file.
+ServiceNow secrets through a supervisor, orchestrator, keychain, or secret
+manager rather than filling a repository dotenv file.
 
 > The `SN_ALLOWED_*` and `SN_PROFILE_NAME` variables below build a profile only
 > when `~/.servicenow-mcp/config.json` does **not** exist. With a profile file
@@ -449,55 +537,53 @@ npm start
 ```
 
 Before running those non-secret commands, the approved runtime secret
-mechanism must already have injected `MCP_BEARER_TOKEN` and the
-authentication-specific ServiceNow secret into the service process. Do not
-enter either value in this shell block or append it to `npm start`.
+mechanism must already have injected the authentication-specific ServiceNow
+secret into the process. Do not enter it in this shell block.
 
-The MCP endpoint is `http://127.0.0.1:3000/mcp` by default. Configure a standards-compliant Streamable HTTP client with that URL and this request header:
+A client connects by spawning the command; there is no URL and no header:
 
-```text
-Authorization: Bearer <the MCP_BEARER_TOKEN value>
+```json
+{
+  "mcpServers": {
+    "servicenow-mcp": { "command": "servicenow-mcp", "args": [] }
+  }
+}
 ```
 
-The endpoint uses standard MCP Streamable HTTP and does not require a provider-specific adapter. Use TLS or an approved private-access boundary before any non-loopback deployment.
+JSON-RPC messages travel on the child's stdin and stdout, one newline-delimited
+message per frame. Everything else the server reports — startup warnings, and
+one structured JSON-line event per completed tool call — goes to **stderr**,
+which your client captures as its server log. There is no per-message size
+limit imposed by the transport.
 
-For complete official SDK and independent Fetch client examples, safe
-two-profile setup, crossed profile/result/audit checks, and optional provider
-connectivity, see [V2 service and client setup](docs/CLIENT-SETUP.md).
-
-Unauthenticated `GET`/`HEAD` probes are available at `/health/live` and
-`/health/ready`. Liveness is process-local and never calls ServiceNow;
-readiness reports whether this runtime is currently able to admit MCP work.
-The production container's baked probe connects over loopback with the reserved
-`Host: mcp-health.internal` authority. That authority is accepted only for the
-two health paths from a loopback peer; it never grants `/mcp` access and should
-not be added to `MCP_ALLOWED_HOSTS`.
-Authenticated `/mcp` requests accept one JSON-RPC message per HTTP `POST` and
-are limited to a 1 MiB JSON body. Oversized bodies receive HTTP 413; malformed
-JSON and JSON-RPC batch arrays receive HTTP 400 before MCP server construction
-or tool dispatch. The effective transport defaults are a 15-second body-read
-timeout, a 120-second end-to-end admitted-request deadline, a 10-second header
-deadline, a 30-second Node request timeout, and a 5-second keep-alive timeout.
+For complete official SDK and independent client examples, safe two-profile
+setup, and crossed profile/result/audit checks, see
+[V2 service and client setup](docs/CLIENT-SETUP.md).
 
 ### Breaking changes in 2.0
 
-2.0 no longer supports local child-process or command/arguments-based MCP configuration. In particular, local Claude stdio configuration is not supported and there is no compatibility flag or alternate executable that restores it. Replace the old local-process entry with the authenticated `/mcp` URL.
+Every tool call must name a `profile`, and table access is deny-by-default.
+Those two require action on every install. The transport is stdio, as it was in
+`1.0.0`, so a client configured with a `command` entry keeps working.
 
-The nine breaking changes from `1.0.0`, each with a before/after example, are in
-[Migrating to 2.0](docs/V2-MIGRATION.md#breaking-changes-at-a-glance). The three
-that require action on every install are the HTTP transport, the mandatory
-`profile` argument on every tool call, and deny-by-default table access.
+The breaking changes from `1.0.0`, each with a before/after example, are in
+[Migrating to 2.0](docs/V2-MIGRATION.md#breaking-changes-at-a-glance).
 
-For the pinned, numeric non-root OCI artifact, read-only runtime flags,
-runtime-only secret/profile injection, health/shutdown contract, provenance,
-scanning, and cross-platform build guidance, see
-[Production container deployment](docs/CONTAINER-DEPLOYMENT.md).
-For health interpretation, derived telemetry, alerts, dashboards, retention,
-deployment, rollback, rotation, incident response, and redacted support
-collection, see the [Remote operations runbook](docs/OPERATIONS-RUNBOOK.md).
-For an optional outbound-only Secure MCP Tunnel adapter, ChatGPT developer-mode
-setup, redacted validation evidence, and teardown, see
-[Private ChatGPT connectivity](docs/PRIVATE-CHATGPT-CONNECTIVITY.md).
+### Deployment guides for the dormant HTTP transport
+
+2.0 ships stdio only. The container image, the health and shutdown contract,
+the operations runbook, and the Secure MCP Tunnel adapter all describe the
+[dormant HTTP transport](docs/ENTERPRISE-RELEASE-BOUNDARY.md#the-dormant-http-transport),
+which no CLI path reaches. They are kept because that transport is a planned
+enterprise deployment shape, not because they apply to a 2.0 install — nothing
+in this section is needed to use this server.
+
+- [Production container deployment](docs/CONTAINER-DEPLOYMENT.md) — OCI
+  artifact, non-root runtime, provenance and scanning
+- [Remote operations runbook](docs/OPERATIONS-RUNBOOK.md) — health
+  interpretation, telemetry, alerts, rotation, incident response
+- [Private ChatGPT connectivity](docs/PRIVATE-CHATGPT-CONNECTIVITY.md) —
+  outbound-only Secure MCP Tunnel adapter
 
 ---
 
@@ -555,76 +641,71 @@ stub and is **not published in 2.0** — it does not appear in `tools/list`. Use
 
 ## Environment Variables
 
-### MCP HTTP runtime
+### MCP runtime
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `MCP_BEARER_TOKEN` | ✅ | — | Static bearer secret protecting `/mcp`; 32–4096 valid bearer characters. Startup fails if absent or invalid. |
-| `MCP_OWNER_ID` | ✅ | — | Stable non-secret owner identifier recorded in request/tool context. |
-| `MCP_CLIENT_ID` | ✅ | — | Stable non-secret client identifier recorded in request/tool context. |
-| `MCP_HOST` | ❌ | `127.0.0.1` | HTTP bind host. Non-loopback binding requires an approved private-access or TLS boundary. |
-| `MCP_PORT` | ❌ | `3000` | HTTP listen port. |
-| `MCP_ALLOWED_HOSTS` | ❌ | bind/socket authorities | Comma-separated exact HTTP `Host` authorities. When omitted, only safe authorities derived from the bind address and accepted socket are allowed. Include ports when clients send them. |
-| `MCP_ALLOWED_ORIGINS` | ❌ | deny browser origins | Comma-separated exact HTTP(S) browser origins. Requests with no `Origin` remain allowed; an `Origin` or CORS preflight must match this list exactly. |
-| `MCP_MAX_CONCURRENT_REQUESTS` | ❌ | `2` | Accepted `/mcp` requests that may execute concurrently (1–1024 syntactically). Excess work is not queued; it receives HTTP 503 and `Retry-After: 1`. Startup **throws** — it does not clamp — for values whose combined request/upstream estimate exceeds 512 MiB. With the shipped 1 MiB body limit the maximum is 2; `3` needs 624 MiB and refuses to start. See [Body size and concurrency](#body-size-and-concurrency). |
-| `MCP_MAX_CONNECTIONS` | ❌ | `128` | Accepted TCP connections (1–4096). Excess sockets are dropped before HTTP request admission. Unread bodies after an early response are drained for at most 16 KiB and 100 ms, then destroyed. |
-| `MCP_SHUTDOWN_GRACE_MS` | ❌ | `10000` | Bound from 1–300000 ms for draining accepted HTTP work before active sockets/resources are forced closed. |
-| `MCP_PRE_AUTH_RATE_CAPACITY` | ❌ | `240` | Pre-authentication requests available per direct socket-source refill period (1–1000000). |
-| `MCP_PRE_AUTH_RATE_REFILL_MS` | ❌ | `60000` | Pre-authentication token refill period in milliseconds (1–86400000). |
-| `MCP_PRE_AUTH_RATE_MAX_ENTRIES` | ❌ | `4096` | Maximum retained digested source buckets (1–100000). |
-| `MCP_IDENTITY_RATE_CAPACITY` | ❌ | `120` | Authenticated requests available per owner/client refill period (1–1000000). |
-| `MCP_IDENTITY_RATE_REFILL_MS` | ❌ | `60000` | Authenticated identity token refill period in milliseconds (1–86400000). |
-| `MCP_IDENTITY_RATE_MAX_ENTRIES` | ❌ | `128` | Maximum retained digested owner/client buckets (1–100000). |
+| `MCP_OWNER_ID` | ❌ | `local-owner` | Stable non-secret owner identifier recorded in request/tool context and every audit record. A label, not a credential; it is never checked. |
+| `MCP_CLIENT_ID` | ❌ | `local-client` | Stable non-secret client identifier recorded in request/tool context and every audit record. A label, not a credential; it is never checked. |
 
-CORS permits `POST` and the `Accept`, `Authorization`, `Content-Type`, and
-`Mcp-Protocol-Version` request headers for configured origins. Successful
-preflights return HTTP 204. CORS responses expose `X-Request-Id`, and every
-HTTP or parser-boundary rejection also returns a fresh opaque request ID when
-the socket can still receive a response.
+That is the whole list. There is no bind address, port, `Host`/`Origin`
+allowlist, concurrency cap, connection cap, shutdown grace period, bearer
+token, or rate limit, because there is no listener: a client spawns the server
+and owns its lifetime.
 
-Admission uses a combined conservative estimate derived from hostile JSON
-measurements: a 900,001-byte array containing 300,000 empty objects expanded
-by 22.4× on the heap and 54× in RSS, so request JSON plus ServiceNow JSON/text
-uses a 64× safety factor. Each ExecutionContext may consume at most 1 MiB of
-ServiceNow JSON/text cumulatively across parallel calls; declared lengths are
-reserved atomically before reading and streamed bytes are charged before
-parse. Raw attachment downloads are accounted against their own separate
-cumulative 10 MiB memory budget with an 8× allowance for the source Buffer,
-base64/UTF-16 representation, and JSON serialization. That figure is an
-internal memory reservation, not a usable attachment size — see
-[Attachment payloads](#attachment-payloads).
+The server reads these from its environment and falls back to
+`~/.servicenow-mcp/server.env` for any it does not find there. That file is
+owner-only (mode `0600`) and is where `servicenow-mcp-setup` writes the
+generated identifiers and `SN_PROFILE_ENCRYPTION_KEY`. It exists because the
+client that spawns the server supplies its own environment and will not have
+sourced anything. A value already present in the environment always wins, so a
+container or CI runner that passes configuration directly is unaffected.
+`servicenow-mcp-setup doctor` reports that file's mode and contents.
 
-Startup enforces `concurrency × (((request MiB + 1 MiB) × 64) +
-(10 MiB × 8)) <= 512 MiB`. With the default 1 MiB request body and concurrency
-2, this is 208 MiB per request and 416 MiB combined; concurrency 3 needs
-624 MiB and is rejected.
-OAuth token and error bodies remain capped at 64 KiB, within the remaining
-default headroom. The 512 MiB value is a conservative admission estimate, not
-a process-wide heap or RSS limit; operators should still choose a lower
-concurrency where the container budget or other application state requires it.
+### Observability
 
-The MCP endpoint defaults to two bounded token buckets: 240 requests per
-60-second period per pre-authentication socket source (up to 4096 retained
-sources) and 120 requests per 60-second period per authenticated owner/client
-identity (up to 128 retained identities). Operators can reduce or increase each
-capacity, refill period, and retained-key cap only within the startup-validated
-bounds above. Forwarded IP headers are not trusted. Excess requests receive
-HTTP 429, `Retry-After`, `Cache-Control: no-store`, and
-`{"error":"rate_limited"}`. The source bucket covers `/mcp` and unknown
-routes before authentication. Lifecycle probes are deliberately exempt so MCP
-traffic cannot starve orchestrator liveness/readiness checks.
+Each completed tool call emits one JSON-line event to **stderr**, which the
+spawning client captures as its server log:
 
-Each HTTP request and completed tool call emits one JSON-line event to stderr
-with correlation, latency, outcome, rejection reason, and status. Tool audits
-classify request cancellation and request-deadline expiration separately from
-handler failures. Configured
-owner/client identifiers are represented only by SHA-256 pseudonyms; headers,
-URLs/query strings, bodies, credentials, tokens, config objects, and exception
-text are not event fields. Telemetry never blocks request completion: stderr
-backpressure retains at most 256 pending lines, drops excess events, and emits
-a `{"type":"telemetry_dropped","count":N}` summary after the stream drains.
+```json
+{"schemaVersion":1,"type":"mcp_tool","observedAtMs":1737000000000,"latencyMs":42,
+ "correlationId":"stdio-<session>-<invocation>","ownerIdHash":"sha256:...",
+ "clientIdHash":"sha256:...","tool":"sn_query","profile":"dev",
+ "instance":"https://dev00001.service-now.com","outcome":"success","reason":null,
+ "errorCategory":null,"retry":null,"retryAfterSeconds":null}
+```
 
-### Body size and concurrency
+Tool audits classify request cancellation and request-deadline expiration
+separately from handler failures. Configured owner/client identifiers are
+represented only by SHA-256 pseudonyms; headers, URLs/query strings, bodies,
+credentials, tokens, config objects, and exception text are not event fields.
+Telemetry never blocks a tool result: stderr backpressure retains at most 256
+pending lines, drops excess events, and emits a
+`{"type":"telemetry_dropped","count":N}` summary after the stream drains.
+
+A correlation ID is `stdio-<session>-<invocation>`. The session half is fixed
+for the life of one spawned server, so every record from one client session
+groups together; the invocation half is fresh per call. Neither half is derived
+from anything the caller sent.
+
+**stdout carries the protocol and nothing else.** Every diagnostic goes to
+stderr. One stray byte on stdout would desynchronize the client's JSON-RPC
+parser and end the session, so there is no such thing as a harmless
+`console.log` on the startup or request path; `test/stdio-entrypoint.test.ts`
+spawns a real server and asserts it.
+
+Arguments that fail a tool's schema are rejected by the MCP SDK before any
+handler runs, so they return an error to the caller but produce **no audit
+event** — the execution context that would issue one is never opened. Every
+call that reaches a tool is audited.
+
+### Body size and concurrency (dormant HTTP runtime only)
+
+None of this applies to the shipped server. It describes the dormant HTTP
+runtime, which no CLI path reaches — see
+[the enterprise release boundary](docs/ENTERPRISE-RELEASE-BOUNDARY.md#the-dormant-http-transport)
+— and binds only someone embedding this package and calling `createHttpRuntime`
+directly. Over stdio there is no request-body limit and no admission ceiling.
 
 Request body size and concurrency trade directly against each other under the
 512 MiB admission ceiling:
@@ -649,12 +730,9 @@ Two failure modes are worth knowing:
   neither the ceiling, the arithmetic, nor a working value; the table above is
   the way forward.
 
-**`maxBodyBytes` is not operator-configurable in the shipped executable.**
-`src/index.ts` builds the request policy with only `allowedHosts` and
-`allowedOrigins`, so the limit is always 1 MiB and no environment variable
-changes it. Both thresholds bind anyone embedding this package and calling
-`createHttpRuntime` directly. For an operator, the only reachable form of this
-failure is `MCP_MAX_CONCURRENT_REQUESTS=3`.
+**`maxBodyBytes` is not operator-configurable.** `src/http-entrypoint.ts`
+builds the request policy with only `allowedHosts` and `allowedOrigins`, so the
+limit is always 1 MiB and no environment variable changes it.
 
 ### Metadata cache
 
@@ -755,21 +833,22 @@ safe leaf `file_name` plus `content_base64`; downloads return
 requires the owning `table` and record `sys_id`, which are policy-authorized
 and verified against attachment metadata before any bytes are returned.
 
-**Practical size limit.** Both directions travel inside the 1 MiB `/mcp` JSON
-request envelope, and base64 inflates a file by about a third on the way in, so
-the usable payload is roughly 768 KiB of raw file before envelope overhead —
-far below the 10 MiB decoded cap the tool also enforces, which is therefore
-never the binding constraint over HTTP. The tool's own `content_base64` schema
-description carries the authoritative figure. An oversized upload is rejected
-with HTTP `413` before the tool runs.
+**Size limit: 10 MiB decoded, and that is the only one.** The stdio transport
+frames messages by newline with no size bound, so the tool's own limits are
+what apply — 10 MiB of decoded bytes for an upload, and a separate 10 MiB raw
+budget for a download. The tool's `content_base64` schema description carries
+the authoritative figure.
 
-**A 10 MiB attachment is unreachable over HTTP at any concurrency**, so raising
-the body limit is not a path to it: base64 inflates 10 MiB to about 13.33 MiB
-on the wire, which budgets roughly 997 MiB against the 512 MiB ceiling — nearly
-double, even at concurrency 1. See [Body size and concurrency](#body-size-and-concurrency).
-Treat `sn_attach` as suitable for logs, configs, screenshots, and small
-documents rather than bulk transfer; send large files through ServiceNow's own
-UI or a separate integration.
+The ~760 KiB practical ceiling documented before 2.1 came from the HTTP body
+limit, which no longer applies: the client and server share a pipe, not an
+envelope. Base64 still inflates a file by about a third in the message itself,
+so a 10 MiB attachment is roughly a 13.3 MiB JSON frame — large, but the
+transport will carry it.
+
+Treat `sn_attach` as suitable for logs, configs, screenshots, and documents
+rather than bulk transfer; a very large frame still costs memory in both the
+client and the server, and ServiceNow's own UI or a dedicated integration is a
+better path for bulk file movement.
 
 ### Table access policy
 
@@ -933,10 +1012,10 @@ This server is designed for production use with multiple safety layers:
 
 ## Development
 
-Have the approved local supervisor or keychain inject `MCP_BEARER_TOKEN` and
-the selected ServiceNow authentication secret before starting the process.
-The commands below contain non-secret configuration only; never prepend or
-append protected values on the command line.
+Have the approved local supervisor or keychain inject the selected ServiceNow
+authentication secret before starting the process. The commands below contain
+non-secret configuration only; never prepend or append protected values on the
+command line.
 
 ```bash
 # Clone
@@ -947,7 +1026,7 @@ cd servicenow-mcp
 npm install
 npm run build
 
-# Run the production HTTP service
+# Run the server directly, speaking stdio on this terminal's pipes
 MCP_OWNER_ID=local-owner \
 MCP_CLIENT_ID=local-client \
 SN_ALLOWED_READ_TABLES=incident,problem,change_request \
@@ -973,28 +1052,40 @@ npm run dev
 ### Testing with MCP Inspector
 
 Use the isolated, exactly locked Inspector toolchain on Node.js 22.19 or newer;
-the server itself remains supported on Node.js 20. Set the non-secret `MCP_URL`
-and `MCP_PROFILE`, install from `tools/inspector/package-lock.json`, and run the
+the server itself remains supported on Node.js 20. Set the non-secret
+`MCP_PROFILE`, install from `tools/inspector/package-lock.json`, and run the
 local-only launcher:
 
 ```bash
-npm ci --prefix tools/inspector --engine-strict --ignore-scripts
-npm run inspector
+MCP_PROFILE=dev npm run inspector
 ```
 
-Select Streamable HTTP in the local UI, use the exact protected `/mcp` URL,
-enter the bearer from the approved secret store in the UI, and include the
-explicit profile in every call. The launcher does not pass the bearer in argv,
-expose Inspector beyond loopback, or create a tunnel. Run `npm run smoke` as the
-second client against the same `MCP_URL` and `MCP_PROFILE`. See
-[`docs/RELEASE-VALIDATION.md`](docs/RELEASE-VALIDATION.md) for the release gates,
-write confirmation, evidence, and rollback procedure.
+(Run `npm ci --prefix tools/inspector --engine-strict --ignore-scripts` first.)
+
+The launcher prints the exact **STDIO** command and arguments to enter in the
+Inspector UI. There is no endpoint and no bearer to type. Include the explicit
+profile in every call. The Inspector spawns the server itself and inherits a
+scrubbed environment with every `MCP_*` and `SN_*` value removed; the server
+still resolves its credential, because it reads the owner-only
+`~/.servicenow-mcp/server.env` at startup rather than relying on what it was
+handed. The launcher does not expose Inspector beyond loopback or create a
+tunnel.
+
+`npm run smoke` is the second client. It spawns `dist/index.js` the same way and
+needs only `MCP_PROFILE`:
+
+```bash
+MCP_PROFILE=dev npm run smoke
+```
+
+See [`docs/RELEASE-VALIDATION.md`](docs/RELEASE-VALIDATION.md) for the release
+gates, write confirmation, evidence, and rollback procedure.
 
 ---
 
 ## Roadmap
 
-- [x] **Streamable HTTP transport** at `/mcp`
+- [x] **stdio transport** — the client spawns the server; a Streamable HTTP runtime exists but is [dormant](docs/ENTERPRISE-RELEASE-BOUNDARY.md#the-dormant-http-transport)
 - [x] **OAuth 2.0** authentication support (client_credentials + password grants, API keys)
 - [ ] **sn_script** background-script execution (SNS-39) — future state, deliberately not shipped in 2.0; requires automating the `sys.scripts.do` UI endpoint with session auth
 - [ ] **Streaming** for large result sets

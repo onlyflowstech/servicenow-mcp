@@ -11,7 +11,15 @@ import { instanceHostError } from "../src/profile-manager.js";
 const root = new URL("../", import.meta.url);
 const guide = readFileSync(new URL("docs/PRODUCTION-SECURITY.md", root), "utf8");
 const runtimeSource = readFileSync(new URL("src/http-runtime.ts", root), "utf8");
-const entrypointSource = readFileSync(new URL("src/index.ts", root), "utf8");
+/**
+ * The Host/Origin allowlists belong to the HTTP composition, which is dormant:
+ * no CLI path reaches it. It still has to stay honest about what it would do
+ * if an enterprise deployment re-exposed it, which is what this asserts.
+ */
+const entrypointSource = readFileSync(
+  new URL("src/http-entrypoint.ts", root),
+  "utf8"
+);
 const profileSource = readFileSync(new URL("src/profile-manager.ts", root), "utf8");
 
 const originalAllowedInstanceHosts = process.env.SN_ALLOWED_INSTANCE_HOSTS;
