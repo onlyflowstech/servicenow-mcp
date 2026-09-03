@@ -104,11 +104,15 @@ combination is a ServiceNow proxy open to the network whose failure mode is a
 *working* deployment, so the entrypoint refuses to start when the host is not
 loopback and no `MCP_BEARER_TOKEN` is set, rather than warning.
 
-`container-release` runs in CI but is **not required**: it validates an
+`container-release` runs in both workflows but gates neither: it validates an
 artifact 2.0 does not ship, and a red check there must not block a stdio
-release. It is kept running so the image does not rot. Make it required again
-when this transport is re-exposed — at which point its failures become
-release-blocking, as they should be.
+release or the npm publish that delivers it. In `ci.yml` it is
+`continue-on-error`; in `publish.yml` it is additionally absent from the
+`publish` job's `needs`, because a hard dependency there would stop the package
+users install from shipping over an image they never receive. It is kept
+running so the image does not rot. Restore both when this transport is
+re-exposed — at which point its failures become release-blocking, as they
+should be.
 
 ## Concrete seams V2 preserves
 

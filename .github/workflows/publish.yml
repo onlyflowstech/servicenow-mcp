@@ -42,6 +42,7 @@ jobs:
 
   container-release:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -64,10 +65,14 @@ jobs:
       - run: MCP_CONTAINER_SCANNER=trivy npm run container:scan
 
   publish:
+    # container-release is deliberately absent. It builds and validates an OCI
+    # image for the dormant HTTP transport, which 2.0 does not ship, so a
+    # failure there must not block publishing the package that users actually
+    # install. It still runs and reports. Add it back when that transport is
+    # re-exposed — see docs/ENTERPRISE-RELEASE-BOUNDARY.md.
     needs:
       - portable-release
       - inspector-toolchain
-      - container-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
