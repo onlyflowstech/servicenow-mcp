@@ -13,6 +13,7 @@ import {
   resolveReadableFields,
   validateWritableFields,
 } from "../field-policy.js";
+import { rejectGenericIncidentJournalFields } from "../incident-journal-policy.js";
 import { ok, err } from "../utils.js";
 import { serviceNowSysIdPathSegment } from "../servicenow-identifiers.js";
 import {
@@ -81,6 +82,11 @@ export async function handler(
     rejectRawEncodedWrite(
       (args as unknown as Readonly<Record<string, unknown>>).query
     );
+    // The append-only journal discipline is uniform across every write path.
+    // Without this, sn_batch was the one way to set comments/work_notes as
+    // generic fields, which is exactly what makes the journal audit trail
+    // meaningless. Matches sn_create and sn_update.
+    rejectGenericIncidentJournalFields(args.fields);
     if (args.action === "update" && !args.fields) {
       return err("--fields is required for update action");
     }

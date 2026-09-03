@@ -268,6 +268,11 @@ afterEach(async () => {
   );
 });
 
+function responseText(result: Awaited<ReturnType<Client["callTool"]>>): string {
+  const content = (result as { content?: { type: string; text?: string }[] }).content;
+  return content?.[0]?.type === "text" ? (content[0].text ?? "") : "";
+}
+
 function responseData(result: Awaited<ReturnType<Client["callTool"]>>): unknown {
   const structured = result.structuredContent;
   if (typeof structured !== "object" || structured === null) {
@@ -337,13 +342,16 @@ describe("SNSDK-30 registered-tool field boundary", () => {
       },
     });
 
-    // "all" on a granted table now means every column, so the projection is
-    // omitted rather than enumerated from a built-in readable list.
-    for (const [, params] of [
+    // "all" resolves to the wildcard selection, but the upstream request is
+    // capped from the dictionary: never sent without a projection, defaults
+    // first, and never naming a sensitive column.
+    for (const [path, params] of [
       ...connected.serviceNowClient.getWithMeta.mock.calls,
       ...connected.serviceNowClient.get.mock.calls,
     ] as [string, Record<string, string> | undefined][]) {
-      expect(params?.sysparm_fields).toBeUndefined();
+      if (path.startsWith("/api/now/table/sys_")) continue;
+      expect(params?.sysparm_fields).toBe("number,comments,description");
+      expect(params?.sysparm_fields).not.toContain("client_secret");
     }
   });
 
@@ -429,11 +437,11 @@ describe("SNSDK-30 registered-tool field boundary", () => {
     expect(connected.serviceNowClient.get).not.toHaveBeenCalled();
   });
 
-  it("no longer denies a batch journal write at the field boundary", async () => {
-    // Recorded deliberately: the built-in incident writable list used to deny
-    // `work_notes` here. Field policy no longer denies at table granularity,
-    // so the write is admitted and ServiceNow's ACLs govern it. The dedicated
-    // incident journal policy still governs sn_update.
+  it("rejects a journal write through sn_batch, as through create and update", async () => {
+    // The append-only journal discipline is uniform across every write path.
+    // sn_batch was the one gap: the built-in incident writable list used to
+    // deny work_notes here, and once field policy stopped denying at table
+    // granularity nothing did.
     const connected = await harness();
     const batch = await connected.client.callTool({
       name: "sn_batch",
@@ -445,11 +453,37 @@ describe("SNSDK-30 registered-tool field boundary", () => {
         },
         action: "update",
         confirm: true,
-        fields: { work_notes: "now admitted" },
+        fields: { work_notes: "must go through the journal tool" },
       },
     });
 
-    expect(batch.isError).toBeUndefined();
+    expect(batch.isError).toBe(true);
+    const text = responseText(batch);
+    expect(text).toContain("work_notes");
+    expect(text).toContain("sn_incident_add_work_note");
+    // The message must name the tool that was actually called.
+    expect(text).toContain("sn_batch");
+    expect(text).not.toContain("sn_update cannot write");
+  });
+
+  it("rejects a journal write through sn_create and tells the caller to sequence", async () => {
+    const connected = await harness();
+    const created = await connected.client.callTool({
+      name: "sn_create",
+      arguments: {
+        profile: "field",
+        table: "incident",
+        fields: { short_description: "ok", comments: "must go through the journal tool" },
+      },
+    });
+
+    expect(created.isError).toBe(true);
+    const text = responseText(created);
+    expect(text).toContain("sn_create");
+    // At create time there is no sys_id yet, so "pass sys_id" is advice the
+    // caller cannot follow. The message must sequence the two calls instead.
+    expect(text).toContain("Create the record first");
+    expect(text).toContain("sn_incident_add_comment");
   });
 
   it("uses the validated REST batch payload and filters aggregate raw output", async () => {

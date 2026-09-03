@@ -93,12 +93,20 @@ export function isIncidentJournalPolicyError(
 
 /** Safe fixed guidance; caller-controlled journal text is never interpolated. */
 export function incidentJournalMigrationMessage(
-  field: IncidentJournalField
+  field: IncidentJournalField,
+  tool?: string
 ): string {
-  return (
-    `Generic sn_update cannot write append-only incident field ${field}. ` +
-    `Use ${JOURNAL_TOOLS[field]} with sys_id and content.`
-  );
+  const rejected =
+    typeof tool === "string" && tool.trim() !== ""
+      ? `${tool.trim()} cannot write append-only incident field ${field}.`
+      : `Generic writes cannot set append-only incident field ${field}.`;
+  // At create time the record has no sys_id yet, so telling the caller to pass
+  // one is advice they cannot follow. Sequence the two calls instead.
+  const remedy =
+    tool === "sn_create"
+      ? `Create the record first, then use ${JOURNAL_TOOLS[field]} with the new sys_id and content.`
+      : `Use ${JOURNAL_TOOLS[field]} with sys_id and content.`;
+  return `${rejected} ${remedy}`;
 }
 
 /** Reject journal keys in generic writes without reading any payload values. */

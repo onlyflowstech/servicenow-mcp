@@ -520,7 +520,7 @@ function registerStandardTool(
             : structuredQueryDenied
               ? `Structured query was denied by policy (${error.reason}). Correlation ID: ${context.correlationId}.`
               : journalUpdateDenied
-                ? `${incidentJournalMigrationMessage(error.field!)} Correlation ID: ${context.correlationId}.`
+                ? `${incidentJournalMigrationMessage(error.field!, tool.definition.name)} Correlation ID: ${context.correlationId}.`
                 : fieldAccessDenied
                   ? `${fieldPolicyDenialMessage(error)} Correlation ID: ${context.correlationId}.`
                   : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
@@ -592,7 +592,10 @@ function registerStandardTool(
             // per-user ACLs, and a cache hit bypasses the upstream read, so
             // two identities on one instance must never share a partition.
             `${context.profile.instance}|${credentialFingerprint(config)}`,
-            config.metadataCache
+            config.metadataCache,
+            // Needed to resolve the session timezone the freshness probe
+            // compares in; without it the cache disables itself.
+            config.user
           ),
           settings: Object.freeze({
             instance: context.profile.instance,
@@ -617,6 +620,30 @@ function registerStandardTool(
           request.metadata
         );
         if (cancellation) return cancellation;
+        // A journal denial raised inside a handler is a policy rejection, not
+        // an internal fault. Without this it reaches the caller as "the
+        // operation failed unexpectedly", which tells them nothing about the
+        // tool they should have used.
+        const journalDenied =
+          isIncidentJournalPolicyError(error) &&
+          error.reason === "generic_journal_update" &&
+          error.field !== undefined;
+        if (journalDenied) {
+          auditInvocation(
+            contextDependencies,
+            {
+              outcome: "policy_rejected",
+              reason: "journal_update_denied",
+              profile: binding,
+            },
+            tool.definition.name,
+            request.metadata
+          );
+          return err(
+            `${incidentJournalMigrationMessage(error.field!, tool.definition.name)} ` +
+              `Correlation ID: ${context.correlationId}.`
+          );
+        }
         auditInvocation(
           contextDependencies,
           {
@@ -834,6 +861,30 @@ function registerProfileDiagnostic(
           request.metadata
         );
         if (cancellation) return cancellation;
+        // A journal denial raised inside a handler is a policy rejection, not
+        // an internal fault. Without this it reaches the caller as "the
+        // operation failed unexpectedly", which tells them nothing about the
+        // tool they should have used.
+        const journalDenied =
+          isIncidentJournalPolicyError(error) &&
+          error.reason === "generic_journal_update" &&
+          error.field !== undefined;
+        if (journalDenied) {
+          auditInvocation(
+            contextDependencies,
+            {
+              outcome: "policy_rejected",
+              reason: "journal_update_denied",
+              profile: binding,
+            },
+            tool.definition.name,
+            request.metadata
+          );
+          return err(
+            `${incidentJournalMigrationMessage(error.field!, tool.definition.name)} ` +
+              `Correlation ID: ${context.correlationId}.`
+          );
+        }
         auditInvocation(
           contextDependencies,
           {
