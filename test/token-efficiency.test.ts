@@ -6,6 +6,10 @@ import { handler as updateHandler, schema as updateSchema } from "../src/tools/u
 import { handler as syslogHandler, schema as syslogSchema } from "../src/tools/syslog.js";
 import { DEFAULT_FIELDS, resolveFields } from "../src/table-defaults.js";
 import { resolveReadableFields } from "../src/field-policy.js";
+import {
+  envelopeCompatibilityResult,
+  productionToolOutputSchemas,
+} from "../src/tools/result-envelope.js";
 import type { ServiceNowClient } from "../src/client.js";
 import type { ServiceNowConfig } from "../src/config.js";
 
@@ -529,5 +533,78 @@ describe("sn_query all-fields cap signalling", () => {
     );
 
     expect(parseText(result).hint).toBeUndefined();
+  });
+});
+
+describe("sn_get all-fields cap signalling", () => {
+  function wideGetClient(columnCount: number) {
+    // Include the real defaults so the bounded projection keeps the fields the
+    // fixture record actually carries, as it would on a real table.
+    const columns = [
+      ...resolveReadableFields("incident"),
+      ...Array.from({ length: columnCount }, (_, index) =>
+        `u_col_${String(index).padStart(3, "0")}`
+      ),
+    ];
+    const get = vi.fn(async (path: string) => {
+      if (path === "/api/now/table/sys_db_object") {
+        return { result: [{ name: "incident", super_class: "" }] };
+      }
+      if (path === "/api/now/table/sys_dictionary") {
+        return { result: columns.map((element) => ({ element })) };
+      }
+      return { result: { sys_id: "1".repeat(32), number: "INC0010001" } };
+    });
+    return { client: { get } as unknown as ServiceNowClient, get };
+  }
+
+  async function structuredGet(columnCount: number) {
+    const { client } = wideGetClient(columnCount);
+    const args = {
+      table: "incident",
+      sys_id: "1".repeat(32),
+      fields: "all",
+    };
+    const result = await getHandler(getSchema.parse(args), client, config);
+    const enveloped = envelopeCompatibilityResult("sn_get", args, result);
+    return enveloped.structuredContent?.data as
+      | { record?: unknown; hint?: string }
+      | undefined;
+  }
+
+  it("carries the cap notice, matching how sn_query signals it", async () => {
+    // Silent truncation is the failure: an agent receiving 100 of 300 fields
+    // with no signal concludes the other 200 do not exist.
+    const data = await structuredGet(300);
+
+    expect(data?.hint).toMatch(/capped at 100 of \d+/u);
+    expect(data?.hint).toContain("name them explicitly");
+    // The notice never enters the record namespace, where a real ServiceNow
+    // column named `hint` would collide with it.
+    expect(data?.record).not.toHaveProperty("hint");
+    expect(data?.record).not.toHaveProperty("$hint");
+
+    // The production envelope schema is strict, so the notice only reaches a
+    // caller if the schema actually admits it. Without this the wrapper could
+    // emit a hint that validation then rejects at runtime.
+    const parsed = productionToolOutputSchemas.sn_get.safeParse({
+      data,
+      metadata: {
+        kind: "single",
+        record_count: 1,
+        limits: { max_records: 1000, max_bytes: 100000 },
+        pagination: { mode: "none" },
+        truncation: { truncated: false },
+      },
+      profile: "test",
+    });
+    expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
+  });
+
+  it("says nothing when the table fits under the cap", async () => {
+    const data = await structuredGet(20);
+
+    expect(data?.hint).toBeUndefined();
+    expect(data?.record).toMatchObject({ number: "INC0010001" });
   });
 });

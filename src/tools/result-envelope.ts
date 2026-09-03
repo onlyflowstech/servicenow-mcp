@@ -107,7 +107,25 @@ const dynamicJsonRootSchema = z.union([
   dynamicArraySchema,
 ]);
 
-const wrappedRecordSchema = z.object({ record: dynamicRecordSchema }).strict();
+const wrappedRecordSchema = z
+  .object({
+    record: dynamicRecordSchema,
+    // Optional caller-facing notice, mirroring sn_query's `hint`. Optional so
+    // existing consumers are unaffected: it is present only when the tool has
+    // something to say, such as an all-fields projection having been capped.
+    hint: z.string().optional(),
+  })
+  .strict();
+
+/**
+ * Reserved key a single-record handler uses to carry an envelope-level hint
+ * alongside its record.
+ *
+ * It is deliberately not a legal ServiceNow element name (those match
+ * /^[a-z][a-z0-9_]{0,79}$/), so it can never collide with a real column --
+ * which is exactly why the hint is not carried inside the record namespace.
+ */
+export const ENVELOPE_HINT_KEY = "$hint";
 const wrappedResultSchema = z.object({ result: dynamicJsonRootSchema }).strict();
 const schemaResultSchema = z.object({ fields: dynamicArraySchema }).strict();
 const healthResultSchema = z.object({ health: dynamicRecordSchema }).strict();
@@ -316,14 +334,33 @@ function normalizedListResult(data: unknown): unknown {
   };
 }
 
+/** Recognize the reserved single-record hint wrapper, if present. */
+function envelopeHint(
+  data: unknown
+): { readonly record: unknown; readonly hint: string } | undefined {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return undefined;
+  }
+  const candidate = data as Record<string, unknown>;
+  const hint = candidate[ENVELOPE_HINT_KEY];
+  if (typeof hint !== "string" || !Object.hasOwn(candidate, "record")) {
+    return undefined;
+  }
+  return { record: candidate.record, hint };
+}
+
 function normalizeToolData(
   name: ProductionToolName,
   args: Readonly<Record<string, unknown>>,
   data: unknown
 ): unknown {
   switch (name) {
-    case "sn_get":
-      return { record: data };
+    case "sn_get": {
+      const hinted = envelopeHint(data);
+      return hinted === undefined
+        ? { record: data }
+        : { record: hinted.record, hint: hinted.hint };
+    }
     case "sn_aggregate":
       return { result: data };
     case "sn_schema":

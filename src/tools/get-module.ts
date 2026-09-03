@@ -1,6 +1,7 @@
 /** Canonical contract-bearing sn_get module. */
 
-import { boundedAllFields } from "./all-fields-cap.js";
+import { allFieldsCapNotice, boundedAllFields } from "./all-fields-cap.js";
+import { ENVELOPE_HINT_KEY } from "./result-envelope.js";
 import { types as nodeUtilTypes } from "node:util";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -210,8 +211,17 @@ async function executeGet(
   }
   // Final byte fitting belongs to the central structured-envelope finalizer.
   // Keeping the record namespace untouched avoids collisions with legitimate
-  // ServiceNow fields named `truncated`, `truncated_fields`, or `hint`.
-  return ok(filtered);
+  // ServiceNow fields named `truncated`, `truncated_fields`, or `hint`, which
+  // is why a capped projection is reported through the reserved envelope key
+  // rather than as a field on the record.
+  return ok(
+    bounded?.capped === true
+      ? {
+          [ENVELOPE_HINT_KEY]: allFieldsCapNotice(bounded, args.table),
+          record: filtered,
+        }
+      : filtered
+  );
 }
 
 async function fetchOneRecord(
