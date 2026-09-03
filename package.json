@@ -94,6 +94,7 @@
     "scripts/smoke-test.mjs",
     "tools/inspector/package.json",
     "tools/inspector/package-lock.json",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE"
   ]
