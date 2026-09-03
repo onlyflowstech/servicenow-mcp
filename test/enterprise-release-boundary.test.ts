@@ -109,13 +109,35 @@ describe("SNSDK-43 enterprise release boundary", () => {
     expect(boundary).not.toMatch(/\b(?:Q[1-4]|20\d{2}-\d{2}-\d{2}|sprint\s+\d+)\b/iu);
   });
 
+  it("records the HTTP transport as dormant rather than available", () => {
+    expect(boundary).toContain("The product exposes exactly one transport: **stdio**");
+    expect(boundary).toContain("**Dormant means unreachable, not configurable.**");
+    expect(boundary).toContain("transport environment variable and no CLI flag");
+    // It names where the dormant code lives, and those modules still exist.
+    for (const target of [
+      "../src/http-entrypoint.ts",
+      "../src/http-runtime.ts",
+      "../src/http-request-policy.ts",
+      "../src/http-observability.ts",
+    ]) {
+      expect(boundary).toContain(target);
+      expect(existsSync(resolve(dirname(boundaryPath), target))).toBe(true);
+    }
+    // Re-exposing it is framed as a product decision, not a setting.
+    expect(boundary).toContain("a product decision, not a configuration change");
+  });
+
   it("adds no enterprise runtime or dependency coupling", () => {
     expect(packageJson.dependencies).not.toHaveProperty("tunnel-client");
     for (const dependency of Object.keys(packageJson.dependencies ?? {})) {
       expect(dependency).not.toMatch(/(?:auth0|keycloak|openid|rbac|tenant)/iu);
     }
     const source = sourceText(resolve(repositoryRoot, "src"));
-    expect(source).not.toContain("ENTERPRISE-RELEASE-BOUNDARY");
+    // A comment may point at the boundary document — the dormant HTTP path in
+    // particular needs to say where its rationale lives. What must not exist
+    // is runtime coupling: no module may read, import, or ship the document,
+    // and no enterprise type may appear.
+    expect(source).not.toMatch(/(?:import|require|readFile\w*)\([^)]*ENTERPRISE-RELEASE-BOUNDARY/u);
     expect(source).not.toMatch(
       /(?:interface|class|type)\s+(?:TenantContext|UserDirectory|RbacProvider|ComplianceAdministrator)\b/u
     );

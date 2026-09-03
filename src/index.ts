@@ -1,6 +1,25 @@
 #!/usr/bin/env node
 
-/** HTTP-only executable composition for @onlyflows/servicenow-mcp V2. */
+/**
+ * Executable composition for @onlyflows/servicenow-mcp.
+ *
+ * The transport is stdio, always. An MCP client spawns this binary and speaks
+ * JSON-RPC over the child's stdin/stdout; there is no port, no endpoint, and
+ * nothing to start or keep running between sessions.
+ *
+ * **stdout carries the protocol.** Everything this process reports — warnings,
+ * structured tool events, startup failures — goes to stderr, which the client
+ * captures as a log. A single stray byte on stdout desynchronizes the client's
+ * JSON-RPC parser and ends the session, so there is no such thing as a harmless
+ * `console.log` anywhere on the startup or request path.
+ *
+ * A listening HTTP service still exists in `src/http-entrypoint.ts` and stays
+ * under test, but nothing here reaches it and setup never registers a client
+ * against a URL. It is a dormant enterprise deployment shape; see
+ * `docs/ENTERPRISE-RELEASE-BOUNDARY.md` for what re-exposing it would mean.
+ *
+ * @module index
+ */
 
 import type {
   AuditSink,
@@ -14,44 +33,33 @@ import {
   type EncodedQueryAccessPolicy,
 } from "./encoded-query-policy.js";
 import {
-  StaticBearerAuthenticationProvider,
-  UnauthenticatedIdentityProvider,
-  type HttpAuthenticationProvider,
-  type HttpAuthenticationRequest,
-} from "./http-auth.js";
-import {
-  createHttpRuntime,
-  MAX_HTTP_CONNECTIONS,
-  type AuthenticatedHttpRequestContext,
-} from "./http-runtime.js";
-import {
   createHttpObservability,
-  createHttpRateLimiter,
   createBoundedJsonLinesEventSink,
-  MAX_RATE_LIMIT_CAPACITY,
-  MAX_RATE_LIMIT_ENTRIES,
-  MAX_RATE_LIMIT_PERIOD_MS,
   type HttpObservability,
 } from "./http-observability.js";
-import { createHttpRequestPolicy } from "./http-request-policy.js";
 import { ProfileManager, type ProfileManager as ProfileManagerType } from "./profile-manager.js";
 import { registerSetupPrompts } from "./setup-prompts.js";
 import { createMcpServer } from "./server.js";
 import {
-  DEFAULT_SHUTDOWN_GRACE_PERIOD_MS,
-  createReadinessGate,
-  installShutdownCoordinator,
-} from "./startup.js";
+  loadServerEnvironmentFile,
+  startStdioRuntime,
+  stderrWrite,
+  type StdioSessionContext,
+} from "./stdio-runtime.js";
 import {
   createTableAccessPolicy,
   type TableAccessPolicyInput,
 } from "./table-policy.js";
 import {
+  DEFAULT_CLIENT_ID,
+  DEFAULT_OWNER_ID,
+  optionalEnvironmentVariable,
+} from "./runtime-environment.js";
+import {
   REGISTERED_TOOL_COUNT,
   registerServiceNowTools,
 } from "./tools/index.js";
 import { VERSION } from "./version.js";
-
 
 function createRestrictedPolicyProvider(
   profileManager: ProfileManagerType,
@@ -87,49 +95,18 @@ function createRestrictedPolicyProvider(
 }
 
 /**
- * Identity used for audit attribution when the operator has not named one.
+ * The identity every audit record from this session is attributed to.
  *
- * These are labels, never credentials: they were always read from configuration
- * rather than proved by the caller, so defaulting them changes nothing about
- * who is admitted. They exist so every audit record has a stable, well-formed
- * `OwnerClientIdentity`.
+ * Under stdio there is nothing to authenticate: the client already had to be
+ * able to spawn this process, and it runs as whoever did. `MCP_OWNER_ID` and
+ * `MCP_CLIENT_ID` are therefore labels an operator chooses, and setup generates
+ * a per-install pair so records from two installs stay distinguishable.
  */
-const DEFAULT_OWNER_ID = "local-owner";
-const DEFAULT_CLIENT_ID = "local-client";
-
-/**
- * Select the HTTP authentication boundary.
- *
- * Authentication is opt-in. `MCP_BEARER_TOKEN` turns it on and the service then
- * requires and verifies that token on every request. With the variable absent
- * the service serves unauthenticated: any process on this machine that can
- * reach the listening socket is admitted, and the `Host`/`Origin` allowlists,
- * loopback binding, admission and rate limits, and the per-profile table policy
- * are what remain. The warning below is deliberately loud and unconditional;
- * this is a property of the deployment an operator must be able to see in the
- * service log.
- *
- * Setting `MCP_BEARER_TOKEN` to the empty string is a configuration error
- * rather than a way to disable authentication, so a half-applied env file fails
- * to start instead of silently opening the port.
- */
-function createAuthenticationProvider(): HttpAuthenticationProvider<HttpAuthenticationRequest> {
-  const identity = Object.freeze({
+function resolveIdentity(): { readonly ownerId: string; readonly clientId: string } {
+  return Object.freeze({
     ownerId: optionalEnvironmentVariable("MCP_OWNER_ID") ?? DEFAULT_OWNER_ID,
     clientId: optionalEnvironmentVariable("MCP_CLIENT_ID") ?? DEFAULT_CLIENT_ID,
   });
-  const token = optionalEnvironmentVariable("MCP_BEARER_TOKEN");
-  if (token === undefined) {
-    process.stderr.write(
-      "[servicenow-mcp] WARNING: MCP_BEARER_TOKEN is not set, so this endpoint " +
-        "is UNAUTHENTICATED. Any process on this machine that can reach it may " +
-        "use every table these profiles grant. Host/Origin allowlists and the " +
-        "listening address are the only remaining boundary. Set " +
-        "MCP_BEARER_TOKEN to require a bearer token.\n"
-    );
-    return new UnauthenticatedIdentityProvider(identity);
-  }
-  return new StaticBearerAuthenticationProvider([{ token, ...identity }]);
 }
 
 async function main(): Promise<void> {
@@ -138,151 +115,65 @@ async function main(): Promise<void> {
     await runSetupCli({ argv: process.argv.slice(2) });
     return;
   }
-  const authenticationProvider = createAuthenticationProvider();
-  const host = optionalEnvironmentVariable("MCP_HOST");
-  const port = optionalIntegerEnvironmentVariable("MCP_PORT", 0, 65_535);
-  const maxConcurrentRequests = optionalIntegerEnvironmentVariable(
-    "MCP_MAX_CONCURRENT_REQUESTS",
-    1,
-    1_024
-  );
-  const maxConnections = optionalIntegerEnvironmentVariable(
-    "MCP_MAX_CONNECTIONS",
-    1,
-    MAX_HTTP_CONNECTIONS
-  );
-  const gracePeriodMs =
-    optionalIntegerEnvironmentVariable("MCP_SHUTDOWN_GRACE_MS", 1, 300_000) ??
-    DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
+
+  // The client chose this process's environment, so the owner-only file setup
+  // wrote is the only place the profile encryption key can come from. Values
+  // already in the environment always win.
+  loadServerEnvironmentFile();
+
   const profileManager = new ProfileManager();
   const effectivePolicyProvider = createRestrictedPolicyProvider(
     profileManager,
     encodedQueryAccessPolicyFromEnvironment()
   );
-  const httpObservability = createHttpObservability({
+
+  // The same structured `mcp_tool` JSONL records the HTTP runtime emits, on the
+  // same stream. Under stdio, stderr is the only channel that exists.
+  const observability = createHttpObservability({
     sink: createBoundedJsonLinesEventSink({
       writeLine: (line) => process.stderr.write(line),
       onDrain: (listener) => process.stderr.once("drain", listener),
       maxPendingLines: 256,
     }),
   });
-  const httpRateLimiter = createHttpRateLimiter({
-    preAuthentication: {
-      capacity: optionalIntegerEnvironmentVariable(
-        "MCP_PRE_AUTH_RATE_CAPACITY",
-        1,
-        MAX_RATE_LIMIT_CAPACITY
-      ) ?? 240,
-      refillPeriodMs: optionalIntegerEnvironmentVariable(
-        "MCP_PRE_AUTH_RATE_REFILL_MS",
-        1,
-        MAX_RATE_LIMIT_PERIOD_MS
-      ) ?? 60_000,
-      maxEntries: optionalIntegerEnvironmentVariable(
-        "MCP_PRE_AUTH_RATE_MAX_ENTRIES",
-        1,
-        MAX_RATE_LIMIT_ENTRIES
-      ) ?? 4_096,
-    },
-    authenticatedIdentity: {
-      capacity: optionalIntegerEnvironmentVariable(
-        "MCP_IDENTITY_RATE_CAPACITY",
-        1,
-        MAX_RATE_LIMIT_CAPACITY
-      ) ?? 120,
-      refillPeriodMs: optionalIntegerEnvironmentVariable(
-        "MCP_IDENTITY_RATE_REFILL_MS",
-        1,
-        MAX_RATE_LIMIT_PERIOD_MS
-      ) ?? 60_000,
-      maxEntries: optionalIntegerEnvironmentVariable(
-        "MCP_IDENTITY_RATE_MAX_ENTRIES",
-        1,
-        MAX_RATE_LIMIT_ENTRIES
-      ) ?? 128,
-    },
-  });
-  const readiness = createReadinessGate();
-  const allowedHosts = optionalCommaSeparatedEnvironmentVariable(
-    "MCP_ALLOWED_HOSTS"
-  );
-  const allowedOrigins = optionalCommaSeparatedEnvironmentVariable(
-    "MCP_ALLOWED_ORIGINS"
-  );
-  const requestPolicy = createHttpRequestPolicy({
-    ...(allowedHosts === undefined ? {} : { allowedHosts }),
-    ...(allowedOrigins === undefined ? {} : { allowedOrigins }),
-  });
 
   const basicProfiles = profileManager.getBasicAuthProfileNames();
   if (basicProfiles.length > 0) {
-    process.stderr.write(
+    stderrWrite(
       `[servicenow-mcp] WARNING: ${basicProfiles.length} configured profile(s) use ` +
         `ServiceNow basic authentication, which is being phased out (KB3096078).\n`
     );
   }
 
-  const runtime = createHttpRuntime({
-    ...(host === undefined ? {} : { host }),
-    ...(port === undefined ? {} : { port }),
-    ...(maxConcurrentRequests === undefined ? {} : { maxConcurrentRequests }),
-    ...(maxConnections === undefined ? {} : { maxConnections }),
-    authenticationProvider,
-    readinessCheck: readiness.check,
-    observability: httpObservability,
-    rateLimiter: httpRateLimiter,
-    requestPolicy,
-    createServer: (requestContext) =>
+  await startStdioRuntime({
+    identity: resolveIdentity(),
+    createServer: (session) =>
       createApplicationServer(
         profileManager,
-        requestContext,
+        session,
         effectivePolicyProvider,
-        httpObservability
+        observability
       ),
   });
-  const shutdown = installShutdownCoordinator({
-    runtime,
-    gracePeriodMs,
-    onComplete: (signal) => {
-      readiness.markNotReady();
-      process.stderr.write(`[servicenow-mcp] HTTP shutdown complete (${signal}).\n`);
-      process.exit(0);
-    },
-    onError: (signal) => {
-      readiness.markNotReady();
-      process.stderr.write(`[servicenow-mcp] HTTP shutdown failed (${signal}).\n`);
-      process.exit(1);
-    },
-  });
 
-  try {
-    const address = await runtime.start();
-    readiness.markReady();
-    process.stderr.write(
-      `@onlyflows/servicenow-mcp v${VERSION} listening on ${address.url.href} -- ` +
-        `${REGISTERED_TOOL_COUNT} tools; explicit profile required\n`
-    );
-  } catch {
-    readiness.markNotReady();
-    shutdown.dispose();
-    await runtime.close({ gracePeriodMs: 0 }).catch(() => {});
-    throw new Error("HTTP service startup failed");
-  }
+  stderrWrite(
+    `@onlyflows/servicenow-mcp v${VERSION} ready on stdio -- ` +
+      `${REGISTERED_TOOL_COUNT} tools; explicit profile required\n`
+  );
 }
 
 function createApplicationServer(
   profileManager: ProfileManager,
-  requestContext: AuthenticatedHttpRequestContext,
+  session: StdioSessionContext,
   effectivePolicyProvider: EffectivePolicyProvider,
-  httpObservability: HttpObservability
+  observability: HttpObservability
 ) {
   const executionContext: ExecutionContextDependencies = Object.freeze({
-    requestMetadataProvider: requestContext.requestMetadataProvider,
-    requestSignal: requestContext.signal,
+    requestMetadataProvider: session.requestMetadataProvider,
     effectivePolicyProvider,
-    auditSink: createHttpAuditSink(requestContext),
+    auditSink: createStdioAuditSink(),
     toolAuditObserver: Object.freeze({
-      begin: () => httpObservability.beginTool(),
+      begin: () => observability.beginTool(),
     }),
   });
   return createMcpServer({
@@ -298,62 +189,34 @@ function createApplicationServer(
   });
 }
 
-function createHttpAuditSink(
-  requestContext: AuthenticatedHttpRequestContext
-): AuditSink {
+/**
+ * Records reach stderr through the tool observer, which pseudonymizes the
+ * identity and bounds every field. This sink exists because the port is
+ * required, and stays inert so one record is never emitted twice.
+ *
+ * The HTTP sink is not inert for the same reason: it marks that a request
+ * produced an audit record, which is a property of a request boundary that
+ * stdio does not have.
+ */
+function createStdioAuditSink(): AuditSink {
   return Object.freeze({
-    write(_record: ToolAuditRecord): void {
-      requestContext.markToolAuditObserved();
-    },
-    writePreContext(_record: PreContextAuditRecord): void {
-      requestContext.markToolAuditObserved();
-    },
+    write(_record: ToolAuditRecord): void {},
+    writePreContext(_record: PreContextAuditRecord): void {},
   });
 }
 
-function optionalEnvironmentVariable(name: string): string | undefined {
-  const value = process.env[name];
-  if (value === undefined) return undefined;
-  if (value.length === 0) {
-    throw new TypeError(`Environment variable ${name} must not be empty`);
-  }
-  return value;
-}
-
-function optionalIntegerEnvironmentVariable(
-  name: string,
-  minimum: number,
-  maximum: number
-): number | undefined {
-  const value = process.env[name];
-  if (value === undefined) return undefined;
-  if (!/^(?:0|[1-9][0-9]*)$/u.test(value)) {
-    throw new TypeError(`Environment variable ${name} must be an integer`);
-  }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
-    throw new TypeError(
-      `Environment variable ${name} must be from ${minimum} through ${maximum}`
-    );
-  }
-  return parsed;
-}
-
-function optionalCommaSeparatedEnvironmentVariable(
-  name: string
-): readonly string[] | undefined {
-  const value = process.env[name];
-  if (value === undefined) return undefined;
-  const entries = value.split(",").map((entry) => entry.trim());
-  if (entries.length === 0 || entries.some((entry) => entry.length === 0)) {
-    throw new TypeError(
-      `Environment variable ${name} must contain comma-separated exact values`
-    );
-  }
-  return Object.freeze(entries);
-}
-
-void main().catch(() => {
-  process.stderr.write("[servicenow-mcp] Fatal HTTP service startup error.\n");
+/**
+ * Say why, on stderr.
+ *
+ * A client that spawned this process shows its stderr and nothing else, so a
+ * bare "startup failed" leaves an operator with no thread to pull. Every error
+ * that can land here is authored by this codebase — an environment variable
+ * that failed validation, or a profile file that could not be read — and names
+ * a setting or a path, never a credential value.
+ */
+void main().catch((error: unknown) => {
+  const reason = error instanceof Error ? error.message : "unknown startup error";
+  stderrWrite(`[servicenow-mcp] Fatal stdio startup error: ${reason}\n`);
+  stderrWrite("[servicenow-mcp] Run servicenow-mcp-setup doctor to diagnose it.\n");
   process.exitCode = 1;
 });

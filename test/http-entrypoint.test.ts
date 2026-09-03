@@ -6,7 +6,12 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-const ENTRYPOINT = new URL("../dist/index.js", import.meta.url);
+/**
+ * The dormant HTTP composition, which no `bin` entry and no CLI path reaches.
+ * It is driven directly here so the enterprise deployment shape stays proven
+ * while stdio is the only transport the product exposes.
+ */
+const ENTRYPOINT = new URL("../dist/http-entrypoint.js", import.meta.url);
 const TEST_TOKEN = "entrypoint-contract-token-at-least-32-characters";
 const children = new Set<ChildProcess>();
 let temporaryHome: string;
@@ -26,9 +31,9 @@ afterEach(async () => {
   rmSync(temporaryHome, { recursive: true, force: true });
 });
 
-describe("packaged HTTP entrypoint", () => {
+describe("dormant HTTP entrypoint", () => {
   it.each(["SIGINT", "SIGTERM"] as const)(
-    "starts only HTTP and exits cleanly after bounded %s shutdown",
+    "listens and exits cleanly after bounded %s shutdown",
     async (signal) => {
       const child = startEntrypoint({
         MCP_BEARER_TOKEN: TEST_TOKEN,
@@ -388,3 +393,44 @@ function waitForExitWithin(
     child.once("error", onError);
   });
 }
+
+describe("non-loopback host requires a bearer", () => {
+  /**
+   * Unauthenticated is a deliberate local convenience, and on loopback the
+   * reach is this machine, which already holds the credential file. Off
+   * loopback the same configuration is a ServiceNow proxy open to the network,
+   * and it *works* — so a warning would be read past. The container image sets
+   * MCP_HOST=0.0.0.0, which is exactly this case.
+   */
+  it("refuses to start on 0.0.0.0 with no token, and says how to fix it", async () => {
+    const child = startEntrypoint({ MCP_HOST: "0.0.0.0", MCP_PORT: "0" });
+    const stderr = collectStderr(child);
+    const [code] = await waitForExitWithin(child, 10_000);
+
+    expect(code).not.toBe(0);
+    expect(stderr.value).toContain("Refusing to start");
+    expect(stderr.value).toContain("not loopback");
+    // Both remedies, so the operator does not have to guess which applies.
+    expect(stderr.value).toContain("MCP_BEARER_TOKEN");
+    expect(stderr.value).toContain("MCP_HOST=127.0.0.1");
+    // The specific message must survive, not collapse into the generic startup
+    // error that exists to keep credential paths out of the log.
+    expect(stderr.value).not.toContain("Fatal HTTP service startup error");
+  });
+
+  it("starts on 0.0.0.0 when a token is configured", async () => {
+    const child = startEntrypoint({
+      MCP_HOST: "0.0.0.0",
+      MCP_PORT: "0",
+      MCP_BEARER_TOKEN: "y".repeat(48),
+    });
+    const stderr = collectStderr(child);
+    // waitForListeningUrl matches a 127.0.0.1 log line, so it cannot be used
+    // for a 0.0.0.0 bind. Asserting the process is still alive and never
+    // refused is the property under test.
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_500));
+
+    expect(stderr.value).not.toContain("Refusing to start");
+    expect(child.exitCode).toBeNull();
+  });
+});
