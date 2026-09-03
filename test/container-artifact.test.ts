@@ -93,7 +93,11 @@ describe("SNSDK-39 production OCI artifact", () => {
   it("runs direct as numeric non-root with health, shutdown, and read-only-safe paths", () => {
     expect(dockerfile).toContain("USER 10001:10001");
     expect(dockerfile).toContain(
-      'ENTRYPOINT ["/nodejs/bin/node", "/app/dist/index.js"]'
+      // dist/index.js is the stdio entrypoint and is meaningless in a
+      // container. The image serves the dormant HTTP transport, so it must
+      // launch that module; pointing at the stdio one starts a server with no
+      // stdin and no listener, which looks healthy and does nothing.
+      'ENTRYPOINT ["/nodejs/bin/node", "/app/dist/http-entrypoint.js"]'
     );
     expect(dockerfile).toContain("STOPSIGNAL SIGTERM");
     expect(dockerfile).toContain("EXPOSE 3000/tcp");

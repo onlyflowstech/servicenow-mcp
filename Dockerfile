@@ -55,4 +55,6 @@ EXPOSE 3000/tcp
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD ["/nodejs/bin/node", "/app/container-healthcheck.mjs"]
-ENTRYPOINT ["/nodejs/bin/node", "/app/dist/index.js"]
+# dist/index.js is the stdio entrypoint and has no meaning in a container.
+# The image serves the dormant HTTP transport, which is what this runs.
+ENTRYPOINT ["/nodejs/bin/node", "/app/dist/http-entrypoint.js"]
