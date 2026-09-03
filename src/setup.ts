@@ -21,15 +21,17 @@
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 import { createInterface } from "node:readline/promises";
 
@@ -95,6 +97,17 @@ export interface SetupCliDependencies {
   ) => Promise<string | undefined>;
   /** Injected for tests; defaults to the environment key provider. */
   readonly keyProvider?: ProfileEncryptionKeyProvider;
+  /**
+   * Injected for tests; defaults to spawning the packaged server detached.
+   * Returns the log path so a failed start can be diagnosed without the
+   * operator re-running anything.
+   */
+  readonly startService?: (
+    env: NodeJS.ProcessEnv,
+    logPath: string
+  ) => { readonly pid: number | undefined };
+  /** Injected for tests; how long to wait for the service to answer /health/ready. */
+  readonly readyTimeoutMs?: number;
   /** Injected for tests; defaults to the protected stdin/stderr reader. */
   readonly secretIo?: ProfileAdminIO;
 }
@@ -491,9 +504,205 @@ async function runWizard(
       dependencies
     );
 
-    out(renderWizardSummary(paths, options, name, tableAccess, registered, home));
+    // 8. Start the service and verify, so setup ends with a working install
+    //    rather than two commands for the operator to copy.
+    const service = await startAndVerifyInteractively(
+      prompter,
+      options,
+      paths,
+      values,
+      env,
+      name,
+      home,
+      dependencies
+    );
+
+    out(
+      renderWizardSummary(
+        paths,
+        options,
+        name,
+        tableAccess,
+        registered,
+        home,
+        service
+      )
+    );
   } finally {
     prompter.close();
+  }
+}
+
+/** Outcome of the optional start-and-verify step at the end of the wizard. */
+interface ServiceStartOutcome {
+  readonly started: boolean;
+  readonly alreadyRunning: boolean;
+  readonly ready: boolean;
+  readonly logPath: string;
+}
+
+const SERVICE_READY_TIMEOUT_MS = 20_000;
+const SERVICE_READY_POLL_MS = 250;
+
+/**
+ * Start the packaged server detached and wait for readiness.
+ *
+ * The service is spawned with the bootstrap values rather than the operator's
+ * environment, because `server.env` is exactly what it needs and requiring a
+ * `source` first would make setup depend on a step setup is supposed to remove.
+ */
+async function startAndVerifyInteractively(
+  prompter: WizardPrompter,
+  options: InitOptions,
+  paths: ResolvedPaths,
+  values: Readonly<Record<string, string>>,
+  env: NodeJS.ProcessEnv,
+  profile: string,
+  home: string,
+  dependencies: SetupCliDependencies
+): Promise<ServiceStartOutcome> {
+  const logPath = join(dirname(paths.serverEnv), "service.log");
+  const probe = dependencies.probe ?? defaultProbe;
+  const readyUrl = new URL("/health/ready", options.endpoint).toString();
+
+  const alreadyReady = await isReady(probe, readyUrl);
+  if (alreadyReady) {
+    prompter.note("\n  ok  the service is already running on this endpoint.");
+    return Object.freeze({
+      started: false,
+      alreadyRunning: true,
+      ready: true,
+      logPath,
+    });
+  }
+
+  if (!(await prompter.confirm("\nStart the service now and verify it", true))) {
+    return Object.freeze({
+      started: false,
+      alreadyRunning: false,
+      ready: false,
+      logPath,
+    });
+  }
+
+  prompter.note("\nStarting the service...");
+  const serviceEnv: NodeJS.ProcessEnv = { ...env, ...values };
+  const start = dependencies.startService ?? defaultStartService;
+  let pid: number | undefined;
+  try {
+    ({ pid } = start(serviceEnv, logPath));
+  } catch (error) {
+    prompter.note(
+      `  FAILED  could not start the service: ${describeError(error)}\n` +
+        `  Start it by hand:\n` +
+        `    set -a; source ${shellQuote(paths.serverEnv)}; set +a; servicenow-mcp`
+    );
+    return Object.freeze({
+      started: false,
+      alreadyRunning: false,
+      ready: false,
+      logPath,
+    });
+  }
+
+  const readyTimeoutMs = dependencies.readyTimeoutMs ?? SERVICE_READY_TIMEOUT_MS;
+  const ready = await waitForReady(probe, readyUrl, readyTimeoutMs);
+  if (!ready) {
+    prompter.note(
+      `  FAILED  the service did not become ready within ` +
+        `${Math.round(readyTimeoutMs / 1000)}s.\n` +
+        `  Its output is in ${shellQuote(logPath)}.\n` +
+        `  A port already in use and a missing value in server.env both look\n` +
+        `  like this; the log says which.`
+    );
+    return Object.freeze({
+      started: true,
+      alreadyRunning: false,
+      ready: false,
+      logPath,
+    });
+  }
+
+  prompter.note(
+    `  ok  the service is ready at ${options.endpoint}` +
+      `${pid === undefined ? "" : ` (pid ${pid})`}.`
+  );
+
+  // Reuse doctor's own checks rather than a parallel set, so what setup
+  // reports and what `doctor` reports can never drift apart.
+  const checks: Check[] = [
+    checkNodeVersion(),
+    checkDirectoryMode(paths.configDir),
+    ...checkEnvFile(paths.serverEnv, [
+      "MCP_BEARER_TOKEN",
+      "MCP_OWNER_ID",
+      "MCP_CLIENT_ID",
+    ]),
+    ...checkProfiles(paths, home, env, dependencies, profile),
+    ...(await checkEndpoint(options.endpoint, paths, dependencies)),
+  ];
+  prompter.note(`\n${renderDoctorText(checks)}`);
+
+  return Object.freeze({
+    started: true,
+    alreadyRunning: false,
+    ready: true,
+    logPath,
+  });
+}
+
+async function isReady(
+  probe: NonNullable<SetupCliDependencies["probe"]>,
+  readyUrl: string
+): Promise<boolean> {
+  try {
+    const response = await probe(readyUrl, {
+      method: "GET",
+      timeoutMs: PROBE_TIMEOUT_MS,
+    });
+    return response.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForReady(
+  probe: NonNullable<SetupCliDependencies["probe"]>,
+  readyUrl: string,
+  timeoutMs: number
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await isReady(probe, readyUrl)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, SERVICE_READY_POLL_MS));
+  }
+}
+
+/**
+ * Spawn the packaged server detached, with stdio to a log file.
+ *
+ * `dist/index.js` sits beside this module, so the server is resolved relative
+ * to the running CLI rather than from PATH — a globally linked setup must not
+ * silently start a different installation.
+ */
+function defaultStartService(
+  env: NodeJS.ProcessEnv,
+  logPath: string
+): { readonly pid: number | undefined } {
+  const entrypoint = join(__dirname, "index.js");
+  const log = openSync(logPath, "a", 0o600);
+  try {
+    chmodSync(logPath, 0o600);
+    const child = spawn(process.execPath, [entrypoint], {
+      env,
+      detached: true,
+      stdio: ["ignore", log, log],
+    });
+    child.unref();
+    return { pid: child.pid };
+  } finally {
+    closeSync(log);
   }
 }
 
@@ -893,7 +1102,8 @@ function renderWizardSummary(
   profile: string,
   tableAccess: TableAccessPolicyInput,
   registered: readonly string[],
-  home: string
+  home: string,
+  service: ServiceStartOutcome
 ): string {
   const short = (path: string): string => displayPath(path, home);
   const lines = [
@@ -906,13 +1116,41 @@ function renderWizardSummary(
     `Endpoint  ${options.endpoint}`,
     `Clients   ${registered.length > 0 ? registered.join(", ") : "(none registered)"}`,
     "",
-    "Start the service:",
-    `  set -a; source ${shellQuote(short(paths.serverEnv))}; set +a; servicenow-mcp`,
-    "",
-    "Then verify it end to end:",
-    `  servicenow-mcp-setup doctor --profile ${profile}`,
-    "",
   ];
+
+  if (service.ready) {
+    lines.push(
+      service.alreadyRunning
+        ? "The service was already running and answered its readiness check."
+        : "The service is running and answered its readiness check.",
+      "",
+      `Service log  ${short(service.logPath)}`,
+      "",
+      "Re-check it at any time:",
+      `  servicenow-mcp-setup doctor --profile ${profile}`,
+      ""
+    );
+    if (service.started) {
+      lines.push(
+        "It runs detached and will not survive a reboot. To manage it under",
+        "launchd, systemd or a container, stop it and start it there instead.",
+        ""
+      );
+    }
+  } else {
+    lines.push(
+      service.started
+        ? "The service was started but did not become ready; see the log above."
+        : "The service is not running yet.",
+      "",
+      "Start it:",
+      `  set -a; source ${shellQuote(short(paths.serverEnv))}; set +a; servicenow-mcp`,
+      "",
+      "Then verify it end to end:",
+      `  servicenow-mcp-setup doctor --profile ${profile}`,
+      ""
+    );
+  }
   if (registered.length === 0) {
     lines.push(
       "Configure a client by hand:",
@@ -1242,10 +1480,14 @@ function configureClaudeCode(
       "http",
       "--scope",
       "user",
-      "--header",
-      `Authorization: Bearer \${${CLIENT_BEARER_ENV}}`,
+      // `--header` is variadic (`-H, --header <header...>`), so it must come
+      // after the positionals. Placed before them it consumes the name and the
+      // endpoint as further header values and the CLI reports
+      // "missing required argument 'name'".
       MCP_SERVER_NAME,
       endpoint,
+      "--header",
+      `Authorization: Bearer \${${CLIENT_BEARER_ENV}}`,
     ],
     context.env
   );
@@ -1294,8 +1536,8 @@ function renderClientConfiguration(
         `placeholder below keeps the bearer out of argv and out of the config file.\n\n` +
         `  set -a; source ${shellQuote(paths.clientEnv)}; set +a\n` +
         `  claude mcp add --transport http --scope user \\\n` +
-        `    --header 'Authorization: Bearer \${${CLIENT_BEARER_ENV}}' \\\n` +
-        `    ${MCP_SERVER_NAME} ${endpoint}\n\n` +
+        `    ${MCP_SERVER_NAME} ${endpoint} \\\n` +
+        `    --header 'Authorization: Bearer \${${CLIENT_BEARER_ENV}}'\n\n` +
         `Equivalent .mcp.json entry:\n\n` +
         `${indent(
           JSON.stringify(
@@ -2260,10 +2502,37 @@ function resolvePaths(home: string): ResolvedPaths {
   });
 }
 
+/**
+ * Build a manager for an install this process did not create.
+ *
+ * `doctor` and `grant` inspect an existing install, so the encryption key is
+ * normally only on disk in `server.env` — the same reason `doctor` reads that
+ * file for its handshake probe. Falling back to it means a successful setup is
+ * not immediately followed by `doctor` reporting the key as unavailable. When
+ * neither source has a key the env-based provider still raises the original
+ * error, so a genuinely missing key keeps its remedy.
+ */
 function profileManagerFor(home: string): ProfileManager {
-  return new ProfileManager({
-    configFilePath: join(home, PROFILE_CONFIG_RELATIVE_PATH),
-  });
+  const configFilePath = join(home, PROFILE_CONFIG_RELATIVE_PATH);
+  if (process.env[ENCRYPTION_KEY_ENV]) {
+    return new ProfileManager({ configFilePath });
+  }
+  const serverEnv = join(home, SERVER_ENV_RELATIVE_PATH);
+  if (existsSync(serverEnv)) {
+    const stored = parseEnvFile(readFileSync(serverEnv, "utf8"))[ENCRYPTION_KEY_ENV];
+    if (stored) {
+      try {
+        return new ProfileManager({
+          configFilePath,
+          encryptionKeyProvider: encryptionKeyProviderFromValue(stored),
+        });
+      } catch {
+        // A corrupt stored key falls through to the environment provider so the
+        // operator gets the existing remedy rather than a parse failure here.
+      }
+    }
+  }
+  return new ProfileManager({ configFilePath });
 }
 
 /**

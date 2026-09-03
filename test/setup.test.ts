@@ -768,6 +768,14 @@ const ACCEPTS: SetupCliDependencies["verifyCredential"] = async (config) => ({
   detail: `${config.instance} accepted the credential.`,
 });
 
+/** Answer for the wizard's closing "start the service?" confirmation. */
+const DECLINE_START = "n";
+
+/** Nothing is listening, so the wizard offers to start rather than reusing. */
+const NOT_LISTENING: SetupCliDependencies["probe"] = async () => {
+  throw new Error("connect ECONNREFUSED 127.0.0.1:3000");
+};
+
 describe("setup wizard", () => {
   let home: string;
   let manager: ProfileManager;
@@ -783,7 +791,12 @@ describe("setup wizard", () => {
     overrides: Partial<SetupCliDependencies> = {},
     secrets: readonly string[] = ["hunter2"]
   ): Promise<{ prompter: ScriptedPrompter; out: string }> {
-    const prompter = scriptedPrompter(script, secrets);
+    // The wizard ends by offering to start the service. These cases are about
+    // everything before that, so decline it, and report the endpoint as not
+    // ready. Both are explicit: without the injected probe the wizard would
+    // reach the real 127.0.0.1:3000, and the suite would pass or fail
+    // depending on whether a server happened to be running on this machine.
+    const prompter = scriptedPrompter([...script, DECLINE_START], secrets);
     const io = capture();
     await runSetupCli({
       home,
@@ -796,6 +809,7 @@ describe("setup wizard", () => {
       verifyCredential: ACCEPTS,
       resolveParentTable: async () => undefined,
       commandExists: () => false,
+      probe: NOT_LISTENING,
       writeStdout: (value) => io.out.push(value),
       writeStderr: (value) => io.err.push(value),
       ...overrides,
@@ -1267,7 +1281,7 @@ describe("setup wizard on a genuinely fresh machine", () => {
     vi.stubEnv("SN_PROFILE_ENCRYPTION_KEY", "");
 
     const io = capture();
-    const prompter = scriptedPrompter(SCRIPT, ["fresh-machine-secret"]);
+    const prompter = scriptedPrompter([...SCRIPT, DECLINE_START], ["fresh-machine-secret"]);
     await runSetupCli({
       home,
       argv: [],
@@ -1277,6 +1291,7 @@ describe("setup wizard on a genuinely fresh machine", () => {
       verifyCredential: async () => ({ ok: true, detail: "accepted" }),
       resolveParentTable: async () => undefined,
       commandExists: () => false,
+      probe: NOT_LISTENING,
       writeStdout: (value) => io.out.push(value),
       writeStderr: (value) => io.err.push(value),
     });
@@ -1320,7 +1335,7 @@ describe("setup wizard on a genuinely fresh machine", () => {
       argv: [],
       env: { HOME: home },
       interactive: true,
-      prompter: scriptedPrompter(SCRIPT, ["returning-user-secret"]),
+      prompter: scriptedPrompter([...SCRIPT, DECLINE_START], ["returning-user-secret"]),
       verifyCredential: async () => ({ ok: true, detail: "accepted" }),
       resolveParentTable: async () => undefined,
       commandExists: () => false,
@@ -1348,7 +1363,7 @@ describe("setup wizard on a genuinely fresh machine", () => {
       argv: [],
       env: { HOME: home },
       interactive: true,
-      prompter: scriptedPrompter([...SCRIPT, "y"], ["bearer-check-secret"]),
+      prompter: scriptedPrompter([...SCRIPT, "y", DECLINE_START], ["bearer-check-secret"]),
       verifyCredential: async () => ({ ok: true, detail: "accepted" }),
       resolveParentTable: async () => undefined,
       commandExists: () => true,
@@ -1383,7 +1398,7 @@ describe("setup wizard on a genuinely fresh machine", () => {
       },
     } as unknown as ProfileManager;
 
-    const prompter = scriptedPrompter([...SCRIPT, "y"], ["retry-secret"]);
+    const prompter = scriptedPrompter([...SCRIPT, "y", DECLINE_START], ["retry-secret"]);
     await runSetupCli({
       home,
       argv: [],
@@ -1408,5 +1423,131 @@ describe("setup wizard on a genuinely fresh machine", () => {
       encryptionKeyProvider: encryptionKeyProviderFromValue(key),
     });
     expect(reloaded.resolveCredential(reloaded.getProfile("dev"))).toBe("retry-secret");
+  });
+});
+
+describe("setup wizard start-and-verify", () => {
+  /**
+   * The wizard used to end by printing two commands for the operator to run.
+   * It now starts the service and verifies it, so these cover the three
+   * outcomes: nothing listening and the operator accepts, something already
+   * listening, and a start that never becomes ready.
+   */
+  const SCRIPT = [
+    "dev",
+    "dev00001.service-now.com",
+    "basic",
+    "encrypted",
+    "integration.user",
+    "Just incident",
+    "None",
+  ];
+
+  function readyProbe(readyAfter: number): {
+    probe: NonNullable<SetupCliDependencies["probe"]>;
+    calls: () => number;
+  } {
+    let seen = 0;
+    return {
+      calls: () => seen,
+      probe: async (url: string): Promise<ProbeResponse> => {
+        seen += 1;
+        if (seen <= readyAfter) throw new Error("connect ECONNREFUSED");
+        return { status: 200, headers: {}, body: "", url } as ProbeResponse;
+      },
+    };
+  }
+
+  it("starts the service and reports it ready", async () => {
+    const home = newHome("sn-mcp-start-");
+    const started: Array<{ hasBearer: boolean; hasKey: boolean }> = [];
+    const { probe } = readyProbe(1);
+
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: true,
+      prompter: scriptedPrompter([...SCRIPT, "y"], ["start-secret"]),
+      verifyCredential: async () => ({ ok: true, detail: "accepted" }),
+      resolveParentTable: async () => undefined,
+      commandExists: () => false,
+      probe,
+      startService: (env) => {
+        started.push({
+          hasBearer: Boolean(env.MCP_BEARER_TOKEN),
+          hasKey: Boolean(env.SN_PROFILE_ENCRYPTION_KEY),
+        });
+        return { pid: 4242 };
+      },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+
+    // Started exactly once, and handed the values setup just provisioned —
+    // the service must not depend on the operator sourcing server.env first.
+    expect(started).toEqual([{ hasBearer: true, hasKey: true }]);
+  });
+
+  it("reuses a service that is already listening instead of starting another", async () => {
+    const home = newHome("sn-mcp-start-existing-");
+    let startCalls = 0;
+
+    const prompter = scriptedPrompter(SCRIPT, ["existing-secret"]);
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: true,
+      prompter,
+      verifyCredential: async () => ({ ok: true, detail: "accepted" }),
+      resolveParentTable: async () => undefined,
+      commandExists: () => false,
+      probe: async (url: string) =>
+        ({ status: 200, headers: {}, body: "", url }) as ProbeResponse,
+      startService: () => {
+        startCalls += 1;
+        return { pid: 1 };
+      },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+
+    // Nothing was started, and the operator was never asked — the script has
+    // no answer for a start confirmation, so a prompt here would throw.
+    expect(startCalls).toBe(0);
+    expect(prompter.remaining()).toBe(0);
+    expect(prompter.notes.join("\n")).toContain("already running");
+  });
+
+  it("reports a start that never becomes ready, and names the log", async () => {
+    const home = newHome("sn-mcp-start-stuck-");
+
+    const prompter = scriptedPrompter([...SCRIPT, "y"], ["stuck-secret"]);
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: true,
+      prompter,
+      verifyCredential: async () => ({ ok: true, detail: "accepted" }),
+      resolveParentTable: async () => undefined,
+      commandExists: () => false,
+      probe: async () => {
+        throw new Error("connect ECONNREFUSED");
+      },
+      startService: () => ({ pid: 99 }),
+      readyTimeoutMs: 50,
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+
+    const notes = prompter.notes.join("\n");
+    expect(notes).toContain("did not become ready");
+    expect(notes).toContain("service.log");
+    // The profile still exists: a service that will not start must not
+    // discard a credential the instance already accepted.
+    const manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+    expect(manager.getProfile("dev").instance).toBe("https://dev00001.service-now.com");
   });
 });
