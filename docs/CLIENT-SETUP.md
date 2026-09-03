@@ -361,6 +361,53 @@ tool/table pair.
 whose allowlist names a table with no target entry, which is the failure that
 otherwise surfaces only as a generic policy denial at call time.
 
+### Unrestricted field selection
+
+`fields=all` and `response_format: "detailed"` resolve to a wildcard selection
+and are bounded to at most **100 columns**, resolved from `sys_dictionary`
+including fields inherited through `super_class`. Ordering is the table's
+default projection first in declared order, then the remainder alphabetically.
+`sn_query` reports truncation in its `hint` field; `sn_get` will carry the same
+notice shortly. The cap bounds the upstream request rather than the response,
+because a wide table previously breached the 1 MiB cumulative upstream limit and
+failed the call outright.
+
+Two consequences for callers:
+
+- **Journal fields are returned.** `comments` and `work_notes` are in the
+  resolved set for `fields=all` and `detailed`, as they are for an explicit
+  `fields=comments` and for `sn_schema`. The default projection still excludes
+  them. Journal content on real instances routinely contains customer PII, so
+  asking for all fields on `incident` returns customer-visible commentary.
+- **Sensitive-looking names are never requested.** A field whose name matches
+  the sensitive pattern is excluded from the resolved set rather than requested
+  and scrubbed on arrival, so the value does not cross the wire at all.
+
+### Metadata caching prerequisites
+
+Caching is per instance *and* credential identity, and it requires a resolvable
+session timezone: the freshness probe compares `sys_updated_on`, which
+ServiceNow evaluates in the session user's timezone rather than UTC. Resolving
+it needs the authenticating account's `user_name` to read `sys_user.time_zone`,
+falling back to the `glide.sys.default.tz` property. The profile therefore needs
+read access to `sys_user` and `sys_properties` for the lookup to work.
+
+When the zone cannot be resolved, **caching is disabled for that identity**
+rather than falling back to a UTC assumption — a wrong assumption would serve
+silently stale metadata for the length of the offset. Because OAuth
+client_credentials and API-key profiles carry no username, metadata caching is
+disabled for them entirely. Basic auth and the OAuth password grant are
+unaffected.
+
+The practical cost is small and worth stating: the cache only ever saved payload
+bytes, never round trips, since a hit still performs one freshness probe. The
+loss on an affected profile is bandwidth on `sys_dictionary` reads, not latency.
+
+Deletions to a cached metadata table become visible within one TTL — 24 hours by
+default. The probe detects updates, not deletes, so a deleted row stays served
+until its entry expires. Lower the TTL or pass `force_recache: true` when a
+deletion must be reflected sooner.
+
 Incident `comments` and `work_notes` are append-only. Generic `sn_update`
 rejects them before credentials/client construction. After separate human
 authorization on a disposable non-production incident, use a dedicated tool:

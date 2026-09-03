@@ -34,8 +34,19 @@ apply only if you used the affected surface.
   never asks for a secret in chat.
 - **Append-only incident journal tools.** `sn_incident_add_comment` and
   `sn_incident_add_work_note`.
-- **Metadata caching.** Optional per-instance caching of dictionary and schema
-  reads, off by default for tables you do not name.
+- **Metadata caching.** Per-instance-and-identity caching of dictionary and
+  schema reads, off by default for tables you do not name. It requires a
+  resolvable session timezone, so it is **disabled for OAuth
+  client_credentials and API-key profiles**, which carry no username — see
+  [Metadata caching prerequisites](CLIENT-SETUP.md#metadata-caching-prerequisites).
+- **Bounded unrestricted field selection.** `fields=all` and
+  `response_format: "detailed"` are capped at 100 columns instead of dropping
+  `sysparm_fields` and risking a failed call on a wide table.
+- **Journal content is readable on request.** `comments` and `work_notes` are
+  returned by `fields=all`, `response_format: "detailed"`, an explicit
+  `fields=comments`, and `sn_schema`. The default projection still excludes
+  them. Journal content on real instances routinely contains customer PII, so
+  asking for all fields on `incident` now returns customer-visible commentary.
 
 ### 1. Transport
 

@@ -207,6 +207,30 @@ SN_METADATA_CACHE_TTL_MS=86400000
 SN_METADATA_CACHE_TABLES=sys_glide_object,sys_dictionary,sys_db_object,sys_app,sys_plugins,sys_metadata*,sys_flow*
 ```
 
+Metadata caching additionally requires a resolvable ServiceNow session
+timezone: the freshness probe compares `sys_updated_on`, which the instance
+evaluates in the session user's timezone. The zone is read from
+`sys_user.time_zone` for the authenticating account, falling back to the
+`glide.sys.default.tz` property, so the profile needs read access to `sys_user`
+and `sys_properties` for the lookup to succeed. When it cannot be resolved the
+cache disables itself for that identity rather than assuming UTC — an assumed
+zone would serve silently stale metadata for the length of the offset. OAuth
+client_credentials and API-key profiles carry no username and therefore cannot
+cache metadata at all. Deletions to a cached table become visible within one
+TTL, since the probe detects updates rather than deletes.
+
+Journal content is readable on request. `comments` and `work_notes` on
+`incident` are returned by `fields=all`, `response_format: "detailed"`, an
+explicit `fields=comments`, and `sn_schema`; the default projection still
+excludes them. Journal content on production instances routinely contains
+customer PII, so a profile granted `incident` reads can retrieve
+customer-visible commentary whenever the caller asks for it. Treat that as part
+of the data classification when granting incident reads, and narrow it through
+the field policy rather than relying on the default projection, which the
+caller can override. Field names matching the sensitive-name pattern are
+excluded from an unrestricted selection before the request is built, so those
+values are never requested rather than being requested and scrubbed on arrival.
+
 `sys_properties` is deliberately absent from that list. Rows in it are
 ACL-restricted per user and routinely hold integration secrets in the `value`
 column, and a cache hit is served without re-contacting ServiceNow, so the

@@ -634,15 +634,94 @@ failure is `MCP_MAX_CONCURRENT_REQUESTS=3`.
 
 ### Metadata cache
 
-Stable ServiceNow metadata reads are cached per instance for 24 hours by
-default. The default cached table patterns are `sys_glide_object`,
-`sys_dictionary`, `sys_db_object`, `sys_app`, `sys_plugins`, `sys_properties`,
+Stable ServiceNow metadata reads are cached per instance and credential identity
+for 24 hours by default. The default cached table patterns are
+`sys_glide_object`, `sys_dictionary`, `sys_db_object`, `sys_app`, `sys_plugins`,
 `sys_metadata*`, and `sys_flow*`. Set `metadataCache.ttlMs` and
 `metadataCache.tables` on a file-backed profile, or `SN_METADATA_CACHE_TTL_MS`
 / `SN_METADATA_CACHE_TABLES` for the explicit environment profile. `sn_query`,
 `sn_get`, and `sn_schema` accept `force_recache: true` to refresh metadata. A
 cache hit performs a lightweight `sys_updated_on` probe and is used only when no
 matching metadata rows changed since the previous sync.
+
+**Prerequisite: a resolvable session timezone.** The freshness probe compares
+`sys_updated_on`, which ServiceNow evaluates in the *session user's* timezone,
+not UTC. Resolving that zone requires the authenticating account's `user_name`
+to look up `sys_user.time_zone`, falling back to the `glide.sys.default.tz`
+property. When it cannot be resolved the cache **disables itself** for that
+identity rather than assuming UTC — a wrong assumption would silently serve
+stale metadata for the length of the offset. The server logs a warning naming
+the reads it needs.
+
+This has one consequence worth knowing before you configure it:
+
+| Profile auth | Metadata caching |
+|---|---|
+| Basic | works — the profile carries a username |
+| OAuth **password** grant | works — the profile carries a username |
+| OAuth **client_credentials** | **disabled** — no username to resolve a timezone from |
+| API key | **disabled** — no username to resolve a timezone from |
+
+The profile also needs read access to `sys_user` (for `time_zone`) and
+`sys_properties` (for `glide.sys.default.tz`) for the lookup to succeed at all.
+
+**The honest tradeoff:** the cache only ever saved payload bytes, never round
+trips — a cache hit still costs one freshness probe. So on a client-credentials
+or API-key profile the practical loss is bandwidth on `sys_dictionary` reads,
+not latency. If you are choosing an auth mode, this should not be the deciding
+factor.
+
+**Deletions become visible within one TTL.** The freshness probe detects
+updates, not deletes, so a row deleted upstream stays served until its entry
+expires and is re-fetched — up to 24 hours at the default TTL. This is accepted
+behavior, not a defect; lower `SN_METADATA_CACHE_TTL_MS` or pass
+`force_recache: true` if you need a deletion reflected sooner.
+
+### Unrestricted field selection (`fields=all`, `response_format=detailed`)
+
+Both resolve to a wildcard selection. They previously dropped `sysparm_fields`
+entirely, so ServiceNow returned every column and a wide table could breach the
+1 MiB cumulative upstream cap and **fail the call outright**. They are now
+bounded to at most **100 columns**.
+
+The cap bounds the *upstream request*, not the response — truncating after
+receipt would not help, because the bytes have already crossed the wire and
+already breached the limit. Columns are resolved from `sys_dictionary`, walking
+`super_class` so an extended table contributes its inherited fields. Ordering is
+deterministic: the table's curated default projection first in its declared
+order, then every remaining column alphabetically. Defaults lead so a capped
+result stays useful; alphabetical afterwards because dictionary row order is not
+stable across instances. Every failure path falls back to the table's bounded
+default projection, never to dropping `sysparm_fields`.
+
+`sn_query` reports truncation through its `hint` field. `sn_get` will carry the
+same notice shortly.
+
+Two behavior changes worth stating plainly, because they change what a caller
+gets back:
+
+- **Journal fields are now returned.** `comments` and `work_notes` are included
+  in the resolved set for `fields=all` and `detailed`. See
+  [Journal content and field selection](#journal-content-and-field-selection).
+- **Sensitive-looking field names are excluded from the resolved set entirely.**
+  A name matching the sensitive-field pattern is never *requested*, rather than
+  being requested and scrubbed on arrival. Under the old wildcard behavior the
+  value crossed the wire and was then removed; naming it in `sysparm_fields`
+  would have pulled it over deliberately, which is worse.
+
+### Journal content and field selection
+
+Journal content on `incident` — `comments` (customer-visible) and `work_notes`
+(internal) — is readable through `fields=all`, `response_format: "detailed"`, an
+explicit `fields=comments`, and `sn_schema`. **The default projection still
+excludes it**, so an ordinary `sn_query` or `sn_get` does not return it.
+
+Stated as a fact rather than a warning: journal content on real instances
+routinely contains customer PII, so asking for all fields on `incident` returns
+customer-visible commentary along with everything else. Operators granting
+`incident` reads to an agent should know that. If that is not wanted, grant a
+narrower read via the field policy rather than relying on the default
+projection, since the caller chooses `fields`.
 
 ### Attachment payloads
 
