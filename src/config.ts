@@ -1,8 +1,15 @@
 /**
- * Configuration — reads ServiceNow credentials from environment variables.
+ * Configuration types and env-value parse helpers for ServiceNow
+ * connection settings. Loading (config file / environment variables)
+ * lives in ProfileManager.
  *
  * @module config
  */
+
+import type { MetadataCacheConfigInput } from "./metadata-cache.js";
+
+export type AuthType = "basic" | "oauth" | "apikey";
+export type GrantType = "client_credentials" | "password";
 
 export interface ServiceNowConfig {
   instance: string;
@@ -10,45 +17,72 @@ export interface ServiceNowConfig {
   password: string;
   displayValue: string;
   relDepth: number;
+  /** Auth scheme (default "basic"). */
+  authType?: AuthType;
+  /** OAuth client id (authType "oauth"). */
+  clientId?: string;
+  /** OAuth client secret, already resolved (authType "oauth"). */
+  clientSecret?: string;
+  /** OAuth grant type (default "client_credentials"). */
+  grantType?: GrantType;
+  /** API key, already resolved (authType "apikey"). */
+  apiKey?: string;
+  /** Header the API key is sent in (default "x-sn-apikey"). */
+  apiKeyHeader?: string;
+  /** Per-request timeout in ms (default 30000). */
+  timeoutMs?: number;
+  /** Per-instance upstream REST concurrency cap (default 4). */
+  maxConcurrentRequests?: number;
+  /** Schema metadata cache TTL in milliseconds (default 300000). */
+  schemaCacheTtlMs?: number;
+  /** Per-instance metadata read-through cache configuration. */
+  metadataCache?: MetadataCacheConfigInput;
 }
 
 /**
- * Load and validate configuration from environment variables.
- * Throws descriptive errors when required variables are missing.
+ * Parse a timeout value (ms). Returns undefined for missing,
+ * non-numeric, or non-positive values.
  */
-export function loadConfig(): ServiceNowConfig {
-  const instance = process.env.SN_INSTANCE;
-  const user = process.env.SN_USER;
-  const password = process.env.SN_PASSWORD;
-  const displayValue = process.env.SN_DISPLAY_VALUE ?? "true";
-  const relDepth = parseInt(process.env.SN_REL_DEPTH ?? "3", 10);
-
-  const missing: string[] = [];
-  if (!instance) missing.push("SN_INSTANCE");
-  if (!user) missing.push("SN_USER");
-  if (!password) missing.push("SN_PASSWORD");
-
-  if (missing.length > 0) {
-    throw new Error(
-      `Missing required environment variable(s): ${missing.join(", ")}\n\n` +
-        "Set them in your MCP client configuration:\n" +
-        '  SN_INSTANCE  — ServiceNow instance URL (e.g. https://yourinstance.service-now.com)\n' +
-        '  SN_USER      — ServiceNow username\n' +
-        '  SN_PASSWORD  — ServiceNow password\n'
-    );
+export function parsePositiveIntegerEnv(
+  value: string | undefined,
+  name: string,
+  options: { readonly min?: number; readonly max?: number } = {}
+): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  if (!/^(?:0|[1-9]\d*)$/u.test(value.trim())) {
+    throw new Error(`${name} must be a positive integer`);
   }
-
-  // Normalize instance URL: strip trailing slash, ensure https://
-  let normalizedInstance = instance!.replace(/\/+$/, "");
-  if (!normalizedInstance.startsWith("http")) {
-    normalizedInstance = `https://${normalizedInstance}`;
+  const parsed = Number(value.trim());
+  const min = options.min ?? 1;
+  const max = options.max ?? Number.MAX_SAFE_INTEGER;
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be between ${min} and ${max}`);
   }
+  return parsed;
+}
 
-  return {
-    instance: normalizedInstance,
-    user: user!,
-    password: password!,
-    displayValue,
-    relDepth: isNaN(relDepth) ? 3 : relDepth,
-  };
+export function parseTimeoutMs(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = parseInt(value, 10);
+  return isNaN(parsed) || parsed <= 0 ? undefined : parsed;
+}
+
+/**
+ * Parse an auth type. Returns undefined for missing or unknown values.
+ */
+export function parseAuthType(value: string | undefined): AuthType | undefined {
+  if (value === "basic" || value === "oauth" || value === "apikey") {
+    return value;
+  }
+  return undefined;
+}
+
+/**
+ * Parse an OAuth grant type. Returns undefined for missing or unknown values.
+ */
+export function parseGrantType(value: string | undefined): GrantType | undefined {
+  if (value === "client_credentials" || value === "password") {
+    return value;
+  }
+  return undefined;
 }

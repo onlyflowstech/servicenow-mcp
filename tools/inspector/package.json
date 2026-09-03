@@ -1,0 +1,12 @@
+{
+  "name": "servicenow-mcp-inspector-toolchain",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Isolated, pinned MCP Inspector toolchain for release validation.",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/inspector": "2.0.0"
+  }
+}
