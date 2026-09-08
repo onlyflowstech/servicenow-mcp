@@ -13,15 +13,17 @@ import {
   prepareWriteFieldArguments,
   withFieldPolicyArgumentValues,
 } from "../field-policy.js";
-import { prepareIncidentWriteFields } from "../incident-write-policy.js";
+import {
+  normalizeWriteTable,
+  prepareWriteFieldValues,
+} from "../write-value-policy.js";
 import { rejectGenericIncidentJournalFields } from "../incident-journal-policy.js";
-import { normalizeTableName } from "../table-policy.js";
 import { ok } from "../utils.js";
 import {
-  filteredIncidentWriteRecord,
-  optionalIncidentNumber,
+  filteredWriteRecord,
+  optionalRecordNumber,
   requiredCreatedSysId,
-} from "./incident-write-shared.js";
+} from "./record-write-shared.js";
 import {
   envelopeCompatibilityResult,
   productionToolOutputSchemas,
@@ -36,8 +38,9 @@ import {
 export const definition = Object.freeze({
   name: "sn_create",
   description:
-    "Create one incident with a required bounded short_description and optional " +
-    "policy-approved ordinary fields. Journal fields require dedicated tools.",
+    "Create one record on any table the configured policy grants for writes. " +
+    "Fields are bounded by the field policy; incident additionally requires a " +
+    "short_description. Journal fields require dedicated tools.",
   annotations: Object.freeze({
     title: "Create record",
     readOnlyHint: false,
@@ -50,11 +53,15 @@ export const definition = Object.freeze({
 function compatibleInputSchema() {
   return z
     .object({
-      table: z.string().describe("Exactly incident; subject to the configured write target policy"),
+      table: z
+        .string()
+        .describe(
+          "Target table; must be granted for writes by the configured table policy"
+        ),
       fields: z
         .record(z.unknown())
         .describe(
-          'Approved ordinary incident values; short_description is required (e.g. {"short_description":"Server down","urgency":"1"})'
+          'Field values approved by the configured field policy. On incident, short_description is required (e.g. {"short_description":"Server down","urgency":"1"})'
         ),
     })
     .strict(ENCODED_QUERY_MIGRATION_MESSAGE);
@@ -86,9 +93,9 @@ export function resolveCreateAccess(candidate: unknown): CreateAccessResolution 
     (parsed as unknown as Readonly<Record<string, unknown>>).query
   );
   rejectGenericIncidentJournalFields(parsed.fields);
-  const table = normalizeTableName(parsed.table);
+  const table = normalizeWriteTable(parsed.table);
   let prepared = prepareWriteFieldArguments(parsed, table);
-  const fields = prepareIncidentWriteFields("create", table, prepared.fields);
+  const fields = prepareWriteFieldValues("create", table, prepared.fields);
   prepared = withFieldPolicyArgumentValues(prepared, { table, fields });
   return Object.freeze({
     args: Object.freeze(prepared),
@@ -106,11 +113,12 @@ async function executeCreate(
     (args as unknown as Readonly<Record<string, unknown>>).query
   );
   rejectGenericIncidentJournalFields(args.fields);
-  const fields = prepareIncidentWriteFields("create", args.table, args.fields);
-  const response = await client.post("/api/now/table/incident", fields);
-  const safeRecord = filteredIncidentWriteRecord(args, response, "do_not_retry");
+  const table = normalizeWriteTable(args.table);
+  const fields = prepareWriteFieldValues("create", table, args.fields);
+  const response = await client.post(`/api/now/table/${table}`, fields);
+  const safeRecord = filteredWriteRecord(args, response, "do_not_retry");
   const sysId = requiredCreatedSysId(safeRecord);
-  const number = optionalIncidentNumber(safeRecord);
+  const number = optionalRecordNumber(safeRecord);
   const record = Object.fromEntries(
     Object.entries(safeRecord).filter(
       ([field]) => field !== "sys_id" && field !== "number"
@@ -119,7 +127,7 @@ async function executeCreate(
   return ok({
     sys_id: sysId,
     ...(number === undefined ? {} : { number }),
-    table: "incident",
+    table,
     record,
   });
 }
@@ -131,10 +139,11 @@ export const createToolModule = defineServiceNowToolModule({
   outputSchema: productionToolOutputSchemas.sn_create,
   requirements: {
     permissions: ["write"],
-    tables: {
-      kind: "static",
-      names: ["incident"],
-    },
+    tables: Object.freeze({
+      kind: "dynamic",
+      names: Object.freeze([]),
+      description: "Caller-selected table approved for writes by the table policy.",
+    }),
     apis: ["table"],
     fieldPolicies: ["write"],
     capabilities: ["record:create"],

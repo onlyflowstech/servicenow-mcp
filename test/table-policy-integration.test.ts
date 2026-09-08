@@ -16,6 +16,7 @@ import {
   createTableAccessPolicy,
   type TableAccessPolicyInput,
 } from "../src/table-policy.js";
+import { serviceNowToolModules } from "../src/tools/catalog.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
 
 const CONFIG: ServiceNowConfig = {
@@ -40,6 +41,8 @@ async function createHarness(
       status: 200,
       headers: new Headers(),
     })),
+    post: vi.fn(async () => ({ result: { sys_id: "a".repeat(32) } })),
+    patch: vi.fn(async () => ({ result: { sys_id: "a".repeat(32) } })),
   } as unknown as ServiceNowClient;
   const getProfile = vi.fn(() => ({
     instance: CONFIG.instance,
@@ -193,6 +196,344 @@ describe("SNSDK-29 registry enforcement", () => {
       tool: "sn_query",
       outcome: "policy_rejected",
       reason: "table_access_denied",
+    });
+  });
+
+  it("denies every registered ServiceNow tool under a deny-all policy", async () => {
+    // The whole surface, not a representative sample: every tool that can
+    // reach ServiceNow must be stopped by the configured policy before a
+    // credential, a client, or a handler is reached. A tool that resolves no
+    // table plan would silently sit outside the policy, so this enumerates
+    // the catalog rather than naming tools by hand.
+    const SYS_ID = "a".repeat(32);
+    const invocations: Record<string, Record<string, unknown>> = {
+      sn_query: { table: "incident" },
+      sn_get: { table: "incident", sys_id: SYS_ID },
+      sn_create: { table: "incident", fields: { short_description: "probe" } },
+      sn_update: {
+        table: "incident",
+        sys_id: SYS_ID,
+        fields: { short_description: "probe" },
+      },
+      sn_incident_add_comment: { sys_id: SYS_ID, content: "probe" },
+      sn_incident_add_work_note: { sys_id: SYS_ID, content: "probe" },
+      sn_delete: { table: "incident", sys_id: SYS_ID, confirm: true },
+      sn_batch: {
+        table: "incident",
+        action: "update",
+        structured_query: {
+          filter: {
+            type: "equality",
+            field: "number",
+            operator: "eq",
+            value: "INC0000000",
+          },
+        },
+        fields: { short_description: "probe" },
+        confirm: true,
+      },
+      sn_aggregate: { table: "incident", type: "COUNT" },
+      sn_schema: { table: "incident" },
+      sn_health: { check: "version" },
+      sn_attach: { action: "list", table: "incident", sys_id: SYS_ID },
+      sn_relationships: { sys_id: SYS_ID },
+      sn_syslog: { limit: 1 },
+      sn_codesearch: { search_term: "probe" },
+      sn_discover: { type: "tables" },
+      sn_atf: { action: "list" },
+      sn_nl: { text: "show me open incidents" },
+    };
+
+    const connected = await harness({ readTables: [], writeTables: [], targets: [] });
+    const registered = serviceNowToolModules.map(
+      ({ definition }) => definition.name
+    );
+    // Fail loudly if a tool is added without being covered here.
+    expect(Object.keys(invocations).sort()).toEqual([...registered].sort());
+
+    for (const tool of registered) {
+      const result = await connected.client.callTool({
+        name: tool,
+        arguments: { profile: "policy", ...invocations[tool] },
+      });
+      expect(result.isError, `${tool} was not denied`).toBe(true);
+      expect(connected.records.at(-1), `${tool} audit`).toMatchObject({
+        tool,
+        outcome: "policy_rejected",
+        profile: "policy",
+      });
+    }
+
+    expect(connected.getConfig).not.toHaveBeenCalled();
+    expect(connected.getClient).not.toHaveBeenCalled();
+    expect(connected.serviceNowClient.getWithMeta).not.toHaveBeenCalled();
+    expect(connected.serviceNowClient.post).not.toHaveBeenCalled();
+    expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
+  });
+
+  it("honors a write grant on a non-incident table instead of a code gate", async () => {
+    // The reported bug: an operator granted writeTables ["*"], sn_update still
+    // failed, and the message named the table-access policy -- a key that was
+    // already correct and could not change the outcome. The grant is now the
+    // only thing that decides which tables are writable.
+    const connected = await harness({
+      readTables: ["*"],
+      writeTables: ["*"],
+      targets: [
+        {
+          table: "sys_script_include",
+          kind: "canonical",
+          tools: ["sn_create", "sn_update"],
+          closureComplete: true,
+          relatedTables: ["sys_script_include"],
+        },
+      ],
+    });
+
+    const updated = await connected.client.callTool({
+      name: "sn_update",
+      arguments: {
+        profile: "policy",
+        table: "sys_script_include",
+        sys_id: "a".repeat(32),
+        fields: { description: "probe" },
+      },
+    });
+
+    expect(updated.isError).toBeUndefined();
+    expect(connected.serviceNowClient.patch).toHaveBeenCalledWith(
+      `/api/now/table/sys_script_include/${"a".repeat(32)}`,
+      { description: "probe" }
+    );
+    expect(connected.records.at(-1)).toMatchObject({
+      tool: "sn_update",
+      outcome: "success",
+      profile: "policy",
+    });
+
+    const created = await connected.client.callTool({
+      name: "sn_create",
+      arguments: {
+        profile: "policy",
+        table: "sys_script_include",
+        fields: { name: "ProbeScriptInclude" },
+      },
+    });
+
+    expect(created.isError).toBeUndefined();
+    expect(connected.serviceNowClient.post).toHaveBeenCalledWith(
+      "/api/now/table/sys_script_include",
+      { name: "ProbeScriptInclude" }
+    );
+  });
+
+  it("gives sn_update and sn_batch the same write boundary", async () => {
+    // The reported integrity gap: sn_update was hard-gated to incident while
+    // sn_batch reached the same PATCH endpoint for any table, so the gate
+    // blocked the documented path and the undocumented one stayed open. Both
+    // tools now answer to the one configured policy, and must agree on which
+    // tables are writable.
+    const batchArguments = (table: string) => ({
+      profile: "policy",
+      table,
+      action: "update",
+      structured_query: {
+        filter: {
+          type: "equality",
+          field: "name",
+          operator: "eq",
+          value: "ZZZ_NoSuchScriptInclude_Probe",
+        },
+      },
+      fields: { description: "probe" },
+      confirm: true,
+    });
+    const updateArguments = (table: string) => ({
+      profile: "policy",
+      table,
+      sys_id: "a".repeat(32),
+      fields: { description: "probe" },
+    });
+
+    const granted = await harness({
+      readTables: ["*"],
+      writeTables: ["*"],
+      targets: [
+        {
+          table: "sys_script_include",
+          kind: "canonical",
+          tools: ["sn_update", "sn_batch"],
+          closureComplete: true,
+          relatedTables: ["sys_script_include"],
+        },
+      ],
+    });
+    const grantedUpdate = await granted.client.callTool({
+      name: "sn_update",
+      arguments: updateArguments("sys_script_include"),
+    });
+    const grantedBatch = await granted.client.callTool({
+      name: "sn_batch",
+      arguments: batchArguments("sys_script_include"),
+    });
+    expect(grantedUpdate.isError).toBeUndefined();
+    expect(grantedBatch.isError).toBeUndefined();
+
+    const withheld = await harness({
+      readTables: ["*"],
+      writeTables: ["incident"],
+      targets: [
+        {
+          table: "incident",
+          kind: "canonical",
+          tools: ["sn_update", "sn_batch"],
+          closureComplete: true,
+          relatedTables: ["incident"],
+        },
+      ],
+    });
+    const withheldUpdate = await withheld.client.callTool({
+      name: "sn_update",
+      arguments: updateArguments("sys_script_include"),
+    });
+    const withheldBatch = await withheld.client.callTool({
+      name: "sn_batch",
+      arguments: batchArguments("sys_script_include"),
+    });
+    expect(withheldUpdate.isError).toBe(true);
+    expect(withheldBatch.isError).toBe(true);
+    for (const record of withheld.records) {
+      expect(record).toMatchObject({
+        outcome: "policy_rejected",
+        reason: "table_access_denied",
+      });
+    }
+    expect(withheld.getClient).not.toHaveBeenCalled();
+  });
+
+  it("authorizes an sn_batch dry run as a read, not as a write", async () => {
+    // Documenting the boundary as it actually stands: a dry run requests only
+    // read authorization, so it answers on a table the caller may read but not
+    // write. It performs no mutation, but it does report a matched count for a
+    // write the caller could not execute. Any change here is a product
+    // decision, so it is pinned rather than silently altered.
+    const connected = await harness({
+      readTables: ["*"],
+      writeTables: ["incident"],
+      targets: [
+        {
+          table: "incident",
+          kind: "canonical",
+          tools: ["sn_update", "sn_batch"],
+          closureComplete: true,
+          relatedTables: ["incident"],
+        },
+      ],
+    });
+
+    const dryRun = await connected.client.callTool({
+      name: "sn_batch",
+      arguments: {
+        profile: "policy",
+        table: "sys_script_include",
+        action: "update",
+        structured_query: {
+          filter: {
+            type: "equality",
+            field: "name",
+            operator: "eq",
+            value: "ZZZ_NoSuchScriptInclude_Probe",
+          },
+        },
+        fields: { description: "probe" },
+        confirm: false,
+      },
+    });
+
+    expect(dryRun.isError).toBeUndefined();
+    expect(connected.records.at(-1)).toMatchObject({
+      tool: "sn_batch",
+      outcome: "success",
+    });
+  });
+
+  it("still denies a write to a table the policy does not grant", async () => {
+    // Removing the code gate must not remove the configured boundary: the
+    // table policy is now the only thing standing between the caller and the
+    // table, so it has to hold on its own.
+    const connected = await harness({
+      readTables: ["*"],
+      writeTables: ["incident"],
+      targets: [
+        {
+          table: "incident",
+          kind: "canonical",
+          tools: ["sn_create", "sn_update"],
+          closureComplete: true,
+          relatedTables: ["incident"],
+        },
+      ],
+    });
+
+    const denied = await connected.client.callTool({
+      name: "sn_update",
+      arguments: {
+        profile: "policy",
+        table: "sys_script_include",
+        sys_id: "a".repeat(32),
+        fields: { description: "probe" },
+      },
+    });
+
+    expect(denied.isError).toBe(true);
+    expect(responseText(denied)).toMatch(
+      /^ERROR: Table access was denied by policy\./u
+    );
+    expect(connected.getConfig).not.toHaveBeenCalled();
+    expect(connected.getClient).not.toHaveBeenCalled();
+    expect(connected.records.at(-1)).toMatchObject({
+      tool: "sn_update",
+      outcome: "policy_rejected",
+      reason: "table_access_denied",
+      profile: "policy",
+    });
+  });
+
+  it("reports a bounded-value denial as a value denial, not a table denial", async () => {
+    const connected = await harness({
+      readTables: ["*"],
+      writeTables: ["*"],
+      targets: [
+        {
+          table: "incident",
+          kind: "canonical",
+          tools: ["sn_update"],
+          closureComplete: true,
+          relatedTables: ["incident"],
+        },
+      ],
+    });
+
+    const denied = await connected.client.callTool({
+      name: "sn_update",
+      arguments: {
+        profile: "policy",
+        table: "incident",
+        sys_id: "a".repeat(32),
+        fields: { urgency: 9 },
+      },
+    });
+
+    expect(denied.isError).toBe(true);
+    const text = responseText(denied);
+    expect(text).not.toMatch(/Table access was denied by policy/u);
+    expect(text).not.toContain("writeTables");
+    expect(text).toContain("rejected a field value");
+    expect(connected.records.at(-1)).toMatchObject({
+      tool: "sn_update",
+      outcome: "policy_rejected",
+      reason: "write_value_denied",
+      profile: "policy",
     });
   });
 
