@@ -36,6 +36,10 @@ import {
   isIncidentJournalPolicyError,
 } from "../incident-journal-policy.js";
 import {
+  isWriteValuePolicyError,
+  writeValueDenialMessage,
+} from "../write-value-policy.js";
+import {
   createAuditRecord,
   createExecutionContext,
   createPreContextAuditRecord,
@@ -496,6 +500,10 @@ function registerStandardTool(
         // "table access denied" points the operator at the wrong place.
         const fieldAccessDenied =
           !journalUpdateDenied && isFieldPolicyError(error);
+        // A bounded-value denial is not a table denial: it is not fixed in
+        // tableAccess.writeTables. Reporting it as one sends the operator to
+        // edit a key that cannot change the outcome.
+        const writeValueDenied = isWriteValuePolicyError(error);
         auditInvocation(
           contextDependencies,
           {
@@ -508,7 +516,9 @@ function registerStandardTool(
                   ? "journal_update_denied"
                   : fieldAccessDenied
                     ? "field_access_denied"
-                    : "table_access_denied",
+                    : writeValueDenied
+                      ? "write_value_denied"
+                      : "table_access_denied",
             profile: binding,
           },
           tool.definition.name,
@@ -523,7 +533,9 @@ function registerStandardTool(
                 ? `${incidentJournalMigrationMessage(error.field!, tool.definition.name)} Correlation ID: ${context.correlationId}.`
                 : fieldAccessDenied
                   ? `${fieldPolicyDenialMessage(error)} Correlation ID: ${context.correlationId}.`
-                  : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
+                  : writeValueDenied
+                    ? `${writeValueDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
+                    : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
         );
       }
 
@@ -817,13 +829,21 @@ function registerProfileDiagnostic(
         );
         if (cancellation) return cancellation;
         // Same classification as the primary dispatch path: a field-policy
-        // denial is fixed in a different configuration key than a table one.
+        // denial is fixed in a different configuration key than a table one,
+        // and a bounded-value denial is fixed in no configuration key at all.
+        // No context-only tool reaches the write-value policy today; the
+        // branch keeps the two paths from drifting apart again.
         const fieldAccessDenied = isFieldPolicyError(error);
+        const writeValueDenied = isWriteValuePolicyError(error);
         auditInvocation(
           contextDependencies,
           {
             outcome: "policy_rejected",
-            reason: fieldAccessDenied ? "field_access_denied" : "table_access_denied",
+            reason: fieldAccessDenied
+              ? "field_access_denied"
+              : writeValueDenied
+                ? "write_value_denied"
+                : "table_access_denied",
             profile: binding,
           },
           tool.definition.name,
@@ -832,7 +852,9 @@ function registerProfileDiagnostic(
         return err(
           fieldAccessDenied
             ? `${fieldPolicyDenialMessage(error)} Correlation ID: ${context.correlationId}.`
-            : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
+            : writeValueDenied
+              ? `${writeValueDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
+              : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
         );
       }
 

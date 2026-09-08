@@ -77,7 +77,7 @@ describe("SNSDK-49 canonical incident write modules", () => {
   it("owns both public contracts while preserving facade and catalog identity", () => {
     expect(createDefinition).toEqual({
       name: "sn_create",
-      description: expect.stringContaining("required bounded short_description"),
+      description: expect.stringContaining("any table the configured policy grants"),
       annotations: {
         title: "Create record",
         readOnlyHint: false,
@@ -128,7 +128,14 @@ describe("SNSDK-49 canonical incident write modules", () => {
       expect(module.runtime).toBe("servicenow");
       expect(module.requirements).toEqual({
         permissions: ["write"],
-        tables: { kind: "static", names: ["incident"] },
+        // Which table is written is resolved from the caller's argument and
+        // authorized by the configured table policy, so the dependency is
+        // dynamic rather than a fixed incident-only set.
+        tables: {
+          kind: "dynamic",
+          names: [],
+          description: expect.stringContaining("Caller-selected table"),
+        },
         apis: ["table"],
         fieldPolicies: ["write"],
         capabilities: [capability],
@@ -163,7 +170,7 @@ describe("SNSDK-49 canonical incident write modules", () => {
     ).toBe(true);
     for (const invalid of [
       { sys_id: "short", table: "incident", record: {} },
-      { sys_id: CANONICAL_SYS_ID, table: "problem", record: {} },
+      { sys_id: CANONICAL_SYS_ID, table: "Not A Table", record: {} },
       { sys_id: CANONICAL_SYS_ID, table: "incident", record: {}, extra: true },
     ]) {
       const validEnvelope = {
@@ -359,8 +366,17 @@ describe("SNSDK-49 canonical incident write modules", () => {
         );
       }
     }
+    // A non-incident table is no longer rejected here: whether it may be
+    // written is the configured table policy's decision, made by the
+    // dispatcher against the plan this resolver returns.
+    expect(
+      resolveCreateAccess({
+        profile: PROFILE,
+        table: "problem",
+        fields: { short_description: "safe" },
+      }).requests
+    ).toEqual([{ operation: "write", table: "problem" }]);
     for (const invalid of [
-      { profile: PROFILE, table: "problem", fields: { short_description: "safe" } },
       { profile: PROFILE, table: "incident", fields: { description: "missing" } },
       { profile: PROFILE, table: "incident", fields: { short_description: "  " } },
       {

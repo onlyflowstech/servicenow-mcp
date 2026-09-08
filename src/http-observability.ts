@@ -779,7 +779,15 @@ function validateToolDisposition(
       reason === "policy_context_unavailable" &&
       resolved) ||
     (outcome === "policy_rejected" &&
-      reason === "table_access_denied" &&
+      // Every policy-rejection reason the dispatcher can emit is valid here.
+      // Listing only the table denial silently rejected the sibling reasons
+      // and threw while building the structured event for them.
+      (reason === "table_access_denied" ||
+        reason === "field_access_denied" ||
+        reason === "encoded_query_denied" ||
+        reason === "structured_query_denied" ||
+        reason === "journal_update_denied" ||
+        reason === "write_value_denied") &&
       resolved) ||
     (outcome === "client_rejected" &&
       (reason === "client_initialization_failed" ||

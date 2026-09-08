@@ -53,7 +53,7 @@ the rest of the boundary unchanged.
 | --- | --- | --- | --- | --- |
 | `sn_query` | Filtered collection with profile, metadata, and pagination | Empty collection; ACL/policy denial before client | Validation, authorization, hostile upstream error | Table path and complete `sysparm_*` map |
 | `sn_get` | One filtered record by canonical `sys_id` | Exact identifier produces `not_found` or `conflict` for zero or multiple matches | Timeout and rate limit with bounded retry metadata | Direct record path or bounded stable identifier query |
-| `sn_create` | Controlled incident creation with filtered structured output | Invalid or disallowed field rejected before client | Safe normalized failure | Exact incident collection path and allowed body |
+| `sn_create` | Controlled record creation with filtered structured output | Invalid or disallowed field rejected before client | Safe normalized failure | Exact granted-table collection path and allowed body |
 | `sn_update` | Controlled incident update with filtered structured output | Invalid value, journal field, or disallowed field rejected before client | Safe normalized failure | Exact canonical record path and allowed body |
 | `sn_incident_add_comment`, `sn_incident_add_work_note` | Append-only comment and work-note operation envelopes | Content never appears in result or audit | Normalized upstream failure | Exact canonical incident path and one journal field |
 | Shared registry | Strict input/output schemas and explicit annotations | Required profile on all reference tools | Correlation ID and issued audit category/retry metadata | No discovery-time profile, credential, client, or ServiceNow access |
