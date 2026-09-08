@@ -5,7 +5,68 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] — unreleased
+## [2.1.0] — 2026-09
+
+> **Read this before upgrading if any profile grants `writeTables: ["*"]`, or
+> names a table other than `incident`.** In 2.0.0 a hardcoded gate confined
+> `sn_create` and `sn_update` to the `incident` table no matter what a profile
+> granted, and the README documented them that way. That gate is gone: those
+> tools now write any table the profile grants. If you granted a wide write
+> allowlist while relying on the documented incident-only behaviour to keep
+> single-record writes narrow, that assumption no longer holds — **review the
+> `writeTables` allowlist and `targets` on every profile before upgrading.**
+> This ships as a minor because the grant was always the operator's, and the
+> gate was a defect that stopped it taking effect; the effective write surface
+> can still widen without any configuration change on your side.
+
+### Changed
+
+- **`sn_create` and `sn_update` are no longer restricted to `incident`.** They
+  write to any table the profile grants, so the configured `tableAccess` and
+  field policies are now the only thing deciding which tables are writable —
+  the same boundary `sn_batch` and `sn_delete` already answered to. Previously
+  a hardcoded gate rejected every other table regardless of configuration,
+  which both blocked granted work and left the restriction unenforced on
+  `sn_batch`. **A profile granting `writeTables: ["*"]` (or naming other
+  tables) now permits single-record writes to those tables through
+  `sn_create`/`sn_update`; narrow the grant if that is wider than intended.**
+  `incident` keeps its bounded typed value policy (approved ordinary fields,
+  required `short_description` on create, range-checked `impact`/`urgency`/
+  `priority`/`state`); other tables get generic value bounds — scalar values
+  only, no control characters, at most 100,000 characters. The `sn_create`
+  result's `table` is now the table written rather than the literal
+  `"incident"`.
+- **Policy denials are classified separately in errors and audit records.** A
+  bounded-value rejection is reported as such and audited as
+  `write_value_denied`, instead of being reported as "Table access was denied
+  by policy" and audited as `table_access_denied`. The previous message named
+  `tableAccess.writeTables` — a key that could not affect the outcome — and
+  sent operators to re-issue grants that were already correct. Structured HTTP
+  tool events also accept every policy-rejection reason now; previously any
+  reason other than `table_access_denied` threw while the event was built.
+
+### Fixed
+
+- A write denied by the bounded value policy was reported as
+  `ERROR: Table access was denied by policy.` — naming `tableAccess.writeTables`,
+  a per-profile key that was already correct and could not affect the outcome.
+  Operators re-issued grants against a restriction no configuration could lift.
+  Each failure reason now has its own message, and the four
+  reasons (`unsupported_table`, `missing_short_description`, `invalid_value`,
+  `invalid_mode`) are no longer flattened into one misleading string.
+- The incident restriction was not a boundary: `sn_batch` reached the same
+  `PATCH /api/now/table/{table}/{sys_id}` endpoint for any table, on a bulk
+  surface, so the gate blocked the documented path while leaving the
+  undocumented one open. See **Changed** above for how this was resolved.
+- Structured HTTP tool events accepted only `table_access_denied` for a policy
+  rejection. Any other reason — including the existing `field_access_denied` —
+  threw a `TypeError` while the event was being built.
+- The 50,000-envelope validation gate asserted a single wall-clock reading
+  against a 1000ms ceiling, which measured CI runner load as much as this code
+  and failed at 1117ms while passing locally. It now takes the best of three
+  rounds against a ceiling set to catch an order-of-magnitude regression.
+
+## [2.0.0] — 2026-09
 
 2.0 is a local, single-owner stdio server. Your client spawns it and speaks
 over that process's stdin and stdout; nothing listens on a port.
