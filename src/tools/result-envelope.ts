@@ -168,7 +168,10 @@ const createResultSchema = z
   .object({
     sys_id: canonicalSysIdSchema,
     number: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/u).optional(),
-    table: z.literal("incident"),
+    // The created record's canonical table. Writes are no longer pinned to
+    // incident; which tables are writable is the configured table policy's
+    // decision.
+    table: z.string().regex(/^[a-z][a-z0-9_]{0,79}$/u),
     record: dynamicRecordSchema,
   })
   .strict();

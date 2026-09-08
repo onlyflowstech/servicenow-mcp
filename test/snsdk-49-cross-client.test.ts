@@ -463,22 +463,37 @@ describe.each(clients)("SNSDK-49 %s incident writes", (_label, createClient) => 
       expect(post).not.toHaveBeenCalled();
       expect(patch).not.toHaveBeenCalled();
       expect(harness.auditWrite).toHaveBeenCalledTimes(8);
-      // One field-policy denial remains -- a sensitive field name, which is
-      // the only field-level denial the built-ins still impose. The rest are
-      // table denials. Every one is a policy rejection recorded before any
-      // credential or upstream access.
+      // The three denial kinds stay separable, because each is fixed in a
+      // different place. The "problem" table is a genuine table denial: the
+      // grant here is writeTables ["incident"], and that is now the only thing
+      // deciding which tables are writable. The empty write payload is a field
+      // denial. The remaining six are bounded-value denials, fixable in no
+      // configuration key at all -- so none of them may be reported as a table
+      // denial. Every one is recorded before any credential or upstream access.
+      expect(
+        harness.auditWrite.mock.calls.filter(
+          ([audit]) => audit.reason === "table_access_denied"
+        )
+      ).toHaveLength(1);
       expect(
         harness.auditWrite.mock.calls.filter(
           ([audit]) => audit.reason === "field_access_denied"
         )
       ).toHaveLength(1);
+      expect(
+        harness.auditWrite.mock.calls.filter(
+          ([audit]) => audit.reason === "write_value_denied"
+        )
+      ).toHaveLength(6);
       for (const [audit] of harness.auditWrite.mock.calls) {
         expect(audit).toMatchObject({
           outcome: "policy_rejected",
         });
-        expect(["table_access_denied", "field_access_denied"]).toContain(
-          audit.reason
-        );
+        expect([
+          "write_value_denied",
+          "field_access_denied",
+          "table_access_denied",
+        ]).toContain(audit.reason);
       }
     } finally {
       await client.close();

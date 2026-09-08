@@ -13,16 +13,18 @@ import {
   prepareWriteFieldArguments,
   withFieldPolicyArgumentValues,
 } from "../field-policy.js";
-import { prepareIncidentWriteFields } from "../incident-write-policy.js";
+import {
+  normalizeWriteTable,
+  prepareWriteFieldValues,
+} from "../write-value-policy.js";
 import { rejectGenericIncidentJournalFields } from "../incident-journal-policy.js";
 import {
   serviceNowSysIdPathSegment,
   serviceNowSysIdSchema,
 } from "../servicenow-identifiers.js";
-import { normalizeTableName } from "../table-policy.js";
 import { createToolError } from "../tool-error.js";
 import { ok } from "../utils.js";
-import { filteredIncidentWriteRecord } from "./incident-write-shared.js";
+import { filteredWriteRecord } from "./record-write-shared.js";
 import {
   envelopeCompatibilityResult,
   productionToolOutputSchemas,
@@ -37,8 +39,9 @@ import {
 export const definition = Object.freeze({
   name: "sn_update",
   description:
-    "Update ordinary fields on exactly one incident selected by canonical sys_id. " +
-    "At least one bounded approved field is required; journals use dedicated tools.",
+    "Update ordinary fields on exactly one record selected by canonical sys_id, " +
+    "on any table the configured policy grants for writes. At least one bounded " +
+    "approved field is required; journals use dedicated tools.",
   annotations: Object.freeze({
     title: "Update record",
     readOnlyHint: false,
@@ -51,14 +54,18 @@ export const definition = Object.freeze({
 function compatibleInputSchema() {
   return z
     .object({
-      table: z.string().describe("Exactly incident; subject to the configured write target policy"),
+      table: z
+        .string()
+        .describe(
+          "Target table; must be granted for writes by the configured table policy"
+        ),
       sys_id: serviceNowSysIdSchema.describe(
-        "The exact 32-hex sys_id of one incident to update"
+        "The exact 32-hex sys_id of the one record to update"
       ),
       fields: z
         .record(z.unknown())
         .describe(
-          "At least one approved bounded ordinary incident field; comments and work_notes are rejected"
+          "At least one approved bounded ordinary field; comments and work_notes are rejected"
         ),
     })
     .strict(ENCODED_QUERY_MIGRATION_MESSAGE);
@@ -90,9 +97,9 @@ export function resolveUpdateAccess(candidate: unknown): UpdateAccessResolution 
     (parsed as unknown as Readonly<Record<string, unknown>>).query
   );
   rejectGenericIncidentJournalFields(parsed.fields);
-  const table = normalizeTableName(parsed.table);
+  const table = normalizeWriteTable(parsed.table);
   let prepared = prepareWriteFieldArguments(parsed, table);
-  const fields = prepareIncidentWriteFields("update", table, prepared.fields);
+  const fields = prepareWriteFieldValues("update", table, prepared.fields);
   prepared = withFieldPolicyArgumentValues(prepared, {
     table,
     sys_id: parsed.sys_id,
@@ -115,12 +122,13 @@ async function executeUpdate(
   );
   rejectGenericIncidentJournalFields(args.fields);
   const sysId = serviceNowSysIdPathSegment(args.sys_id);
-  const fields = prepareIncidentWriteFields("update", args.table, args.fields);
+  const table = normalizeWriteTable(args.table);
+  const fields = prepareWriteFieldValues("update", table, args.fields);
   const response = await client.patch(
-    `/api/now/table/incident/${sysId}`,
+    `/api/now/table/${table}/${sysId}`,
     fields
   );
-  const safeRecord = filteredIncidentWriteRecord(
+  const safeRecord = filteredWriteRecord(
     args,
     response,
     "retry_if_safe_and_idempotent"
@@ -149,10 +157,11 @@ export const updateToolModule = defineServiceNowToolModule({
   outputSchema: productionToolOutputSchemas.sn_update,
   requirements: {
     permissions: ["write"],
-    tables: {
-      kind: "static",
-      names: ["incident"],
-    },
+    tables: Object.freeze({
+      kind: "dynamic",
+      names: Object.freeze([]),
+      description: "Caller-selected table approved for writes by the table policy.",
+    }),
     apis: ["table"],
     fieldPolicies: ["write"],
     capabilities: ["record:update"],

@@ -742,10 +742,12 @@ describe("SNSDK-54 reference tool behavior matrix", () => {
     expect(connected.audits).toHaveLength(4);
     expect(connected.audits).toEqual(
       expect.arrayContaining([
+        // A missing short_description is a code-owned incident write denial,
+        // not a table denial: no tableAccess grant can satisfy it.
         expect.objectContaining({
           tool: "sn_create",
           outcome: "policy_rejected",
-          reason: "table_access_denied",
+          reason: "write_value_denied",
         }),
         // The sensitive `password` field is a field-policy denial, not a table
         // one, and is now classified as such.
@@ -754,10 +756,12 @@ describe("SNSDK-54 reference tool behavior matrix", () => {
           outcome: "policy_rejected",
           reason: "field_access_denied",
         }),
+        // An out-of-range urgency is likewise a bounded-value denial from the
+        // incident write policy.
         expect.objectContaining({
           tool: "sn_update",
           outcome: "policy_rejected",
-          reason: "table_access_denied",
+          reason: "write_value_denied",
         }),
         expect.objectContaining({
           tool: "sn_update",
@@ -771,7 +775,7 @@ describe("SNSDK-54 reference tool behavior matrix", () => {
         ({ tool, outcome, reason }) =>
           tool === "sn_create" &&
           outcome === "policy_rejected" &&
-          (reason === "table_access_denied" || reason === "field_access_denied")
+          (reason === "write_value_denied" || reason === "field_access_denied")
       )
     ).toHaveLength(2);
     for (const denial of denials) {

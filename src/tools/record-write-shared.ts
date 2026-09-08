@@ -1,4 +1,4 @@
-/** Shared response hardening for the dedicated ordinary incident write modules. */
+/** Shared response hardening for the dedicated ordinary write modules. */
 
 import { types as nodeUtilTypes } from "node:util";
 
@@ -11,9 +11,9 @@ import { normalizeServiceNowSysId } from "../servicenow-identifiers.js";
 import { createToolError, type ToolErrorRetry } from "../tool-error.js";
 import { stripEmpty } from "../utils.js";
 
-const INCIDENT_NUMBER = /^[A-Za-z0-9_-]{1,80}$/u;
+const RECORD_NUMBER = /^[A-Za-z0-9_-]{1,80}$/u;
 
-export function filteredIncidentWriteRecord(
+export function filteredWriteRecord(
   args: Readonly<Record<string, unknown>>,
   response: unknown,
   retry: ToolErrorRetry
@@ -43,7 +43,8 @@ export function requiredCreatedSysId(record: Record<string, unknown>): string {
   }
 }
 
-export function optionalIncidentNumber(
+/** Tables that carry no `number` column simply omit it. */
+export function optionalRecordNumber(
   record: Record<string, unknown>
 ): string | undefined {
   const candidate = record.number;
@@ -54,7 +55,7 @@ export function optionalIncidentNumber(
     throw createToolError("upstream", "do_not_retry");
   }
   const number = candidate.trim();
-  if (!INCIDENT_NUMBER.test(number)) {
+  if (!RECORD_NUMBER.test(number)) {
     throw createToolError("upstream", "do_not_retry");
   }
   return number;

@@ -596,8 +596,8 @@ in this section is needed to use this server.
 |------|-------------|
 | `sn_query` | Query an approved table with structured filters, field selection, pagination, and sorting; bounded raw reads require an explicit policy rule |
 | `sn_get` | Get a single record by sys_id from an approved table |
-| `sn_create` | Create an incident using only controlled ordinary writable fields |
-| `sn_update` | Update one incident selected by exact `sys_id`, using only controlled ordinary writable fields; rejects `comments` and `work_notes` with dedicated-tool migration guidance |
+| `sn_create` | Create a record on any table granted for writes, using only field-policy-approved writable fields; `incident` additionally requires a bounded `short_description` |
+| `sn_update` | Update one record selected by exact `sys_id` on any table granted for writes, using only field-policy-approved writable fields; rejects `comments` and `work_notes` with dedicated-tool migration guidance |
 | `sn_incident_add_comment` | Append one bounded customer-visible comment to an incident; repeated calls append again |
 | `sn_incident_add_work_note` | Append one bounded internal work note to an incident; repeated calls append again |
 | `sn_delete` | Delete a record on an approved write table (requires `confirm: true`) |

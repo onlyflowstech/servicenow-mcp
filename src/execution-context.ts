@@ -121,6 +121,7 @@ export type ToolAuditReason =
   | "encoded_query_denied"
   | "structured_query_denied"
   | "journal_update_denied"
+  | "write_value_denied"
   | "client_initialization_failed"
   | "profile_binding_changed"
   | "request_cancelled"
@@ -184,7 +185,8 @@ export type ToolAuditRecord =
         | "field_access_denied"
         | "encoded_query_denied"
         | "structured_query_denied"
-        | "journal_update_denied";
+        | "journal_update_denied"
+        | "write_value_denied";
     })
   | (ResolvedToolAuditRecord & ToolAuditErrorFields & {
       readonly outcome: "client_rejected";
@@ -399,7 +401,8 @@ export type ToolAuditDisposition =
         | "field_access_denied"
         | "encoded_query_denied"
         | "structured_query_denied"
-        | "journal_update_denied";
+        | "journal_update_denied"
+        | "write_value_denied";
       readonly profile: ResolvedProfileBinding;
     }
   | {
@@ -493,7 +496,8 @@ export function createAuditRecord(input: CreateToolAuditRecordInput): ToolAuditR
         reason !== "field_access_denied" &&
         reason !== "encoded_query_denied" &&
         reason !== "structured_query_denied" &&
-        reason !== "journal_update_denied"
+        reason !== "journal_update_denied" &&
+        reason !== "write_value_denied"
       ) {
         break;
       }
@@ -743,7 +747,8 @@ function validateAuditInvariant(
         reason === "field_access_denied" ||
         reason === "encoded_query_denied" ||
         reason === "structured_query_denied" ||
-        reason === "journal_update_denied") &&
+        reason === "journal_update_denied" ||
+        reason === "write_value_denied") &&
       hasProfile) ||
     (outcome === "client_rejected" &&
       (reason === "client_initialization_failed" ||
