@@ -1,0 +1,91 @@
+{
+  "_meta": {
+    "story": "SNSDK-67 (ATF S0 spike)",
+    "source": "Read-only Table API reads on a Personal Developer Instance, 2026-09",
+    "sanitized": "Instance host replaced with example.service-now.com; no instance-specific records included.",
+    "consumers": ["S4 sn_atf_readiness"]
+  },
+  "plugins": {
+    "_verification": "verified (v_plugin.id)",
+    "_note": "v_plugin.sys_id is the plugin id truncated to its last 32 characters; always read the `id` field.",
+    "atf": { "id": "com.glide.automated_testing_framework", "name": "Automated Test Framework", "active": "Active" },
+    "cicd_rest_api": { "id": "com.glide.continuousdelivery", "name": "Continuous Integration and Continuous Delivery (CICD) REST API", "active": "Active" },
+    "cicd_spoke": { "id": "com.sn_cicd_spoke", "name": "Continuous Integration and Continuous Delivery (CICD) Spoke", "active": "Active", "required": false },
+    "atf_sub_plugins_observed": [
+      "com.glide.automated_testing_impl.schedule",
+      "com.glide.automated_testing_impl.headless_test_runner",
+      "com.glide.automated_testing_impl.rest_inbound",
+      "com.glide.automated_testing_impl.parameters",
+      "com.glide.automated_testing_impl.custom_ui",
+      "com.glide.automated_testing_impl.lists",
+      "com.glide.automated_testing_impl.service_catalog",
+      "com.glide.automated_testing_impl.service_portal"
+    ]
+  },
+  "properties": {
+    "_verification": "verified (sys_properties name/type/description)",
+    "sn_atf.runner.enabled": {
+      "type": "true | false",
+      "platform_default": "false",
+      "observed": "true",
+      "meaning": "Enable test/test suite execution. Defaults to false so tests don't accidentally run on production. Private: does not move between instances in update sets.",
+      "readiness": "blocker when not 'true'"
+    },
+    "sn_atf.schedule.enabled": {
+      "type": "true | false",
+      "observed": "true",
+      "meaning": "Enable scheduled test suite execution. Also requires sn_atf.runner.enabled.",
+      "readiness": "informational"
+    },
+    "sn_atf.runner.heartbeat.timeout": {
+      "type": "integer",
+      "observed": "120",
+      "meaning": "Seconds without a heartbeat before a client test runner flips from online to offline (120-1800)."
+    },
+    "sn_atf.runner.heartbeat.interval": {
+      "type": "integer",
+      "observed": "60",
+      "meaning": "Seconds between client test runner heartbeats (60-1800)."
+    },
+    "sn_atf.headless.enabled": {
+      "type": "true | false",
+      "platform_default": "false",
+      "observed": "false",
+      "meaning": "Enable the headless (docker) client test runner."
+    }
+  },
+  "roles": {
+    "_verification": "verified (sys_user_role names exist); membership of the service account NOT verified",
+    "cicd": "sn_cicd.sys_ci_automation",
+    "cicd_alternative": "admin",
+    "atf": ["atf_test_admin", "atf_test_designer", "atf_ws_designer"]
+  },
+  "client_test_runner": {
+    "_verification": "schema verified; zero sys_atf_agent rows on the PDI, so an 'online' row was never observed",
+    "table": "sys_atf_agent",
+    "online_when": {
+      "status": "online",
+      "type": "scheduled",
+      "last_checkin_within_seconds": "sn_atf.runner.heartbeat.timeout"
+    },
+    "fields": {
+      "status": { "choices": ["online", "offline"] },
+      "type": { "choices": ["manual", "scheduled"] },
+      "last_checkin": "glide_date_time",
+      "status_reason": "string(1000)",
+      "is_cloud_runner": "boolean",
+      "headless": "boolean",
+      "browser_name": "string",
+      "browser_version": "string",
+      "os_name": "string",
+      "os_version": "string",
+      "user": "reference sys_user (do not read; not needed for readiness)"
+    },
+    "observed_rows": []
+  },
+  "ui_step_environment": {
+    "_verification": "verified (sys_atf_step_config.step_env display values)",
+    "needs_client_runner": ["UI"],
+    "server_only": ["Server - Independent", "Server - REST"]
+  }
+}

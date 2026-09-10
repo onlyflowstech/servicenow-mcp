@@ -1,0 +1,149 @@
+{
+  "_meta": {
+    "story": "SNSDK-67 (ATF S0 spike)",
+    "source": "sn_schema + read-only Table API reads on a Personal Developer Instance, 2026-09",
+    "sanitized": "All record sys_ids, numbers, test/suite names, users, timestamps and log text are synthetic. Field names, types, choices and structure are as observed.",
+    "consumers": ["S5 sn_atf_run", "S6 sn_atf_results", "S1 renderer (untrusted output sample)"]
+  },
+  "tables": {
+    "sys_atf_test_suite_result": {
+      "_verification": "verified",
+      "key_fields": {
+        "test_suite": "reference sys_atf_test_suite",
+        "status": { "choices": ["started", "running", "completed", "success", "failure", "error", "canceled", "skipped", "success_with_warnings"] },
+        "success": "boolean",
+        "run_time": "glide_duration (value is '1970-01-01 HH:MM:SS')",
+        "start_time": "glide_date_time",
+        "end_time": "glide_date_time",
+        "execution_tracker": "reference sys_execution_tracker",
+        "parent": "reference sys_atf_test_suite_result (child suites)",
+        "previous_suite_result": "reference sys_atf_test_suite_result",
+        "number": "string (TESnnnnnnn)",
+        "success_count": "integer (direct tests only)",
+        "failure_count": "integer",
+        "error_count": "integer",
+        "skip_count": "integer",
+        "rolled_up_test_success_count": "integer (includes child suites)",
+        "rolled_up_test_failure_count": "integer",
+        "rolled_up_test_error_count": "integer",
+        "rolled_up_test_skip_count": "integer",
+        "rolled_up_test_canceled_count": "integer",
+        "rolled_up_test_success_with_warnings_count": "integer"
+      },
+      "_note": "Table field names are rolled_up_test_* (with an underscore). The CI/CD results API uses rolledup_test_* (no underscore). Do not share one mapper."
+    },
+    "sys_atf_test_result": {
+      "_verification": "verified",
+      "key_fields": {
+        "test": "reference sys_atf_test",
+        "test_name": "string(100) (snapshot of the test name at run time)",
+        "parent": "reference sys_atf_test_suite_result (label: Test suite result)",
+        "status": { "choices": ["pending", "waiting", "running", "success", "failure", "skipped", "error", "canceled", "paused", "success_with_warnings"] },
+        "first_failing_step": "reference sys_atf_test_result_step",
+        "first_failing_client_error": "reference sys_atf_test_result_item",
+        "output": "string(4000) - UNTRUSTED, contains HTML (<a href>, <span>) and raw log text",
+        "run_time": "glide_duration",
+        "start_time": "glide_date_time",
+        "end_time": "glide_date_time",
+        "execution_tracker": "reference sys_execution_tracker",
+        "previous_test_result": "reference sys_atf_test_result"
+      }
+    },
+    "sys_atf_test_result_step": {
+      "_verification": "verified; extends sys_atf_test_result_item (most fields are inherited)",
+      "own_fields": ["order", "origin_test", "outputs", "sys_id"],
+      "inherited_fields": {
+        "test_result": "reference sys_atf_test_result (mandatory)",
+        "step": "reference sys_atf_step",
+        "status": { "choices": ["pending", "error", "failure", "skipped", "success", "canceled", "success_with_warnings", "warning", "ignored"] },
+        "summary": "string(1000) - UNTRUSTED",
+        "output": "compressed(12288) - UNTRUSTED",
+        "description": "string(1000)",
+        "type": { "choices": ["client_log", "server_log", "step_result", "test_setup", "test_teardown", "client_alert", "client_error", "client_confirm", "client_prompt", "server_error"] },
+        "run_time_millis": "integer",
+        "start_time": "glide_date_time",
+        "end_time": "glide_date_time"
+      },
+      "_note": "Filter type=step_result to get one row per step; the other types are log/alert items on the parent table sys_atf_test_result_item."
+    },
+    "sys_execution_tracker": {
+      "_verification": "verified",
+      "key_fields": {
+        "state": { "choices": { "0": "Pending", "1": "Running", "2": "Successful", "3": "Failed", "4": "Cancelled" } },
+        "percent_complete": "integer",
+        "message": "string(4000)",
+        "detail_message": "string(4000)",
+        "result": "string(4000) - JSON text for ATF suite runs (see sample)",
+        "source": "document_id (the suite sys_id)",
+        "source_table": "table_name (sys_atf_test_suite)",
+        "parent": "reference sys_execution_tracker"
+      }
+    }
+  },
+  "samples": {
+    "suite_result_failure": {
+      "sys_id": "a0000000000000000000000000000001",
+      "number": "TES0000001",
+      "test_suite": { "value": "a0000000000000000000000000000100", "display_value": "Example Suite" },
+      "status": { "value": "failure", "display_value": "Failure" },
+      "success": "false",
+      "run_time": { "value": "1970-01-01 00:00:08", "display_value": "8 Seconds" },
+      "start_time": "2026-01-01 12:00:00",
+      "end_time": "2026-01-01 12:00:08",
+      "execution_tracker": "a0000000000000000000000000000200",
+      "success_count": "1",
+      "failure_count": "2",
+      "error_count": "0",
+      "skip_count": "0",
+      "rolled_up_test_success_count": "1",
+      "rolled_up_test_failure_count": "2",
+      "rolled_up_test_error_count": "0",
+      "rolled_up_test_skip_count": "0",
+      "rolled_up_test_canceled_count": "0",
+      "rolled_up_test_success_with_warnings_count": "0"
+    },
+    "suite_result_success": {
+      "sys_id": "a0000000000000000000000000000002",
+      "number": "TES0000002",
+      "test_suite": { "value": "a0000000000000000000000000000100", "display_value": "Example Suite" },
+      "status": { "value": "success", "display_value": "Success" },
+      "success": "true",
+      "run_time": { "value": "1970-01-01 00:00:07", "display_value": "7 Seconds" },
+      "rolled_up_test_success_count": "3",
+      "rolled_up_test_failure_count": "0",
+      "rolled_up_test_error_count": "0",
+      "rolled_up_test_skip_count": "0"
+    },
+    "test_result_failure": {
+      "sys_id": "a0000000000000000000000000000011",
+      "test": { "value": "a0000000000000000000000000000300", "display_value": "Example test: order posts and ledger balances" },
+      "test_name": "Example test: order posts and ledger balances",
+      "parent": { "value": "a0000000000000000000000000000001", "display_value": "TES0000001" },
+      "status": { "value": "failure", "display_value": "Failure" },
+      "first_failing_step": { "value": "a0000000000000000000000000000021", "display_value": "Run Server Side Script" },
+      "run_time": { "value": "1970-01-01 00:00:02", "display_value": "2 Seconds" },
+      "output": "\n\n\nFull logging from step execution:\n12:00:02.816 Loading script: jasmine_lib/jasmine31.js\n12:00:03.391 Successfully loaded jasmine_lib/jasmine31.js\n12:00:04.483 Background message, type:error, message: Invalid state transition from \"draft\" to \"completed\".\n12:00:04.488 App:<a href=\"sys_scope.do?sys_id=a0000000000000000000000000000900\" target=\"_blank\">Example App</a> x_example_app: Assertion failed: post succeeded, errors: [{\"code\":\"ERR_EXAMPLE\",\"message\":\"Only a completed record can be reconciled (current: draft).\"}] should have been true but was false\n"
+    },
+    "step_result_failure": {
+      "sys_id": "a0000000000000000000000000000021",
+      "test_result": { "value": "a0000000000000000000000000000011" },
+      "step": { "value": "a0000000000000000000000000000400", "display_value": "Run Server Side Script" },
+      "type": "step_result",
+      "status": { "value": "failure", "display_value": "Failure" },
+      "order": "1",
+      "run_time_millis": "1781",
+      "summary": "Assertion failed: post succeeded ... should have been true but was false"
+    },
+    "execution_tracker_suite_failed": {
+      "sys_id": "a0000000000000000000000000000200",
+      "name": "Test suite 'Example Suite' started by Example User on 01/01/26 12:00:00.000",
+      "state": { "value": "3", "display_value": "Failed" },
+      "percent_complete": "100",
+      "message": "Suite failed",
+      "detail_message": "Suite failed",
+      "source": "a0000000000000000000000000000100",
+      "source_table": "sys_atf_test_suite",
+      "result": "{\"useCloudRunner\":false,\"test_to_tracker_id_map\":{\"a0000000000000000000000000000300\":\"a0000000000000000000000000000201\"},\"test_suite_result_id\":\"a0000000000000000000000000000001\",\"child_suite_to_tracker_id_map\":{}}"
+    }
+  }
+}
