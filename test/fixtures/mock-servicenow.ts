@@ -9,6 +9,7 @@ import type {
   ServiceNowClient,
   ServiceNowOperations,
 } from "../../src/client.js";
+import type { AtfExecutionPolicyInput } from "../../src/atf-policy.js";
 import type { ServiceNowConfig } from "../../src/config.js";
 import type {
   ExecutionContextDependencies,
@@ -149,6 +150,8 @@ export interface MockServiceNowHarnessOptions {
   readonly steps?: readonly MockServiceNowStep[];
   readonly tableAccess?: TableAccessPolicy;
   readonly modules?: readonly ToolModuleContract[];
+  /** ATF grants stated by the mocked policy; omission denies them. */
+  readonly atf?: AtfExecutionPolicyInput;
 }
 
 /** Shared MCP boundary harness for future ServiceNow domain-module tests. */
@@ -206,6 +209,7 @@ export async function createMockServiceNowHarness(
         id: "snsdk-54-mocked-policy",
         revision: "v1",
         tableAccess,
+        ...(options.atf === undefined ? {} : { atf: options.atf }),
       }),
     },
     auditSink: {

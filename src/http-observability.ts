@@ -787,7 +787,8 @@ function validateToolDisposition(
         reason === "encoded_query_denied" ||
         reason === "structured_query_denied" ||
         reason === "journal_update_denied" ||
-        reason === "write_value_denied") &&
+        reason === "write_value_denied" ||
+        reason === "atf_execution_denied") &&
       resolved) ||
     (outcome === "client_rejected" &&
       (reason === "client_initialization_failed" ||
