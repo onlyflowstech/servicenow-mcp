@@ -1170,7 +1170,8 @@ function finalizeHandlerInvocation(
     const enriched = validateSuccessfulModuleResult(
       outputSchema,
       guarded.result,
-      canonicalProfile
+      canonicalProfile,
+      tool
     );
     if (!enriched) {
       return handlerResultFailure(
@@ -1246,7 +1247,8 @@ export function enrichSuccessfulResult(
 function validateSuccessfulModuleResult(
   outputSchema: ReturnType<typeof toolRegistrationConfig>["outputSchema"],
   result: CallToolResult,
-  canonicalProfile: string
+  canonicalProfile: string,
+  tool: string
 ): CallToolResult | undefined {
   try {
     const enriched = enrichSuccessfulResult(result, canonicalProfile);
@@ -1256,7 +1258,7 @@ function validateSuccessfulModuleResult(
       ...enriched,
       structuredContent: parsed.data,
     };
-    const finalized = finalizeEnvelopeResult(validated);
+    const finalized = finalizeEnvelopeResult(validated, tool);
     if (!finalized) return undefined;
     const finalParsed = outputSchema.safeParse(finalized.structuredContent);
     if (!finalParsed.success) return undefined;

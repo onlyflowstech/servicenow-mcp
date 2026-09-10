@@ -284,6 +284,53 @@ export function isProductionToolName(name: string): name is ProductionToolName {
   return Object.hasOwn(productionToolOutputSchemas, name);
 }
 
+/** Read-only copy of a finalized envelope handed to a tool text renderer. */
+export interface RenderableEnvelope {
+  readonly profile?: string;
+  readonly data: unknown;
+  readonly metadata: Readonly<z.infer<typeof resultMetadataSchema>>;
+}
+
+export interface EnvelopeTextRenderContext {
+  /** The generic one-line summary, including continuation/truncation guidance. */
+  readonly summary: string;
+}
+
+/**
+ * Human-readable text for one tool's successful result. It receives a deeply
+ * frozen copy, so it cannot alter structuredContent, and the values in it come
+ * from ServiceNow: build output only with the escaping helpers in markdown.ts.
+ */
+export type EnvelopeTextRenderer = (
+  envelope: RenderableEnvelope,
+  context: EnvelopeTextRenderContext
+) => string;
+
+// Populated while modules load, then sealed by the first finalized result so a
+// renderer cannot be added or swapped once tool calls are being served.
+const ENVELOPE_TEXT_RENDERERS = new Map<string, EnvelopeTextRenderer>();
+let envelopeTextRenderersSealed = false;
+
+/** Register the text renderer for one production tool, once, before first use. */
+export function registerEnvelopeTextRenderer(
+  tool: ProductionToolName,
+  renderer: EnvelopeTextRenderer
+): void {
+  if (envelopeTextRenderersSealed) {
+    throw new TypeError("envelope text renderers are sealed once results are finalized");
+  }
+  if (typeof tool !== "string" || !isProductionToolName(tool)) {
+    throw new TypeError("envelope text renderer requires a production tool name");
+  }
+  if (typeof renderer !== "function") {
+    throw new TypeError(`${tool}: envelope text renderer must be a function`);
+  }
+  if (ENVELOPE_TEXT_RENDERERS.has(tool)) {
+    throw new TypeError(`${tool}: envelope text renderer is already registered`);
+  }
+  ENVELOPE_TEXT_RENDERERS.set(tool, renderer);
+}
+
 interface MutableMetadata {
   kind: "single" | "collection" | "operation";
   record_count: number;
@@ -822,12 +869,74 @@ function truncateLongestString(data: unknown): boolean {
   return true;
 }
 
+function deepFreeze(value: unknown): unknown {
+  if (typeof value === "object" && value !== null) {
+    for (const entry of Object.values(value)) deepFreeze(entry);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function renderedEnvelopeText(
+  renderer: EnvelopeTextRenderer,
+  envelope: MutableEnvelope,
+  summary: string
+): string | undefined {
+  try {
+    const view = deepFreeze(
+      JSON.parse(JSON.stringify(envelope))
+    ) as RenderableEnvelope;
+    const text = renderer(view, Object.freeze({ summary }));
+    return typeof text === "string" && text.trim() !== "" ? text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Replace handler text with a coordinator-rendered summary and enforce the
+ * Replace handler text with coordinator-rendered text and enforce the
  * declared final MCP result byte limit. Returns undefined when even a fully
  * minimized valid envelope cannot fit, causing the caller to fail closed.
+ *
+ * The envelope is always fitted against the generic one-line summary. A tool
+ * with a registered renderer then gets its readable text only if the fitted
+ * result still fits with it; a renderer that throws, returns no text, or
+ * overflows the budget falls back to the summary. Readable text therefore
+ * never costs structured records and never turns a success into an error.
  */
 export function finalizeEnvelopeResult(
+  result: CallToolResult,
+  tool?: string
+): CallToolResult | undefined {
+  envelopeTextRenderersSealed = true;
+  const summarized = finalizeSummaryResult(result);
+  const renderer =
+    tool === undefined ? undefined : ENVELOPE_TEXT_RENDERERS.get(tool);
+  if (
+    !summarized ||
+    !renderer ||
+    !isMutableEnvelope(summarized.structuredContent)
+  ) {
+    return summarized;
+  }
+  const envelope = summarized.structuredContent;
+  const block = summarized.content[0];
+  const text = renderedEnvelopeText(
+    renderer,
+    envelope,
+    block?.type === "text" ? block.text : ""
+  );
+  if (text === undefined) return summarized;
+  const rendered: CallToolResult = {
+    ...summarized,
+    content: [{ type: "text", text }],
+  };
+  return resultBytes(rendered) <= envelope.metadata.limits.max_bytes
+    ? rendered
+    : summarized;
+}
+
+function finalizeSummaryResult(
   result: CallToolResult
 ): CallToolResult | undefined {
   if (!isMutableEnvelope(result.structuredContent)) return result;
