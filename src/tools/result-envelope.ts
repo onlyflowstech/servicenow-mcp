@@ -8,6 +8,7 @@ import {
   MAX_RESPONSE_BYTES_MAX,
   MAX_RESPONSE_BYTES_MIN,
 } from "../utils.js";
+import { canonicalHttpsOrigin } from "./markdown.js";
 import { withResolvedProfileOutput } from "./tool-module.js";
 
 export const DEFAULT_RESULT_RECORD_LIMIT = 1_000;
@@ -294,6 +295,17 @@ export interface RenderableEnvelope {
 export interface EnvelopeTextRenderContext {
   /** The generic one-line summary, including continuation/truncation guidance. */
   readonly summary: string;
+  /**
+   * Canonical https origin of the resolved profile's instance, for building
+   * record links. Coordinator-supplied, never taken from ServiceNow content,
+   * and absent when the profile instance is not a bare https origin.
+   */
+  readonly instanceOrigin?: string;
+}
+
+/** Trusted coordinator inputs to text rendering; never part of structuredContent. */
+export interface EnvelopeTextRenderOptions {
+  readonly instanceOrigin?: string;
 }
 
 /**
@@ -880,13 +892,13 @@ function deepFreeze(value: unknown): unknown {
 function renderedEnvelopeText(
   renderer: EnvelopeTextRenderer,
   envelope: MutableEnvelope,
-  summary: string
+  context: EnvelopeTextRenderContext
 ): string | undefined {
   try {
     const view = deepFreeze(
       JSON.parse(JSON.stringify(envelope))
     ) as RenderableEnvelope;
-    const text = renderer(view, Object.freeze({ summary }));
+    const text = renderer(view, context);
     return typeof text === "string" && text.trim() !== "" ? text : undefined;
   } catch {
     return undefined;
@@ -906,7 +918,8 @@ function renderedEnvelopeText(
  */
 export function finalizeEnvelopeResult(
   result: CallToolResult,
-  tool?: string
+  tool?: string,
+  options: EnvelopeTextRenderOptions = {}
 ): CallToolResult | undefined {
   envelopeTextRenderersSealed = true;
   const summarized = finalizeSummaryResult(result);
@@ -921,10 +934,14 @@ export function finalizeEnvelopeResult(
   }
   const envelope = summarized.structuredContent;
   const block = summarized.content[0];
+  const instanceOrigin = canonicalHttpsOrigin(options.instanceOrigin);
   const text = renderedEnvelopeText(
     renderer,
     envelope,
-    block?.type === "text" ? block.text : ""
+    Object.freeze({
+      summary: block?.type === "text" ? block.text : "",
+      ...(instanceOrigin === undefined ? {} : { instanceOrigin }),
+    })
   );
   if (text === undefined) return summarized;
   const rendered: CallToolResult = {

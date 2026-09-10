@@ -4,6 +4,7 @@ import { enrichSuccessfulResult } from "../src/tools/index.js";
 import {
   headline,
   inline,
+  recordLink,
   renderMarkdown,
   table,
 } from "../src/tools/markdown.js";
@@ -12,10 +13,12 @@ import {
   envelopeCompatibilityResult,
   finalizeEnvelopeResult,
   registerEnvelopeTextRenderer,
+  type EnvelopeTextRenderContext,
   type ProductionToolName,
   type RenderableEnvelope,
 } from "../src/tools/result-envelope.js";
 import {
+  SNSDK54_INSTANCE,
   SNSDK54_PROFILE_NAME,
   SNSDK54_SYS_ID,
   createMockServiceNowHarness,
@@ -35,8 +38,10 @@ function captureError(action: () => void): unknown {
 // Vitest isolates modules per file, so these test-only renderers are
 // registered before this file finalizes anything and never leak elsewhere.
 const seen: RenderableEnvelope[] = [];
+const seenContexts: EnvelopeTextRenderContext[] = [];
 registerEnvelopeTextRenderer("sn_health", (envelope, context) => {
   seen.push(envelope);
+  seenContexts.push(context);
   return renderMarkdown(
     headline("Instance health", { status: "pass" }),
     inline(context.summary)
@@ -52,14 +57,21 @@ registerEnvelopeTextRenderer("sn_discover", (envelope) => {
   (envelope.data as { results: unknown[] }).results.push("mutated");
   return "unreachable";
 });
-registerEnvelopeTextRenderer("sn_query", (envelope) => {
+registerEnvelopeTextRenderer("sn_query", (envelope, context) => {
   const results = (envelope.data as { results: Array<Record<string, unknown>> })
     .results;
   return renderMarkdown(
     headline("Incidents", { detail: `${results.length} shown` }),
     table(
       ["Number"],
-      results.map((record) => [String(record.number)])
+      results.map((record) => [
+        recordLink(
+          context.instanceOrigin ?? "",
+          "incident",
+          String(record.sys_id),
+          String(record.number)
+        ),
+      ])
     )
   );
 });
@@ -155,6 +167,30 @@ describe("envelope text renderer registry", () => {
     expect(Object.isFrozen(view.data)).toBe(true);
   });
 
+  it("passes only a validated instance origin in the render context", () => {
+    const source = enriched("sn_health", {}, { status: "ok" });
+    const summary = `Success for profile "${PROFILE}": single result with 1 record.`;
+
+    finalizeEnvelopeResult(source, "sn_health", {
+      instanceOrigin: "https://example.service-now.com/",
+    });
+    expect(seenContexts.at(-1)).toStrictEqual({
+      summary,
+      instanceOrigin: "https://example.service-now.com",
+    });
+    expect(Object.isFrozen(seenContexts.at(-1))).toBe(true);
+
+    for (const instanceOrigin of [
+      undefined,
+      "http://example.service-now.com",
+      "https://example.service-now.com/path",
+      "https://user:pw@example.service-now.com",
+    ]) {
+      finalizeEnvelopeResult(source, "sn_health", { instanceOrigin });
+      expect(seenContexts.at(-1)).toStrictEqual({ summary });
+    }
+  });
+
   it("falls back to the summary instead of truncating when rendered text overflows", () => {
     const { withTool, withoutTool } = withAndWithoutTool("sn_nl", {}, {
       table: "incident",
@@ -188,7 +224,7 @@ describe("envelope text renderer registry", () => {
     ).toEqual([{ name: "incident" }]);
   });
 
-  it("delivers rendered text through the MCP dispatcher", async () => {
+  it("delivers rendered text, linked from the profile's instance, through the MCP dispatcher", async () => {
     const connected = await createMockServiceNowHarness({
       steps: [
         {
@@ -215,12 +251,18 @@ describe("envelope text renderer registry", () => {
       expect(result.content).toEqual([
         {
           type: "text",
-          text: "### Incidents — 1 shown\n\n| Number |\n| --- |\n| INC0010054 |",
+          text:
+            "### Incidents — 1 shown\n\n| Number |\n| --- |\n" +
+            `| [INC0010054](${SNSDK54_INSTANCE}/incident.do?sys_id=${SNSDK54_SYS_ID}) |`,
         },
       ]);
       expect(
         (result.structuredContent as { data: { results: unknown[] } }).data.results
       ).toHaveLength(1);
+      // The origin reaches the renderer only; structured output is unchanged.
+      expect(JSON.stringify(result.structuredContent)).not.toContain(
+        SNSDK54_INSTANCE
+      );
       connected.fixture.assertConsumed();
     } finally {
       await connected.close();

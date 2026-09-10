@@ -51,9 +51,11 @@ const LINE_BREAKS = /\r\n?|[\n\u2028\u2029]/gu;
 const UNSAFE_CHARACTERS =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/gu;
 // Characters with inline meaning. Escaping brackets and angle brackets
-// disables links, images, autolinks, and raw HTML; `|` keeps table cells
-// intact; backticks prevent code spans; `&` blocks character references.
-const INLINE_SPECIAL = /[\\`*~[\]<>|&]/gu;
+// disables links, images, autolinks, and raw HTML; `!` is escaped everywhere
+// so escaped text ending in one cannot turn a following issued link into an
+// image; `|` keeps table cells intact; backticks prevent code spans; `&`
+// blocks character references.
+const INLINE_SPECIAL = /[\\`*~[\]<>|&!]/gu;
 const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 const SYS_ID = /^[0-9a-f]{32}$/u;
 const ZONED_ISO_TIMESTAMP =
@@ -104,7 +106,7 @@ function escapeLeadingBlockMarker(text: string): string {
   if (ordered) {
     return `${ordered[1]}\\${ordered[2]}${text.slice(ordered[0].length)}`;
   }
-  return /^[#>+\-=!]/u.test(text) ? `\\${text}` : text;
+  return /^[#>+\-=]/u.test(text) ? `\\${text}` : text;
 }
 
 /** Stop GFM from turning bare URLs, www. hosts, or addresses into links. */
@@ -246,7 +248,12 @@ export function untrustedBlock(
   );
 }
 
-function httpsOrigin(candidate: string): string | undefined {
+/**
+ * The canonical `https://host[:port]` origin of a bare instance URL, or
+ * undefined for anything else (another scheme, credentials, path, query).
+ */
+export function canonicalHttpsOrigin(candidate: unknown): string | undefined {
+  if (typeof candidate !== "string") return undefined;
   let url: URL;
   try {
     url = new URL(candidate);
@@ -277,7 +284,7 @@ export function recordLink(
   sysId: string,
   label: MarkdownInline
 ): MarkdownFragment {
-  const origin = httpsOrigin(instanceOrigin);
+  const origin = canonicalHttpsOrigin(instanceOrigin);
   const escapedLabel = inlineMarkdown(label);
   if (origin === undefined || !TABLE_NAME.test(tableName) || !SYS_ID.test(sysId)) {
     return issue(escapedLabel, "inline");
