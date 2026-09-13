@@ -22,6 +22,14 @@ import {
   parsePositiveIntegerEnv,
   parseTimeoutMs,
 } from "./config.js";
+import {
+  AtfConfigurationError,
+  atfConfigFromEnvironment,
+  resolveAtfConfig,
+  validateAtfConfigInput,
+  type AtfConfig,
+  type AtfConfigInput,
+} from "./atf-config.js";
 import { tableAccessPolicyInputFromEnvironment, type TableAccessPolicyInput } from "./table-policy.js";
 import { metadataCacheConfigFromEnvironment, type MetadataCacheConfigInput } from "./metadata-cache.js";
 import { ServiceNowClient } from "./client.js";
@@ -82,6 +90,11 @@ export interface Profile {
   writableTableFields?: unknown;
   /** Per-instance metadata cache configuration (default TTL 24h). */
   metadataCache?: MetadataCacheConfigInput;
+  /**
+   * ATF grants and result-cache settings. The grants (`execute`,
+   * `allowScriptSteps`) come only from the profile; see atf-config.ts.
+   */
+  atf?: AtfConfigInput;
 }
 
 export interface ProfileConfig {
@@ -111,6 +124,7 @@ const PROFILE_KEYS = new Set([
   "vendor_code", "description", "authType", "clientId", "clientSecret",
   "grantType", "apiKey", "apiKeyHeader", "timeoutMs", "maxConcurrentRequests", "schemaCacheTtlMs",
   "tableAccess", "fieldPolicy", "readableTableFields", "writableTableFields", "metadataCache",
+  "atf",
 ]);
 
 export interface ProfileManagerOptions {
@@ -312,7 +326,17 @@ export class ProfileManager {
         profile.schemaCacheTtlMs ??
         parsePositiveIntegerEnv(process.env.SN_SCHEMA_CACHE_TTL_MS, "SN_SCHEMA_CACHE_TTL_MS", { max: 3_600_000 }),
       ...resolvedMetadataCache(profile),
+      atf: resolveAtfConfig(profile.atf, atfConfigFromEnvironment()),
     });
+  }
+
+  /**
+   * Resolved ATF grants and result-cache settings for one profile. It reads
+   * no credential material, so policy selection can call it before any
+   * client exists.
+   */
+  getAtfConfig(name: string): AtfConfig {
+    return resolveAtfConfig(this.getProfile(name).atf, atfConfigFromEnvironment());
   }
 
   /**
@@ -441,10 +465,14 @@ export class ProfileManager {
         profiles,
       };
     } catch (err) {
+      // An ATF configuration message is authored in atf-config.ts and names
+      // only the offending key, never its value, so it is safe to surface.
       const reason =
-        err instanceof Error && err.message.includes("legacy plaintext")
-          ? "Legacy plaintext profile credentials are rejected; replace them through the profile administration CLI"
-          : "Profile configuration could not be loaded safely";
+        err instanceof AtfConfigurationError
+          ? `Profile configuration is invalid: ${err.message}`
+          : err instanceof Error && err.message.includes("legacy plaintext")
+            ? "Legacy plaintext profile credentials are rejected; replace them through the profile administration CLI"
+            : "Profile configuration could not be loaded safely";
       throw new Error(reason);
     } finally {
       if (descriptor !== undefined) fs.closeSync(descriptor);
@@ -544,6 +572,13 @@ export class ProfileManager {
     const metadataCache = metadataCacheConfigFromEnvironment();
     if (Object.keys(metadataCache).length > 0) {
       profile.metadataCache = metadataCache;
+    }
+
+    // The only place SN_ATF_EXECUTE and SN_ATF_ALLOW_SCRIPT_STEPS grant
+    // anything: this profile is itself defined by the environment.
+    const atf = atfConfigFromEnvironment();
+    if (Object.keys(atf).length > 0) {
+      profile.atf = atf;
     }
 
     return {
@@ -702,6 +737,9 @@ function validateLoadedProfiles(value: object): Record<string, Profile> {
 function canonicalizeProfile(profile: Profile): Profile {
   validateProfileKeys(profile);
   const canonical: Profile = { ...profile };
+  if (canonical.atf !== undefined) {
+    canonical.atf = validateAtfConfigInput(canonical.atf);
+  }
   for (const field of ["credential", "clientSecret", "apiKey"] as const) {
     const source = canonical[field];
     if (typeof source === "string") {
@@ -735,6 +773,9 @@ function immutableProfileSnapshot(profile: Profile): Profile {
   }
   if (snapshot.metadataCache !== undefined) {
     snapshot.metadataCache = deepFreezeJsonClone(snapshot.metadataCache);
+  }
+  if (snapshot.atf !== undefined) {
+    snapshot.atf = deepFreezeJsonClone(snapshot.atf);
   }
   for (const field of ["credential", "clientSecret", "apiKey"] as const) {
     const source = snapshot[field];

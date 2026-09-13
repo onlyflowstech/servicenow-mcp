@@ -89,6 +89,9 @@ function createRestrictedPolicyProvider(
             : { writableTableFields: configuredProfile.writableTableFields }),
         },
         encodedQueryAccess,
+        // Only the grants are read from this; cache settings reach handlers
+        // through the resolved configuration instead.
+        atf: profileManager.getAtfConfig(profile.name),
       });
     },
   });

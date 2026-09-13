@@ -17,6 +17,7 @@ import { types as nodeUtilTypes } from "node:util";
 import { z } from "zod";
 
 import type { ServiceNowOperations } from "../client.js";
+import type { AtfHandlerSettings } from "../atf-config.js";
 import type { ServiceNowConfig } from "../config.js";
 import { ENCODED_QUERY_MIGRATION_MESSAGE } from "../encoded-query-policy.js";
 import type {
@@ -124,7 +125,12 @@ export const profileOutputSchema = withResolvedProfileOutput(z.object({}));
 
 export type ToolPermission = "read" | "write";
 export type ToolFieldPolicy = "read" | "write";
-export type ServiceNowApiFamily = "aggregate" | "atf" | "attachment" | "table";
+export type ServiceNowApiFamily =
+  | "aggregate"
+  | "atf"
+  | "attachment"
+  | "cicd"
+  | "table";
 
 export type ToolTableDependencies =
   | { readonly kind: "none" }
@@ -145,9 +151,16 @@ export interface ToolModuleRequirements {
   readonly capabilities: readonly string[];
 }
 
-/** Narrow non-secret settings available to a ServiceNow tool handler. */
+/**
+ * Narrow non-secret settings available to a ServiceNow tool handler. The
+ * dispatcher always supplies `atf`; it is optional only so direct handler
+ * tests need not construct it. ATF grants are not settings: they are enforced
+ * from the resolved policy before the handler runs.
+ */
 export type ServiceNowToolSettings = Readonly<
-  Pick<ServiceNowConfig, "displayValue" | "instance" | "relDepth">
+  Pick<ServiceNowConfig, "displayValue" | "instance" | "relDepth"> & {
+    readonly atf?: AtfHandlerSettings;
+  }
 >;
 
 export type ToolModuleLogLevel = "debug" | "info" | "warn";
@@ -1384,6 +1397,7 @@ function validateRequirements(
     "aggregate",
     "atf",
     "attachment",
+    "cicd",
     "table",
   ] as const);
   validateTables(name, requirements.tables);

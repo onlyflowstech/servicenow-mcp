@@ -39,6 +39,8 @@ import {
   isWriteValuePolicyError,
   writeValueDenialMessage,
 } from "../write-value-policy.js";
+import { atfHandlerSettings } from "../atf-config.js";
+import { atfPolicyDenialMessage, isAtfPolicyError } from "../atf-policy.js";
 import {
   createAuditRecord,
   createExecutionContext,
@@ -504,6 +506,9 @@ function registerStandardTool(
         // tableAccess.writeTables. Reporting it as one sends the operator to
         // edit a key that cannot change the outcome.
         const writeValueDenied = isWriteValuePolicyError(error);
+        // An ATF execution denial is lifted by the profile's atf.execute
+        // grant, never by a table rule, so it must not read as one.
+        const atfExecutionDenied = isAtfPolicyError(error);
         auditInvocation(
           contextDependencies,
           {
@@ -518,7 +523,9 @@ function registerStandardTool(
                     ? "field_access_denied"
                     : writeValueDenied
                       ? "write_value_denied"
-                      : "table_access_denied",
+                      : atfExecutionDenied
+                        ? "atf_execution_denied"
+                        : "table_access_denied",
             profile: binding,
           },
           tool.definition.name,
@@ -535,7 +542,9 @@ function registerStandardTool(
                   ? `${fieldPolicyDenialMessage(error)} Correlation ID: ${context.correlationId}.`
                   : writeValueDenied
                     ? `${writeValueDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
-                    : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
+                    : atfExecutionDenied
+                      ? `${atfPolicyDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
+                      : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
         );
       }
 
@@ -613,6 +622,7 @@ function registerStandardTool(
             instance: context.profile.instance,
             displayValue: config.displayValue,
             relDepth: config.relDepth,
+            atf: atfHandlerSettings(config.atf),
           }),
           context,
           policy: context.effectivePolicy,
@@ -835,6 +845,7 @@ function registerProfileDiagnostic(
         // branch keeps the two paths from drifting apart again.
         const fieldAccessDenied = isFieldPolicyError(error);
         const writeValueDenied = isWriteValuePolicyError(error);
+        const atfExecutionDenied = isAtfPolicyError(error);
         auditInvocation(
           contextDependencies,
           {
@@ -843,7 +854,9 @@ function registerProfileDiagnostic(
               ? "field_access_denied"
               : writeValueDenied
                 ? "write_value_denied"
-                : "table_access_denied",
+                : atfExecutionDenied
+                  ? "atf_execution_denied"
+                  : "table_access_denied",
             profile: binding,
           },
           tool.definition.name,
@@ -854,7 +867,9 @@ function registerProfileDiagnostic(
             ? `${fieldPolicyDenialMessage(error)} Correlation ID: ${context.correlationId}.`
             : writeValueDenied
               ? `${writeValueDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
-              : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
+              : atfExecutionDenied
+                ? `${atfPolicyDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
+                : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
         );
       }
 

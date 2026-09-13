@@ -576,6 +576,48 @@ const POLICY_DEFINITIONS = {
     readable: ["sys_id", "test", "test_suite", "execution", "parent", "status", "output", "duration", "start_time", "end_time", "sys_created_on"],
     writable: [],
   },
+  // Field names for the tables below are provisional until the ATF platform
+  // spike (SNSDK-67) confirms them against an instance. Only `defaults` is
+  // applied (see FIELD_POLICY_BASE); an unknown default is ignored upstream.
+  sys_atf_step: {
+    defaults: ["sys_id", "test", "step_config", "order", "active", "description"],
+    readable: ["sys_id", "test", "step_config", "order", "active", "description", "sys_updated_on"],
+    writable: [],
+  },
+  // Shared with catalog and other variable owners; values can be sensitive.
+  // Reachable only through an explicit tableAccess grant.
+  sys_variable_value: {
+    defaults: ["sys_id", "document", "document_key", "variable", "value"],
+    readable: ["sys_id", "document", "document_key", "variable", "value", "order", "sys_updated_on"],
+    writable: [],
+  },
+  sys_atf_test_suite_result: {
+    defaults: ["sys_id", "test_suite", "status", "start_time", "end_time", "run_time"],
+    readable: [
+      "sys_id",
+      "test_suite",
+      "status",
+      "start_time",
+      "end_time",
+      "run_time",
+      "rolledup_test_success_count",
+      "rolledup_test_failure_count",
+      "rolledup_test_error_count",
+      "rolledup_test_skip_count",
+      "sys_created_on",
+    ],
+    writable: [],
+  },
+  sys_atf_test_result_step: {
+    defaults: ["sys_id", "test_result", "step", "order", "status", "summary"],
+    readable: ["sys_id", "test_result", "step", "order", "status", "summary", "output", "start_time", "end_time"],
+    writable: [],
+  },
+  sys_atf_agent: {
+    defaults: ["sys_id", "name", "status", "browser_name", "os_name", "sys_updated_on"],
+    readable: ["sys_id", "name", "status", "browser_name", "browser_version", "os_name", "os_version", "sys_updated_on"],
+    writable: [],
+  },
 } as const satisfies Record<string, TableFieldPolicyDefinition>;
 
 /**

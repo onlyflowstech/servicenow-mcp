@@ -202,6 +202,7 @@ describe("explicit named SN_* environment profile", () => {
       clientSecret: "oauth-client-secret",
       grantType: "password",
       timeoutMs: 7654,
+      atf: { execute: false, allowScriptSteps: false, resultCacheSize: 10 },
     });
   });
 
@@ -243,6 +244,7 @@ describe("explicit named SN_* environment profile", () => {
       authType: "basic",
       grantType: "client_credentials",
       timeoutMs: 4321,
+      atf: { execute: false, allowScriptSteps: false, resultCacheSize: 10 },
     });
   });
 
