@@ -1170,7 +1170,9 @@ function finalizeHandlerInvocation(
     const enriched = validateSuccessfulModuleResult(
       outputSchema,
       guarded.result,
-      canonicalProfile
+      canonicalProfile,
+      tool,
+      profile.instance
     );
     if (!enriched) {
       return handlerResultFailure(
@@ -1246,7 +1248,9 @@ export function enrichSuccessfulResult(
 function validateSuccessfulModuleResult(
   outputSchema: ReturnType<typeof toolRegistrationConfig>["outputSchema"],
   result: CallToolResult,
-  canonicalProfile: string
+  canonicalProfile: string,
+  tool: string,
+  instanceOrigin: string
 ): CallToolResult | undefined {
   try {
     const enriched = enrichSuccessfulResult(result, canonicalProfile);
@@ -1256,7 +1260,8 @@ function validateSuccessfulModuleResult(
       ...enriched,
       structuredContent: parsed.data,
     };
-    const finalized = finalizeEnvelopeResult(validated);
+    // The instance origin feeds only renderer context, never structuredContent.
+    const finalized = finalizeEnvelopeResult(validated, tool, { instanceOrigin });
     if (!finalized) return undefined;
     const finalParsed = outputSchema.safeParse(finalized.structuredContent);
     if (!finalParsed.success) return undefined;
