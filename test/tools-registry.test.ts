@@ -183,6 +183,7 @@ afterEach(async () => {
 describe("high-level tool discovery", () => {
   const expectedInputs: Record<string, string[]> = {
     sn_aggregate: ["display_value", "field", "group_by", "limit", "offset", "profile", "table", "type"],
+    sn_atf_author: ["action", "active", "application_scope", "description", "name", "profile", "start_order", "suite_sys_id", "test_sys_ids"],
     sn_atf: ["action", "execution_id", "fields", "limit", "offset", "profile", "suite_name", "suite_sys_id", "test_sys_id", "timeout", "wait"],
     sn_attach: ["action", "attachment_sys_id", "content_base64", "content_type", "file_name", "limit", "offset", "profile", "sys_id", "table"],
     sn_batch: ["action", "confirm", "fields", "limit", "profile", "structured_query", "table"],
@@ -214,6 +215,7 @@ describe("high-level tool discovery", () => {
     }
   > = {
     sn_aggregate: { title: "Aggregate records", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    sn_atf_author: { title: "Author ATF tests and suites", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     sn_atf: { title: "Run ATF tests", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     sn_attach: { title: "Manage attachments", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     sn_batch: { title: "Bulk update/delete records", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -234,7 +236,7 @@ describe("high-level tool discovery", () => {
     sn_update: { title: "Update record", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   };
 
-  it("publishes 19 unique sn_* tools from Zod with required profile", async () => {
+  it("publishes 20 unique sn_* tools from Zod with required profile", async () => {
     const fake = createProfileManager();
     const { client } = await harness(fake);
     const discovered = (await client.listTools()).tools;
@@ -446,6 +448,7 @@ describe("structured query registry boundary", () => {
 describe("profile validation boundary", () => {
   const validArguments: Record<string, Record<string, unknown>> = {
     sn_aggregate: { table: "incident", type: "COUNT" },
+    sn_atf_author: { action: "create_test", name: "Example" },
     sn_atf: { action: "list" },
     sn_attach: { action: "list" },
     sn_batch: {

@@ -20,6 +20,7 @@ const DENY_ALL_TABLE_ACCESS = Object.freeze({
 const EXPECTED_TOOL_NAMES = [
   "sn_aggregate",
   "sn_atf",
+  "sn_atf_author",
   "sn_attach",
   "sn_batch",
   "sn_codesearch",

@@ -89,7 +89,7 @@ function renderAddProfilePrompt(
     "",
     "Notes on step 2:",
     "- Default tools are sn_query, sn_get, sn_aggregate, sn_schema for a read grant, plus sn_create and sn_update for a write grant. Add --tools to narrow further.",
-    "- sn_delete, sn_batch, and sn_atf are never granted implicitly; name them with --tools only if I ask.",
+    "- sn_delete, sn_batch, sn_atf, sn_atf_run, and sn_atf_author are never granted implicitly; name them with --tools only if I ask.",
     "- If a table extends another (change_request and task, for example), add --related \"<table>=<parent>\".",
     "- Add --dry-run first to show me the resulting rules before writing them.",
     "",

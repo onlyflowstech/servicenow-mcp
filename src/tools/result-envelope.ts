@@ -152,6 +152,19 @@ const atfResultEnvelopeSchema = z
   })
   .strict();
 
+const atfRecordIdSchema = z.string().regex(/^[a-f0-9]{32}$/);
+const atfAuthorResultSchema = z.object({
+  action: z.enum(["create_test", "create_suite", "add_tests_to_suite"]),
+  outcome: z.enum(["created", "failed"]),
+  results: z.array(z.object({
+    table: z.enum(["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test"]),
+    sys_id: atfRecordIdSchema,
+  }).strict()).max(100),
+  rolled_back: z.array(atfRecordIdSchema).max(100),
+  rollback_failed: z.array(atfRecordIdSchema).max(100),
+  uncertain_insert: z.boolean(),
+}).strict();
+
 const queryResultSchema = z
   .object({
     record_count: nonNegativeInteger,
@@ -247,6 +260,7 @@ const productionDataSchemas = Object.freeze({
   sn_codesearch: listResultSchema,
   sn_discover: listResultSchema,
   sn_atf: atfResultEnvelopeSchema,
+  sn_atf_author: atfAuthorResultSchema,
   sn_nl: naturalLanguageResultSchema,
   sn_profile: profileResultSchema,
 });
@@ -277,6 +291,7 @@ export const productionToolOutputSchemas = Object.freeze({
   sn_codesearch: withStructuredResultEnvelope(productionDataSchemas.sn_codesearch),
   sn_discover: withStructuredResultEnvelope(productionDataSchemas.sn_discover),
   sn_atf: withStructuredResultEnvelope(productionDataSchemas.sn_atf),
+  sn_atf_author: withStructuredResultEnvelope(productionDataSchemas.sn_atf_author),
   sn_nl: withStructuredResultEnvelope(productionDataSchemas.sn_nl),
   sn_profile: withStructuredResultEnvelope(productionDataSchemas.sn_profile),
 });

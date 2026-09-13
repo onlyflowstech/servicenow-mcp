@@ -187,7 +187,10 @@ interface ClientOptions {
   readonly clients: readonly ClientTarget[];
 }
 
+const ATF_AUTHOR_TABLES = Object.freeze(["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_atf_step", "sys_variable_value"]);
+
 interface GrantOptions {
+  readonly atf?: boolean;
   readonly profile: string;
   readonly read: readonly string[];
   readonly write: readonly string[];
@@ -1388,7 +1391,10 @@ function runGrant(
     ? Object.freeze({})
     : (current.tableAccess ?? Object.freeze({}));
 
-  const tableAccess = buildTableAccess(existing, options);
+  const ordinary = buildTableAccess(existing, options);
+  const tableAccess = options.atf
+    ? buildTableAccess(ordinary, { ...options, read: [], write: ATF_AUTHOR_TABLES, tools: ["sn_atf_author"] })
+    : ordinary;
 
   if (options.dryRun) {
     out(
@@ -1965,7 +1971,7 @@ function parseGrantArguments(args: readonly string[]): GrantOptions {
   const parsed = parseFlags(
     args,
     {
-      boolean: new Set(["--replace", "--dry-run", "--json"]),
+      boolean: new Set(["--replace", "--dry-run", "--json", "--atf"]),
       value: new Set(["--profile", "--read", "--write", "--tools", "--related"]),
       repeatable: new Set(["--related"]),
     },
@@ -1975,8 +1981,8 @@ function parseGrantArguments(args: readonly string[]): GrantOptions {
   if (!profile) throw new Error(`--profile is required.\n\n${usage}`);
   const read = parseTableList(parsed.values.get("--read"), "--read");
   const write = parseTableList(parsed.values.get("--write"), "--write");
-  if (read.length === 0 && write.length === 0) {
-    throw new Error(`Give at least one of --read or --write.\n\n${usage}`);
+  if (read.length === 0 && write.length === 0 && !parsed.flags.has("--atf")) {
+    throw new Error(`Give at least one of --read, --write, or --atf.\n\n${usage}`);
   }
   return Object.freeze({
     profile,
@@ -1985,6 +1991,7 @@ function parseGrantArguments(args: readonly string[]): GrantOptions {
     ...(parsed.values.has("--tools")
       ? { tools: parseToolList(parsed.values.get("--tools") as string) }
       : {}),
+    atf: parsed.flags.has("--atf"),
     related: parseRelated(parsed.repeated.get("--related") ?? []),
     replace: parsed.flags.has("--replace"),
     dryRun: parsed.flags.has("--dry-run"),
@@ -2441,6 +2448,8 @@ function renderGrantHelp(): string {
     "  --profile NAME          Profile to modify (required)",
     "  --read TABLES           Comma-separated tables to allow for reads",
     "  --write TABLES          Comma-separated tables to allow for writes",
+    "  --atf                   Grant the five ATF authoring tables to sn_atf_author only",
+    "                          Does not enable execution or script-step authoring",
     `  --tools LIST            Tools permitted on these targets`,
     `                          (default read: ${DEFAULT_READ_TOOLS.join(",")};`,
     `                           default write adds: ${DEFAULT_WRITE_TOOLS.join(",")})`,

@@ -59,6 +59,7 @@ const SCHEMA_DICTIONARY_QUERY =
 
 const expectedInputs: Record<string, readonly string[]> = {
   sn_aggregate: ["display_value", "field", "group_by", "limit", "offset", "profile", "table", "type"],
+  sn_atf_author: ["action", "active", "application_scope", "description", "name", "profile", "start_order", "suite_sys_id", "test_sys_ids"],
   sn_atf: ["action", "execution_id", "fields", "limit", "offset", "profile", "suite_name", "suite_sys_id", "test_sys_id", "timeout", "wait"],
   sn_attach: ["action", "attachment_sys_id", "content_base64", "content_type", "file_name", "limit", "offset", "profile", "sys_id", "table"],
   sn_batch: ["action", "confirm", "fields", "limit", "profile", "structured_query", "table"],
@@ -81,6 +82,7 @@ const expectedInputs: Record<string, readonly string[]> = {
 
 const expectedRequired: Record<string, readonly string[]> = {
   sn_aggregate: ["profile", "table", "type"],
+  sn_atf_author: ["action", "profile"],
   sn_atf: ["action", "profile"],
   sn_attach: ["action", "profile"],
   sn_batch: ["action", "profile", "structured_query", "table"],
@@ -105,6 +107,7 @@ const validProfileBoundaryArguments: Readonly<
   Record<string, Readonly<Record<string, unknown>>>
 > = Object.freeze({
   sn_aggregate: { table: "incident", type: "COUNT" },
+  sn_atf_author: { action: "create_test", name: "Example" },
   sn_atf: { action: "list" },
   sn_attach: { action: "list" },
   sn_batch: {
@@ -152,6 +155,7 @@ type CompleteAnnotations = Required<NonNullable<Tool["annotations"]>>;
 
 const expectedAnnotations: Record<string, CompleteAnnotations> = {
   sn_aggregate: { title: "Aggregate records", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  sn_atf_author: { title: "Author ATF tests and suites", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   sn_atf: { title: "Run ATF tests", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   sn_attach: { title: "Manage attachments", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   sn_batch: { title: "Bulk update/delete records", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -713,7 +717,7 @@ const leakProbeModule = defineServiceNowToolModule({
 });
 
 describe.each(clientFactories)("SNSDK-27 %s contract", (_label, createClient) => {
-  it("initializes and discovers the exact 19-tool schema and annotation contract", async () => {
+  it("initializes and discovers the exact 20-tool schema and annotation contract", async () => {
     const harness = await createHarness();
     const client = createClient(harness.url);
     try {
@@ -760,6 +764,20 @@ describe.each(clientFactories)("SNSDK-27 %s contract", (_label, createClient) =>
     } finally {
       await client.close();
     }
+  });
+
+  it("creates an ATF suite with structured results and readable links", async () => {
+    const post = vi.fn(async () => ({ result: { sys_id: "1".repeat(32) } }));
+    const harness = await createHarness({ client: { post } as unknown as ServiceNowClient, writeTables: ["sys_atf_test_suite"], targetTools: ["sn_atf_author"] });
+    const client = createClient(harness.url);
+    try {
+      await client.initialize();
+      const result = await client.callTool("sn_atf_author", { profile: PROFILE_NAME, action: "create_suite", name: "Example suite" });
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent).toMatchObject({ profile: PROFILE_NAME, data: { outcome: "created", results: [{ table: "sys_atf_test_suite", sys_id: "1".repeat(32) }] } });
+      expect(JSON.stringify(result.content)).toContain(`${INSTANCE}/sys_atf_test_suite.do?sys_id=${"1".repeat(32)}`);
+      expect(post).toHaveBeenCalledWith("/api/now/table/sys_atf_test_suite", { name: "Example suite", active: "true" });
+    } finally { await client.close(); }
   });
 
   it("appends both incident journal fields through exact non-secret results", async () => {

@@ -158,7 +158,7 @@ describe("packaged stdio entrypoint", () => {
     const listed = (await session.response(2)).result as {
       tools: { name: string; inputSchema: { required?: string[] } }[];
     };
-    expect(listed.tools).toHaveLength(19);
+    expect(listed.tools).toHaveLength(20);
     // The transport changed; the profile requirement did not.
     expect(
       listed.tools.every((tool) => tool.inputSchema.required?.includes("profile"))

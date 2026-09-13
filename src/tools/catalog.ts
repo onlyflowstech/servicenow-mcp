@@ -8,6 +8,7 @@ import { resolveToolTableAccess } from "../tool-table-access.js";
 
 import * as aggregate from "./aggregate.js";
 import * as atf from "./atf.js";
+import { atfAuthorToolModule } from "./atf-author-module.js";
 import * as attach from "./attach.js";
 import * as batch from "./batch.js";
 import * as codesearch from "./codesearch.js";
@@ -186,6 +187,7 @@ export const serviceNowToolModules = Object.freeze([
     fieldPolicies: ["read"],
     capabilities: ["metadata:discover"],
   }),
+  atfAuthorToolModule,
   existingToolModule(atf, {
     permissions: ["read", "write"],
     tables: staticTables(

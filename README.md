@@ -3,7 +3,7 @@
 <!-- Logo placeholder -->
 <!-- ![ServiceNow MCP Server](banner.png) -->
 
-**The most comprehensive ServiceNow MCP server.** 19 tools for full CRUD, append-only incident journals, CMDB graph traversal, ATF testing, multi-instance profiles, and more.
+**The most comprehensive ServiceNow MCP server.** 20 tools for full CRUD, append-only incident journals, CMDB graph traversal, ATF testing, multi-instance profiles, and more.
 
 Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](https://github.com/onlyflowstech)
 
@@ -496,7 +496,7 @@ deny-by-default table and tool policy:
 | Natural language interface | ❌ | 🚧 currently policy-denied pending a typed access plan |
 | Background scripts | ❌ | 🚧 on the [roadmap](#roadmap) (SNS-39) |
 | Multi-instance profiles | ❌ | ✅ (named profiles, per-call override) |
-| **Total tools** | **1–3** | **19** |
+| **Total tools** | **1–3** | **20** |
 
 ---
 
@@ -625,6 +625,7 @@ in this section is needed to use this server.
 
 | Tool | Description |
 |------|-------------|
+| `sn_atf_author` | Create tests/suites and ordered suite memberships with explicit write grants |
 | `sn_atf` | List ATF tests/suites and get results; `run`/`run-suite` currently fail closed |
 | `sn_nl` | Currently fails closed until natural-language composition emits a complete typed access plan |
 

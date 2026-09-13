@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `sn_atf_author` creates tests, suites, and ordered suite memberships under
+  explicit table and field grants. Failed attempts return a structured rollback
+  report and identify uncertain inserts that require inspection before retrying.
+- `setup grant --atf` binds the five ATF authoring tables to `sn_atf_author`
+  without enabling execution or script steps.
+- Per-profile ATF configuration, opt-in execution-policy infrastructure, and
+  escaping-first readable tool renderers.
+- An identity-bound ATF result-cache library with atomic writes, concurrent-writer
+  locking, bounded summaries, private storage and memory fallback. Execution and
+  results tools will connect to this library in a subsequent change.
+
+### Fixed
+
+- ATF suite-result table policy fields use `rolled_up_test_*`, matching the
+  platform fixtures rather than the CI/CD response spelling.
+
 ## [2.1.0] — 2026-09
 
 > **Read this before upgrading if any profile grants `writeTables: ["*"]`, or
