@@ -15,6 +15,7 @@ import {
   CONTAINER_RELEASE_GATES,
   PORTABLE_RELEASE_GATES,
   validateReleaseContract,
+  releaseChannel,
 } from "../scripts/release-validate.mjs";
 import {
   extractCreatedSysId,
@@ -399,6 +400,19 @@ describe("SNSDK-57 deterministic CI and release contract", () => {
     expect(profileContract).toContain(
       "adds the resolved profile to every successful result and audit"
     );
+  });
+
+  it("routes stable and dev versions explicitly and rejects other channels", () => {
+    expect(releaseChannel("2.1.0")).toBe("latest");
+    expect(releaseChannel("2.2.0-dev.1")).toBe("dev");
+    for (const version of ["2.2.0-beta.1", "2.2.0-dev", "2.2.0-dev.01", "02.2.0", "2.2.0-dev.1+sha", "2.2.0-dev.1\n"]) {
+      expect(() => releaseChannel(version)).toThrow();
+    }
+    const workflow = read(".github/workflows/publish.yml");
+    expect(workflow).toContain('"v[0-9]+.[0-9]+.[0-9]+-dev.[0-9]+"');
+    expect(workflow).toContain('npm_tag="$(node scripts/release-validate.mjs --npm-tag)"\n          npm publish --access public --tag "$npm_tag"');
+    const version = JSON.parse(read("package.json")).version;
+    expect(validateReleaseContract({ environment: { GITHUB_REF_TYPE: "tag", GITHUB_REF_NAME: `v${version}` } }).channel).toBe(releaseChannel(version));
   });
 
   it("fails closed on release tag drift and keeps version selection separate", () => {

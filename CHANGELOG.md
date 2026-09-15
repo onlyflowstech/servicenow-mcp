@@ -5,9 +5,12 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.2.0-dev.1] — 2026-09-14
 
 ### Added
+
+- Tag-driven dev prereleases publish to the npm `dev` channel while stable
+  releases continue to publish to `latest`.
 
 - `sn_atf_author` creates tests, suites, and ordered suite memberships under
   explicit table and field grants. Failed attempts return a structured rollback

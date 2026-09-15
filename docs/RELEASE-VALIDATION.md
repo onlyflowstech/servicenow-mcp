@@ -138,3 +138,30 @@ the target; stable-tag publication fails unless the tag exactly matches them.
 
 The Inspector operating model and security constraints are documented by the
 [official MCP Inspector project](https://github.com/modelcontextprotocol/inspector).
+
+## Dev releases
+
+A development release uses a unique version such as `2.2.0-dev.1` in
+`package.json`, both root entries in `package-lock.json`, and `src/version.ts`.
+Commit the version and changelog, then push the matching Git tag:
+
+```sh
+git tag -a v2.2.0-dev.1 -m "Development release 2.2.0-dev.1"
+git push origin v2.2.0-dev.1
+```
+
+The existing `publish.yml` workflow runs the release gates and publishes through
+npm trusted publishing. The validator maps stable versions to `latest` and
+`X.Y.Z-dev.N` versions to `dev`; other prerelease channels and mismatched tags
+are rejected. Every published version must be unique. GitHub prereleases can
+be created for these tags without marking them as the latest stable release.
+
+Install the newest development build or pin an exact build:
+
+```sh
+npm install -g @onlyflows/servicenow-mcp@dev
+npm install -g @onlyflows/servicenow-mcp@2.2.0-dev.1
+```
+
+Restart the MCP client after updating. To return to the stable channel, install
+`@onlyflows/servicenow-mcp@latest` and restart the client again.

@@ -43,7 +43,8 @@ export function validateReleaseContract(options = {}) {
   const inspectorSource = read("scripts/inspector.mjs");
   const releaseGuide = read("docs/RELEASE-VALIDATION.md");
 
-  assert(/^[0-9]+\.[0-9]+\.[0-9]+$/u.test(packageJson.version), "package version is not stable semver");
+  const channel = releaseChannel(packageJson.version);
+  assert(read("src/version.ts").includes(`export const VERSION = "${packageJson.version}";`), "runtime version differs from package version");
   assert(packageLock.version === packageJson.version, "package-lock version differs from package version");
   assert(
     packageLock.packages?.[""]?.version === packageJson.version,
@@ -155,6 +156,7 @@ export function validateReleaseContract(options = {}) {
 
   return Object.freeze({
     version: packageJson.version,
+    channel,
     tag: tag ?? null,
     inspectorVersion: inspectorPackage.dependencies["@modelcontextprotocol/inspector"],
     portableGateCount: PORTABLE_RELEASE_GATES.length,
@@ -164,11 +166,18 @@ export function validateReleaseContract(options = {}) {
   });
 }
 
+/** Only reviewed stable and dev channels can be published. */
+export function releaseChannel(version) {
+  const match = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(-dev\.(?:0|[1-9][0-9]*))?$/u.exec(version);
+  assert(typeof version === "string" && match !== null && match[0] === version, "package version must be stable semver or a dev.N prerelease");
+  return match[1] === undefined ? "latest" : "dev";
+}
+
 function releaseTagFromEnvironment(environment) {
   if (environment.GITHUB_REF_TYPE !== "tag") return undefined;
   const tag = environment.GITHUB_REF_NAME;
-  if (typeof tag !== "string" || !/^v[0-9]+\.[0-9]+\.[0-9]+$/u.test(tag)) {
-    throw new Error("tag release is missing a valid stable GITHUB_REF_NAME");
+  if (typeof tag !== "string" || !/^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-dev\.(?:0|[1-9][0-9]*))?$/u.test(tag)) {
+    throw new Error("tag release is missing a valid stable or dev GITHUB_REF_NAME");
   }
   return tag;
 }
@@ -191,7 +200,8 @@ function isMainModule() {
 
 if (isMainModule()) {
   try {
-    process.stdout.write(`${JSON.stringify(validateReleaseContract())}\n`);
+    const result = validateReleaseContract();
+    process.stdout.write(`${process.argv.includes("--npm-tag") ? result.channel : JSON.stringify(result)}\n`);
   } catch (error) {
     process.stderr.write(
       `${error instanceof Error ? error.message : "Release contract validation failed"}\n`
