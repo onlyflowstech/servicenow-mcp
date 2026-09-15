@@ -2,6 +2,7 @@
 
 /** Adversarial local validation of the built production container. */
 
+import { runValidationStage } from "./container-validation-stage.mjs";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -39,7 +40,7 @@ let officialClient;
 try {
   const [metadata] = JSON.parse(docker(["image", "inspect", image]).stdout);
   assertImageMetadata(metadata);
-  const hostPort = await availableHostPort();
+  const hostPort = await runValidationStage("allocate host port", availableHostPort);
   const endpoint = new URL(`http://127.0.0.1:${hostPort}/mcp`);
 
   docker([
@@ -65,19 +66,19 @@ try {
   ]);
   created = true;
 
-  await waitUntilReady(name, endpoint);
-  await waitForDockerHealth(name, "healthy");
-  await verifyHostBoundary(endpoint);
+  await runValidationStage("HTTP readiness", () => waitUntilReady(name, endpoint));
+  await runValidationStage("Docker healthy state", () => waitForDockerHealth(name, "healthy"));
+  await runValidationStage("Host boundary", () => verifyHostBoundary(endpoint));
   verifyRuntimeIsolation(name);
-  const officialManifest = await verifyOfficialClient(endpoint, token);
-  const independentManifest = await verifyIndependentClient(endpoint, token);
+  const officialManifest = await runValidationStage("official MCP client", () => verifyOfficialClient(endpoint, token));
+  const independentManifest = await runValidationStage("independent MCP client", () => verifyIndependentClient(endpoint, token));
   assert(
     JSON.stringify(officialManifest) === JSON.stringify(independentManifest),
     "official and independent clients discovered different tool contracts"
   );
 
-  const live = await fetch(new URL("/health/live", endpoint));
-  const ready = await fetch(new URL("/health/ready", endpoint));
+  const live = await runValidationStage("liveness probe", () => fetch(new URL("/health/live", endpoint)));
+  const ready = await runValidationStage("readiness probe", () => fetch(new URL("/health/ready", endpoint)));
   assert(live.status === 200, "liveness failed");
   assert(ready.status === 200, "readiness failed");
 
@@ -110,7 +111,7 @@ try {
     image,
   ]);
   unhealthyCreated = true;
-  await waitForDockerHealth(unhealthyName, "unhealthy");
+  await runValidationStage("Docker unhealthy state", () => waitForDockerHealth(unhealthyName, "unhealthy"));
 
   process.stdout.write(JSON.stringify({
     image,
@@ -130,7 +131,7 @@ try {
     graceful_sigterm: true,
   }) + "\n");
 } finally {
-  if (officialClient) await officialClient.close().catch(() => {});
+  if (officialClient) await runValidationStage("client cleanup", () => officialClient.close()).catch(() => {});
   if (created) docker(["rm", "--force", name], true);
   if (unhealthyCreated) docker(["rm", "--force", unhealthyName], true);
 }
@@ -363,7 +364,7 @@ function normalizeToolManifest(tools, label) {
   // Independent external check of the built container: deliberately a literal,
   // not an import of the local registry. Source of truth is
   // REGISTERED_TOOL_COUNT in src/tools/index.ts (derived from catalog.ts).
-  assert(Array.isArray(tools) && tools.length === 19, `${label} did not discover 19 tools`);
+  assert(Array.isArray(tools) && tools.length === 23, `${label} did not discover 23 tools`);
   const names = new Set();
   const manifest = tools.map((tool) => {
     assert(typeof tool?.name === "string" && tool.name.length > 0, `${label} exposed an invalid tool name`);
@@ -402,6 +403,7 @@ function docker(args, allowFailure = false) {
   const result = spawnSync("docker", args, {
     encoding: "utf8",
     maxBuffer: 4 * 1024 * 1024,
+    timeout: 60_000,
   });
   if (!allowFailure && (result.error || result.status !== 0)) {
     throw new Error("Docker validation command failed");
