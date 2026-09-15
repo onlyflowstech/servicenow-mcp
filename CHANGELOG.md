@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Container validation expects the current 23-tool contract and reports named,
   bounded asynchronous stages instead of leaving pending checks without diagnostics.
 - Docker validation subprocesses have a one-minute timeout.
+- Refresh the pinned Distroless runtime base to pick up the OpenSSL security fix
+  for CVE-2026-14456; retain the high/critical vulnerability scan gate.
 
 ## [2.2.0-dev.4] — 2026-09-15
 
