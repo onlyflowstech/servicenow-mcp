@@ -117,6 +117,34 @@ describe("ATF comparisons", () => {
   });
 });
 describe("ATF readiness", () => {
+  it.each(["empty", "missing", "inactive"])("reports %s suite structure accurately", async scenario => {
+    const h = harness([
+      rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true" }]),
+      rows([{ sys_id: id(1), active: "true" }]), rows([]), rows([{ test: { value: id(2) } }, { test: id(3) }]),
+      rows([{ sys_id: id(2), active: "true" }, ...(scenario === "missing" ? [] : [{ sys_id: id(3), active: "false" }])]),
+      rows(scenario === "empty" ? [] : [{ step_config: id(4) }]),
+      ...(scenario === "empty" ? [] : [rows([{ sys_id: id(4), step_env: "Server" }])]),
+      rows([{ sys_id: id(8) }]), rows({}),
+    ]);
+    const result = data(await h.call(atfReadinessToolModule, { suite_sys_id: id(1) }));
+    expect(result.verdict).toBe(["empty", "missing"].includes(scenario) ? "blocked" : "unverified");
+    expect(result.checks).toEqual(expect.arrayContaining([
+      { check: "Suite memberships", status: scenario === "missing" ? "fail" : "pass", message: expect.any(String) },
+      { check: "Active test steps", status: scenario === "empty" ? "fail" : "pass", message: expect.any(String) },
+    ]));
+    h.fixture.assertConsumed();
+  });
+  it("flags an empty active test in a child suite", async () => {
+    const h = harness([
+      rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true" }]),
+      rows([{ sys_id: id(1), active: "true" }]), rows([{ sys_id: id(9) }]), rows([]), rows([]), rows([{ test: id(2) }]),
+      rows([{ sys_id: id(2), active: "true" }]), rows([]), rows([{ sys_id: id(8) }]), rows({}),
+    ]);
+    expect(data(await h.call(atfReadinessToolModule, { suite_sys_id: id(1) }))).toMatchObject({ verdict: "blocked", checks: expect.arrayContaining([
+      { check: "Active test steps", status: "fail", message: "1 active tests have no active steps." },
+    ]) });
+    h.fixture.assertConsumed();
+  });
   it("checks cloud installation without probing a local browser and keeps provisioning unverified", async () => {
     const h = harness([rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true" }]), rows([{ sys_id: id(8), scope: "sn_atf_tg" }]), rows({})]);
     const result = data(await h.call(atfReadinessToolModule, {}));

@@ -5,6 +5,32 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0-dev.4] — 2026-09-15
+
+### Fixed
+
+- Verify that the suite and every requested test are readable before creating
+  any memberships. Missing references fail without partial inserts.
+- Report duplicate test IDs as invalid input instead of a table-policy denial.
+- Normalize ServiceNow reference objects when listing tests by suite name.
+- Block readiness for missing or unreadable test references and active tests
+  without active steps, including tests in child suites. Inactive tests do not
+  count as missing references.
+
+### Validation
+
+- Release gates passed: 1,616 unit tests, 250 protocol checks, 72 profile
+  checks, 14 release checks, and no reported production dependency vulnerabilities.
+- All four fixes were verified against the fd demo instance using disposable
+  Global records; fixtures and their update/deletion metadata were removed.
+
+### Validation limits
+
+- Cloud Runner provisioning and remote execution were verified on the demo
+  instance. Positive UI workflows remain blocked by its page JavaScript error
+  involving `proActiveTrigger`; this release does not suppress that error.
+- Authenticated inbound REST steps still require separate credential validation.
+
 ## [2.2.0-dev.3] — 2026-09-15
 
 ### Changed

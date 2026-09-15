@@ -36,10 +36,18 @@ Step authoring reads `sys_atf_test`, `sys_atf_step`, `sys_atf_step_config`,
 requires `sys_atf_step`, `sys_variable_value`, and `sys_element_mapping`.
 ServiceNow ACLs and CI/CD roles still apply.
 
+When adding tests to a suite, the profile needs read access to
+`sys_atf_test_suite` and `sys_atf_test` in addition to membership write access.
+The suite and all requested tests are verified before any memberships are
+created. Duplicate IDs are rejected as invalid input.
+
 ## Check and run a suite
 
 Call `sn_atf_readiness` with `{"profile":"pdi","suite_name":"Example suite"}`.
 The verdict is `ready`, `blocked`, or `unverified`, with actionable checks.
+Suite inspection includes active child suites and flags missing or unreadable test
+references and active tests with no active steps. Inactive tests are excluded
+from execution checks, but their references must still be readable.
 Execution is cloud-only: every submission sends `run_in_cloud=true` to ServiceNow.
 UI tests use ServiceNow Cloud Runner; no local browser tab is opened or required.
 Configure the ServiceNow ATF Test Generator and Cloud Runner app (`sn_atf_tg`)

@@ -67,20 +67,26 @@ export const atfReadinessToolModule = defineServiceNowToolModule({
           for (const member of await read("sys_atf_test_suite_test", `test_suite=${suiteId}`)) tests.add(id.parse(value(member.test)));
         }
         if (tests.size > 1000) throw new Error("Suite has too many tests to inspect");
-        requiresUI = false; let activeTests = 0;
+        requiresUI = false; let activeTests = 0; let emptyTests = 0; let missingTests = 0;
         if (tests.size) {
-          const active = await read("sys_atf_test", `sys_idIN${[...tests].join(",")}^active=true`);
+          const found = await read("sys_atf_test", `sys_idIN${[...tests].join(",")}`);
+          const foundIds = new Set(found.map(test => id.parse(value(test.sys_id))));
+          missingTests = [...tests].filter(test => !foundIds.has(test)).length;
+          if (found.some(test => !["true", "false"].includes(value(test.active)))) throw new Error("Unreadable test activity");
+          const active = found.filter(test => value(test.active) === "true");
           activeTests = active.length;
           for (const test of active) {
             const steps = await read("sys_atf_step", `test=${id.parse(value(test.sys_id))}^active=true`);
             const configs = [...new Set(steps.map(step => id.parse(value(step.step_config))))];
-            if (!configs.length) continue;
+            if (!configs.length) { emptyTests++; continue; }
             const rows = await read("sys_atf_step_config", `sys_idIN${configs.join(",")}`);
             if (rows.length !== configs.length || rows.some(row => !display(row.step_env))) throw new Error("Incomplete step environment metadata");
             if (rows.some(row => display(row.step_env) === "UI")) requiresUI = true;
           }
         }
-        add("Suite", activeTests ? "pass" : "fail", `${activeTests} active tests; ${requiresUI ? "Cloud Runner required" : "server-only steps"}.`);
+        add("Suite memberships", missingTests ? "fail" : "pass", missingTests ? `${missingTests} referenced tests are missing or unreadable.` : "All referenced tests are readable.");
+        add("Active test steps", emptyTests ? "fail" : "pass", emptyTests ? `${emptyTests} active tests have no active steps.` : "No empty active tests found.");
+        add("Suite", activeTests && !missingTests && !emptyTests ? "pass" : "fail", `${activeTests} active tests; ${requiresUI ? "Cloud Runner required" : activeTests > emptyTests ? "server-only steps" : "no executable steps"}.`);
       } catch { requiresUI = undefined; add("Suite", "warn", "Could not completely verify the active suite, memberships, or step environments."); }
     }
     try {

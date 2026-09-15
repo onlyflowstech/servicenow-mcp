@@ -6,7 +6,11 @@ import { createMockServiceNowHarness, SNSDK54_PROFILE_NAME, type MockServiceNowS
 
 const id = (n: number) => n.toString(16).padStart(32, "0");
 const tables = ["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test"];
-const policy = createTableAccessPolicy({ writeTables: tables, targets: tables.map(table => ({ table, kind: "canonical" as const, tools: ["sn_atf_author"], closureComplete: true, relatedTables: [table] })) });
+const policy = createTableAccessPolicy({ readTables: tables, writeTables: tables, targets: tables.map(table => ({ table, kind: "canonical" as const, tools: ["sn_atf_author"], closureComplete: true, relatedTables: [table] })) });
+const membershipReads: MockServiceNowStep[] = [
+  { operation: "get", response: { result: [{ sys_id: id(1) }] } },
+  { operation: "get", response: { result: [{ sys_id: id(2) }, { sys_id: id(3) }] } },
+];
 async function call(args: Record<string, unknown>, steps: MockServiceNowStep[], granted = true) {
   const harness = await createMockServiceNowHarness({ modules: [atfAuthorToolModule], tableAccess: granted ? policy : createTableAccessPolicy({}), steps });
   try {
@@ -30,10 +34,11 @@ describe("sn_atf_author", () => {
   });
   it("creates ordered membership rows", async () => {
     const { result, calls } = await call({ action: "add_tests_to_suite", suite_sys_id: id(1), test_sys_ids: [id(2), id(3)], start_order: 20 }, [
+      ...membershipReads,
       { operation: "post", response: { result: { sys_id: id(4) } } }, { operation: "post", response: { result: { sys_id: id(5) } } },
     ]);
     expect(result.isError).not.toBe(true);
-    expect(calls.map(c => c.body)).toEqual([{ test: id(2), test_suite: id(1), order: "20" }, { test: id(3), test_suite: id(1), order: "21" }]);
+    expect(calls.filter(c => c.operation === "post").map(c => c.body)).toEqual([{ test: id(2), test_suite: id(1), order: "20" }, { test: id(3), test_suite: id(1), order: "21" }]);
   });
   it.each(["create_test", "create_suite", "add_tests_to_suite"])("denies %s before credentials or I/O", async action => {
     const args = action === "add_tests_to_suite" ? { suite_sys_id: id(1), test_sys_ids: [id(2)] } : { name: "Example" };
@@ -42,16 +47,45 @@ describe("sn_atf_author", () => {
   });
   it("rolls back only this invocation's confirmed records and reports uncertainty", async () => {
     const { result, calls } = await call({ action: "add_tests_to_suite", suite_sys_id: id(1), test_sys_ids: [id(2), id(3)] }, [
+      ...membershipReads,
       { operation: "post", response: { result: { sys_id: id(4) } } }, { operation: "post", error: new Error("secret upstream message") }, { operation: "delete", response: { status: 204 } },
     ]);
-    expect(result.structuredContent).toMatchObject({ data: { outcome: "failed" } }); expect(calls[2]!.path).toBe(`/api/now/table/sys_atf_test_suite_test/${id(4)}`);
+    expect(result.structuredContent).toMatchObject({ data: { outcome: "failed" } }); expect(calls[4]!.path).toBe(`/api/now/table/sys_atf_test_suite_test/${id(4)}`);
     expect(JSON.stringify(result)).toContain(`Rolled back: ${id(4)}`); expect(JSON.stringify(result)).toContain("may have succeeded"); expect(JSON.stringify(result)).not.toContain("secret upstream");
   });
   it("reports rollback failure without deleting the caller's test or suite", async () => {
     const { result, calls } = await call({ action: "add_tests_to_suite", suite_sys_id: id(1), test_sys_ids: [id(2), id(3)] }, [
+      ...membershipReads,
       { operation: "post", response: { result: { sys_id: id(4) } } }, { operation: "post", response: {} }, { operation: "delete", error: new Error("denied") },
     ]);
     expect(JSON.stringify(result)).toContain(`Rollback failed for: ${id(4)}`); expect(calls.filter(c => c.operation === "delete")).toHaveLength(1);
+  });
+  it("rejects duplicate IDs as invalid input before credentials or I/O", async () => {
+    const { result, calls, managerCalls } = await call({ action: "add_tests_to_suite", suite_sys_id: id(1), test_sys_ids: [id(2), id(2)] }, []);
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toContain("test_sys_ids must be unique");
+    expect(JSON.stringify(result)).not.toContain("Table access denied");
+    expect(calls).toEqual([]);
+    expect(managerCalls.config).toEqual([]);
+  });
+  it.each(["suite", "test", "unreadable"])("does not create partial memberships for a missing or %s reference", async missing => {
+    const steps: MockServiceNowStep[] = missing === "unreadable" ? [{ operation: "get", error: new Error("private denial") }] : [
+      { operation: "get", response: { result: missing === "suite" ? [] : [{ sys_id: id(1) }] } },
+      { operation: "get", response: { result: [{ sys_id: id(2) }] } },
+    ];
+    const { result, calls } = await call({ action: "add_tests_to_suite", suite_sys_id: id(1), test_sys_ids: [id(2), id(3)] }, steps);
+    expect(result.structuredContent).toMatchObject({ data: { outcome: "failed", results: [], uncertain_insert: false, message: expect.stringContaining("No memberships were created") } });
+    expect(calls.every(c => c.operation === "get")).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("private denial");
+  });
+  it("requires reference read grants before credentials or writes", async () => {
+    const h = await createMockServiceNowHarness({ modules: [atfAuthorToolModule], tableAccess: createTableAccessPolicy({ ...policy, readTables: [] }), steps: [] });
+    try {
+      const result = await h.client.callTool({ name: "sn_atf_author", arguments: { profile: SNSDK54_PROFILE_NAME, action: "add_tests_to_suite", suite_sys_id: id(1), test_sys_ids: [id(2)] } });
+      expect(result.isError).toBe(true);
+      expect(h.fixture.calls).toEqual([]);
+      expect(h.managerCalls.config).toEqual([]);
+    } finally { await h.close(); }
   });
   it("preflights every membership field under the configured policy", () => {
     expect(() => runWithFieldPolicyConfiguration({ fieldPolicy: { sys_atf_test_suite_test: { writable: ["test", "test_suite"] } } }, () =>

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { value } from "./atf-shared.js";
 import type { ServiceNowOperations } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
@@ -153,7 +154,9 @@ export async function handler(
                 ? (r as Record<string, unknown>).test
                 : undefined
             )
+            .map(value)
             .filter(Boolean)
+            .map(candidate => serviceNowSysIdSchema.parse(candidate))
             .join(",");
           if (!testIds)
             return ok({ record_count: 0, results: [] });

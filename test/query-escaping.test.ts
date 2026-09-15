@@ -144,6 +144,16 @@ describe("encoded-query injection is neutralized", () => {
     expect(result.isError).toBe(true); // no CI found -- lookup stays scoped
   });
 
+  it.each([false, true])("sn_atf suite listing handles reference objects: %s", async referenceObject => {
+    const { client, get } = getClient();
+    const suiteId = "1".repeat(32), testId = "2".repeat(32);
+    get.mockResolvedValueOnce({ result: [{ sys_id: suiteId }] })
+      .mockResolvedValueOnce({ result: [{ test: referenceObject ? { value: testId, link: "https://untrusted.example" } : testId }] })
+      .mockResolvedValueOnce({ result: [{ sys_id: testId, name: "Example" }] });
+    const result = await atfHandler(atfSchema.parse({ action: "list", suite_name: "Example" }), client, config);
+    expect(result.isError).not.toBe(true);
+    expect(get.mock.calls[2][1]).toMatchObject({ sysparm_query: `sys_idIN${testId}^ORDERBYsys_id` });
+  });
   it("sn_atf suite_name resolution", async () => {
     const { client, get } = getClient();
     const result = await atfHandler(

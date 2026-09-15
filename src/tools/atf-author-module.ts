@@ -1,3 +1,4 @@
+import { prepareAtfReads, readAtfRows, value } from "./atf-shared.js";
 import { stepRequestSchema, prepareSteps, authorSteps, stepTypes, STEP_READ_TABLES } from "./atf-step-catalog.js";
 import type { ResolvedEffectivePolicyReference } from "../execution-context.js";
 /** ATF authoring with instance metadata verification before step writes. */
@@ -20,7 +21,7 @@ const schema = z.object({
   active: z.boolean().optional().describe("Whether the new test or suite is active (default true)"),
   application_scope: z.union([serviceNowSysIdSchema, z.literal("global")]).optional().describe("Application scope sys_id or global for Global scope"),
   suite_sys_id: serviceNowSysIdSchema.optional().describe("Suite sys_id required for add_tests_to_suite"),
-  test_sys_ids: z.array(serviceNowSysIdSchema).min(1).max(100).optional().describe("Unique test sys_ids to add, in execution order (maximum 100)"),
+  test_sys_ids: z.array(serviceNowSysIdSchema).min(1).max(100).refine(ids => new Set(ids).size === ids.length, "test_sys_ids must be unique").optional().describe("Unique test sys_ids to add, in execution order (maximum 100)"),
   start_order: z.number().int().min(0).max(1000000).optional().describe("First membership order (default 100); existing memberships are unchanged"),
 }).strict();
 export const atfAuthorInputSchema = withRequiredProfile(schema);
@@ -38,7 +39,6 @@ export function resolveAtfAuthorAccess(candidate: unknown, policy?: ResolvedEffe
     if (args.name !== undefined || args.description !== undefined || args.active !== undefined || args.application_scope !== undefined) {
       throw new Error("Creation fields are not accepted when adding tests");
     }
-    if (new Set(args.test_sys_ids).size !== args.test_sys_ids.length) throw new Error("test_sys_ids must be unique");
     tableName = "sys_atf_test_suite_test";
     rows = args.test_sys_ids.map((test, index) => ({ test, test_suite: args.suite_sys_id, order: (args.start_order ?? 100) + index }));
   } else {
@@ -60,9 +60,10 @@ export function resolveAtfAuthorAccess(candidate: unknown, policy?: ResolvedEffe
     prepared = withFieldPolicyArgumentValues(prepared, { table: target, fields: values });
     return { table: target, fields: values, prepared };
   });
+  const readTables = args.action === "add_tests_to_suite" ? ["sys_atf_test_suite", "sys_atf_test"] : [];
   return {
-    args: { ...args, writes },
-    requests: [{ operation: "write" as const, table: target }],
+    args: prepareAtfReads({ ...args, writes }, readTables),
+    requests: [...readTables.map(table => ({ operation: "read" as const, table })), { operation: "write" as const, table: target }],
   };
 }
 
@@ -103,7 +104,19 @@ export const atfAuthorToolModule = defineServiceNowToolModule({
     const writes = (args as unknown as { writes: Write[] }).writes;
     const created: { table: string; sys_id: string }[] = [];
     let uncertain = false;
+    let verifyingMemberships = args.action === "add_tests_to_suite";
     try {
+      if (verifyingMemberships) {
+        const suites = await readAtfRows(services, args, "sys_atf_test_suite", `sys_id=${args.suite_sys_id}`, 1);
+        const requested = args.test_sys_ids as string[];
+        const tests = await readAtfRows(services, args, "sys_atf_test", `sys_idIN${requested.join(",")}`, requested.length);
+        const visible = new Set(tests.map(test => value(test.sys_id)));
+        if (suites.length !== 1 || value(suites[0].sys_id) !== args.suite_sys_id || requested.some(test => !visible.has(test))) {
+          return envelopeCompatibilityResult("sn_atf_author", args, ok({ action: args.action, outcome: "failed", results: [], rolled_back: [], rollback_failed: [], uncertain_insert: false,
+            message: "Suite or requested tests are missing or unreadable. No memberships were created." }));
+        }
+        verifyingMemberships = false;
+      }
       for (const write of writes) {
         uncertain = true;
         const response = await services.serviceNow.post(`/api/now/table/${write.table}`, write.fields);
@@ -128,6 +141,7 @@ export const atfAuthorToolModule = defineServiceNowToolModule({
       return envelopeCompatibilityResult("sn_atf_author", args, ok({
         action: args.action, outcome: "failed", results: [], rolled_back: rolledBack,
         rollback_failed: remaining, uncertain_insert: uncertain,
+        ...(verifyingMemberships ? { message: "Could not verify suite and test references. No memberships were created." } : {}),
       }));
     }
   },
