@@ -39,8 +39,17 @@ describe("ATF execution and results", () => {
   it("submits once with query parameters and returns progress without polling", async () => {
     const h = harness([rows([{ sys_id: id(1), name: "Example", active: "true" }]), submission]);
     expect(data(await h.call(atfRunToolModule, { suite_sys_id: id(1), wait: false }))).toMatchObject({ outcome: "running", progress_id: id(2) });
-    expect(h.fixture.calls[1]).toMatchObject({ operation: "post", path: "/api/sn_cicd/testsuite/run", body: {}, params: { test_suite_sys_id: id(1) } });
+    expect(h.fixture.calls[1]).toMatchObject({ operation: "post", path: "/api/sn_cicd/testsuite/run", body: {}, params: { test_suite_sys_id: id(1), run_in_cloud: "true" } });
     h.fixture.assertConsumed();
+  });
+  it("rejects requests for a local runner before I/O", () => {
+    expect(() => atfRunToolModule.resolveAccess({ profile: "pdi", suite_sys_id: id(1), run_in_cloud: false }, policy)).toThrow();
+  });
+  it("does not fall back to a local runner when cloud submission fails", async () => {
+    const h = harness([rows([{ sys_id: id(1), name: "Example", active: "true" }]), { operation: "post", error: createToolError("upstream", "retry_after_correction") }]);
+    expect(data(await h.call(atfRunToolModule, { suite_sys_id: id(1) })).outcome).toBe("unavailable");
+    expect(h.fixture.calls.filter(call => call.operation === "post")).toHaveLength(1);
+    expect(h.fixture.calls[1].params).toMatchObject({ run_in_cloud: "true" });
   });
   it("polls to completion, follows only validated IDs, and caches a compact summary", async () => {
     vi.useFakeTimers();
@@ -108,6 +117,18 @@ describe("ATF comparisons", () => {
   });
 });
 describe("ATF readiness", () => {
+  it("checks cloud installation without probing a local browser and keeps provisioning unverified", async () => {
+    const h = harness([rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true" }]), rows([{ sys_id: id(8), scope: "sn_atf_tg" }]), rows({})]);
+    const result = data(await h.call(atfReadinessToolModule, {}));
+    expect(result.verdict).toBe("unverified");
+    expect(result.checks).toEqual(expect.arrayContaining([{ check: "Cloud Runner app", status: "pass", message: expect.any(String) }, { check: "Cloud Runner configuration", status: "warn", message: expect.any(String) }]));
+    expect(h.fixture.calls.some(call => call.path.includes("sys_atf_agent"))).toBe(false);
+    h.fixture.assertConsumed();
+  });
+  it("blocks a missing cloud app instead of recommending a local browser", async () => {
+    const h = harness([rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true" }]), rows([]), rows({})]);
+    expect(data(await h.call(atfReadinessToolModule, {}))).toMatchObject({ verdict: "blocked", checks: expect.arrayContaining([{ check: "Cloud Runner app", status: "fail", message: expect.stringContaining("Local browser fallback is disabled") }]) });
+  });
   it("recognizes the active plugin choice returned by the live Table API", async () => {
     const h = harness([rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true" }]), rows([]), rows({})]);
     const result = data(await h.call(atfReadinessToolModule, {}));
@@ -119,6 +140,11 @@ describe("ATF readiness", () => {
   it("reports blocked properties, absent execution grants and inconclusive role probes", async () => {
     const h = harness([rows([{ id: "com.glide.automated_testing_framework", active: "true" }]), rows([]), rows([]), rows([]), { operation: "get", error: createToolError("not_found", "do_not_retry") }], { policy: { ...policy, atf: { execute: false, allowScriptSteps: false } } });
     expect(data(await h.call(atfReadinessToolModule, {}))).toMatchObject({ verdict: "blocked", checks: expect.arrayContaining([{ check: "CI/CD role", status: "warn", message: expect.any(String) }, { check: "Execution grant", status: "fail", message: expect.any(String) }]) });
+  });
+  it("does not report authoring grants complete when mapping writes are missing", async () => {
+    const tableAccess=createTableAccessPolicy({readTables:["*"],writeTables:["sys_atf_test","sys_atf_test_suite","sys_atf_test_suite_test","sys_atf_step","sys_variable_value"],targets:["sys_atf_test","sys_atf_test_suite","sys_atf_test_suite_test","sys_atf_step","sys_variable_value"].map(table=>({table,kind:"canonical" as const,tools:["sn_atf_author"],closureComplete:true,relatedTables:[table]}))});
+    const h=harness([rows([{active:"active"}]),rows([{active:"active"}]),rows([{name:"sn_atf.runner.enabled",value:"true"}]),rows([]),rows({})],{policy:{...policy,tableAccess}});
+    expect(data(await h.call(atfReadinessToolModule,{})).checks).toEqual(expect.arrayContaining([{check:"Authoring grants (informational)",status:"pass",message:expect.stringContaining("not fully granted")}])) ;
   });
   it("denies a profile with no readable checks before I/O", () => {
     expect(() => atfReadinessToolModule.resolveAccess({ profile: "pdi" }, { ...policy, tableAccess: createTableAccessPolicy({}) })).toThrow();

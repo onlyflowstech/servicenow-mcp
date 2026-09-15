@@ -18,7 +18,7 @@ export const ATF_READ_FIELDS: Record<string, string> = {
   sys_atf_test_result_step: "sys_id,test_result,step,type,status,summary,description",
   v_plugin: "sys_id,id,active",
   sys_properties: "sys_id,name,value",
-  sys_atf_agent: "sys_id,status,type,last_checkin,browser_name,os_name",
+  sys_scope: "sys_id,name,scope",
   var_dictionary: "sys_id,model_id,element,internal_type,mandatory,order",
   sys_element_mapping: "sys_id,id,table,field,value",
   sys_variable_value: "sys_id,document,document_key,variable,value,order",

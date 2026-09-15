@@ -7,7 +7,7 @@ import { defineServiceNowToolModule, withRequiredProfile } from "./tool-module.j
 import { envelopeCompatibilityResult, productionToolOutputSchemas } from "./result-envelope.js";
 import { prepareAtfReads, readAtfRows, resolveSuite, value, display } from "./atf-shared.js";
 
-const baseTables = ["v_plugin", "sys_properties", "sys_atf_agent"];
+const baseTables = ["v_plugin", "sys_properties", "sys_scope"];
 const suiteTables = ["sys_atf_test_suite", "sys_atf_test_suite_test", "sys_atf_test", "sys_atf_step", "sys_atf_step_config"];
 const schema = withRequiredProfile(z.object({
   suite_sys_id: id.optional().describe("Optional suite ID to verify membership and UI-runner requirements"),
@@ -47,13 +47,11 @@ export const atfReadinessToolModule = defineServiceNowToolModule({
         add(name, rows.length === 1 && ["true", "active"].includes(value(rows[0].active)) ? "pass" : "fail", rows.length === 1 && ["true", "active"].includes(value(rows[0].active)) ? "Active" : `Activate ${plugin}`);
       } catch { add(name, "warn", "Could not verify; grant access to v_plugin and check the plugin on the instance."); }
     }
-    let heartbeat = 0;
     try {
-      const rows = await read("sys_properties", "nameINsn_atf.runner.enabled,sn_atf.schedule.enabled,sn_atf.runner.heartbeat.timeout", 3);
+      const rows = await read("sys_properties", "nameINsn_atf.runner.enabled,sn_atf.schedule.enabled", 2);
       const props = new Map(rows.map(row => [value(row.name), value(row.value)]));
       add("Execution property", props.get("sn_atf.runner.enabled") === "true" ? "pass" : "fail", props.get("sn_atf.runner.enabled") === "true" ? "Enabled" : "Set sn_atf.runner.enabled=true on the test instance.");
       add("Scheduled execution (informational)", "pass", props.get("sn_atf.schedule.enabled") === "true" ? "Enabled" : "Disabled; not required for an on-demand CI/CD run.");
-      heartbeat = Number(props.get("sn_atf.runner.heartbeat.timeout"));
     } catch { add("Execution properties", "warn", "Could not verify sys_properties values."); }
     let requiresUI: boolean | undefined;
     if (args.suite_sys_id || args.suite_name) {
@@ -82,17 +80,14 @@ export const atfReadinessToolModule = defineServiceNowToolModule({
             if (rows.some(row => display(row.step_env) === "UI")) requiresUI = true;
           }
         }
-        add("Suite", activeTests ? "pass" : "fail", `${activeTests} active tests; ${requiresUI ? "UI runner required" : "server-only steps"}.`);
+        add("Suite", activeTests ? "pass" : "fail", `${activeTests} active tests; ${requiresUI ? "Cloud Runner required" : "server-only steps"}.`);
       } catch { requiresUI = undefined; add("Suite", "warn", "Could not completely verify the active suite, memberships, or step environments."); }
     }
     try {
-      const agents = await read("sys_atf_agent", "status=online^type=scheduled", 100);
-      const online = Number.isFinite(heartbeat) && heartbeat > 0 && agents.some(agent => {
-        const raw = value(agent.last_checkin); const instant = Date.parse(raw.includes("T") ? raw : `${raw.replace(" ", "T")}Z`);
-        const age = Date.now() - instant; return age >= 0 && age < heartbeat * 1000;
-      });
-      add("Client runner", online || requiresUI === false ? "pass" : requiresUI ? "fail" : "warn", online ? "A scheduled runner has a recent heartbeat." : requiresUI === false ? "No client runner is needed for these server-only tests." : "No fresh scheduled runner verified. Open one if the suite uses UI steps.");
-    } catch { add("Client runner", "warn", "Could not verify runner heartbeat and status."); }
+      const apps = await read("sys_scope", "scope=sn_atf_tg", 1);
+      add("Cloud Runner app", apps.length === 1 ? "pass" : "fail", apps.length === 1 ? "ATF Test Generator and Cloud Runner is installed." : "Install and configure ServiceNow ATF Test Generator and Cloud Runner (sn_atf_tg). Local browser fallback is disabled.");
+      if (apps.length === 1) add("Cloud Runner configuration", "warn", "Installation alone does not verify cloud provisioning or the configured cloud user. Validate with a cloud run; no local browser is used.");
+    } catch { add("Cloud Runner app", "warn", "Could not verify sn_atf_tg; grant read access to sys_scope and verify Cloud Runner configuration. No local browser fallback is used."); }
     try {
       await services.serviceNow.get("/api/sn_cicd/progress/00000000000000000000000000000000");
       add("CI/CD role", "pass", "CI/CD progress endpoint accepted the request.");
@@ -101,7 +96,7 @@ export const atfReadinessToolModule = defineServiceNowToolModule({
       add("CI/CD role", denied ? "fail" : "warn", denied ? "Grant sn_cicd.sys_ci_automation (or an appropriate administrator role)." : "Role probe is inconclusive: an unknown progress ID does not prove role membership. Verify it on the instance.");
     }
     add("Execution grant", services.policy.atf.execute ? "pass" : "fail", services.policy.atf.execute ? "Profile enables execution." : "Set atf.execute=true on this profile to permit runs.");
-    const authorTables = ["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_atf_step", "sys_variable_value"];
+    const authorTables = ["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_atf_step", "sys_variable_value", "sys_element_mapping"];
     const authorAllowed = authorTables.every(table => { try { authorizeTableAccess(services.policy.tableAccess, { operation: "write", table }, "sn_atf_author"); return true; } catch { return false; } });
     add("Authoring grants (informational)", "pass", authorAllowed ? "Authoring table grants are configured." : "Authoring writes are not fully granted; use setup grant --atf if authoring is needed.");
     const verdict = checks.some(check => check.status === "fail") ? "blocked" : checks.some(check => check.status === "warn") ? "unverified" : "ready";

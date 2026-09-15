@@ -25,7 +25,7 @@ Script-step authoring separately requires `allowScriptSteps: true`. Both default
 to false. Restart the MCP client after changing profile configuration.
 
 Grant the selected tools their required read tables and fields. Readiness uses
-`v_plugin`, `sys_properties`, `sys_atf_agent`, `sys_atf_test_suite`,
+`v_plugin`, `sys_properties`, `sys_scope`, `sys_atf_test_suite`,
 `sys_atf_test_suite_test`, `sys_atf_test`, `sys_atf_step` and
 `sys_atf_step_config`; denied probes are reported as unverified.
 Execution reads `sys_atf_test_suite` and the three result tables:
@@ -40,14 +40,19 @@ ServiceNow ACLs and CI/CD roles still apply.
 
 Call `sn_atf_readiness` with `{"profile":"pdi","suite_name":"Example suite"}`.
 The verdict is `ready`, `blocked`, or `unverified`, with actionable checks.
-A missing browser runner is normal for server-only suites. Readiness checks
-configuration; it cannot guarantee successful execution.
+Execution is cloud-only: every submission sends `run_in_cloud=true` to ServiceNow.
+UI tests use ServiceNow Cloud Runner; no local browser tab is opened or required.
+Configure the ServiceNow ATF Test Generator and Cloud Runner app (`sn_atf_tg`)
+and its cloud user before running. There is no manual/local runner fallback.
+Readiness checks installation; it cannot guarantee cloud provisioning or successful execution.
 
 Call `sn_atf_run` with:
 
 ```json
 {"profile":"pdi","suite_name":"Example suite","wait":true,"timeout":300}
 ```
+
+`run_in_cloud` defaults to `true` and rejects `false`.
 
 Use exactly one of `suite_name` or `suite_sys_id`. Names must resolve to one
 active suite. `wait:false` returns submission identifiers immediately. Polling
@@ -96,7 +101,9 @@ created during that invocation, including mapping rows that do not cascade; insp
 
 The catalog supports 13 step types; executable script steps require the
 separate grant. REST headers and query parameters accept a JSON object mapping
-names to string values. Inbound REST requests use their own ATF request
+names to string values. JSON element assertions use slash-separated paths, such
+as `result/number` or `error/message`, rather than JSONPath dot notation.
+Inbound REST requests use their own ATF request
 authentication; the MCP OAuth token is not copied into test steps.
 
 Step inputs are saved through ServiceNow's authenticated native ATF form. The

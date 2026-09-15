@@ -627,8 +627,8 @@ in this section is needed to use this server.
 |------|-------------|
 | `sn_atf_author` | Create tests/suites, ordered memberships and validated typed steps |
 | `sn_atf` | Legacy test/suite listing and results; execution redirects to `sn_atf_run` |
-| `sn_atf_readiness` | Check plugins, properties, runner availability and permissions |
-| `sn_atf_run` | Execute a suite through CI/CD with bounded polling |
+| `sn_atf_readiness` | Check plugins, properties, Cloud Runner installation and permissions |
+| `sn_atf_run` | Execute a suite through Cloud Runner only, with bounded polling |
 | `sn_atf_results` | Fetch results, cached history and comparisons |
 | `sn_nl` | Currently fails closed until natural-language composition emits a complete typed access plan |
 

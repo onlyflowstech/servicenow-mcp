@@ -15,7 +15,8 @@ const schema = withRequiredProfile(z.object({
   suite_name: z.string().trim().min(1).max(100).optional().describe("Exact unique active suite name"),
   wait: z.boolean().default(true).describe("Wait for completion (default true)"),
   timeout: z.number().int().min(1).max(3600).default(300).describe("Maximum wait in seconds after submission"),
-  browser_name: z.string().min(1).max(80).optional().describe("Optional client-runner browser name"),
+  run_in_cloud: z.literal(true).default(true).describe("Cloud-only execution; local browser runners are not supported"),
+  browser_name: z.string().min(1).max(80).optional().describe("Optional Cloud Runner browser name"),
 }).strict());
 export function waitForAtfPoll(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -29,7 +30,7 @@ const tables = ["sys_atf_test_suite", ...RESULT_TABLES];
 registerAtfRenderers();
 export const atfRunToolModule = defineServiceNowToolModule({
   runtime: "servicenow",
-  definition: { name: "sn_atf_run", description: "Run an ATF suite through CI/CD with explicit atf.execute permission. Returns progress/result IDs, readable failures and cached comparison. Use sn_atf_readiness first.",
+  definition: { name: "sn_atf_run", description: "Run an ATF suite using ServiceNow Cloud Runner only (no local browser or manual-runner fallback), through CI/CD with explicit atf.execute permission. Returns progress/result IDs, readable failures and cached comparison. Use sn_atf_readiness first.",
     annotations: { title: "Run an ATF suite", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } },
   inputSchema: schema, outputSchema: productionToolOutputSchemas.sn_atf_run,
   requirements: { permissions: ["read", "write"], tables: { kind: "static", names: tables }, apis: ["cicd", "table"], fieldPolicies: ["read"], capabilities: ["atf:execute"] },
@@ -44,7 +45,7 @@ export const atfRunToolModule = defineServiceNowToolModule({
     let output: AtfExecutionResult = { outcome: "unavailable", suite_id: suite.id, suite_name: suite.name, failures: [], warnings: [] };
     try {
       const submitted = progress(await services.serviceNow.post("/api/sn_cicd/testsuite/run", {}, {
-        test_suite_sys_id: suite.id, ...(args.browser_name ? { browser_name: String(args.browser_name) } : {}),
+        test_suite_sys_id: suite.id, run_in_cloud: "true", ...(args.browser_name ? { browser_name: String(args.browser_name) } : {}),
       }));
       output = { ...output, outcome: "running", progress_id: submitted.progress_id, result_id: submitted.result_id };
       if (!submitted.progress_id && !submitted.result_id) throw new Error("No result locator returned");

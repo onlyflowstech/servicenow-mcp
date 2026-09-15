@@ -40,7 +40,7 @@ export function stepTypes(allowScripts: boolean) {
       properties: Object.fromEntries(definition.inputs.map(input => [input.element, {
         type: input.internal_type === "simple_name_values" ? ["object", "string"] : input.internal_type === "boolean" ? "boolean" : input.internal_type === "integer" ? "integer" : "string",
         ...(input.choices ? { enum: input.choices } : input.internal_type === "simple_name_values" ? { additionalProperties: { type: "string" }, maxProperties: 50 } : {}),
-        description: input.internal_type === "simple_name_values" ? "A name-to-string map, or an empty string" : input.internal_type,
+        description: type === "rest_assert_json_payload_element" && input.element === "element_name" ? "Slash-separated element path, e.g. result/number (not JSONPath dot notation)" : input.internal_type === "simple_name_values" ? "A name-to-string map, or an empty string" : input.internal_type,
       }])), required: definition.inputs.filter(input => input.mandatory && input.default === undefined).map(input => input.element),
     },
   }));

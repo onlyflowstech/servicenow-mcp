@@ -5,6 +5,34 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0-dev.3] — 2026-09-15
+
+### Changed
+
+- ATF execution is cloud-only: every suite submission sends `run_in_cloud=true`.
+  Requests with `false` are rejected, and cloud failures never fall back to a
+  local browser runner.
+- Readiness checks the ServiceNow Cloud Runner application instead of requiring
+  a local scheduled browser heartbeat. Installation alone remains unverified
+  until cloud provisioning and execution are validated.
+
+### Fixed
+
+- Authoring readiness includes the required output-mapping write grant.
+- REST JSON element assertions document slash-separated paths such as
+  `result/number`, matching native ATF behavior.
+
+### Validation and known limitations
+
+- Added coverage for catalog choices, booleans, REST input maps, script grants,
+  cloud-only submission, and absence of a local-runner fallback.
+- Cloud UI execution remains unverified: the PDI accepted a cloud submission,
+  but its cloud-user setup check could not reach ServiceNow cloud infrastructure.
+  This prerelease is intended for validation on a configured demo instance.
+- Temporary PDI fixtures and results were removed and original profile grants
+  restored. ServiceNow denied deletion of protected internal rollback history;
+  no ACLs were changed to remove it.
+
 ## [2.2.0-dev.2] — 2026-09-15
 
 ### Added

@@ -60,7 +60,7 @@ const SCHEMA_DICTIONARY_QUERY =
 const expectedInputs: Record<string, readonly string[]> = {
   sn_aggregate: ["display_value", "field", "group_by", "limit", "offset", "profile", "table", "type"],
   sn_atf_author: ["action", "active", "application_scope", "description", "name", "profile", "start_order", "steps", "suite_sys_id", "test_sys_id", "test_sys_ids"],
-  sn_atf_run: ["browser_name", "profile", "suite_name", "suite_sys_id", "timeout", "wait"],
+  sn_atf_run: ["browser_name", "profile", "run_in_cloud", "suite_name", "suite_sys_id", "timeout", "wait"],
   sn_atf_results: ["action", "limit", "previous_result_id", "profile", "progress_id", "regression_percent", "result_id", "suite_sys_id", "test_sys_id"],
   sn_atf_readiness: ["profile", "suite_name", "suite_sys_id"],
   sn_atf: ["action", "execution_id", "fields", "limit", "offset", "profile", "suite_name", "suite_sys_id", "test_sys_id", "timeout", "wait"],
