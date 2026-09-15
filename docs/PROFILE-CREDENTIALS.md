@@ -144,7 +144,7 @@ to unrelated table targets. Existing grants remain in place.
 
 Create a test with `{"profile":"pdi","action":"create_test","name":"Example"}`.
 Creation accepts optional `description`, `active` (default true), and
-`application_scope` (a scope sys_id). Membership accepts `suite_sys_id`,
+`application_scope` (a scope sys_id, or `"global"` for Global). Membership accepts `suite_sys_id`,
 `test_sys_ids` (1–100 unique IDs), and optional `start_order` (default 100).
 Orders increment by one; existing memberships are not deduplicated or reordered.
 The instance enforces reference integrity, application scope, and ACLs.

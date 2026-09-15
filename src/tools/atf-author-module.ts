@@ -18,7 +18,7 @@ const schema = z.object({
   name: z.string().trim().min(1).max(100).optional().describe("Name required for create_test and create_suite"),
   description: z.string().max(1000).optional().describe("Description for a new test or suite"),
   active: z.boolean().optional().describe("Whether the new test or suite is active (default true)"),
-  application_scope: serviceNowSysIdSchema.optional().describe("Optional application scope sys_id for creation"),
+  application_scope: z.union([serviceNowSysIdSchema, z.literal("global")]).optional().describe("Application scope sys_id or global for Global scope"),
   suite_sys_id: serviceNowSysIdSchema.optional().describe("Suite sys_id required for add_tests_to_suite"),
   test_sys_ids: z.array(serviceNowSysIdSchema).min(1).max(100).optional().describe("Unique test sys_ids to add, in execution order (maximum 100)"),
   start_order: z.number().int().min(0).max(1000000).optional().describe("First membership order (default 100); existing memberships are unchanged"),

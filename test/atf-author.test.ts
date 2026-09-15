@@ -23,6 +23,11 @@ describe("sn_atf_author", () => {
     expect(JSON.stringify(result)).not.toContain("untrusted");
     expect(calls[0]).toMatchObject({ path: `/api/now/table/${action === "create_test" ? "sys_atf_test" : "sys_atf_test_suite"}`, body: { name: "Example", active: "true", sys_scope: id(2) } });
   });
+  it.each(["create_test", "create_suite"])("accepts the Global scope ID for %s", async action => {
+    const { result, calls } = await call({ action, name: "Global example", application_scope: "global" }, [{ operation: "post", response: { result: { sys_id: id(1) } } }]);
+    expect(result.isError).not.toBe(true);
+    expect(calls[0].body).toMatchObject({ sys_scope: "global" });
+  });
   it("creates ordered membership rows", async () => {
     const { result, calls } = await call({ action: "add_tests_to_suite", suite_sys_id: id(1), test_sys_ids: [id(2), id(3)], start_order: 20 }, [
       { operation: "post", response: { result: { sys_id: id(4) } } }, { operation: "post", response: { result: { sys_id: id(5) } } },

@@ -108,6 +108,14 @@ describe("ATF comparisons", () => {
   });
 });
 describe("ATF readiness", () => {
+  it("recognizes the active plugin choice returned by the live Table API", async () => {
+    const h = harness([rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true" }]), rows([]), rows({})]);
+    const result = data(await h.call(atfReadinessToolModule, {}));
+    expect(result.checks).toEqual(expect.arrayContaining([
+      { check: "ATF plugin", status: "pass", message: "Active" },
+      { check: "CI/CD plugin", status: "pass", message: "Active" },
+    ]));
+  });
   it("reports blocked properties, absent execution grants and inconclusive role probes", async () => {
     const h = harness([rows([{ id: "com.glide.automated_testing_framework", active: "true" }]), rows([]), rows([]), rows([]), { operation: "get", error: createToolError("not_found", "do_not_retry") }], { policy: { ...policy, atf: { execute: false, allowScriptSteps: false } } });
     expect(data(await h.call(atfReadinessToolModule, {}))).toMatchObject({ verdict: "blocked", checks: expect.arrayContaining([{ check: "CI/CD role", status: "warn", message: expect.any(String) }, { check: "Execution grant", status: "fail", message: expect.any(String) }]) });

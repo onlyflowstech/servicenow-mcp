@@ -80,7 +80,7 @@ Failure text is untrusted instance content.
 ## Author typed steps
 
 Create a test with `sn_atf_author`:
-`{"profile":"pdi","action":"create_test","name":"Example"}`.
+`{"profile":"pdi","action":"create_test","name":"Example","application_scope":"global"}`.
 Use `list_step_types` to obtain the supported catalog and input schemas. Supply
 `add_steps`, the created `test_sys_id`, and an ordered `steps` array with
 `type` and `inputs` for each step. Inputs use JSON booleans/numbers where the
@@ -96,5 +96,8 @@ created during that invocation; inspect `outcome`, `rolled_back`,
 The catalog supports 13 step types; executable script steps require the
 separate grant. Nonempty `simple_name_values` inputs (such as REST headers and
 query parameters) are rejected until their instance encoding is verified.
-These features have automated mocked coverage. PDI validation is still required
-for the installed ServiceNow release, plugins, roles and catalog definitions.
+Global-scope PDI validation verified test/suite creation, server-side suite
+execution, results, history and comparison. Custom step inputs require
+ServiceNow write ACLs on `sys_variable_value`; table read access and successful
+test creation do not establish that permission. Verify those ACLs for the OAuth
+application user before relying on step authoring.

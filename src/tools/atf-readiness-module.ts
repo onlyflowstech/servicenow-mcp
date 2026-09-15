@@ -44,7 +44,7 @@ export const atfReadinessToolModule = defineServiceNowToolModule({
     for (const [name, plugin] of [["ATF plugin", "com.glide.automated_testing_framework"], ["CI/CD plugin", "com.glide.continuousdelivery"]]) {
       try {
         const rows = await read("v_plugin", `id=${plugin}`, 1);
-        add(name, rows.length === 1 && value(rows[0].active) === "true" ? "pass" : "fail", rows.length === 1 && value(rows[0].active) === "true" ? "Active" : `Activate ${plugin}`);
+        add(name, rows.length === 1 && ["true", "active"].includes(value(rows[0].active)) ? "pass" : "fail", rows.length === 1 && ["true", "active"].includes(value(rows[0].active)) ? "Active" : `Activate ${plugin}`);
       } catch { add(name, "warn", "Could not verify; grant access to v_plugin and check the plugin on the instance."); }
     }
     let heartbeat = 0;
