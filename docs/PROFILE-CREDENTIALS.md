@@ -137,8 +137,11 @@ servicenow-mcp-setup grant --profile pdi --atf --dry-run
 servicenow-mcp-setup grant --profile pdi --atf
 ```
 
-The preset binds five authoring tables to `sn_atf_author`: the three above,
-plus `sys_atf_step` and `sys_variable_value` for step authoring.
+The preset binds six authoring tables to `sn_atf_author`: the three above,
+plus `sys_atf_step`, `sys_variable_value`, and `sys_element_mapping` for step
+authoring. Inputs and output mappings are saved through the authenticated native
+ATF form with stored-value verification; no ACL changes or installed app are required.
+It also grants the metadata and read-back tables needed by `add_steps`.
 It does not enable execution or script authoring, and does not add authoring
 to unrelated table targets. Existing grants remain in place.
 

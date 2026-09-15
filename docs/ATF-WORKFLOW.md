@@ -31,8 +31,9 @@ Grant the selected tools their required read tables and fields. Readiness uses
 Execution reads `sys_atf_test_suite` and the three result tables:
 `sys_atf_test_suite_result`, `sys_atf_test_result`, `sys_atf_test_result_step`.
 Results needs the three result tables, including for cached history.
-Step authoring reads `sys_atf_step_config`, `var_dictionary`, and
-`sys_variable_value` and writes `sys_atf_step` and `sys_variable_value`.
+Step authoring reads `sys_atf_test`, `sys_atf_step`, `sys_atf_step_config`,
+`var_dictionary`, `sys_variable_value`, and `sys_element_mapping`. Its write plan
+requires `sys_atf_step`, `sys_variable_value`, and `sys_element_mapping`.
 ServiceNow ACLs and CI/CD roles still apply.
 
 ## Check and run a suite
@@ -90,14 +91,25 @@ All input schemas and field grants are checked before writes. The server then
 verifies each configuration and input definition against the instance, scopes
 input values to each new step, and verifies the stored values. Unknown step
 configurations and metadata mismatches fail closed. Rollback only targets rows
-created during that invocation; inspect `outcome`, `rolled_back`,
+created during that invocation, including mapping rows that do not cascade; inspect `outcome`, `rolled_back`,
 `rollback_failed`, and `uncertain_insert` before retrying.
 
 The catalog supports 13 step types; executable script steps require the
-separate grant. Nonempty `simple_name_values` inputs (such as REST headers and
-query parameters) are rejected until their instance encoding is verified.
-Global-scope PDI validation verified test/suite creation, server-side suite
-execution, results, history and comparison. Custom step inputs require
-ServiceNow write ACLs on `sys_variable_value`; table read access and successful
-test creation do not establish that permission. Verify those ACLs for the OAuth
-application user before relying on step authoring.
+separate grant. REST headers and query parameters accept a JSON object mapping
+names to string values. Inbound REST requests use their own ATF request
+authentication; the MCP OAuth token is not copied into test steps.
+
+Step inputs are saved through ServiceNow's authenticated native ATF form. The
+server parses HTML as data, verifies the test/configuration/scope, and sends only
+requested input controls with the form token and temporary session cookies.
+It requires neither a browser inspector nor an installed scoped application,
+and makes no ACL changes. Parent-step write permissions and all MCP table/field
+grants still apply. Native form contracts can vary by ServiceNow version;
+unrecognized forms fail closed and trigger bounded cleanup of newly created steps.
+
+Reference and document inputs can use `{{step['<32-character-step-id>'].first_record}}`.
+The source must be an earlier active step in the same test and expose the named
+output. The server saves the native mapping and verifies both the mapping and
+ordinary input value. Create the source step first to obtain its ID, then add
+the dependent step with a higher `start_order`. Steps inherit the test's scope;
+use `application_scope:"global"` when creating Global tests and suites.

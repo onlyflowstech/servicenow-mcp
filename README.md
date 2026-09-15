@@ -932,7 +932,9 @@ complete. File-backed profile example:
 ```
 `sn_nl` remains denied without a complete typed side-effect plan. Legacy ATF
 `run`/`run-suite` return migration guidance; use `sn_atf_run` with an explicit
-`atf.execute` profile grant. See [ATF workflow](docs/ATF-WORKFLOW.md).
+`atf.execute` profile grant. Typed ATF steps use the authenticated native form
+to save and verify inputs and output references without ACL changes or an
+installed application. See [ATF workflow](docs/ATF-WORKFLOW.md).
 Incident journal fields are append-only: generic `sn_update` rejects `comments`
 and `work_notes` before credentials or client creation. Use
 `sn_incident_add_comment` or `sn_incident_add_work_note` with exactly

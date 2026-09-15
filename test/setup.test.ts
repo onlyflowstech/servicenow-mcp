@@ -403,7 +403,8 @@ describe("setup grant", () => {
     await runSetupCli({ home, argv: ["grant", "--profile", "dev", "--atf", "--read", "incident"], profileManager: manager, writeStdout: () => undefined });
     const profile = manager.getProfile("dev");
     const targets = profile.tableAccess!.targets!;
-    expect(profile.tableAccess!.writeTables).toEqual(["sys_atf_step", "sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_variable_value"]);
+    expect(profile.tableAccess!.readTables).toEqual(["incident", "sys_atf_step", "sys_atf_step_config", "sys_atf_test", "sys_element_mapping", "sys_variable_value", "var_dictionary"]);
+    expect(profile.tableAccess!.writeTables).toEqual(["sys_atf_step", "sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_element_mapping", "sys_variable_value"]);
     for (const target of targets.filter(target => target.table !== "incident")) expect(target.tools).toEqual(["sn_atf_author"]);
     expect(targets.find(target => target.table === "incident")!.tools).not.toContain("sn_atf_author");
     expect(profile.atf?.execute).not.toBe(true);

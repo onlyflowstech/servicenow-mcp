@@ -187,7 +187,7 @@ interface ClientOptions {
   readonly clients: readonly ClientTarget[];
 }
 
-const ATF_AUTHOR_TABLES = Object.freeze(["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_atf_step", "sys_variable_value"]);
+const ATF_AUTHOR_TABLES = Object.freeze(["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_atf_step", "sys_variable_value", "sys_element_mapping"]);
 
 interface GrantOptions {
   readonly atf?: boolean;
@@ -1393,7 +1393,7 @@ function runGrant(
 
   const ordinary = buildTableAccess(existing, options);
   const tableAccess = options.atf
-    ? buildTableAccess(ordinary, { ...options, read: [], write: ATF_AUTHOR_TABLES, tools: ["sn_atf_author"] })
+    ? buildTableAccess(ordinary, { ...options, read: ["sys_atf_test", "sys_atf_step", "sys_atf_step_config", "var_dictionary", "sys_variable_value", "sys_element_mapping"], write: ATF_AUTHOR_TABLES, tools: ["sn_atf_author"] })
     : ordinary;
 
   if (options.dryRun) {
@@ -2448,7 +2448,7 @@ function renderGrantHelp(): string {
     "  --profile NAME          Profile to modify (required)",
     "  --read TABLES           Comma-separated tables to allow for reads",
     "  --write TABLES          Comma-separated tables to allow for writes",
-    "  --atf                   Grant the five ATF authoring tables to sn_atf_author only",
+    "  --atf                   Grant the ATF authoring tables to sn_atf_author only",
     "                          Does not enable execution or script-step authoring",
     `  --tools LIST            Tools permitted on these targets`,
     `                          (default read: ${DEFAULT_READ_TOOLS.join(",")};`,

@@ -1808,6 +1808,7 @@ describe.each(clientFactories)("SNSDK-45 %s module isolation", (_label, createCl
           "patch",
           "post",
           "postBinary",
+          "saveAtfStepInputs",
         ],
         profile: PROFILE_NAME,
         prototype_is_null: true,

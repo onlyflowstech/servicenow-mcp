@@ -558,7 +558,7 @@ const POLICY_DEFINITIONS = {
   },
   sys_atf_test: {
     defaults: ["sys_id", "name", "description", "active", "sys_updated_on"],
-    readable: ["sys_id", "name", "description", "active", "sys_updated_on"],
+    readable: ["sys_id", "name", "description", "active", "sys_updated_on", "sys_scope"],
     writable: [],
   },
   sys_atf_test_suite: {
@@ -586,6 +586,11 @@ const POLICY_DEFINITIONS = {
   },
   // Shared with catalog and other variable owners; values can be sensitive.
   // Reachable only through an explicit tableAccess grant.
+  sys_element_mapping: {
+    defaults: ["sys_id", "id", "table", "field", "value"],
+    readable: ["sys_id", "id", "table", "field", "value"],
+    writable: [],
+  },
   sys_variable_value: {
     defaults: ["sys_id", "document", "document_key", "variable", "value"],
     readable: ["sys_id", "document", "document_key", "variable", "value", "order", "sys_updated_on"],

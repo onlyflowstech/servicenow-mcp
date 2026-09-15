@@ -5,6 +5,38 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0-dev.2] — 2026-09-15
+
+### Added
+
+- ATF readiness checks, CI/CD suite execution with bounded polling, detailed
+  results, persistent history and comparisons between runs.
+- A verified catalog of 13 typed ATF steps, including REST headers/query maps
+  and references to outputs from earlier steps in the same test.
+- Native authenticated ATF form input saving and stored-value verification,
+  without installing a scoped application or changing ServiceNow ACLs.
+- Authoring grants now include input mappings and required metadata reads.
+
+### Fixed
+
+- Global scope creation accepts the platform's `global` identifier; new steps
+  inherit their parent test's scope.
+- Plugin readiness recognizes the platform's `active` choice value.
+- Step input verification handles stored boolean values and enforces security
+  by default for record queries and validation.
+- Failed step authoring performs bounded cleanup even after request cancellation
+  and reports remaining input or mapping records.
+
+### Validation
+
+- PDI validation in Global: all 13 types authored and read back; server-side
+  assertions, record-output chaining, REST unauthorized-response checks, results,
+  failure details, history and comparisons verified. Temporary records removed.
+- Browser-driven steps were authored but their execution requires an ATF browser
+  runner. Authenticated REST requests need their own ATF request credentials.
+- This remains a dev prerelease; native forms must be verified against each
+  supported ServiceNow version.
+
 ## [2.2.0-dev.1] — 2026-09-14
 
 ### Added

@@ -34,7 +34,8 @@ export type MockServiceNowOperation =
   | "patch"
   | "delete"
   | "postBinary"
-  | "getRaw";
+  | "getRaw"
+  | "saveAtfStepInputs";
 
 export interface MockServiceNowCall {
   readonly operation: MockServiceNowOperation;
@@ -88,6 +89,7 @@ export function createMockServiceNowFixture(
   }
 
   const operations: ServiceNowOperations = Object.freeze({
+    saveAtfStepInputs: (body: import("../../src/atf-form.js").AtfFormInput) => invoke<void>({ operation: "saveAtfStepInputs", path: "/sys_atf_step.do", body }),
     get: <T>(path: string, params?: Record<string, string>) =>
       invoke<T | null>({ operation: "get", path, params }),
     getWithMeta: <T>(path: string, params?: Record<string, string>) =>
@@ -459,6 +461,7 @@ function isMockOperation(value: unknown): value is MockServiceNowOperation {
       "delete",
       "postBinary",
       "getRaw",
+      "saveAtfStepInputs",
     ].includes(value)
   );
 }

@@ -1,6 +1,6 @@
 {
   "name": "@onlyflows/servicenow-mcp",
-  "version": "2.2.0-dev.1",
+  "version": "2.2.0-dev.2",
   "description": "stdio ServiceNow MCP server with 23 tools for CRUD, CMDB traversal, ATF testing, and explicit multi-instance profiles.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -59,6 +59,7 @@
   "dependencies": {
     "@hono/node-server": "2.0.12",
     "@modelcontextprotocol/sdk": "1.30.0",
+    "parse5": "7.3.0",
     "zod": "^3.25.76"
   },
   "overrides": {
@@ -78,6 +79,7 @@
     ".env.example",
     "dist",
     "docs/ADDING-TOOLS.md",
+    "docs/ATF-WORKFLOW.md",
     "docs/CLIENT-SETUP.md",
     "docs/CONTAINER-DEPLOYMENT.md",
     "docs/CROSS-CLIENT-RELEASE-MATRIX.md",

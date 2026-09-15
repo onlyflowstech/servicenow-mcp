@@ -68,10 +68,11 @@ export function resolveAtfAuthorAccess(candidate: unknown, policy?: ResolvedEffe
 
 registerEnvelopeTextRenderer("sn_atf_author", (envelope, context) => {
   if ((envelope.data as { action: string }).action === "list_step_types") return renderMarkdown(headline("ATF step catalog"), table(["Type", "Name"], ((envelope.data as { step_types: {type: string; name: string}[] }).step_types).map(step => [step.type, step.name])));
-  const data = envelope.data as { outcome: "created" | "failed"; results: { table: string; sys_id: string }[]; rolled_back: string[]; rollback_failed: string[]; uncertain_insert: boolean };
+  const data = envelope.data as { outcome: "created" | "failed"; results: { table: string; sys_id: string }[]; rolled_back: string[]; rollback_failed: string[]; uncertain_insert: boolean; message?: string };
   if (data.outcome === "failed") return renderMarkdown(
     headline("ATF authoring failed", { status: "fail" }),
     text(`Rolled back: ${data.rolled_back.join(", ") || "none"}.`, 4000),
+    text(data.message),
     text(`Rollback failed for: ${data.rollback_failed.join(", ") || "none"}.`, 4000),
     data.uncertain_insert ? text("The last insert may have succeeded without a usable response; inspect the instance before retrying.") : null,
   );
@@ -92,7 +93,7 @@ export const atfAuthorToolModule = defineServiceNowToolModule({
   outputSchema: productionToolOutputSchemas.sn_atf_author,
   requirements: {
     permissions: ["read", "write"],
-    tables: { kind: "static", names: ["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_atf_step", ...STEP_READ_TABLES] },
+    tables: { kind: "static", names: [...new Set(["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_atf_step", ...STEP_READ_TABLES])] },
     apis: ["table"], fieldPolicies: ["read", "write"], capabilities: ["atf:author"],
   },
   resolveAccess: (args, policy) => resolveAtfAuthorAccess(args, policy),

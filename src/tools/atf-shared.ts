@@ -10,7 +10,7 @@ import type { AtfExecutionResult } from "./atf-contracts.js";
 export const ATF_READ_FIELDS: Record<string, string> = {
   sys_atf_test_suite: "sys_id,name,active,parent",
   sys_atf_test_suite_test: "sys_id,test,test_suite,order",
-  sys_atf_test: "sys_id,name,active",
+  sys_atf_test: "sys_id,name,active,sys_scope",
   sys_atf_step: "sys_id,test,step_config,active,order,description",
   sys_atf_step_config: "sys_id,name,step_env",
   sys_atf_test_suite_result: "sys_id,test_suite,parent,status,success,start_time,end_time,run_time,rolled_up_test_success_count,rolled_up_test_failure_count,rolled_up_test_error_count,rolled_up_test_skip_count",
@@ -20,6 +20,7 @@ export const ATF_READ_FIELDS: Record<string, string> = {
   sys_properties: "sys_id,name,value",
   sys_atf_agent: "sys_id,status,type,last_checkin,browser_name,os_name",
   var_dictionary: "sys_id,model_id,element,internal_type,mandatory,order",
+  sys_element_mapping: "sys_id,id,table,field,value",
   sys_variable_value: "sys_id,document,document_key,variable,value,order",
 };
 export const RESULT_TABLES = ["sys_atf_test_suite_result", "sys_atf_test_result", "sys_atf_test_result_step"];

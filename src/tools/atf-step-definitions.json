@@ -237,7 +237,8 @@
         "mandatory": false,
         "order": 100,
         "variable": "02fb0027531000109e02ddeeff7b120b",
-        "sdk_constant": true
+        "sdk_constant": true,
+        "default": "true"
       }
     ]
   },

@@ -177,6 +177,7 @@ export function createCachedServiceNowOperations(
     delete: { value: operations.delete.bind(operations) },
     postBinary: { value: operations.postBinary.bind(operations) },
     getRaw: { value: operations.getRaw.bind(operations) },
+    ...(operations.saveAtfStepInputs ? { saveAtfStepInputs: { value: operations.saveAtfStepInputs.bind(operations) } } : {}),
   });
   return Object.freeze(cached);
 }

@@ -14,6 +14,7 @@
  * @module client
  */
 
+import { atfFormInputSchema, prepareAtfForm, atfFormCookies, type AtfFormInput } from "./atf-form.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { ServiceNowConfig } from "./config.js";
@@ -46,6 +47,7 @@ export interface RequestResult<T = ParsedJson> {
  * client through `this`, own properties, or the prototype chain.
  */
 export interface ServiceNowOperations {
+  saveAtfStepInputs?(input: AtfFormInput): Promise<void>;
   get<T = ParsedJson>(
     path: string,
     params?: Record<string, string>
@@ -160,6 +162,27 @@ export class ServiceNowClient {
       new URL(this.#baseUrl).origin,
       config.maxConcurrentRequests ?? DEFAULT_MAX_CONCURRENT_REQUESTS
     );
+  }
+
+  /** Fixed native form endpoint; no generic form/URL capability is exposed. */
+  async saveAtfStepInputs(candidate: AtfFormInput): Promise<void> {
+    const input = atfFormInputSchema.parse(candidate);
+    const origin = new URL(this.#baseUrl).origin;
+    const endpoint = origin + "/sys_atf_step.do";
+    const deadline = AbortSignal.timeout(this.#timeoutMs);
+    const parent = currentRequestSignal();
+    const signal = parent ? AbortSignal.any([parent, deadline]) : deadline;
+    const response = await this.fetchWithPolicy("GET", endpoint + "?sys_id=" + input.stepId, { Accept: "text/html" }, undefined, true);
+    if (response.status !== 200) { drainBody(response); throw this.buildHttpError("GET", response.status, response.headers); }
+    const html = (await readBoundedResponseBody(response, 2 * 1024 * 1024, signal, currentRawByteBudget())).toString("utf8");
+    const fields = prepareAtfForm(html, origin, input);
+    const cookies = atfFormCookies(response.headers);
+    const saved = await this.fetchWithPolicy("POST", endpoint, { "Content-Type": "application/x-www-form-urlencoded", Accept: "text/html", ...(cookies ? { Cookie: cookies } : {}) }, fields, true);
+    drainBody(saved);
+    if (![200, 302, 303].includes(saved.status)) throw this.buildHttpError("POST", saved.status, saved.headers);
+    const location = saved.headers.get("location");
+    if (location && new URL(location, endpoint).origin !== origin) throw createToolError("upstream", "do_not_retry");
+    // Caller must verify stored inputs. A successful HTTP response is insufficient.
   }
 
   // ── Core HTTP methods ──────────────────────────────────────────
@@ -343,7 +366,8 @@ export class ServiceNowClient {
     method: HttpMethod,
     url: string,
     headers: Record<string, string>,
-    body?: BodyInit
+    body?: BodyInit,
+    nativeForm = false
   ): Promise<Response> {
     let attempt = 0;
     let authRetried = false;
@@ -368,6 +392,7 @@ export class ServiceNowClient {
             headers: { ...authHeaders, ...headers },
             body,
             signal: attemptSignal,
+            ...(nativeForm ? { redirect: "manual" as const } : {}),
           })
         );
       } catch {
@@ -377,7 +402,7 @@ export class ServiceNowClient {
         }
         // Transient network error (DNS, reset, refused...). Never retry a
         // POST -- the request may have reached the server before failing.
-        if (method !== "POST" && attempt < this.#maxRetries) {
+        if (!nativeForm && method !== "POST" && attempt < this.#maxRetries) {
           attempt++;
           throwIfRequestCancelled(requestSignal);
           await waitForRequestCancellation(
@@ -390,7 +415,7 @@ export class ServiceNowClient {
       }
 
       // 401: give the auth provider one chance to refresh and retry.
-      if (response.status === 401 && !authRetried) {
+      if (!nativeForm && response.status === 401 && !authRetried) {
         throwIfRequestCancelled(requestSignal);
         const shouldRetry = await waitForRequestCancellation(
           this.#auth.onAuthFailure(requestSignal),
@@ -404,7 +429,7 @@ export class ServiceNowClient {
       }
 
       if (
-        isRetryableStatus(response.status, method) &&
+        !nativeForm && isRetryableStatus(response.status, method) &&
         attempt < this.#maxRetries
       ) {
         attempt++;
@@ -464,6 +489,7 @@ export function createServiceNowOperations(
 ): ServiceNowOperations {
   const operations = Object.create(null) as ServiceNowOperations;
   Object.defineProperties(operations, {
+    ...(client.saveAtfStepInputs ? { saveAtfStepInputs: { value: (input: AtfFormInput) => client.saveAtfStepInputs!(input) } } : {}),
     get: {
       value: <T = ParsedJson>(path: string, params?: Record<string, string>) =>
         client.get<T>(path, params),

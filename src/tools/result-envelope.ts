@@ -165,6 +165,7 @@ const atfAuthorResultSchema = z.object({
   rolled_back: z.array(atfRecordIdSchema).max(1000),
   rollback_failed: z.array(atfRecordIdSchema).max(1000),
   uncertain_insert: z.boolean(),
+  message: z.string().max(1000).optional(),
 }).strict();
 
 const queryResultSchema = z
