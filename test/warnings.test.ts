@@ -31,15 +31,11 @@ const config: ServiceNowConfig = {
 
 /** A genuine trusted authorization failure issued by the client boundary. */
 const FORBIDDEN = createToolError("authorization", "retry_after_correction");
-const NOT_FOUND = createToolError("not_found", "do_not_retry");
-const AMBIGUOUS_POST = createToolError("upstream", "do_not_retry");
 const TIMEOUT = createToolError("timeout", "retry_if_safe_and_idempotent");
 /** What formatError() renders FORBIDDEN as. */
 const FORBIDDEN_TEXT = formatError(FORBIDDEN);
 const INTERNAL_TEXT = formatError(new Error("untrusted"));
 const ROOT_SYS_ID = "0123456789abcdef0123456789abcdef";
-const TEST_SYS_ID = "11111111111111111111111111111111";
-const SUITE_SYS_ID = "22222222222222222222222222222222";
 
 function parseText(result: { content: Array<{ type: string; text: string }> }) {
   return JSON.parse(result.content[0].text);
@@ -420,156 +416,11 @@ describe("sn_health warnings", () => {
   });
 });
 
-describe("sn_atf fallback-chain warnings", () => {
-  it("run: falls back after a trusted endpoint not-found", async () => {
-    const post = vi.fn(async (path: string) => {
-      if (path === "/api/sn_atf/rest/test") throw NOT_FOUND;
-      return { result: { sys_id: "res1" } };
-    });
-    const client = { post } as unknown as ServiceNowClient;
-
-    const result = await atfHandler(
-      atfSchema.parse({ action: "run", test_sys_id: TEST_SYS_ID, wait: false }),
-      client,
-      config
-    );
-    expect(result.isError).toBeUndefined();
-    const parsed = parseText(result);
-    expect(parsed.sys_id).toBe("res1");
-    expect(parsed.warnings).toEqual([
-      `POST /api/sn_atf/rest/test: ${formatError(NOT_FOUND)}`,
-    ]);
-    expect(post).toHaveBeenCalledTimes(2);
-  });
-
-  it("run: omits warnings when the first strategy succeeds", async () => {
-    const post = vi.fn(async () => ({ result: { sys_id: "res1" } }));
-    const client = { post } as unknown as ServiceNowClient;
-
-    const parsed = parseText(
-      await atfHandler(
-        atfSchema.parse({
-          action: "run",
-          test_sys_id: TEST_SYS_ID,
-          wait: false,
-        }),
-        client,
-        config
-      )
-    );
-    expect(parsed).toEqual({ sys_id: "res1" });
-  });
-
-  it("run: never duplicates an ambiguous first POST failure", async () => {
-    const post = vi
-      .fn()
-      .mockRejectedValueOnce(AMBIGUOUS_POST)
-      .mockResolvedValue({ result: { sys_id: "must-not-run" } });
-    const client = { post } as unknown as ServiceNowClient;
-
-    expect(
-      await rejectedDescriptor(
-        atfHandler(
-          atfSchema.parse({
-            action: "run",
-            test_sys_id: TEST_SYS_ID,
-            wait: false,
-          }),
-          client,
-          config
-        )
-      )
-    ).toMatchObject({ category: "upstream", retry: "do_not_retry" });
-    expect(post).toHaveBeenCalledOnce();
-  });
-
-  it("run: stops before the third POST after an ambiguous second failure", async () => {
-    const post = vi
-      .fn()
-      .mockRejectedValueOnce(NOT_FOUND)
-      .mockRejectedValueOnce(AMBIGUOUS_POST)
-      .mockResolvedValue({ result: { sys_id: "must-not-run" } });
-    const client = { post } as unknown as ServiceNowClient;
-
-    expect(
-      await rejectedDescriptor(
-        atfHandler(
-          atfSchema.parse({
-            action: "run",
-            test_sys_id: TEST_SYS_ID,
-            wait: false,
-          }),
-          client,
-          config
-        )
-      )
-    ).toMatchObject({ category: "upstream", retry: "do_not_retry" });
-    expect(post).toHaveBeenCalledTimes(2);
-  });
-
-  it("run: reaches the final strategy only after two trusted not-found responses", async () => {
-    const post = vi.fn(async () => {
-      throw NOT_FOUND;
-    });
-    const client = { post } as unknown as ServiceNowClient;
-
-    expect(
-      await rejectedDescriptor(
-        atfHandler(
-          atfSchema.parse({ action: "run", test_sys_id: TEST_SYS_ID }),
-          client,
-          config
-        )
-      )
-    ).toMatchObject({ category: "not_found", retry: "do_not_retry" });
-    expect(post).toHaveBeenCalledTimes(3);
-  });
-
-  it("run-suite: falls back after a trusted endpoint not-found", async () => {
-    const post = vi.fn(async (path: string) => {
-      if (path === "/api/sn_atf/rest/suite") throw NOT_FOUND;
-      return { result: { tracker_id: "trk1" } };
-    });
-    const client = { post } as unknown as ServiceNowClient;
-
-    const result = await atfHandler(
-      atfSchema.parse({
-        action: "run-suite",
-        suite_sys_id: SUITE_SYS_ID,
-        wait: false,
-      }),
-      client,
-      config
-    );
-    expect(result.isError).toBeUndefined();
-    const parsed = parseText(result);
-    expect(parsed.tracker_id).toBe("trk1");
-    expect(parsed.warnings).toEqual([
-      `POST /api/sn_atf/rest/suite: ${formatError(NOT_FOUND)}`,
-    ]);
-    expect(post).toHaveBeenCalledTimes(2);
-  });
-
-  it("run-suite: never duplicates an ambiguous first POST failure", async () => {
-    const post = vi
-      .fn()
-      .mockRejectedValueOnce(AMBIGUOUS_POST)
-      .mockResolvedValue({ result: { tracker_id: "must-not-run" } });
-    const client = { post } as unknown as ServiceNowClient;
-
-    expect(
-      await rejectedDescriptor(
-        atfHandler(
-          atfSchema.parse({
-            action: "run-suite",
-            suite_sys_id: SUITE_SYS_ID,
-            wait: false,
-          }),
-          client,
-          config
-        )
-      )
-    ).toMatchObject({ category: "upstream", retry: "do_not_retry" });
-    expect(post).toHaveBeenCalledOnce();
+describe("sn_atf legacy execution migration", () => {
+  it.each(["run", "run-suite"] as const)("returns migration guidance for %s without any I/O", async action => {
+    const post = vi.fn(); const get = vi.fn();
+    const result = await atfHandler(atfSchema.parse({ action }), { post, get } as unknown as ServiceNowClient, config);
+    expect(parseText(result)).toMatchObject({ status: "migration_required", message: expect.stringContaining("sn_atf_run") });
+    expect(post).not.toHaveBeenCalled(); expect(get).not.toHaveBeenCalled();
   });
 });

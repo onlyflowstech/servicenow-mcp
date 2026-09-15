@@ -1,3 +1,4 @@
+import { atfExecutionResultSchema, atfResultsSchema, atfReadinessSchema } from "./atf-contracts.js";
 /** Shared SNSDK-33 structured-result contracts and compatibility adapter. */
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -154,14 +155,15 @@ const atfResultEnvelopeSchema = z
 
 const atfRecordIdSchema = z.string().regex(/^[a-f0-9]{32}$/);
 const atfAuthorResultSchema = z.object({
-  action: z.enum(["create_test", "create_suite", "add_tests_to_suite"]),
-  outcome: z.enum(["created", "failed"]),
+  action: z.enum(["create_test", "create_suite", "add_tests_to_suite", "add_steps", "list_step_types"]),
+  step_types: z.array(z.record(z.unknown())).optional(),
+  outcome: z.enum(["created", "failed", "catalog"]),
   results: z.array(z.object({
-    table: z.enum(["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test"]),
+    table: z.enum(["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_atf_step"]),
     sys_id: atfRecordIdSchema,
   }).strict()).max(100),
-  rolled_back: z.array(atfRecordIdSchema).max(100),
-  rollback_failed: z.array(atfRecordIdSchema).max(100),
+  rolled_back: z.array(atfRecordIdSchema).max(1000),
+  rollback_failed: z.array(atfRecordIdSchema).max(1000),
   uncertain_insert: z.boolean(),
 }).strict();
 
@@ -260,6 +262,9 @@ const productionDataSchemas = Object.freeze({
   sn_codesearch: listResultSchema,
   sn_discover: listResultSchema,
   sn_atf: atfResultEnvelopeSchema,
+  sn_atf_run: atfExecutionResultSchema,
+  sn_atf_results: atfResultsSchema,
+  sn_atf_readiness: atfReadinessSchema,
   sn_atf_author: atfAuthorResultSchema,
   sn_nl: naturalLanguageResultSchema,
   sn_profile: profileResultSchema,
@@ -291,6 +296,9 @@ export const productionToolOutputSchemas = Object.freeze({
   sn_codesearch: withStructuredResultEnvelope(productionDataSchemas.sn_codesearch),
   sn_discover: withStructuredResultEnvelope(productionDataSchemas.sn_discover),
   sn_atf: withStructuredResultEnvelope(productionDataSchemas.sn_atf),
+  sn_atf_run: withStructuredResultEnvelope(productionDataSchemas.sn_atf_run),
+  sn_atf_results: withStructuredResultEnvelope(productionDataSchemas.sn_atf_results),
+  sn_atf_readiness: withStructuredResultEnvelope(productionDataSchemas.sn_atf_readiness),
   sn_atf_author: withStructuredResultEnvelope(productionDataSchemas.sn_atf_author),
   sn_nl: withStructuredResultEnvelope(productionDataSchemas.sn_nl),
   sn_profile: withStructuredResultEnvelope(productionDataSchemas.sn_profile),
@@ -463,6 +471,9 @@ function collectionArray(data: unknown): unknown[] | undefined {
   if (typeof data !== "object" || data === null) return undefined;
   const record = data as Record<string, unknown>;
   if (Array.isArray(record.results)) return record.results;
+  if (Array.isArray(record.runs)) return record.runs;
+  if (Array.isArray(record.failures)) return record.failures;
+  if (typeof record.execution === "object" && record.execution !== null) return collectionArray(record.execution);
   if (Array.isArray(record.relationships)) return record.relationships;
   if (Array.isArray(record.fields)) return record.fields;
   if (Array.isArray(record.result)) return record.result;

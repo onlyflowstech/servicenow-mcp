@@ -55,7 +55,7 @@ export function createAtfExecutionPolicy(
   });
 }
 
-export type AtfPolicyFailureReason = "execution_not_enabled";
+export type AtfPolicyFailureReason = "execution_not_enabled" | "script_steps_not_enabled";
 
 const ISSUED_ATF_POLICY_ERRORS = new WeakSet<object>();
 
@@ -87,6 +87,7 @@ export function atfPolicyDenialMessage(
   _error: AtfPolicyError,
   tool?: string
 ): string {
+  if (_error.reason === "script_steps_not_enabled") return "ATF script-step authoring denied by policy. Set atf.allowScriptSteps=true on this profile to permit code-executing steps.";
   const subject =
     typeof tool === "string" && tool.trim() !== "" ? tool.trim() : "This tool";
   return (

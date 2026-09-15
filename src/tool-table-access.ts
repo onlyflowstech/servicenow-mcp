@@ -407,10 +407,8 @@ function atfResolution(
       );
     case "run":
     case "run-suite":
-      // ATF definitions can mutate arbitrary application tables. The static
-      // request does not carry a complete trusted side-effect manifest, so a
-      // table-only policy cannot safely authorize execution.
-      throw new TablePolicyError();
+      // Compatibility actions only return migration guidance and perform no I/O.
+      return resolution(args, []);
     default:
       throw new TablePolicyError();
   }

@@ -638,63 +638,13 @@ describe("SNSDK-33 bounded collection inputs", () => {
     });
   });
 
-  it("uses the effective 200 run-suite limit and a +1 continuation probe", async () => {
-    const suiteId = "a".repeat(32);
-    const post = vi.fn(async () => ({ result: {} }));
-    const get = vi.fn(async () => ({
-      result: Array.from({ length: 201 }, (_, index) => ({
-        sys_id: String(index).padStart(32, "0"),
-        test: `test-${index}`,
-        status: index % 2 === 0 ? "Passed" : "Failed",
-      })),
-    }));
-    const args = atfSchema.parse({
-      action: "run-suite",
-      suite_sys_id: suiteId,
-      limit: 500,
-      offset: 7,
-      timeout: 0,
-    });
-    const legacy = await atfHandler(
-      args,
-      { get, post } as never,
-      {} as never,
-      {} as never
-    );
-    expect(post).toHaveBeenCalledWith("/api/sn_atf/rest/suite", {
-      suite_id: suiteId,
-    });
-    expect(get).toHaveBeenCalledTimes(1);
-    expect(get.mock.calls[0]?.[1]).toMatchObject({
-      sysparm_limit: "201",
-      sysparm_offset: "7",
-      sysparm_query: `test_suite=${suiteId}^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`,
-    });
-
-    const structured = productionToolOutputSchemas.sn_atf.parse(
-      finalizeEnvelopeResult(
-        enrichSuccessfulResult(
-          envelopeCompatibilityResult("sn_atf", args, legacy),
-          PROFILE
-        )
-      )?.structuredContent
-    );
-    expect(structured.data.result).toMatchObject({
-      record_count: 200,
-      limit: 200,
-      offset: 7,
-      has_more: true,
-      next_offset: 207,
-      summary: { total: 200, passed: 100, failed: 100, skipped: 0 },
-    });
-    expect(structured.metadata.pagination).toMatchObject({
-      limit: 200,
-      offset: 7,
-      returned: 200,
-      has_more: true,
-      next_offset: 207,
-      order_by: ["-sys_created_on", "-sys_id"],
-    });
+  it("preserves the legacy action contract while returning migration guidance", async () => {
+    const args = atfSchema.parse({ action: "run-suite" });
+    const post = vi.fn(); const get = vi.fn();
+    const legacy = await atfHandler(args, { post, get } as never, {} as never, {} as never);
+    const structured = productionToolOutputSchemas.sn_atf.parse(finalizeEnvelopeResult(enrichSuccessfulResult(envelopeCompatibilityResult("sn_atf", args, legacy), PROFILE))?.structuredContent);
+    expect(structured.data.result).toMatchObject({ status: "migration_required" });
+    expect(post).not.toHaveBeenCalled(); expect(get).not.toHaveBeenCalled();
   });
 
   it("pages code search across table boundaries without skipping records", async () => {

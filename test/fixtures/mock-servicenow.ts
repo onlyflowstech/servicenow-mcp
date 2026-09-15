@@ -92,8 +92,8 @@ export function createMockServiceNowFixture(
       invoke<T | null>({ operation: "get", path, params }),
     getWithMeta: <T>(path: string, params?: Record<string, string>) =>
       invoke<RequestResult<T>>({ operation: "getWithMeta", path, params }),
-    post: <T>(path: string, body?: unknown) =>
-      invoke<T | null>({ operation: "post", path, body }),
+    post: <T>(path: string, body?: unknown, params?: Record<string, string>) =>
+      invoke<T | null>({ operation: "post", path, body, ...(params ? { params } : {}) }),
     patch: <T>(path: string, body?: unknown) =>
       invoke<T | null>({ operation: "patch", path, body }),
     delete: (path: string) =>
@@ -152,6 +152,7 @@ export interface MockServiceNowHarnessOptions {
   readonly modules?: readonly ToolModuleContract[];
   /** ATF grants stated by the mocked policy; omission denies them. */
   readonly atf?: AtfExecutionPolicyInput;
+  readonly atfCacheDirectory?: string;
 }
 
 /** Shared MCP boundary harness for future ServiceNow domain-module tests. */
@@ -175,6 +176,7 @@ export async function createMockServiceNowHarness(
     instance: SNSDK54_INSTANCE,
     user: "snsdk-54-user",
     password: SNSDK54_FAILURE_CANARIES.credential,
+    ...(options.atfCacheDirectory ? { atf: { execute: options.atf?.execute === true, allowScriptSteps: false, resultCacheSize: 10, resultCacheDir: options.atfCacheDirectory } } : {}),
     displayValue: "true",
     relDepth: 3,
     authType: "basic" as const,

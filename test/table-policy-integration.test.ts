@@ -241,6 +241,9 @@ describe("SNSDK-29 registry enforcement", () => {
       sn_codesearch: { search_term: "probe" },
       sn_discover: { type: "tables" },
       sn_atf_author: { action: "create_test", name: "Example" },
+      sn_atf_run: { suite_sys_id: "1".repeat(32) },
+      sn_atf_results: { action: "history", suite_sys_id: "1".repeat(32) },
+      sn_atf_readiness: {},
       sn_atf: { action: "list" },
       sn_nl: { text: "show me open incidents" },
     };

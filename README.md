@@ -3,7 +3,7 @@
 <!-- Logo placeholder -->
 <!-- ![ServiceNow MCP Server](banner.png) -->
 
-**The most comprehensive ServiceNow MCP server.** 20 tools for full CRUD, append-only incident journals, CMDB graph traversal, ATF testing, multi-instance profiles, and more.
+**The most comprehensive ServiceNow MCP server.** 23 tools for full CRUD, append-only incident journals, CMDB graph traversal, ATF testing, multi-instance profiles, and more.
 
 Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](https://github.com/onlyflowstech)
 
@@ -492,11 +492,11 @@ deny-by-default table and tool policy:
 | System log queries | ❌ | ✅ |
 | Code search across artifacts | ❌ | ✅ |
 | Table/app/plugin discovery | ❌ | ✅ |
-| ATF test execution | ❌ | 🚧 listing/results available; execution currently policy-denied |
+| ATF test execution | ❌ | ✅ suite execution with explicit profile grant |
 | Natural language interface | ❌ | 🚧 currently policy-denied pending a typed access plan |
 | Background scripts | ❌ | 🚧 on the [roadmap](#roadmap) (SNS-39) |
 | Multi-instance profiles | ❌ | ✅ (named profiles, per-call override) |
-| **Total tools** | **1–3** | **20** |
+| **Total tools** | **1–3** | **23** |
 
 ---
 
@@ -625,8 +625,11 @@ in this section is needed to use this server.
 
 | Tool | Description |
 |------|-------------|
-| `sn_atf_author` | Create tests/suites and ordered suite memberships with explicit write grants |
-| `sn_atf` | List ATF tests/suites and get results; `run`/`run-suite` currently fail closed |
+| `sn_atf_author` | Create tests/suites, ordered memberships and validated typed steps |
+| `sn_atf` | Legacy test/suite listing and results; execution redirects to `sn_atf_run` |
+| `sn_atf_readiness` | Check plugins, properties, runner availability and permissions |
+| `sn_atf_run` | Execute a suite through CI/CD with bounded polling |
+| `sn_atf_results` | Fetch results, cached history and comparisons |
 | `sn_nl` | Currently fails closed until natural-language composition emits a complete typed access plan |
 
 `sn_script` (background script execution) shipped in 1.0.0 as an unimplemented
@@ -927,8 +930,9 @@ complete. File-backed profile example:
   }
 }
 ```
-`sn_nl` and ATF `run`/`run-suite` currently fail closed because they do not emit
-a complete typed side-effect plan; use the corresponding typed tool instead.
+`sn_nl` remains denied without a complete typed side-effect plan. Legacy ATF
+`run`/`run-suite` return migration guidance; use `sn_atf_run` with an explicit
+`atf.execute` profile grant. See [ATF workflow](docs/ATF-WORKFLOW.md).
 Incident journal fields are append-only: generic `sn_update` rejects `comments`
 and `work_notes` before credentials or client creation. Use
 `sn_incident_add_comment` or `sn_incident_add_work_note` with exactly
@@ -1006,7 +1010,7 @@ This server is designed for production use with multiple safety layers:
 - **Delete operations** require explicit `confirm: true`
 - **Batch operations** run in dry-run mode by default — shows match count without making changes
 - **Bulk operations** require `confirm: true` to leave dry-run mode
-- **Unclassified composition is denied** — `sn_nl` and ATF execution do not run until they can emit complete typed access plans
+- **Unclassified composition is denied** — `sn_nl` requires a complete typed access plan; ATF suite execution requires a separate explicit `atf.execute` grant
 - **Table access is deny-by-default** with independent exact read/write allowlists and non-configurable sensitive-table denials
 - **User input is neutralized** before interpolation into encoded queries (`^` is stripped from filter values — ServiceNow's query syntax has no escape sequence)
 

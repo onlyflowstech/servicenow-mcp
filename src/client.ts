@@ -54,7 +54,7 @@ export interface ServiceNowOperations {
     path: string,
     params?: Record<string, string>
   ): Promise<RequestResult<T>>;
-  post<T = ParsedJson>(path: string, body?: unknown): Promise<T | null>;
+  post<T = ParsedJson>(path: string, body?: unknown, params?: Record<string, string>): Promise<T | null>;
   patch<T = ParsedJson>(path: string, body?: unknown): Promise<T | null>;
   delete(path: string): Promise<{ status: number }>;
   postBinary<T = ParsedJson>(
@@ -179,8 +179,8 @@ export class ServiceNowClient {
     return this.requestWithMeta<T>("GET", path, { params });
   }
 
-  async post<T = ParsedJson>(path: string, body?: unknown): Promise<T | null> {
-    return (await this.requestWithMeta<T>("POST", path, { body })).data;
+  async post<T = ParsedJson>(path: string, body?: unknown, params?: Record<string, string>): Promise<T | null> {
+    return (await this.requestWithMeta<T>("POST", path, { body, params })).data;
   }
 
   async patch<T = ParsedJson>(path: string, body?: unknown): Promise<T | null> {
@@ -473,8 +473,8 @@ export function createServiceNowOperations(
         client.getWithMeta<T>(path, params),
     },
     post: {
-      value: <T = ParsedJson>(path: string, body?: unknown) =>
-        client.post<T>(path, body),
+      value: <T = ParsedJson>(path: string, body?: unknown, params?: Record<string, string>) =>
+        params === undefined ? client.post<T>(path, body) : client.post<T>(path, body, params),
     },
     patch: {
       value: <T = ParsedJson>(path: string, body?: unknown) =>

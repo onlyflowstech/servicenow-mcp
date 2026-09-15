@@ -1,0 +1,532 @@
+{
+  "open_new_form": {
+    "step_config": "05317cd10b10220050192f15d6673af8",
+    "name": "Open a New Form",
+    "step_env": "UI",
+    "executes_user_code": false,
+    "inputs": [
+      {
+        "element": "table",
+        "internal_type": "table_name",
+        "mandatory": true,
+        "order": 100,
+        "variable": "bb84ed825320220002c6435723dc3400",
+        "sdk_constant": true
+      },
+      {
+        "element": "view",
+        "internal_type": "string",
+        "mandatory": false,
+        "order": 200,
+        "variable": "27d4e1c25320220002c6435723dc3486",
+        "sdk_constant": true
+      },
+      {
+        "element": "form_ui",
+        "internal_type": "choice",
+        "mandatory": false,
+        "default": "standard_ui",
+        "order": 50,
+        "variable": "6f2a59a4e7133300b5646ea8c2f6a975",
+        "sdk_constant": true
+      },
+      {
+        "element": "record_path",
+        "internal_type": "string",
+        "mandatory": false,
+        "default": "record",
+        "order": 100,
+        "variable": "3a662f60a3023110571967d1361e6134",
+        "sdk_constant": true
+      }
+    ]
+  },
+  "set_field_values": {
+    "step_config": "fcae4a935332120028bc29cac2dc340e",
+    "name": "Set Field Values",
+    "step_env": "UI",
+    "executes_user_code": false,
+    "inputs": [
+      {
+        "element": "table",
+        "internal_type": "table_name",
+        "mandatory": true,
+        "order": 100,
+        "variable": "424ca6465320220002c6435723dc34b5",
+        "sdk_constant": true
+      },
+      {
+        "element": "field_values",
+        "internal_type": "template_value",
+        "mandatory": true,
+        "order": 100,
+        "variable": "b3dba2465320220002c6435723dc34f0",
+        "sdk_constant": true
+      },
+      {
+        "element": "form_ui",
+        "internal_type": "choice",
+        "mandatory": false,
+        "default": "standard_ui",
+        "order": 50,
+        "variable": "946f3c1a0f23330072e6452bc4767eda",
+        "sdk_constant": true
+      }
+    ]
+  },
+  "submit_form": {
+    "step_config": "be8e0a935332120028bc29cac2dc34e4",
+    "name": "Submit a Form",
+    "step_env": "UI",
+    "executes_user_code": false,
+    "inputs": [
+      {
+        "element": "assert_type",
+        "internal_type": "choice",
+        "mandatory": false,
+        "order": 100,
+        "variable": "c796d40497302200abe4bb7503ac4ad8",
+        "sdk_constant": true,
+        "choices": [
+          "form_submitted_to_server",
+          "form_submission_canceled_in_browser"
+        ]
+      },
+      {
+        "element": "form_ui",
+        "internal_type": "choice",
+        "mandatory": false,
+        "default": "standard_ui",
+        "order": 50,
+        "variable": "ae8b91c9ffa333008d3f5d9ad53bf1ba",
+        "sdk_constant": true
+      }
+    ]
+  },
+  "field_values_validation": {
+    "step_config": "1b97cd31872022008182c9ded0e3ece5",
+    "name": "Field Values Validation",
+    "step_env": "UI",
+    "executes_user_code": false,
+    "inputs": [
+      {
+        "element": "table",
+        "internal_type": "table_name",
+        "mandatory": true,
+        "order": 100,
+        "variable": "a0e13cc35320220002c6435723dc3467",
+        "sdk_constant": true
+      },
+      {
+        "element": "conditions",
+        "internal_type": "conditions",
+        "mandatory": true,
+        "order": 200,
+        "variable": "4aa838f25320220002c6435723dc34e1",
+        "sdk_constant": true
+      },
+      {
+        "element": "form_ui",
+        "internal_type": "choice",
+        "mandatory": false,
+        "default": "standard_ui",
+        "order": 50,
+        "variable": "c83b5337e7633300e12127d8d2f6a98b",
+        "sdk_constant": true
+      }
+    ]
+  },
+  "open_existing_record": {
+    "step_config": "5f2e0e535332120028bc29cac2dc34d3",
+    "name": "Open an Existing Record",
+    "step_env": "UI",
+    "executes_user_code": false,
+    "inputs": [
+      {
+        "element": "table",
+        "internal_type": "table_name",
+        "mandatory": true,
+        "order": 100,
+        "variable": "b124164e53a0220002c6435723dc34c5",
+        "sdk_constant": true
+      },
+      {
+        "element": "record_id",
+        "internal_type": "document_id",
+        "mandatory": true,
+        "order": 200,
+        "variable": "ad351a4e53a0220002c6435723dc34f0",
+        "sdk_constant": true
+      },
+      {
+        "element": "view",
+        "internal_type": "string",
+        "mandatory": false,
+        "order": 300,
+        "variable": "6e55da4e53a0220002c6435723dc34a0",
+        "sdk_constant": true
+      },
+      {
+        "element": "form_ui",
+        "internal_type": "choice",
+        "mandatory": false,
+        "default": "standard_ui",
+        "order": 50,
+        "variable": "17d732a9c7a333005e5c45b881c26007",
+        "sdk_constant": true
+      },
+      {
+        "element": "record_path",
+        "internal_type": "string",
+        "mandatory": false,
+        "default": "record",
+        "order": 100,
+        "variable": "74d6e7a0a3023110571967d1361e616b",
+        "sdk_constant": true
+      },
+      {
+        "element": "selected_tab_index",
+        "internal_type": "integer",
+        "mandatory": false,
+        "default": "1",
+        "order": 400,
+        "variable": "c2eb56e853422110248dddeeff7b1261",
+        "sdk_constant": true
+      }
+    ]
+  },
+  "record_query": {
+    "step_config": "2d82e3c7531400109e02ddeeff7b12a7",
+    "name": "Record Query",
+    "step_env": "Server - Independent",
+    "executes_user_code": false,
+    "inputs": [
+      {
+        "element": "table",
+        "internal_type": "table_name",
+        "mandatory": true,
+        "order": 300,
+        "variable": "78b8d86b531000109e02ddeeff7b12f3",
+        "sdk_constant": true
+      },
+      {
+        "element": "field_values",
+        "label": "Conditions",
+        "internal_type": "conditions",
+        "mandatory": true,
+        "order": 400,
+        "variable": "915990ab531000109e02ddeeff7b12f8",
+        "sdk_constant": true
+      },
+      {
+        "element": "assert_type",
+        "internal_type": "choice",
+        "mandatory": false,
+        "default": "records_match_query",
+        "order": 200,
+        "variable": "b86c0427531000109e02ddeeff7b1227",
+        "sdk_constant": true,
+        "choices": [
+          "records_match_query",
+          "no_records_match_query"
+        ]
+      },
+      {
+        "element": "enforce_security",
+        "internal_type": "boolean",
+        "mandatory": false,
+        "order": 100,
+        "variable": "02fb0027531000109e02ddeeff7b120b",
+        "sdk_constant": true
+      }
+    ]
+  },
+  "record_validation": {
+    "step_config": "1f39a288df60220062fe6c7a4df2639d",
+    "name": "Record Validation",
+    "step_env": "Server - Independent",
+    "executes_user_code": false,
+    "inputs": [
+      {
+        "element": "table",
+        "internal_type": "table_name",
+        "mandatory": true,
+        "order": 100,
+        "variable": "6aad5a575360220002c6435723dc34b0",
+        "sdk_constant": true
+      },
+      {
+        "element": "record_id",
+        "internal_type": "document_id",
+        "mandatory": true,
+        "order": 200,
+        "variable": "52ed1e5b5360220002c6435723dc3421",
+        "sdk_constant": true
+      },
+      {
+        "element": "field_values",
+        "internal_type": "conditions",
+        "mandatory": false,
+        "order": 300,
+        "variable": "ff6e125353a0220002c6435723dc3442",
+        "sdk_constant": true
+      },
+      {
+        "element": "assert_type",
+        "internal_type": "choice",
+        "mandatory": false,
+        "default": "record_validated",
+        "order": 100,
+        "variable": "67400008676003007ba405225685efa4",
+        "sdk_constant": true,
+        "choices": [
+          "record_validated",
+          "record_not_found"
+        ]
+      },
+      {
+        "element": "enforce_security",
+        "internal_type": "boolean",
+        "mandatory": false,
+        "default": "true",
+        "order": 10,
+        "variable": "cbddfa135320220002c6435723dc3415",
+        "sdk_constant": true
+      }
+    ]
+  },
+  "impersonate": {
+    "step_config": "071ee5b253331200040729cac2dc348d",
+    "name": "Impersonate",
+    "step_env": "Server - Independent",
+    "executes_user_code": false,
+    "inputs": [
+      {
+        "element": "user",
+        "internal_type": "reference",
+        "reference": "sys_user",
+        "mandatory": true,
+        "order": 100,
+        "variable": "586e2c4253e0220002c6435723dc3415",
+        "sdk_constant": true
+      }
+    ]
+  },
+  "rest_send_request_inbound": {
+    "step_config": "e00571a10b3222000b7da95e93673a8f",
+    "name": "Send REST Request - Inbound",
+    "step_env": "Server - REST",
+    "executes_user_code": false,
+    "inputs": [
+      {
+        "element": "http_method",
+        "internal_type": "choice",
+        "mandatory": true,
+        "default": "get",
+        "order": 1,
+        "variable": "59877da10b3222000b7da95e93673a56",
+        "sdk_constant": true,
+        "choices": [
+          "get",
+          "post",
+          "put",
+          "delete",
+          "patch"
+        ]
+      },
+      {
+        "element": "end_point",
+        "internal_type": "string",
+        "mandatory": true,
+        "order": 2,
+        "variable": "50bff9250b3222000b7da95e93673a9b",
+        "sdk_constant": true
+      },
+      {
+        "element": "query_params",
+        "internal_type": "simple_name_values",
+        "mandatory": false,
+        "order": 3,
+        "variable": "58408e250b3222000b7da95e93673a5c",
+        "sdk_constant": true
+      },
+      {
+        "element": "headers",
+        "internal_type": "simple_name_values",
+        "mandatory": false,
+        "order": 4,
+        "variable": "cec002650b3222000b7da95e93673aae",
+        "sdk_constant": true
+      },
+      {
+        "element": "request_body",
+        "internal_type": "string",
+        "mandatory": false,
+        "order": 5,
+        "variable": "81e042650b3222000b7da95e93673aa2",
+        "sdk_constant": true
+      },
+      {
+        "element": "auth_type",
+        "internal_type": "choice",
+        "mandatory": false,
+        "default": "basic",
+        "order": 100,
+        "variable": "6cdd0ab543010210b6f9a0246bb8f2f2",
+        "sdk_constant": true,
+        "choices": [
+          "basic",
+          "mutual"
+        ]
+      },
+      {
+        "element": "basic_auth",
+        "internal_type": "reference",
+        "reference": "sys_auth_profile_basic",
+        "mandatory": false,
+        "order": 100,
+        "variable": "020a6af09fd32200ef4afa7dc67fcfec",
+        "sdk_constant": true
+      },
+      {
+        "element": "mutual_auth",
+        "internal_type": "reference",
+        "reference": "sys_certificate",
+        "mandatory": false,
+        "order": 100,
+        "variable": "89ad06b543010210b6f9a0246bb8f2d7",
+        "sdk_constant": true
+      }
+    ]
+  },
+  "rest_assert_status_code": {
+    "step_config": "2f4fa7309f132200ef4afa7dc67fcf0f",
+    "name": "Assert Status Code",
+    "step_env": "Server - REST",
+    "executes_user_code": false,
+    "inputs": [
+      {
+        "element": "response_operation",
+        "internal_type": "choice",
+        "mandatory": false,
+        "default": "equals",
+        "order": 100,
+        "variable": "1d94cb1f3b8032000774229c93efc419",
+        "sdk_constant": true,
+        "choices": [
+          "equals",
+          "not_equals",
+          "less_than",
+          "greater_than",
+          "less_than_equals",
+          "greater_than_equals"
+        ]
+      },
+      {
+        "element": "status_code",
+        "internal_type": "integer",
+        "mandatory": true,
+        "order": 110,
+        "variable": "9f5f67709f132200ef4afa7dc67fcf94",
+        "sdk_constant": true
+      }
+    ]
+  },
+  "rest_assert_response_payload": {
+    "step_config": "d53e40d59f132200ef4afa7dc67fcfc7",
+    "name": "Assert Response Payload",
+    "step_env": "Server - REST",
+    "executes_user_code": false,
+    "inputs": [
+      {
+        "element": "response_operation",
+        "internal_type": "choice",
+        "mandatory": false,
+        "default": "contains",
+        "order": 100,
+        "variable": "ccae44d59f132200ef4afa7dc67fcf1e",
+        "sdk_constant": true,
+        "choices": [
+          "contains",
+          "does_not_contain",
+          "equals",
+          "not_equals",
+          "exists"
+        ]
+      },
+      {
+        "element": "response_body",
+        "internal_type": "string",
+        "mandatory": false,
+        "order": 110,
+        "variable": "f0eec4d59f132200ef4afa7dc67fcf6d",
+        "sdk_constant": true
+      }
+    ]
+  },
+  "rest_assert_json_payload_element": {
+    "step_config": "afc114199f132200ef4afa7dc67fcf64",
+    "name": "Assert JSON Response Payload Element",
+    "step_env": "Server - REST",
+    "executes_user_code": false,
+    "inputs": [
+      {
+        "element": "element_name",
+        "label": "Element path",
+        "internal_type": "string",
+        "mandatory": true,
+        "order": 100,
+        "variable": "5a9258199f132200ef4afa7dc67fcfb4",
+        "sdk_constant": true
+      },
+      {
+        "element": "response_operation",
+        "internal_type": "choice",
+        "mandatory": false,
+        "default": "exists",
+        "order": 110,
+        "variable": "2db298199f132200ef4afa7dc67fcfbc",
+        "sdk_constant": true,
+        "choices": [
+          "contains",
+          "does_not_contain",
+          "equals",
+          "not_equals",
+          "exists"
+        ]
+      },
+      {
+        "element": "element_value",
+        "internal_type": "string",
+        "mandatory": false,
+        "order": 120,
+        "variable": "7b139c199f132200ef4afa7dc67fcfb3",
+        "sdk_constant": true
+      }
+    ]
+  },
+  "run_server_side_script": {
+    "step_config": "41de4a935332120028bc29cac2dc349a",
+    "name": "Run Server Side Script",
+    "step_env": "Server - Independent",
+    "executes_user_code": true,
+    "inputs": [
+      {
+        "element": "jasmine_version",
+        "internal_type": "choice",
+        "mandatory": true,
+        "order": 100,
+        "variable": "42f2564b73031300440211d8faf6a777",
+        "sdk_constant": false
+      },
+      {
+        "element": "script",
+        "internal_type": "script",
+        "mandatory": false,
+        "order": 200,
+        "variable": "989d9e235324220002c6435723dc3484",
+        "sdk_constant": false
+      }
+    ]
+  }
+}

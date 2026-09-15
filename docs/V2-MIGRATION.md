@@ -446,10 +446,10 @@ refuse any particular table: since 2.0 there is no built-in deny list, so a
 credential, authentication, or role-grant table configured in `tableAccess` is
 granted, bounded only by the integration account's ServiceNow roles.
 Multi-table tools must have their complete operation plan authorized before the
-first ServiceNow client access. `sn_nl`
-and ATF `run`/`run-suite` are temporarily denied at this boundary because they
-do not yet expose complete typed side-effect plans; select typed CRUD/query
-tools or non-executing ATF actions directly.
+first ServiceNow client access. `sn_nl` remains denied without a complete typed
+side-effect plan. Legacy ATF execution actions return migration guidance; use
+`sn_atf_run` with the explicit `atf.execute` profile grant. See
+[ATF workflow](ATF-WORKFLOW.md).
 
 ### Incident journal migration
 

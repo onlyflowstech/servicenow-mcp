@@ -474,12 +474,8 @@ describe("complete registered-tool table plans", () => {
       { operation: "read", table: "problem" },
     ]);
     expect(resolveToolTableAccess("sn_codesearch", {}).requests).toHaveLength(5);
-    expect(() => resolveToolTableAccess("sn_atf", { action: "run" })).toThrow(
-      TablePolicyError
-    );
-    expect(() =>
-      resolveToolTableAccess("sn_atf", { action: "run-suite" })
-    ).toThrow(TablePolicyError);
+    expect(resolveToolTableAccess("sn_atf", { action: "run" }).requests).toEqual([]);
+    expect(resolveToolTableAccess("sn_atf", { action: "run-suite" }).requests).toEqual([]);
     expect(
       resolveToolTableAccess("sn_attach", {
         action: "download",

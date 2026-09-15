@@ -1,3 +1,6 @@
+import { atfRunToolModule } from "./atf-run-module.js";
+import { atfResultsToolModule } from "./atf-results-module.js";
+import { atfReadinessToolModule } from "./atf-readiness-module.js";
 /** Canonical contract catalog for all published ServiceNow MCP tools. */
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -188,14 +191,16 @@ export const serviceNowToolModules = Object.freeze([
     capabilities: ["metadata:discover"],
   }),
   atfAuthorToolModule,
+  atfRunToolModule,
+  atfResultsToolModule,
+  atfReadinessToolModule,
   existingToolModule(atf, {
     permissions: ["read", "write"],
     tables: staticTables(
       "sys_atf_test",
       "sys_atf_test_result",
       "sys_atf_test_suite",
-      "sys_atf_test_suite_test",
-      "sys_execution_tracker"
+      "sys_atf_test_suite_test"
     ),
     apis: ["atf", "table"],
     fieldPolicies: ["read"],

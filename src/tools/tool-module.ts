@@ -17,6 +17,7 @@ import { types as nodeUtilTypes } from "node:util";
 import { z } from "zod";
 
 import type { ServiceNowOperations } from "../client.js";
+import type { AtfResultStore } from "../atf-result-cache.js";
 import type { AtfHandlerSettings } from "../atf-config.js";
 import type { ServiceNowConfig } from "../config.js";
 import { ENCODED_QUERY_MIGRATION_MESSAGE } from "../encoded-query-policy.js";
@@ -189,6 +190,7 @@ interface CommonToolHandlerServices {
 export interface ServiceNowToolHandlerServices
   extends CommonToolHandlerServices {
   readonly serviceNow: ServiceNowOperations;
+  readonly atfResults?: AtfResultStore;
   readonly settings: ServiceNowToolSettings;
 }
 

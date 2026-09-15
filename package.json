@@ -1,7 +1,7 @@
 {
   "name": "@onlyflows/servicenow-mcp",
   "version": "2.2.0-dev.1",
-  "description": "stdio ServiceNow MCP server with 20 tools for CRUD, CMDB traversal, ATF testing, and explicit multi-instance profiles.",
+  "description": "stdio ServiceNow MCP server with 23 tools for CRUD, CMDB traversal, ATF testing, and explicit multi-instance profiles.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {

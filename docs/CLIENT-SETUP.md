@@ -415,7 +415,7 @@ runtime and immutable image. See `CROSS-CLIENT-RELEASE-MATRIX.md`.
 
 ## 5. Profile selection, results, and audit evidence
 
-All 20 tools require a non-empty `profile`. Missing, empty, unknown, or invalid
+All 23 tools require a non-empty `profile`. Missing, empty, unknown, or invalid
 names fail before credentials or a ServiceNow client. There is no default,
 active, current, selected-session, or switch-profile operation. To work across
 instances, make separate calls and include the intended name each time:
@@ -659,7 +659,7 @@ have been separately authorized. The current official OpenAI flow is:
    create a developer-mode app, choose **Tunnel** under **Connection**, and
    select the associated tunnel. Do not enter a public MCP URL or a second
    Authorization value in the app.
-4. Scan tools and compare the 20 names, schemas, and annotations with the
+4. Scan tools and compare the 23 names, schemas, and annotations with the
    frozen release manifest. Keep the app private and draft-only.
 5. On every use, name the profile in the request. For example, instruct the
    app to invoke `sn_query` with these exact non-secret arguments:

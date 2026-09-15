@@ -45,6 +45,7 @@ export class AtfResultCache {
 
   constructor(options: {
     profile: string;
+    policyScope?: string;
     config: ServiceNowConfig;
     warn?: (message: string) => void;
   }) {
@@ -53,7 +54,7 @@ export class AtfResultCache {
     const selector = createHash("sha256").update(options.profile).digest("hex");
     this.filePath = join(this.directory, `${selector}.json`);
     this.identity = createHash("sha256").update(JSON.stringify([
-      new URL(options.config.instance).origin, credentialFingerprint(options.config),
+      new URL(options.config.instance).origin, credentialFingerprint(options.config), options.policyScope ?? "",
     ])).digest("hex");
     this.size = z.number().int().min(1).max(100).parse(options.config.atf?.resultCacheSize ?? 10);
     this.memory = this.empty();
@@ -200,4 +201,18 @@ export class AtfResultCache {
       await fs.unlink(temp).catch(error => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
     }
   }
+}
+
+/** The coordinator supplies a narrow cache port; no credentials cross into handlers. */
+export type AtfResultStore = Pick<AtfResultCache, "put" | "history" | "testHistory">;
+const STORES = new Map<string, AtfResultCache>();
+export function atfResultStore(profile: string, config: ServiceNowConfig, policyScope: string): AtfResultStore {
+  const key = createHash("sha256").update(JSON.stringify([profile, credentialFingerprint(config), config.atf, policyScope])).digest("hex");
+  let cache = STORES.get(key);
+  if (!cache) {
+    cache = new AtfResultCache({ profile, config, policyScope });
+    if (STORES.size >= 32) STORES.delete(STORES.keys().next().value!);
+    STORES.set(key, cache);
+  }
+  return Object.freeze({ put: cache.put.bind(cache), history: cache.history.bind(cache), testHistory: cache.testHistory.bind(cache) });
 }

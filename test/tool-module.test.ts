@@ -79,7 +79,7 @@ describe("tool-module contract", () => {
     // Single source of truth for the published tool count. Every other
     // suite derives from REGISTERED_TOOL_COUNT, so this is the one literal
     // to update when a tool is added or removed.
-    expect(REGISTERED_TOOL_COUNT).toBe(20);
+    expect(REGISTERED_TOOL_COUNT).toBe(23);
     expect(() => validateToolModuleCatalog(toolModules)).not.toThrow();
 
     for (const module of toolModules) {
@@ -678,14 +678,14 @@ describe("tool-module contract", () => {
     expect(registerTool).not.toHaveBeenCalled();
   });
 
-  it("declares composed aggregate and ATF tracker dependencies", () => {
+  it("declares aggregate dependencies and removes legacy ATF trackers", () => {
     const atf = toolModules.find((module) => module.definition.name === "sn_atf");
     const naturalLanguage = toolModules.find(
       (module) => module.definition.name === "sn_nl"
     );
     expect(atf?.requirements.tables).toMatchObject({
       kind: "static",
-      names: expect.arrayContaining(["sys_execution_tracker"]),
+      names: expect.not.arrayContaining(["sys_execution_tracker"]),
     });
     expect(naturalLanguage?.requirements.apis).toEqual(["aggregate", "table"]);
   });

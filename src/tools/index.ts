@@ -1,3 +1,4 @@
+import { atfResultStore } from "../atf-result-cache.js";
 /**
  * High-level ServiceNow tool registry.
  *
@@ -170,7 +171,7 @@ export const toolModules = allToolModules;
 export const REGISTERED_TOOL_COUNT = toolModules.length;
 
 /**
- * Register all 20 published tools through the SDK's high-level API.
+ * Register all 23 published tools through the SDK's high-level API.
  *
  * The contract factory retains each module's inferred Zod type while this
  * dispatcher consumes its deliberately erased, runtime-validated boundary.
@@ -618,6 +619,7 @@ function registerStandardTool(
             // compares in; without it the cache disables itself.
             config.user
           ),
+          ...(tool.definition.name === "sn_atf_run" || tool.definition.name === "sn_atf_results" ? { atfResults: atfResultStore(binding.name, config, JSON.stringify(context.effectivePolicy)) } : {}),
           settings: Object.freeze({
             instance: context.profile.instance,
             displayValue: config.displayValue,

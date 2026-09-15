@@ -12,18 +12,17 @@ import {
   preparedReadableFields,
   resolveReadableFields,
 } from "../field-policy.js";
-import { ok, err, escapeQueryValue, formatError, withWarnings } from "../utils.js";
+import { ok, err, escapeQueryValue } from "../utils.js";
 import {
   normalizeServiceNowSysId,
   serviceNowSysIdPathSegment,
   serviceNowSysIdSchema,
 } from "../servicenow-identifiers.js";
-import { trustedToolErrorDescriptor } from "../tool-error.js";
 
 export const definition = {
   name: "sn_atf",
   description:
-    "Automated Test Framework — list, run, and get results for ATF tests and test suites.",
+    "Automated Test Framework — list tests/suites and read legacy results. Run actions return migration guidance for sn_atf_run.",
   annotations: {
     title: "Run ATF tests",
     // run/run-suite EXECUTE tests on the instance and create test-result
@@ -49,10 +48,6 @@ export const schema = z.object({
   timeout: z.number().optional().describe("Max wait time in seconds (default 120 for tests, 300 for suites)"),
 }).strict(ENCODED_QUERY_MIGRATION_MESSAGE);
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function pagedResult(
   records: readonly unknown[],
   offset: number,
@@ -68,27 +63,6 @@ function pagedResult(
     ...(hasMore ? { next_offset: offset + limit } : {}),
     results,
   };
-}
-
-interface AtfRunResult {
-  readonly sys_id?: string;
-  readonly result_id?: string;
-  readonly tracker_id?: string;
-  readonly progress_id?: string;
-  readonly [key: string]: unknown;
-}
-
-interface AtfRunResponse {
-  readonly result?: AtfRunResult;
-}
-
-/** A trusted not-found proves this invocation endpoint did not execute. */
-function isSafeEndpointFallback(error: unknown): boolean {
-  const descriptor = trustedToolErrorDescriptor(error);
-  return (
-    descriptor?.category === "not_found" &&
-    descriptor.retry === "do_not_retry"
-  );
 }
 
 export async function handler(
@@ -216,194 +190,9 @@ export async function handler(
         return ok(pagedResult(results, args.offset, args.limit));
       }
 
-      // ── run single test ──
-      case "run": {
-        if (!args.test_sys_id) return err("test_sys_id is required for run");
-
-        const timeout = args.timeout ?? 120;
-        // Each fallback strategy that fails is recorded so the caller can
-        // see which execution paths were tried and why they failed.
-        const warnings: string[] = [];
-        let runResp: AtfRunResponse | null;
-
-        // Try sn_atf REST API first
-        try {
-          runResp = await client.post<AtfRunResponse>("/api/sn_atf/rest/test", {
-            test_id: args.test_sys_id,
-          });
-        } catch (error) {
-          if (!isSafeEndpointFallback(error)) throw error;
-          warnings.push(`POST /api/sn_atf/rest/test: ${formatError(error)}`);
-          // Fallback: try /api/now/atf/test/{id}/run
-          try {
-            runResp = await client.post<AtfRunResponse>(
-              `/api/now/atf/test/${serviceNowSysIdPathSegment(args.test_sys_id)}/run`
-            );
-          } catch (error2) {
-            if (!isSafeEndpointFallback(error2)) throw error2;
-            warnings.push(
-              `POST /api/now/atf/test/{id}/run: ${formatError(error2)}`
-            );
-            // Last fallback: schedule via Table API
-            try {
-              runResp = await client.post<AtfRunResponse>(
-                "/api/now/table/sys_atf_test_result",
-                {
-                  test: args.test_sys_id,
-                  status: "scheduled",
-                }
-              );
-            } catch (error3) {
-              throw error3;
-            }
-          }
-        }
-
-        const resultId =
-          runResp?.result?.sys_id || runResp?.result?.result_id;
-        const trackerId =
-          runResp?.result?.tracker_id || runResp?.result?.progress_id;
-
-        if (!args.wait) {
-          return ok(withWarnings(runResp?.result || runResp, warnings));
-        }
-
-        // Poll for completion
-        return await pollTestResult(
-          client,
-          args.test_sys_id,
-          resultId,
-          trackerId,
-          timeout,
-          warnings
-        );
-      }
-
-      // ── run suite ──
-      case "run-suite": {
-        if (!args.suite_sys_id)
-          return err("suite_sys_id is required for run-suite");
-
-        const timeout = args.timeout ?? 300;
-        // Record failed fallback strategies (same pattern as "run").
-        const warnings: string[] = [];
-        let runResp: AtfRunResponse | null;
-
-        try {
-          runResp = await client.post<AtfRunResponse>("/api/sn_atf/rest/suite", {
-            suite_id: args.suite_sys_id,
-          });
-        } catch (error) {
-          if (!isSafeEndpointFallback(error)) throw error;
-          warnings.push(`POST /api/sn_atf/rest/suite: ${formatError(error)}`);
-          try {
-            runResp = await client.post<AtfRunResponse>(
-              `/api/now/atf/suite/${serviceNowSysIdPathSegment(args.suite_sys_id)}/run`
-            );
-          } catch (error2) {
-            throw error2;
-          }
-        }
-
-        if (!args.wait) {
-          return ok(withWarnings(runResp?.result || runResp, warnings));
-        }
-
-        // Poll tracker
-        const trackerId =
-          runResp?.result?.tracker_id || runResp?.result?.progress_id;
-        let elapsed = 0;
-        const pollInterval = 5;
-
-        while (elapsed < timeout) {
-          await sleep(pollInterval * 1000);
-          elapsed += pollInterval;
-
-          if (trackerId) {
-            try {
-              const trackerResp = await client.get(
-                `/api/now/table/sys_execution_tracker/${serviceNowSysIdPathSegment(trackerId)}`,
-                {
-                  sysparm_fields: "state,result,message,completion_percent",
-                  sysparm_display_value: "true",
-                }
-              );
-              const state = trackerResp.result?.state;
-              if (
-                state === "Successful" ||
-                state === "Failed" ||
-                state === "Cancelled"
-              ) {
-                break;
-              }
-            } catch {
-              // continue polling
-            }
-          }
-        }
-
-        // Fetch suite results
-        const effectiveLimit = Math.min(args.limit, 200);
-        const resultsResp = await client.get(
-          "/api/now/table/sys_atf_test_result",
-          {
-            sysparm_query: `test_suite=${escapeQueryValue(args.suite_sys_id)}^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`,
-            sysparm_fields:
-              "sys_id,test,status,output,duration,start_time,end_time",
-            sysparm_display_value: "true",
-            sysparm_limit: String(effectiveLimit + 1),
-            sysparm_offset: String(args.offset),
-          }
-        );
-
-        const rawTestResults = Array.isArray(resultsResp.result)
-          ? resultsResp.result
-          : [];
-        const page = pagedResult(
-          rawTestResults,
-          args.offset,
-          effectiveLimit
-        );
-        const testResults = page.results as Array<Record<string, string>>;
-        const passed = testResults.filter(
-          (r: Record<string, string>) =>
-            r.status === "Success" || r.status === "Pass" || r.status === "Passed"
-        ).length;
-        const failed = testResults.filter(
-          (r: Record<string, string>) =>
-            r.status === "Failure" ||
-            r.status === "Fail" ||
-            r.status === "Failed" ||
-            r.status === "Error"
-        ).length;
-        const skipped = testResults.filter(
-          (r: Record<string, string>) =>
-            r.status === "Skipped" || r.status === "Cancelled"
-        ).length;
-
-        return ok(
-          withWarnings(
-            {
-              suite_sys_id: args.suite_sys_id,
-              record_count: page.record_count,
-              limit: page.limit,
-              offset: page.offset,
-              has_more: page.has_more,
-              ...(page.next_offset === undefined
-                ? {}
-                : { next_offset: page.next_offset }),
-              summary: {
-                total: testResults.length,
-                passed,
-                failed,
-                skipped,
-              },
-              results: testResults,
-            },
-            warnings
-          )
-        );
-      }
+      case "run":
+      case "run-suite":
+        return ok({ status: "migration_required", message: "Use sn_atf_run with a suite_sys_id or suite_name and a profile with atf.execute=true. Single-test runs are no longer supported; add the test to a suite." });
 
       // ── results ──
       case "results": {
@@ -457,123 +246,4 @@ export async function handler(
   } catch (error) {
     throw error;
   }
-}
-
-async function pollTestResult(
-  client: ServiceNowOperations,
-  testId: string,
-  resultId: string | undefined,
-  trackerId: string | undefined,
-  timeout: number,
-  warnings: string[]
-) {
-  let elapsed = 0;
-  const pollInterval = 5;
-  let status = "";
-  let currentResultId = resultId;
-
-  while (elapsed < timeout) {
-    await sleep(pollInterval * 1000);
-    elapsed += pollInterval;
-
-    if (currentResultId) {
-      try {
-        const resp = await client.get(
-          `/api/now/table/sys_atf_test_result/${serviceNowSysIdPathSegment(currentResultId)}`,
-          {
-            sysparm_fields:
-              "sys_id,test,status,output,duration,start_time,end_time",
-            sysparm_display_value: "true",
-          }
-        );
-        status = resp.result?.status || "";
-      } catch {
-        // continue
-      }
-    } else if (trackerId) {
-      try {
-        const resp = await client.get(
-          `/api/now/table/sys_execution_tracker/${serviceNowSysIdPathSegment(trackerId)}`,
-          {
-            sysparm_fields: "state,result,message",
-            sysparm_display_value: "true",
-          }
-        );
-        const state = resp.result?.state;
-        if (
-          state === "Successful" ||
-          state === "Failed" ||
-          state === "Cancelled"
-        ) {
-          status = "complete";
-        }
-      } catch {
-        // continue
-      }
-    } else {
-      // Poll by test sys_id
-      try {
-        const resp = await client.get("/api/now/table/sys_atf_test_result", {
-          sysparm_query: `test=${escapeQueryValue(normalizeServiceNowSysId(testId))}^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`,
-          sysparm_fields:
-            "sys_id,test,status,output,duration,start_time,end_time",
-          sysparm_display_value: "true",
-          sysparm_limit: "1",
-        });
-        if (resp.result?.[0]) {
-          status = resp.result[0].status || "";
-          currentResultId = resp.result[0].sys_id;
-        }
-      } catch {
-        // continue
-      }
-    }
-
-    const sl = status.toLowerCase();
-    if (
-      [
-        "success",
-        "pass",
-        "passed",
-        "failure",
-        "fail",
-        "failed",
-        "error",
-        "complete",
-        "skipped",
-        "cancelled",
-      ].includes(sl)
-    ) {
-      break;
-    }
-  }
-
-  // Fetch final result
-  if (currentResultId) {
-    try {
-      const resp = await client.get(
-        `/api/now/table/sys_atf_test_result/${serviceNowSysIdPathSegment(currentResultId)}`,
-        {
-          sysparm_fields:
-            "sys_id,test,status,output,duration,start_time,end_time",
-          sysparm_display_value: "true",
-        }
-      );
-      return ok(withWarnings(resp.result, warnings));
-    } catch {
-      return ok(
-        withWarnings(
-          { status: "timeout", message: `Timed out after ${timeout}s` },
-          warnings
-        )
-      );
-    }
-  }
-
-  return ok(
-    withWarnings(
-      { status: "timeout", message: `Timed out after ${timeout}s` },
-      warnings
-    )
-  );
 }

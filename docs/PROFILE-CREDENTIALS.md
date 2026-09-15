@@ -127,8 +127,8 @@ credential through the protected administration entry point.
 
 ## ATF authoring and result cache
 
-`sn_atf_author` supports `create_test`, `create_suite`, and
-`add_tests_to_suite`. A profile needs explicit writes for the corresponding
+`sn_atf_author` supports `create_test`, `create_suite`,
+`add_tests_to_suite`, `list_step_types`, and `add_steps`. A profile needs explicit writes for the corresponding
 `sys_atf_test`, `sys_atf_test_suite`, or `sys_atf_test_suite_test` table and
 field grants for the values being written. For example:
 
@@ -138,7 +138,7 @@ servicenow-mcp-setup grant --profile pdi --atf
 ```
 
 The preset binds five authoring tables to `sn_atf_author`: the three above,
-plus `sys_atf_step` and `sys_variable_value` reserved for future step support.
+plus `sys_atf_step` and `sys_variable_value` for step authoring.
 It does not enable execution or script authoring, and does not add authoring
 to unrelated table targets. Existing grants remain in place.
 
@@ -174,16 +174,15 @@ and `SN_ATF_RESULT_CACHE_DIR`. `SN_ATF_EXECUTE` and
 `SN_ATF_ALLOW_SCRIPT_STEPS` grant permissions only to an environment-only
 profile, never to stored profiles.
 
-The result-cache library is available for the forthcoming execution/results
-tools. No current tool populates it yet. It stores compact run summaries and
+`sn_atf_run` and `sn_atf_results get` cache completed, verified suite runs.
+The cache stores compact run summaries and
 at most 500 characters of the first failure per test, without raw step output.
 Files default to `~/.servicenow-mcp/atf-results/<sha256-profile-name>.json`;
 hashed profile names prevent path traversal. Each file is bound to the
-instance origin and credential fingerprint, with up to 200 suites and a 16 MiB
+instance origin, credential fingerprint and effective policy, with up to 200 suites and a 16 MiB
 file cap. Least-recently-used suites are evicted when those bounds are reached.
-Changing instance or credentials discards the old history. Cache directories
+Changing instance, credentials or policy discards the old history. Cache directories
 and files must be private (0700/0600 on POSIX).
 
-The four-tool ATF workflow is still under development: readiness, CI/CD suite
-execution, history/compare, and step authoring are not implemented yet.
-Legacy `sn_atf run` and `run-suite` remain policy-denied even with `execute: true`.
+See [ATF workflow](ATF-WORKFLOW.md) for readiness, execution, results and typed
+step authoring. Legacy execution actions return migration guidance.
