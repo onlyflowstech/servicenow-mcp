@@ -61,6 +61,7 @@ import {
   ProfileManager,
   instanceHostError,
   normalizeInstanceUrl,
+  profileNameProblem,
   type Profile,
 } from "./profile-manager.js";
 import { trustedToolErrorDescriptor } from "./tool-error.js";
@@ -560,17 +561,36 @@ async function askProfileName(
   prompter: WizardPrompter,
   existing: readonly string[]
 ): Promise<string> {
-  return prompter.ask("Profile name", {
+  return prompter.ask("Profile name (letters, digits, . _ -; no spaces)", {
     default: existing.includes("dev") ? "" : "dev",
+    // The store's own rule, checked here so an unusable name is refused before
+    // the credential is typed and verified, not at the final save. The answer
+    // is checked exactly as it will be saved, so anything accepted can be.
     validate: (value) => {
-      const name = value.trim();
-      if (name === "") return "A profile name is required.";
-      if (existing.includes(name)) {
-        return `Profile "${name}" already exists. Choose another name, or remove it with servicenow-mcp-profile remove --name ${name}.`;
+      const problem = profileNameProblem(value);
+      if (problem !== undefined) {
+        const suggestion = suggestProfileName(value);
+        return suggestion !== undefined && !existing.includes(suggestion)
+          ? `${problem} Try "${suggestion}".`
+          : problem;
+      }
+      if (existing.includes(value)) {
+        return `Profile "${value}" already exists. Choose another name, or remove it with servicenow-mcp-profile remove --name ${value}.`;
       }
       return undefined;
     },
   });
+}
+
+/** The nearest valid name to one that was refused, such as `my-dev` for `my dev`. */
+function suggestProfileName(value: string): string | undefined {
+  const candidate = value
+    .trim()
+    .replace(/\s+/gu, "-")
+    .replace(/[^A-Za-z0-9._-]/gu, "")
+    .replace(/^[.-]+/u, "")
+    .slice(0, 64);
+  return profileNameProblem(candidate) === undefined ? candidate : undefined;
 }
 
 const SERVICENOW_SUFFIXES = Object.freeze([".service-now.com", ".servicenowservices.com"]);

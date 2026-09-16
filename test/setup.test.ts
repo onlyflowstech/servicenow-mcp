@@ -1173,6 +1173,22 @@ describe("setup wizard", () => {
     expect(reloaded.getProfile("staging").username).toBe("integration.user");
   });
 
+  it("refuses an unusable profile name where it is typed, and suggests one", async () => {
+    // "my-dev" answers the same prompt again. Had the name been accepted, it
+    // would be consumed as the instance and the script would fall out of step.
+    const { prompter } = await runWizard(["my dev", "my-dev", ...HAPPY.slice(1)]);
+
+    expect(prompter.rejections).toEqual([
+      expect.stringContaining("Spaces aren't allowed"),
+    ]);
+    expect(prompter.rejections[0]).toContain("Use 1-64 letters, digits");
+    expect(prompter.rejections[0]).toContain('Try "my-dev".');
+    expect(prompter.remaining()).toBe(0);
+    expect(
+      new ProfileManager({ configFilePath: profileConfigPath(home) }).getProfile("my-dev").username
+    ).toBe("integration.user");
+  });
+
   it("offers the parent table without requiring the operator to know it", async () => {
     await runWizard(
       [

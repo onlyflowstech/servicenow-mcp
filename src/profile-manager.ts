@@ -799,12 +799,38 @@ function deepFreeze<T>(value: T): T {
   return Object.freeze(value);
 }
 
-function validateProfileName(name: string): void {
-  if (
-    typeof name !== "string" ||
-    !/^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/u.test(name)
-  ) {
-    throw new Error("Profile name is invalid");
+const PROFILE_NAME_MAX_LENGTH = 64;
+const PROFILE_NAME_RULE =
+  "Use 1-64 letters, digits, dots, underscores, or hyphens, " +
+  "starting with a letter, digit, or underscore.";
+
+/**
+ * Why a profile name cannot be used, or undefined when it can.
+ *
+ * This is the only definition of the rule. The setup wizard and
+ * `servicenow-mcp-profile` check a name with it where the name is typed, so an
+ * unusable one is refused there rather than at the final save, after the
+ * operator has already entered and verified a credential.
+ */
+export function profileNameProblem(name: string): string | undefined {
+  if (name === "") return `A profile name is required. ${PROFILE_NAME_RULE}`;
+  if (/\s/u.test(name)) return `Spaces aren't allowed. ${PROFILE_NAME_RULE}`;
+  const invalid = /[^A-Za-z0-9._-]/u.exec(name);
+  if (invalid) return `${JSON.stringify(invalid[0])} isn't allowed. ${PROFILE_NAME_RULE}`;
+  if (name.length > PROFILE_NAME_MAX_LENGTH) {
+    return `It's ${name.length} characters; the limit is ${PROFILE_NAME_MAX_LENGTH}.`;
+  }
+  if (!/^[A-Za-z0-9_]/u.test(name)) {
+    return `It can't start with ${JSON.stringify(name[0])}. ${PROFILE_NAME_RULE}`;
+  }
+  return undefined;
+}
+
+export function validateProfileName(name: string): void {
+  const problem =
+    typeof name === "string" ? profileNameProblem(name) : "A profile name is required.";
+  if (problem !== undefined) {
+    throw new Error(`Profile name is invalid. ${problem}`);
   }
 }
 
