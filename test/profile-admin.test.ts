@@ -164,6 +164,30 @@ describe("create, inspect, rotate, and remove", () => {
     );
   });
 
+  it("refuses an unusable --name before reading any secret", async () => {
+    const manager = new ProfileManager({ configFilePath: configPath, encryptionKeyProvider: keyProvider });
+    const reads: string[] = [];
+    const io: ProfileAdminIO = {
+      async readSensitive(label) {
+        reads.push(label);
+        return "never-used";
+      },
+      write() {},
+    };
+
+    await expect(
+      runProfileAdmin(
+        [
+          "create", "--name", "my dev", "--instance", "https://dev.service-now.com",
+          "--auth-type", "basic", "--username", "admin", "--source", "encrypted",
+        ],
+        { manager, keyProvider, io }
+      )
+    ).rejects.toThrow(/^Profile name is invalid\. Spaces aren't allowed\. Use 1-64/u);
+    expect(reads).toEqual([]);
+    expect(fs.existsSync(configPath)).toBe(false);
+  });
+
   it("prompts separately for OAuth password-grant secrets", async () => {
     const cachedKey = Buffer.alloc(32, 0x63);
     const cachedProvider: ProfileEncryptionKeyProvider = {

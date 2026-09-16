@@ -4,6 +4,7 @@ import * as path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   normalizeInstanceUrl,
+  profileNameProblem,
   type Profile,
   ProfileManager,
 } from "../src/profile-manager.js";
@@ -1107,5 +1108,44 @@ describe("SNSDK-38 secure profile persistence", () => {
       expect(fs.statSync(first.getConfigPath()).mode & 0o777).toBe(0o600);
       expect(fs.statSync(path.dirname(first.getConfigPath())).mode & 0o777).toBe(0o700);
     }
+  });
+});
+
+describe("profile name rule", () => {
+  it.each(["dev", "MDDEMO", "_scratch", "qa.west-2", "a".repeat(64)])(
+    "accepts %j",
+    (name) => {
+      expect(profileNameProblem(name)).toBeUndefined();
+    }
+  );
+
+  it.each([
+    ["", /required/u],
+    ["my dev", /Spaces aren't allowed/u],
+    ["tab\there", /Spaces aren't allowed/u],
+    ["prod!", /"!" isn't allowed/u],
+    ["東京", /"東" isn't allowed/u],
+    [".dev", /can't start with "\."/u],
+    ["-dev", /can't start with "-"/u],
+    ["a".repeat(65), /65 characters; the limit is 64/u],
+  ])("refuses %j and says why", (name, reason) => {
+    const problem = profileNameProblem(name);
+    expect(problem).toMatch(reason);
+  });
+
+  it("states what is allowed alongside the reason", () => {
+    expect(profileNameProblem("my dev")).toContain(
+      "Use 1-64 letters, digits, dots, underscores, or hyphens"
+    );
+  });
+
+  it("is the rule the store enforces, with the reason in the error", () => {
+    const manager = new ProfileManager();
+    expect(() =>
+      manager.addProfile("my dev", {
+        instance: "https://dev.service-now.com",
+        credential: "env:SN_PASSWORD",
+      })
+    ).toThrow(/^Profile name is invalid\. Spaces aren't allowed\./u);
   });
 });

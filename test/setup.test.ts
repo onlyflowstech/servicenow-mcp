@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -81,6 +81,8 @@ describe("setup init", () => {
       env: { HOME: home },
       writeStdout: (value) => io.out.push(value),
       writeStderr: (value) => io.err.push(value),
+      // The bare command is registered only off Windows; see the next test.
+      platform: "linux",
       commandExists: () => true,
       runCommand: (command, args) => {
         calls.push({ command, args });
@@ -153,6 +155,67 @@ describe("setup init", () => {
     });
     expect(JSON.stringify(JSON.parse(io.out.join("")))).not.toContain("endpoint");
     expect(io.err.join("")).toBe("");
+  });
+
+  it("registers node and the entrypoint on Windows, even with servicenow-mcp on PATH", async () => {
+    const home = newHome("sn-mcp-setup-windows-");
+    const entrypoint =
+      "C:\\Users\\micha\\AppData\\Roaming\\npm\\node_modules\\@onlyflows\\servicenow-mcp\\dist\\index.js";
+    const adds: Array<{ command: string; launch: readonly string[] }> = [];
+
+    await runSetupCli({
+      home,
+      argv: ["setup", "--json"],
+      env: { HOME: home },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+      platform: "win32",
+      serverEntrypoint: entrypoint,
+      // npm's servicenow-mcp.cmd resolves on PATH, but a client spawning
+      // without a shell cannot run a .cmd shim, so it must not be registered.
+      commandExists: () => true,
+      runCommand: (command, args) => {
+        if (args[1] === "add") {
+          adds.push({ command, launch: args.slice(args.indexOf("--") + 1) });
+        }
+        return args[1] === "get" ? { status: 1 } : { status: 0 };
+      },
+    });
+
+    expect(adds).toEqual([
+      { command: "codex", launch: [process.execPath, entrypoint] },
+      { command: "claude", launch: [process.execPath, entrypoint] },
+    ]);
+  });
+
+  it("registers with a Windows npm shim that is installed but not on PATH", async () => {
+    const home = newHome("sn-mcp-setup-offpath-");
+    const appData = join(home, "AppData", "Roaming");
+    const codex = join(appData, "npm", "codex.cmd");
+    mkdirSync(dirname(codex), { recursive: true });
+    writeFileSync(codex, "");
+    const commands: string[] = [];
+    const io = capture();
+
+    await runSetupCli({
+      home,
+      argv: ["--clients", "codex,claude-code", "--json"],
+      env: { HOME: home, APPDATA: appData },
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: (value) => io.err.push(value),
+      platform: "win32",
+      commandExists: () => false,
+      runCommand: (command, args) => {
+        commands.push(`${command} ${args[1]}`);
+        return args[1] === "get" ? { status: 1 } : { status: 0 };
+      },
+    });
+
+    expect(commands).toEqual([`${codex} get`, `${codex} add`]);
+    expect(JSON.parse(io.out.join(""))).toMatchObject({
+      clients: ["codex"],
+      skipped_clients: ["claude-code (claude CLI not found)"],
+    });
   });
 
   it("prints human-readable next steps by default", async () => {
@@ -609,7 +672,8 @@ describe("setup doctor", () => {
     argv: readonly string[],
     env: NodeJS.ProcessEnv = { HOME: home },
     override?: ProfileManager,
-    commandExists: (command: string) => boolean = () => true
+    commandExists: (command: string) => boolean = () => true,
+    overrides: Partial<SetupCliDependencies> = {}
   ): Promise<{ status: string; checks: Array<{ name: string; ok: boolean; detail: string; remedy?: string }> }> {
     const io = capture();
     await runSetupCli({
@@ -618,7 +682,10 @@ describe("setup doctor", () => {
       env,
       profileManager: override ?? manager,
       commandExists,
+      // The PATH-based server command check; Windows is exercised explicitly.
+      platform: "linux",
       writeStdout: (value) => io.out.push(value),
+      ...overrides,
     });
     return JSON.parse(io.out.join(""));
   }
@@ -764,6 +831,44 @@ describe("setup doctor", () => {
     expect(report.status).toBe("problems");
   });
 
+  it("on Windows, passes when node and the entrypoint exist, whatever PATH holds", async () => {
+    await runSetupCli({
+      home,
+      argv: ["--clients", "none", "--json"],
+      env: { HOME: home },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+    const entrypoint = join(home, "index.js");
+    writeFileSync(entrypoint, "");
+
+    // The bare command is not on PATH, which is exactly what doctor reported as
+    // a failure on a correct Windows install before clients were registered by
+    // absolute path.
+    const report = await doctor(["doctor", "--json"], { HOME: home }, undefined, () => false, {
+      platform: "win32",
+      serverEntrypoint: entrypoint,
+    });
+    const command = report.checks.find((check) => check.name === "server command");
+    expect(command?.ok).toBe(true);
+    expect(command?.detail).toContain(process.execPath);
+    expect(command?.detail).toContain(entrypoint);
+    expect(command?.detail).not.toContain("PATH");
+  });
+
+  it("on Windows, fails with a reinstall remedy when the entrypoint is missing", async () => {
+    const entrypoint = join(home, "missing", "index.js");
+    const report = await doctor(["doctor", "--json"], { HOME: home }, undefined, () => true, {
+      platform: "win32",
+      serverEntrypoint: entrypoint,
+    });
+    const command = report.checks.find((check) => check.name === "server command");
+    expect(command?.ok).toBe(false);
+    expect(command?.detail).toContain(entrypoint);
+    expect(command?.remedy).toContain("npm i -g @onlyflows/servicenow-mcp");
+    expect(report.status).toBe("problems");
+  });
+
   it("reports no service, endpoint, or bearer check at all", async () => {
     await runSetupCli({
       home,
@@ -848,6 +953,28 @@ function scriptedPrompter(
       notes.push(text);
     },
     close() {},
+  };
+}
+
+/** Records notes and questions in the order the operator would see them. */
+function transcriptOf(scripted: ScriptedPrompter): {
+  prompter: ScriptedPrompter;
+  events: string[];
+} {
+  const events: string[] = [];
+  return {
+    events,
+    prompter: {
+      ...scripted,
+      ask: (question, options) => {
+        events.push(`ask: ${question}`);
+        return scripted.ask(question, options);
+      },
+      note: (text) => {
+        events.push(`note: ${text}`);
+        scripted.note(text);
+      },
+    },
   };
 }
 
@@ -939,6 +1066,49 @@ describe("setup wizard", () => {
     expect(out).toContain("servicenow-mcp-setup doctor --profile dev");
     // Never echoes the secret anywhere.
     expect(out).not.toContain("hunter2");
+  });
+
+  it("says before the first question that no client CLI is installed", async () => {
+    const { prompter, events } = transcriptOf(scriptedPrompter(HAPPY));
+    const { out } = await runWizard([], { prompter });
+
+    // Said up front, so the operator can install Claude Code before spending
+    // time on a credential, not only in the summary's "(none registered)".
+    const warned = events.findIndex((event) =>
+      event.includes("No Claude Code (claude) or Codex (codex) CLI was found")
+    );
+    const firstQuestion = events.findIndex((event) => event.startsWith("ask: "));
+    expect(warned).toBeGreaterThanOrEqual(0);
+    expect(warned).toBeLessThan(firstQuestion);
+    expect(events[warned]).toContain('servicenow-mcp-setup again (choose "clients")');
+    expect(prompter.remaining()).toBe(0);
+    expect(out).toContain("(none registered)");
+  });
+
+  it("registers with Claude Code installed off PATH, and says how to fix PATH", async () => {
+    // The Windows native installer's location, in a terminal opened before
+    // the install, whose PATH does not include it yet.
+    const claude = join(home, ".local", "bin", "claude.exe");
+    mkdirSync(dirname(claude), { recursive: true });
+    writeFileSync(claude, "");
+    const commands: string[] = [];
+
+    const { prompter, out } = await runWizard([...HAPPY, "y"], {
+      platform: "win32",
+      serverEntrypoint: join(home, "index.js"),
+      commandExists: () => false,
+      runCommand: (command, args) => {
+        commands.push(`${command} ${args[1]}`);
+        return args[1] === "get" ? { status: 1 } : { status: 0 };
+      },
+    });
+
+    const notes = prompter.notes.join("\n");
+    expect(notes).toContain(`Found Claude Code (claude) at ${claude},`);
+    expect(notes).toContain("not on this terminal's PATH");
+    expect(notes).toContain(`add ${dirname(claude)} to your PATH`);
+    expect(commands).toEqual([`${claude} get`, `${claude} add`]);
+    expect(out).toContain("Clients   claude-code");
   });
 
   it("bootstraps the owner-only server env and no credential files", async () => {
@@ -1086,6 +1256,22 @@ describe("setup wizard", () => {
     const reloaded = new ProfileManager({ configFilePath: profileConfigPath(home) });
     expect(reloaded.getProfile("dev").username).toBe("existing");
     expect(reloaded.getProfile("staging").username).toBe("integration.user");
+  });
+
+  it("refuses an unusable profile name where it is typed, and suggests one", async () => {
+    // "my-dev" answers the same prompt again. Had the name been accepted, it
+    // would be consumed as the instance and the script would fall out of step.
+    const { prompter } = await runWizard(["my dev", "my-dev", ...HAPPY.slice(1)]);
+
+    expect(prompter.rejections).toEqual([
+      expect.stringContaining("Spaces aren't allowed"),
+    ]);
+    expect(prompter.rejections[0]).toContain("Use 1-64 letters, digits");
+    expect(prompter.rejections[0]).toContain('Try "my-dev".');
+    expect(prompter.remaining()).toBe(0);
+    expect(
+      new ProfileManager({ configFilePath: profileConfigPath(home) }).getProfile("my-dev").username
+    ).toBe("integration.user");
   });
 
   it("offers the parent table without requiring the operator to know it", async () => {
@@ -1562,6 +1748,7 @@ describe("setup wizard closing checks", () => {
       verifyCredential: async () => ({ ok: true, detail: "accepted" }),
       resolveParentTable: async () => undefined,
       commandExists: () => false,
+      platform: "linux",
       writeStdout: (value) => io.out.push(value),
       writeStderr: () => undefined,
       ...overrides,
