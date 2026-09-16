@@ -81,6 +81,8 @@ describe("setup init", () => {
       env: { HOME: home },
       writeStdout: (value) => io.out.push(value),
       writeStderr: (value) => io.err.push(value),
+      // The bare command is registered only off Windows; see the next test.
+      platform: "linux",
       commandExists: () => true,
       runCommand: (command, args) => {
         calls.push({ command, args });
@@ -153,6 +155,37 @@ describe("setup init", () => {
     });
     expect(JSON.stringify(JSON.parse(io.out.join("")))).not.toContain("endpoint");
     expect(io.err.join("")).toBe("");
+  });
+
+  it("registers node and the entrypoint on Windows, even with servicenow-mcp on PATH", async () => {
+    const home = newHome("sn-mcp-setup-windows-");
+    const entrypoint =
+      "C:\\Users\\micha\\AppData\\Roaming\\npm\\node_modules\\@onlyflows\\servicenow-mcp\\dist\\index.js";
+    const adds: Array<{ command: string; launch: readonly string[] }> = [];
+
+    await runSetupCli({
+      home,
+      argv: ["setup", "--json"],
+      env: { HOME: home },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+      platform: "win32",
+      serverEntrypoint: entrypoint,
+      // npm's servicenow-mcp.cmd resolves on PATH, but a client spawning
+      // without a shell cannot run a .cmd shim, so it must not be registered.
+      commandExists: () => true,
+      runCommand: (command, args) => {
+        if (args[1] === "add") {
+          adds.push({ command, launch: args.slice(args.indexOf("--") + 1) });
+        }
+        return args[1] === "get" ? { status: 1 } : { status: 0 };
+      },
+    });
+
+    expect(adds).toEqual([
+      { command: "codex", launch: [process.execPath, entrypoint] },
+      { command: "claude", launch: [process.execPath, entrypoint] },
+    ]);
   });
 
   it("prints human-readable next steps by default", async () => {
@@ -609,7 +642,8 @@ describe("setup doctor", () => {
     argv: readonly string[],
     env: NodeJS.ProcessEnv = { HOME: home },
     override?: ProfileManager,
-    commandExists: (command: string) => boolean = () => true
+    commandExists: (command: string) => boolean = () => true,
+    overrides: Partial<SetupCliDependencies> = {}
   ): Promise<{ status: string; checks: Array<{ name: string; ok: boolean; detail: string; remedy?: string }> }> {
     const io = capture();
     await runSetupCli({
@@ -618,7 +652,10 @@ describe("setup doctor", () => {
       env,
       profileManager: override ?? manager,
       commandExists,
+      // The PATH-based server command check; Windows is exercised explicitly.
+      platform: "linux",
       writeStdout: (value) => io.out.push(value),
+      ...overrides,
     });
     return JSON.parse(io.out.join(""));
   }
@@ -761,6 +798,44 @@ describe("setup doctor", () => {
     // The remedy is a registration that cannot depend on the client's PATH.
     expect(command?.remedy).toContain("npm i -g @onlyflows/servicenow-mcp");
     expect(command?.remedy).toContain("index.js");
+    expect(report.status).toBe("problems");
+  });
+
+  it("on Windows, passes when node and the entrypoint exist, whatever PATH holds", async () => {
+    await runSetupCli({
+      home,
+      argv: ["--clients", "none", "--json"],
+      env: { HOME: home },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+    const entrypoint = join(home, "index.js");
+    writeFileSync(entrypoint, "");
+
+    // The bare command is not on PATH, which is exactly what doctor reported as
+    // a failure on a correct Windows install before clients were registered by
+    // absolute path.
+    const report = await doctor(["doctor", "--json"], { HOME: home }, undefined, () => false, {
+      platform: "win32",
+      serverEntrypoint: entrypoint,
+    });
+    const command = report.checks.find((check) => check.name === "server command");
+    expect(command?.ok).toBe(true);
+    expect(command?.detail).toContain(process.execPath);
+    expect(command?.detail).toContain(entrypoint);
+    expect(command?.detail).not.toContain("PATH");
+  });
+
+  it("on Windows, fails with a reinstall remedy when the entrypoint is missing", async () => {
+    const entrypoint = join(home, "missing", "index.js");
+    const report = await doctor(["doctor", "--json"], { HOME: home }, undefined, () => true, {
+      platform: "win32",
+      serverEntrypoint: entrypoint,
+    });
+    const command = report.checks.find((check) => check.name === "server command");
+    expect(command?.ok).toBe(false);
+    expect(command?.detail).toContain(entrypoint);
+    expect(command?.remedy).toContain("npm i -g @onlyflows/servicenow-mcp");
     expect(report.status).toBe("problems");
   });
 
@@ -939,6 +1014,16 @@ describe("setup wizard", () => {
     expect(out).toContain("servicenow-mcp-setup doctor --profile dev");
     // Never echoes the secret anywhere.
     expect(out).not.toContain("hunter2");
+  });
+
+  it("says why no client was registered when neither client CLI is installed", async () => {
+    const { prompter, out } = await runWizard(HAPPY);
+
+    // The summary alone says "(none registered)" and nothing about why.
+    expect(prompter.notes.join("\n")).toContain(
+      "No Claude Code (claude) or Codex (codex) CLI was found on PATH"
+    );
+    expect(out).toContain("(none registered)");
   });
 
   it("bootstraps the owner-only server env and no credential files", async () => {
@@ -1562,6 +1647,7 @@ describe("setup wizard closing checks", () => {
       verifyCredential: async () => ({ ok: true, detail: "accepted" }),
       resolveParentTable: async () => undefined,
       commandExists: () => false,
+      platform: "linux",
       writeStdout: (value) => io.out.push(value),
       writeStderr: () => undefined,
       ...overrides,

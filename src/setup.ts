@@ -39,6 +39,7 @@ import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 
 import { ServiceNowClient } from "./client.js";
+import { commandInvocation, resolveCommand } from "./command-resolution.js";
 import type { AuthType, GrantType, ServiceNowConfig } from "./config.js";
 import {
   createProtectedInputIO,
@@ -81,6 +82,13 @@ export interface SetupCliDependencies {
     args: readonly string[],
     env: NodeJS.ProcessEnv
   ) => CommandResult;
+  /**
+   * Injected for tests; defaults to `process.platform`. Decides the command
+   * clients are registered to launch, and what doctor checks for it.
+   */
+  readonly platform?: NodeJS.Platform;
+  /** Injected for tests; defaults to this package's own `dist/index.js`. */
+  readonly serverEntrypoint?: string;
   /** Injected for tests; defaults to the real profile store under `home`. */
   readonly profileManager?: ProfileManager;
   /** Injected for tests; defaults to a readline/TTY prompter. */
@@ -901,12 +909,19 @@ async function registerClientsInteractively(
   env: NodeJS.ProcessEnv,
   dependencies: SetupCliDependencies
 ): Promise<readonly string[]> {
-  const commandExists = dependencies.commandExists ?? defaultCommandExists;
-  const runCommand = dependencies.runCommand ?? defaultRunCommand;
+  const context = registrationContext(dependencies, env);
   const available = AUTO_REGISTERED_CLIENTS.filter((client) =>
-    commandExists(client === "codex" ? "codex" : "claude")
+    context.commandExists(client === "codex" ? "codex" : "claude")
   );
-  if (available.length === 0) return Object.freeze([]);
+  if (available.length === 0) {
+    // Without this, the summary's "(none registered)" is the only sign, and it
+    // does not say that no client CLI was found to register with.
+    prompter.note(
+      "\nNo Claude Code (claude) or Codex (codex) CLI was found on PATH, so no\n" +
+        "client was registered automatically."
+    );
+    return Object.freeze([]);
+  }
   if (
     !(await prompter.confirm(
       `\nRegister this server with ${available.join(" and ")}?`,
@@ -915,7 +930,6 @@ async function registerClientsInteractively(
   ) {
     return Object.freeze([]);
   }
-  const context: RegistrationContext = { commandExists, runCommand, env };
   const configured: string[] = [];
   for (const client of available) {
     const result = registerClient(client, options.force, context);
@@ -1126,8 +1140,7 @@ async function runInit(
 
   writeSecureEnvFile(paths.serverEnv, values);
 
-  const commandExists = dependencies.commandExists ?? defaultCommandExists;
-  const runCommand = dependencies.runCommand ?? defaultRunCommand;
+  const context = registrationContext(dependencies, env);
   const configuredClients: string[] = [];
   const skippedClients: string[] = [];
 
@@ -1136,11 +1149,7 @@ async function runInit(
       skippedClients.push(`${client} (no CLI to register with)`);
       continue;
     }
-    const registration = registerClient(client, options.force, {
-      commandExists,
-      runCommand,
-      env,
-    });
+    const registration = registerClient(client, options.force, context);
     if (registration.ok) configuredClients.push(client);
     else skippedClients.push(`${client} (${registration.reason})`);
   }
@@ -1190,6 +1199,26 @@ interface RegistrationContext {
     env: NodeJS.ProcessEnv
   ) => CommandResult;
   readonly env: NodeJS.ProcessEnv;
+  readonly platform: NodeJS.Platform;
+  readonly serverEntrypoint: string;
+}
+
+function registrationContext(
+  dependencies: SetupCliDependencies,
+  env: NodeJS.ProcessEnv
+): RegistrationContext {
+  return Object.freeze({
+    commandExists: dependencies.commandExists ?? defaultCommandExists,
+    runCommand: dependencies.runCommand ?? defaultRunCommand,
+    env,
+    platform: dependencies.platform ?? process.platform,
+    serverEntrypoint: dependencies.serverEntrypoint ?? defaultServerEntrypoint(),
+  });
+}
+
+/** The server entrypoint that ships beside this CLI in `dist`. */
+function defaultServerEntrypoint(): string {
+  return join(__dirname, "index.js");
 }
 
 /**
@@ -1201,16 +1230,20 @@ interface RegistrationContext {
  * client's own PATH will not have — registering it anyway would produce a
  * client that fails to launch with nothing to point at. So fall back to this
  * CLI's own sibling entrypoint, which is unambiguous and always correct.
+ *
+ * Windows always gets the entrypoint. There, npm installs `servicenow-mcp` as
+ * a `.cmd` shim, and clients spawn stdio servers without a shell, which cannot
+ * run one, so the bare name fails to launch even when it is on PATH.
  */
 function resolveServerLaunch(
-  commandExists: (command: string) => boolean
+  context: RegistrationContext
 ): { readonly command: string; readonly args: readonly string[] } {
-  if (commandExists(SERVER_COMMAND)) {
+  if (context.platform !== "win32" && context.commandExists(SERVER_COMMAND)) {
     return Object.freeze({ command: SERVER_COMMAND, args: Object.freeze([]) });
   }
   return Object.freeze({
     command: process.execPath,
-    args: Object.freeze([join(__dirname, "index.js")]),
+    args: Object.freeze([context.serverEntrypoint]),
   });
 }
 
@@ -1223,7 +1256,7 @@ function registerClient(
   if (!context.commandExists(binary)) {
     return { ok: false, reason: `${binary} CLI not found` };
   }
-  const launch = resolveServerLaunch(context.commandExists);
+  const launch = resolveServerLaunch(context);
   const result =
     client === "codex"
       ? configureCodex(launch, force, context)
@@ -1551,9 +1584,31 @@ async function runDoctor(
  * PATH here is this shell's, which is the best available proxy. A GUI client
  * launched from the desktop may hold a different one, so the remedy names the
  * absolute-path registration that removes the question entirely.
+ *
+ * On Windows, clients are registered with node and the entrypoint by absolute
+ * path, never the bare name (see `resolveServerLaunch`). PATH is irrelevant
+ * there, so the check is that both files a client will launch exist.
  */
 function checkServerCommand(dependencies: SetupCliDependencies): Check {
   const name = "server command";
+  const fallback = dependencies.serverEntrypoint ?? defaultServerEntrypoint();
+  if ((dependencies.platform ?? process.platform) === "win32") {
+    const missing = [process.execPath, fallback].filter((file) => !existsSync(file));
+    return missing.length === 0
+      ? {
+          name,
+          ok: true,
+          detail: `clients launch ${process.execPath} with ${fallback} over stdio`,
+        }
+      : {
+          name,
+          ok: false,
+          detail: `${missing.join(" and ")} not found`,
+          remedy:
+            "Reinstall the package (npm i -g @onlyflows/servicenow-mcp), then run " +
+            "servicenow-mcp-setup again from the new install.",
+        };
+  }
   const commandExists = dependencies.commandExists ?? defaultCommandExists;
   if (commandExists(SERVER_COMMAND)) {
     return {
@@ -1562,7 +1617,6 @@ function checkServerCommand(dependencies: SetupCliDependencies): Check {
       detail: `${SERVER_COMMAND} resolves on PATH; clients spawn it over stdio`,
     };
   }
-  const fallback = join(__dirname, "index.js");
   return {
     name,
     ok: false,
@@ -2233,11 +2287,7 @@ function unquoteShellValue(raw: string): string {
 }
 
 function defaultCommandExists(command: string): boolean {
-  const result = spawnSync("/bin/sh", ["-lc", `command -v ${shellQuote(command)}`], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  return result.status === 0;
+  return resolveCommand(command) !== undefined;
 }
 
 function defaultRunCommand(
@@ -2245,10 +2295,12 @@ function defaultRunCommand(
   args: readonly string[],
   env: NodeJS.ProcessEnv
 ): CommandResult {
-  const result = spawnSync(command, [...args], {
+  const invocation = commandInvocation(command, args, { env });
+  const result = spawnSync(invocation.command, [...invocation.args], {
     encoding: "utf8",
     env,
     stdio: ["ignore", "pipe", "pipe"],
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments,
   });
   return Object.freeze({
     status: result.status,
