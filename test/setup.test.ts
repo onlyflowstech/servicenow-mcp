@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -186,6 +186,36 @@ describe("setup init", () => {
       { command: "codex", launch: [process.execPath, entrypoint] },
       { command: "claude", launch: [process.execPath, entrypoint] },
     ]);
+  });
+
+  it("registers with a Windows npm shim that is installed but not on PATH", async () => {
+    const home = newHome("sn-mcp-setup-offpath-");
+    const appData = join(home, "AppData", "Roaming");
+    const codex = join(appData, "npm", "codex.cmd");
+    mkdirSync(dirname(codex), { recursive: true });
+    writeFileSync(codex, "");
+    const commands: string[] = [];
+    const io = capture();
+
+    await runSetupCli({
+      home,
+      argv: ["--clients", "codex,claude-code", "--json"],
+      env: { HOME: home, APPDATA: appData },
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: (value) => io.err.push(value),
+      platform: "win32",
+      commandExists: () => false,
+      runCommand: (command, args) => {
+        commands.push(`${command} ${args[1]}`);
+        return args[1] === "get" ? { status: 1 } : { status: 0 };
+      },
+    });
+
+    expect(commands).toEqual([`${codex} get`, `${codex} add`]);
+    expect(JSON.parse(io.out.join(""))).toMatchObject({
+      clients: ["codex"],
+      skipped_clients: ["claude-code (claude CLI not found)"],
+    });
   });
 
   it("prints human-readable next steps by default", async () => {
@@ -926,6 +956,28 @@ function scriptedPrompter(
   };
 }
 
+/** Records notes and questions in the order the operator would see them. */
+function transcriptOf(scripted: ScriptedPrompter): {
+  prompter: ScriptedPrompter;
+  events: string[];
+} {
+  const events: string[] = [];
+  return {
+    events,
+    prompter: {
+      ...scripted,
+      ask: (question, options) => {
+        events.push(`ask: ${question}`);
+        return scripted.ask(question, options);
+      },
+      note: (text) => {
+        events.push(`note: ${text}`);
+        scripted.note(text);
+      },
+    },
+  };
+}
+
 const FIXED_KEY: ProfileEncryptionKeyProvider = {
   getKey: () => Buffer.alloc(32, 7),
 };
@@ -1016,14 +1068,47 @@ describe("setup wizard", () => {
     expect(out).not.toContain("hunter2");
   });
 
-  it("says why no client was registered when neither client CLI is installed", async () => {
-    const { prompter, out } = await runWizard(HAPPY);
+  it("says before the first question that no client CLI is installed", async () => {
+    const { prompter, events } = transcriptOf(scriptedPrompter(HAPPY));
+    const { out } = await runWizard([], { prompter });
 
-    // The summary alone says "(none registered)" and nothing about why.
-    expect(prompter.notes.join("\n")).toContain(
-      "No Claude Code (claude) or Codex (codex) CLI was found on PATH"
+    // Said up front, so the operator can install Claude Code before spending
+    // time on a credential, not only in the summary's "(none registered)".
+    const warned = events.findIndex((event) =>
+      event.includes("No Claude Code (claude) or Codex (codex) CLI was found")
     );
+    const firstQuestion = events.findIndex((event) => event.startsWith("ask: "));
+    expect(warned).toBeGreaterThanOrEqual(0);
+    expect(warned).toBeLessThan(firstQuestion);
+    expect(events[warned]).toContain('servicenow-mcp-setup again (choose "clients")');
+    expect(prompter.remaining()).toBe(0);
     expect(out).toContain("(none registered)");
+  });
+
+  it("registers with Claude Code installed off PATH, and says how to fix PATH", async () => {
+    // The Windows native installer's location, in a terminal opened before
+    // the install, whose PATH does not include it yet.
+    const claude = join(home, ".local", "bin", "claude.exe");
+    mkdirSync(dirname(claude), { recursive: true });
+    writeFileSync(claude, "");
+    const commands: string[] = [];
+
+    const { prompter, out } = await runWizard([...HAPPY, "y"], {
+      platform: "win32",
+      serverEntrypoint: join(home, "index.js"),
+      commandExists: () => false,
+      runCommand: (command, args) => {
+        commands.push(`${command} ${args[1]}`);
+        return args[1] === "get" ? { status: 1 } : { status: 0 };
+      },
+    });
+
+    const notes = prompter.notes.join("\n");
+    expect(notes).toContain(`Found Claude Code (claude) at ${claude},`);
+    expect(notes).toContain("not on this terminal's PATH");
+    expect(notes).toContain(`add ${dirname(claude)} to your PATH`);
+    expect(commands).toEqual([`${claude} get`, `${claude} add`]);
+    expect(out).toContain("Clients   claude-code");
   });
 
   it("bootstraps the owner-only server env and no credential files", async () => {

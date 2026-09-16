@@ -366,6 +366,12 @@ async function runWizard(
     const keyProvider =
       dependencies.keyProvider ?? encryptionKeyProviderFromValue(values[ENCRYPTION_KEY_ENV]);
 
+    // Which client CLIs are installed, said before anything is asked, so an
+    // operator without one learns it now rather than after the credential.
+    const clientContext = registrationContext(dependencies, env, home);
+    const clis = locateClientClis(clientContext);
+    prompter.note(renderClientCliNote(clis));
+
     // 2. Re-run safety: never clobber an existing profile without being told.
     const existing = existingProfileNames(manager);
     if (existing.length > 0) {
@@ -378,8 +384,8 @@ async function runWizard(
         const only = await registerClientsInteractively(
           prompter,
           options,
-          env,
-          dependencies
+          clis,
+          clientContext
         );
         out(renderClientOnlySummary(only, home));
         return;
@@ -511,8 +517,8 @@ async function runWizard(
     const registered = await registerClientsInteractively(
       prompter,
       options,
-      env,
-      dependencies
+      clis,
+      clientContext
     );
 
     // 8. Verify the install the way `doctor` does, so setup ends by reporting
@@ -926,37 +932,59 @@ async function defaultParentTable(
 async function registerClientsInteractively(
   prompter: WizardPrompter,
   options: InitOptions,
-  env: NodeJS.ProcessEnv,
-  dependencies: SetupCliDependencies
+  clis: readonly ClientCli[],
+  context: RegistrationContext
 ): Promise<readonly string[]> {
-  const context = registrationContext(dependencies, env);
-  const available = AUTO_REGISTERED_CLIENTS.filter((client) =>
-    context.commandExists(client === "codex" ? "codex" : "claude")
-  );
-  if (available.length === 0) {
+  if (clis.length === 0) {
     // Without this, the summary's "(none registered)" is the only sign, and it
     // does not say that no client CLI was found to register with.
     prompter.note(
-      "\nNo Claude Code (claude) or Codex (codex) CLI was found on PATH, so no\n" +
-        "client was registered automatically."
+      "\nNo Claude Code (claude) or Codex (codex) CLI was found, so no client\n" +
+        "was registered automatically."
     );
     return Object.freeze([]);
   }
   if (
     !(await prompter.confirm(
-      `\nRegister this server with ${available.join(" and ")}?`,
+      `\nRegister this server with ${clis.map((cli) => cli.client).join(" and ")}?`,
       true
     ))
   ) {
     return Object.freeze([]);
   }
   const configured: string[] = [];
-  for (const client of available) {
-    const result = registerClient(client, options.force, context);
-    if (result.ok) configured.push(client);
-    else prompter.note(`  skipped ${client}: ${result.reason}`);
+  for (const cli of clis) {
+    const result = registerClient(cli, options.force, context);
+    if (result.ok) configured.push(cli.client);
+    else prompter.note(`  skipped ${cli.client}: ${result.reason}`);
   }
   return Object.freeze(configured);
+}
+
+/**
+ * Say up front which clients setup can register with, before the operator
+ * spends time on a credential. With none, they can stop and install Claude
+ * Code first, or know that the client is theirs to configure afterwards.
+ */
+function renderClientCliNote(clis: readonly ClientCli[]): string {
+  if (clis.length === 0) {
+    return (
+      "No Claude Code (claude) or Codex (codex) CLI was found, so setup cannot\n" +
+      "register this server with a client for you. It will still create and\n" +
+      "verify your profile. Afterwards, either install Claude Code and run\n" +
+      'servicenow-mcp-setup again (choose "clients"), or configure your client\n' +
+      "by hand: servicenow-mcp-setup client\n"
+    );
+  }
+  const lines = clis.map((cli) =>
+    cli.offPath
+      ? `Found ${CLIENT_CLI_LABELS[cli.client]} at ${cli.command},\n` +
+        "but its folder is not on this terminal's PATH. Setup will run it from\n" +
+        `there. To run ${clientBinary(cli.client)} yourself, open a new terminal; if it is\n` +
+        `still not recognized, add ${dirname(cli.command)} to your PATH.`
+      : `Found ${CLIENT_CLI_LABELS[cli.client]}.`
+  );
+  return `${lines.join("\n")}\n`;
 }
 
 function renderWizardSummary(
@@ -1160,7 +1188,7 @@ async function runInit(
 
   writeSecureEnvFile(paths.serverEnv, values);
 
-  const context = registrationContext(dependencies, env);
+  const context = registrationContext(dependencies, env, home);
   const configuredClients: string[] = [];
   const skippedClients: string[] = [];
 
@@ -1169,7 +1197,12 @@ async function runInit(
       skippedClients.push(`${client} (no CLI to register with)`);
       continue;
     }
-    const registration = registerClient(client, options.force, context);
+    const cli = locateClientCli(client, context);
+    if (cli === undefined) {
+      skippedClients.push(`${client} (${clientBinary(client)} CLI not found)`);
+      continue;
+    }
+    const registration = registerClient(cli, options.force, context);
     if (registration.ok) configuredClients.push(client);
     else skippedClients.push(`${client} (${registration.reason})`);
   }
@@ -1219,21 +1252,114 @@ interface RegistrationContext {
     env: NodeJS.ProcessEnv
   ) => CommandResult;
   readonly env: NodeJS.ProcessEnv;
+  readonly home: string;
   readonly platform: NodeJS.Platform;
   readonly serverEntrypoint: string;
 }
 
 function registrationContext(
   dependencies: SetupCliDependencies,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  home: string
 ): RegistrationContext {
   return Object.freeze({
     commandExists: dependencies.commandExists ?? defaultCommandExists,
     runCommand: dependencies.runCommand ?? defaultRunCommand,
     env,
+    home,
     platform: dependencies.platform ?? process.platform,
     serverEntrypoint: dependencies.serverEntrypoint ?? defaultServerEntrypoint(),
   });
+}
+
+/** An installed client CLI setup can register with, and how to run it. */
+interface ClientCli {
+  readonly client: ClientTarget;
+  /** The bare name when it resolves on PATH; otherwise the absolute path found. */
+  readonly command: string;
+  /** Found in a default install location that this terminal's PATH lacks. */
+  readonly offPath: boolean;
+}
+
+const CLIENT_CLI_LABELS: Readonly<Partial<Record<ClientTarget, string>>> = Object.freeze({
+  codex: "Codex (codex)",
+  "claude-code": "Claude Code (claude)",
+});
+
+function clientBinary(client: ClientTarget): "claude" | "codex" {
+  return client === "codex" ? "codex" : "claude";
+}
+
+function locateClientClis(context: RegistrationContext): readonly ClientCli[] {
+  return Object.freeze(
+    AUTO_REGISTERED_CLIENTS.map((client) => locateClientCli(client, context)).filter(
+      (cli): cli is ClientCli => cli !== undefined
+    )
+  );
+}
+
+/**
+ * Find a client's CLI on PATH or, failing that, where its installer puts it.
+ *
+ * Installed but not on PATH is common on Windows: the Claude Code installer
+ * adds its folder to the user PATH, but a terminal opened before the install
+ * keeps the old PATH, so `claude` is not recognized there. Registering needs
+ * only the executable, not PATH, so setup runs it by full path instead of
+ * reporting it missing.
+ */
+function locateClientCli(
+  client: ClientTarget,
+  context: RegistrationContext
+): ClientCli | undefined {
+  const binary = clientBinary(client);
+  if (context.commandExists(binary)) {
+    return Object.freeze({ client, command: binary, offPath: false });
+  }
+  const found = defaultInstallLocations(binary, context).find(isRegularFile);
+  return found === undefined
+    ? undefined
+    : Object.freeze({ client, command: found, offPath: true });
+}
+
+/**
+ * Where each CLI's documented installers put it
+ * (https://code.claude.com/docs/en/troubleshoot-install). WinGet and Homebrew
+ * installs are left out: their paths are not documented, and they normally
+ * land on PATH anyway.
+ */
+function defaultInstallLocations(
+  binary: "claude" | "codex",
+  context: RegistrationContext
+): readonly string[] {
+  const windows = context.platform === "win32";
+  // Claude Code installs under USERPROFILE, which HOME can differ from on
+  // Windows (Git Bash sets it), so check both.
+  const homes = [
+    ...new Set(
+      [context.home, windows ? context.env.USERPROFILE : undefined].filter(
+        (home): home is string => Boolean(home)
+      )
+    ),
+  ];
+  const locations: string[] = [];
+  if (binary === "claude") {
+    for (const home of homes) {
+      // The native installer.
+      locations.push(join(home, ".local", "bin", windows ? "claude.exe" : "claude"));
+      // The legacy local install older versions created.
+      if (!windows) locations.push(join(home, ".claude", "local", "claude"));
+    }
+  }
+  // npm's default global prefix on Windows, where `npm install -g` writes its
+  // .cmd shims: Codex always installs this way, and Claude Code can.
+  if (windows && context.env.APPDATA) {
+    locations.push(join(context.env.APPDATA, "npm", `${binary}.cmd`));
+  }
+  return locations;
+}
+
+function isRegularFile(path: string): boolean {
+  return statSync(path, { throwIfNoEntry: false })?.isFile() ?? false;
 }
 
 /** The server entrypoint that ships beside this CLI in `dist`. */
@@ -1268,19 +1394,15 @@ function resolveServerLaunch(
 }
 
 function registerClient(
-  client: ClientTarget,
+  cli: ClientCli,
   force: boolean,
   context: RegistrationContext
 ): { ok: true } | { ok: false; reason: string } {
-  const binary = client === "codex" ? "codex" : "claude";
-  if (!context.commandExists(binary)) {
-    return { ok: false, reason: `${binary} CLI not found` };
-  }
   const launch = resolveServerLaunch(context);
   const result =
-    client === "codex"
-      ? configureCodex(launch, force, context)
-      : configureClaudeCode(launch, force, context);
+    cli.client === "codex"
+      ? configureCodex(cli.command, launch, force, context)
+      : configureClaudeCode(cli.command, launch, force, context);
   if (result.status === 0) return { ok: true };
   return {
     ok: false,
@@ -1290,22 +1412,23 @@ function registerClient(
 
 /** `codex mcp add <name> -- <command> [args...]` registers a stdio server. */
 function configureCodex(
+  codex: string,
   launch: { readonly command: string; readonly args: readonly string[] },
   force: boolean,
   context: RegistrationContext
 ): CommandResult {
-  const existing = context.runCommand("codex", ["mcp", "get", MCP_SERVER_NAME], context.env);
+  const existing = context.runCommand(codex, ["mcp", "get", MCP_SERVER_NAME], context.env);
   if (existing.status === 0) {
     if (!force) return Object.freeze({ status: 0 });
     const removed = context.runCommand(
-      "codex",
+      codex,
       ["mcp", "remove", MCP_SERVER_NAME],
       context.env
     );
     if (removed.status !== 0) return removed;
   }
   return context.runCommand(
-    "codex",
+    codex,
     ["mcp", "add", MCP_SERVER_NAME, "--", launch.command, ...launch.args],
     context.env
   );
@@ -1316,26 +1439,27 @@ function configureCodex(
  * stdio is the default transport, so `--transport` is deliberately omitted.
  */
 function configureClaudeCode(
+  claude: string,
   launch: { readonly command: string; readonly args: readonly string[] },
   force: boolean,
   context: RegistrationContext
 ): CommandResult {
   const existing = context.runCommand(
-    "claude",
+    claude,
     ["mcp", "get", MCP_SERVER_NAME],
     context.env
   );
   if (existing.status === 0) {
     if (!force) return Object.freeze({ status: 0 });
     const removed = context.runCommand(
-      "claude",
+      claude,
       ["mcp", "remove", MCP_SERVER_NAME, "--scope", "user"],
       context.env
     );
     if (removed.status !== 0) return removed;
   }
   return context.runCommand(
-    "claude",
+    claude,
     ["mcp", "add", "--scope", "user", MCP_SERVER_NAME, "--", launch.command, ...launch.args],
     context.env
   );

@@ -187,6 +187,24 @@ describe("commandInvocation", () => {
     expect(() => commandInvocation("codex", ["one\ntwo"], options)).toThrow(/quote or line break/u);
   });
 
+  it("runs a CLI found outside PATH by its absolute path, without searching PATH", () => {
+    const options = {
+      platform: "win32" as const,
+      env: { Path: "C:\\Windows\\system32" },
+      isFile: () => {
+        throw new Error("an absolute path must not be searched for");
+      },
+    };
+    expect(commandInvocation(`${NATIVE}\\claude.exe`, ["--version"], options)).toEqual({
+      command: `${NATIVE}\\claude.exe`,
+      args: ["--version"],
+      windowsVerbatimArguments: false,
+    });
+    expect(commandInvocation(`${NPM}\\codex.cmd`, ["--version"], options).args[3]).toBe(
+      `""${NPM}\\codex.cmd" ^"--version^""`
+    );
+  });
+
   it("passes an unresolved Windows command through, so the spawn reports ENOENT", () => {
     expect(
       commandInvocation("claude", ["--version"], {

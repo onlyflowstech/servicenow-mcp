@@ -83,7 +83,10 @@ export function commandInvocation(
   if (platform !== "win32") return invocation(command, args, false);
 
   const env = options.env ?? process.env;
-  const file = searchWindowsPath(command, env, options.isFile ?? isRegularFile) ?? command;
+  // An absolute path is a CLI found outside PATH; it is already the file.
+  const file = win32.isAbsolute(command)
+    ? command
+    : (searchWindowsPath(command, env, options.isFile ?? isRegularFile) ?? command);
   if (!/\.(?:bat|cmd)$/iu.test(file)) return invocation(file, args, false);
 
   // /d skips AutoRun commands; /s strips exactly the outer pair of quotes, so
