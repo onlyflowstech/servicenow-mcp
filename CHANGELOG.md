@@ -5,9 +5,18 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.2.0-dev.5] — 2026-09-16
 
 ### Fixed
+
+- ATF failures include result/step IDs, a referenced step label fallback, and
+  explicit head/tail excerpts. The new `sn_atf_results step` action retrieves
+  complete summary or output text in bounded chunks.
+- Return 200 test summaries by default with explicit test/failure pagination,
+  replacing the inaccessible 100-test display cap.
+- Report observed `status_changed` instead of inferring flakiness from pass/fail
+  transitions; the deprecated `flaky` field stays empty.
+- Include suite reads in the authoring setup preset for membership verification.
 
 - Container validation expects the current 23-tool contract and reports named,
   bounded asynchronous stages instead of leaving pending checks without diagnostics.

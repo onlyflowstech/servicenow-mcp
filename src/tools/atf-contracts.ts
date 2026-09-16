@@ -4,18 +4,21 @@ import { atfRunSummarySchema } from "../atf-result-cache.js";
 const name = z.string().max(100);
 export const atfComparisonSchema = z.object({
   previous_run: id, current_run: id,
-  new_failures: z.array(id), fixed: z.array(id), still_failing: z.array(id), flaky: z.array(id),
+  new_failures: z.array(id), fixed: z.array(id), still_failing: z.array(id), flaky: z.array(id).describe("Deprecated; empty because status history alone cannot establish flakiness"),
+  status_changed: z.array(id),
   duration_change_ms: z.number(), duration_regression: z.boolean(),
 }).strict();
 export const atfExecutionResultSchema = z.object({
   outcome: z.enum(["running", "completed", "unavailable"]),
   progress_id: id.optional(), result_id: id.optional(), suite_id: id.optional(), suite_name: name.optional(),
   run: atfRunSummarySchema.optional(),
-  failures: z.array(z.object({ test_id: id, test_name: name, step: z.string().max(1000), message: z.string().max(500) }).strict()),
+  failures: z.array(z.object({ test_id: id, test_name: name, step: z.string().max(1000), message: z.string().max(1000), message_truncated: z.boolean(), test_result_id: id, step_result_id: id.optional(), step_id: id.optional() }).strict()),
+  pagination: z.object({ tests_total: z.number().int(), tests_offset: z.number().int(), tests_next_offset: z.number().int().optional(), failures_total: z.number().int(), failures_offset: z.number().int(), failures_next_offset: z.number().int().optional() }).strict().optional(),
   comparison: atfComparisonSchema.optional(), warnings: z.array(z.string().max(1000)),
 }).strict();
 export const atfResultsSchema = z.object({
-  action: z.enum(["get", "history", "compare"]),
+  action: z.enum(["get", "step", "history", "compare"]),
+  step_detail: z.object({ step_result_id: id, test_result_id: id, step_id: id.optional(), step: z.string().max(1000), status: z.string().max(100), field: z.enum(["summary", "output"]), text: z.string().max(8000), offset: z.number().int(), total_characters: z.number().int(), next_offset: z.number().int().optional() }).strict().optional(),
   execution: atfExecutionResultSchema.optional(),
   runs: z.array(atfRunSummarySchema).optional(), comparison: atfComparisonSchema.optional(),
   message: z.string().optional(),

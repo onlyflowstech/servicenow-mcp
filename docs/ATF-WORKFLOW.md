@@ -81,15 +81,45 @@ For history use `action:"history"`, `suite_sys_id` (or `test_sys_id`) and
 optional `limit` (default 10, maximum 100). For comparison use `action:"compare"`
 and `suite_sys_id`; optional `result_id` and `previous_result_id` choose the two
 runs. Otherwise the newest two cached runs are used. Comparison identifies new,
-fixed, continuing and intermittent failures and duration regressions (default
+fixed and continuing failures, observed status changes, and duration regressions (default
 threshold 20%, configurable with `regression_percent`). Comparisons only cover
 visible cached test records. History and comparison make no ServiceNow requests.
 
 The cache retains compact summaries, up to 1000 tests per run and 500 characters
-of the first failure per test. Displayed execution detail is bounded to 100 test
-summaries and 20 failures. History shows run summaries. Private cache storage,
+of the first failure per test. Execution returns up to 200 test summaries and
+10 failure excerpts by default. Use `tests_offset`/`tests_limit` and
+`failures_offset`/`failures_limit` on `sn_atf_results get` to retrieve additional
+pages; the `pagination` object includes totals and next offsets. History shows
+run summaries. Private cache storage,
 retention and memory fallback are described in [profile configuration](PROFILE-CREDENTIALS.md#atf-authoring-and-result-cache).
-Failure text is untrusted instance content.
+Failure text is untrusted instance content. Each failure includes its test-result
+ID and, when available, step-result ID and step ID. Excerpts retain the beginning
+and end of long logs and explicitly indicate truncation. Retrieve complete text:
+
+```json
+{"profile":"pdi","action":"step","step_result_id":"<32-hex step-result ID>","output_field":"summary","output_offset":0,"output_limit":4000}
+```
+
+Repeat with `output_offset` set to `step_detail.next_offset` until absent. Use
+`output_field:"output"` to inspect the other native step-output field. The chunk
+limit is 8000 characters; no complete step logs are added to the result cache.
+Step names use the result description or the referenced step's display label.
+
+`status_changed` reports differences between the compared runs. It does not
+claim nondeterminism: code and instance changes can explain those differences.
+The legacy `flaky` field is deprecated and always empty.
+
+A profile with `readTables:["*"]` and `targets:[]` already allows these reads.
+Do not add broader grants to resolve an unexplained denial. Check the exact
+error category, active server version/profile, field restrictions, and instance
+ACLs. Raw encoded queries have a separate policy; prefer structured filters.
+For a deliberately restricted profile, diagnostic reads can be granted with:
+
+```sh
+servicenow-mcp-setup grant --profile pdi --read sys_atf_test_suite_result,sys_atf_test_result,sys_atf_test_result_step --tools sn_atf_results,sn_get,sn_query
+```
+
+This command does not enable execution or change ServiceNow ACLs.
 
 ## Author typed steps
 

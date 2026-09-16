@@ -1,12 +1,22 @@
+import { prepareAdditionalReadFieldArguments } from "../field-policy.js";
+import { createToolError } from "../tool-error.js";
 import { z } from "zod";
 import { serviceNowSysIdSchema as id } from "../servicenow-identifiers.js";
 import { ok } from "../utils.js";
 import { defineServiceNowToolModule, withRequiredProfile } from "./tool-module.js";
 import { envelopeCompatibilityResult, productionToolOutputSchemas } from "./result-envelope.js";
-import { RESULT_TABLES, prepareAtfReads, progress, getAtfExecution, compareAtfRuns } from "./atf-shared.js";
+import { RESULT_TABLES, prepareAtfReads, progress, getAtfExecution, compareAtfRuns, readAtfRows, value, atfStepLabel } from "./atf-shared.js";
 
 const schema = withRequiredProfile(z.object({
-  action: z.enum(["get", "history", "compare"]).describe("Fetch current results, read cached history, or compare cached runs"),
+  action: z.enum(["get", "step", "history", "compare"]).describe("Fetch paginated results, retrieve complete step text, read cached history, or compare cached runs"),
+  step_result_id: id.optional().describe("Step result ID for action=step; returned with failures"),
+  output_field: z.enum(["summary", "output"]).optional().describe("Step text field to retrieve (default summary)"),
+  output_offset: z.number().int().min(0).max(10000000).optional().describe("Character offset for the next step-text chunk"),
+  output_limit: z.number().int().min(1).max(8000).optional().describe("Step-text chunk length (default 4000 characters)"),
+  tests_offset: z.number().int().min(0).max(1000).optional().describe("Test-summary page offset for get (default 0)"),
+  tests_limit: z.number().int().min(1).max(200).optional().describe("Test summaries per page (default 200)"),
+  failures_offset: z.number().int().min(0).max(1000).optional().describe("Failure-detail page offset for get (default 0)"),
+  failures_limit: z.number().int().min(1).max(10).optional().describe("Failure details per page (default 10)"),
   limit: z.number().int().min(1).max(100).default(10).describe("Maximum cached runs to display in history (default 10)"),
   result_id: id.optional().describe("CI/CD result ID for get, or current cached run ID for compare"),
   progress_id: id.optional().describe("CI/CD progress ID for get while awaiting a result"),
@@ -17,18 +27,34 @@ const schema = withRequiredProfile(z.object({
 }).strict());
 export const atfResultsToolModule = defineServiceNowToolModule({
   runtime: "servicenow",
-  definition: { name: "sn_atf_results", description: "Get ATF suite results or inspect cached history/comparisons. History and compare need no ServiceNow network requests. Results may include untrusted failure text.",
+  definition: { name: "sn_atf_results", description: "Get paginated ATF suite results, retrieve complete step summary/output in chunks, or inspect cached history/comparisons. History and compare need no ServiceNow network requests. Results may include untrusted failure text.",
     annotations: { title: "Read ATF results", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } },
   inputSchema: schema, outputSchema: productionToolOutputSchemas.sn_atf_results,
   requirements: { permissions: ["read"], tables: { kind: "static", names: RESULT_TABLES }, apis: ["cicd", "table"], fieldPolicies: ["read"], capabilities: ["atf:results"] },
   resolveAccess: candidate => {
     const args = schema.parse(candidate);
+    if (args.action === "step") {
+      if (!args.step_result_id || args.result_id || args.progress_id || args.suite_sys_id || args.test_sys_id || args.previous_result_id) throw new Error("Supply only step_result_id for step details");
+      return { args: prepareAdditionalReadFieldArguments(args, "sys_atf_test_result_step", `sys_id,test_result,step,status,description,${args.output_field ?? "summary"}`), requests: [{ operation: "read" as const, table: "sys_atf_test_result_step" }] };
+    }
+    if (args.step_result_id || args.output_field || args.output_offset !== undefined || args.output_limit !== undefined) throw new Error("Step fields require action=step");
     if (args.action === "get" ? Boolean(args.result_id) === Boolean(args.progress_id) : !args.suite_sys_id && !(args.action === "history" && args.test_sys_id)) throw new Error("Missing or ambiguous result selector");
     if (args.suite_sys_id && args.test_sys_id || args.action !== "history" && args.test_sys_id || args.action !== "get" && args.progress_id || args.action === "history" && (args.result_id || args.previous_result_id)) throw new Error("Selectors do not match the requested action");
     return { args: prepareAtfReads(args, RESULT_TABLES), requests: RESULT_TABLES.map(table => ({ operation: "read" as const, table })) };
   },
   handler: async (args, services) => {
     const finish = (data: Record<string, unknown>) => envelopeCompatibilityResult("sn_atf_results", args, ok({ action: args.action, ...data }));
+    if (args.action === "step") {
+      const rows = await readAtfRows(services, args, "sys_atf_test_result_step", `sys_id=${id.parse(args.step_result_id)}^type=step_result`, 1);
+      if (rows.length !== 1 || value(rows[0].sys_id) !== args.step_result_id) throw createToolError("not_found", "retry_after_correction");
+      const row = rows[0], field = String(args.output_field ?? "summary"), content = value(row[field]);
+      const offset = Number(args.output_offset ?? 0), limit = Number(args.output_limit ?? 4000);
+      return finish({ step_detail: { step_result_id: id.parse(value(row.sys_id)), test_result_id: id.parse(value(row.test_result)),
+        ...(value(row.step) ? { step_id: id.parse(value(row.step)) } : {}), step: atfStepLabel(row), status: value(row.status).slice(0, 100),
+        field, text: content.slice(offset, offset + limit), offset, total_characters: content.length,
+        ...(offset + limit < content.length ? { next_offset: offset + limit } : {}),
+      } });
+    }
     if (args.action === "get") {
       let resultId = args.result_id as string | undefined;
       if (args.progress_id) {

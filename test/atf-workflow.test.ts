@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { queryToolModule } from "../src/tools/query-module.js";
 import { atfRunToolModule } from "../src/tools/atf-run-module.js";
 import { atfResultsToolModule } from "../src/tools/atf-results-module.js";
 import { atfReadinessToolModule } from "../src/tools/atf-readiness-module.js";
@@ -93,6 +94,54 @@ describe("ATF execution and results", () => {
     expect(data(await h.call(atfResultsToolModule, { action: "get", result_id: id(3) }))).toMatchObject({ execution: { run: { counts: { failed: 1 } }, failures: [{ message: "failure" }] } });
     expect(h.store[0].tests[0].firstFailure).toBe("failure");
   });
+  it("keeps an assertion after noisy logging and provides a step detail locator and label", async () => {
+    const h = harness([rows({ test_suite_name: "Example" }), rows([{ ...suiteResult, status: "failure", rolled_up_test_success_count: "0", rolled_up_test_failure_count: "1" }]), rows([]),
+      rows([{ sys_id: id(4), test: id(5), status: "failure", first_failing_step: id(6) }]),
+      rows([{ sys_id: id(6), test_result: id(4), step: { value: id(7), display_value: "Check templates" }, summary: "provisioning noise\n".repeat(200) + "Assertion failed: expected task template", description: "" }])]);
+    const result = data(await h.call(atfResultsToolModule, { action: "get", result_id: id(3) }));
+    expect(result).toMatchObject({ execution: { failures: [{ step: "Check templates", step_result_id: id(6), test_result_id: id(4), message_truncated: true, message: expect.stringContaining("Assertion failed: expected task template") }] } });
+  });
+  it("returns all 118 tests by default and supports explicit subsequent pages", async () => {
+    const tests = Array.from({length: 118}, (_, n) => ({ sys_id: id(n + 1000), test: id(n + 2000), status: "success" }));
+    const steps = () => [rows({}), rows([{ ...suiteResult, rolled_up_test_success_count: "118" }]), rows([]), rows(tests)];
+    const first = data(await harness(steps()).call(atfResultsToolModule, { action: "get", result_id: id(3) }));
+    expect(first).toMatchObject({ execution: { pagination: { tests_total: 118 }, run: { tests: tests.map(t => ({testId:t.test,status:t.status})) } } });
+    const page = data(await harness(steps()).call(atfResultsToolModule, { action: "get", result_id: id(3), tests_offset: 100, tests_limit: 10 }));
+    expect(page).toMatchObject({ execution: { pagination: { tests_next_offset: 110, tests_total: 118 }, run: { tests: tests.slice(100,110).map(t => ({testId:t.test,status:t.status})) } } });
+  });
+  it("provides a next offset for failures beyond the first ten", async () => {
+    const tests = Array.from({length:11}, (_, n) => ({sys_id:id(n+100),test:id(n+200),status:"failure"}));
+    const steps = () => [rows({}),rows([{...suiteResult,status:"failure",rolled_up_test_success_count:"0",rolled_up_test_failure_count:"11"}]),rows([]),rows(tests)];
+    const first = data(await harness(steps()).call(atfResultsToolModule,{action:"get",result_id:id(3)}));
+    expect(first).toMatchObject({execution:{pagination:{failures_total:11,failures_next_offset:10}}});
+    const last = data(await harness(steps()).call(atfResultsToolModule,{action:"get",result_id:id(3),failures_offset:10}));
+    expect(last).toMatchObject({execution:{failures:[{test_id:id(210)}],pagination:{failures_offset:10}}});
+    expect((last.execution as {failures:unknown[]}).failures).toHaveLength(1);
+  });
+  it("retrieves step diagnostics with only a read grant on the step-result table", async () => {
+    const table="sys_atf_test_result_step";
+    const h=await createMockServiceNowHarness({modules:[atfResultsToolModule],tableAccess:createTableAccessPolicy({readTables:[table],targets:[{table,kind:"canonical",tools:["sn_atf_results"],closureComplete:true,relatedTables:[table]}]}),steps:[rows([{sys_id:id(6),test_result:id(4),summary:"assertion"}])]});
+    try {
+      const result=await h.client.callTool({name:"sn_atf_results",arguments:{profile:SNSDK54_PROFILE_NAME,action:"step",step_result_id:id(6)}});
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({data:{step_detail:{text:"assertion"}}});
+      h.fixture.assertConsumed();
+    } finally {await h.close();}
+  });
+  it("retrieves complete step output in lossless chunks without fetching unrelated result tables", async () => {
+    const output = "noise\n".repeat(1000) + "assertion at the end";
+    let recovered = "";
+    for (let offset=0; offset<output.length; offset+=1000) {
+      const h = harness([rows([{sys_id:id(6),test_result:id(4),step:id(7),status:"failure",output}])]);
+      const result = await h.call(atfResultsToolModule, {action:"step",step_result_id:id(6),output_field:"output",output_offset:offset,output_limit:1000});
+      const detail = (data(result).step_detail as {text:string;next_offset?:number});
+      recovered += detail.text;
+      expect(h.fixture.calls).toHaveLength(1);
+      expect(h.fixture.calls[0].path).toBe("/api/now/table/sys_atf_test_result_step");
+      expect(detail.next_offset).toBe(offset+1000<output.length?offset+1000:undefined);
+    }
+    expect(recovered).toBe(output);
+  });
   it("does not cache an unverified CI/CD-to-table result mapping", async () => {
     const h = harness([rows({ test_suite_name: "Example" }), rows([])]);
     expect(data(await h.call(atfResultsToolModule, { action: "get", result_id: id(3) }))).toMatchObject({ execution: { outcome: "unavailable" } });
@@ -108,9 +157,9 @@ describe("ATF execution and results", () => {
 });
 function summary(n: number, status: AtfRunSummary["status"]): AtfRunSummary { return { runId: id(n), suiteId: id(1), startedAt: new Date(n * 1000).toISOString(), status, durationMs: n * 1000, counts: { passed: 0, failed: 0, errors: 0, skipped: 0 }, tests: [{ testId: id(5), status }] }; }
 describe("ATF comparisons", () => {
-  it("distinguishes fixed, new and still-failing tests and flags flaky histories", () => {
+  it("distinguishes fixed, new and still-failing tests without claiming flakiness", () => {
     const old = summary(1, "failure"), next = summary(2, "success");
-    expect(compareAtfRuns(old, next)).toMatchObject({ fixed: [id(5)], new_failures: [], still_failing: [], flaky: [id(5)], duration_regression: true });
+    expect(compareAtfRuns(old, next)).toMatchObject({ fixed: [id(5)], new_failures: [], still_failing: [], flaky: [], status_changed: [id(5)], duration_regression: true });
     expect(compareAtfRuns(next, old)).toMatchObject({ new_failures: [id(5)], fixed: [] });
     expect(compareAtfRuns(old, { ...next, tests: old.tests })).toMatchObject({ still_failing: [id(5)] });
     expect(() => compareAtfRuns(old, { ...next, suiteId: id(9) })).toThrow();
@@ -201,5 +250,18 @@ describe("ATF MCP result-cache integration", () => {
       expect(history.isError).not.toBe(true);
       expect(history.structuredContent).toMatchObject({ data: { runs: [{ runId: id(3), tests: [] }] } });
     } finally { await h.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+});
+
+
+describe("ATF diagnostic reads with wildcard profile grants", () => {
+  it.each(["sys_atf_test_result", "sys_atf_test_result_step", "sys_script"])("allows sn_query reads of %s through the MCP coordinator", async table => {
+    const h = await createMockServiceNowHarness({ modules: [queryToolModule], tableAccess: createTableAccessPolicy({readTables:["*"],writeTables:["*"],targets:[]}), steps: [{operation:"getWithMeta",response:{data:{result:[{sys_id:id(1)}]},status:200,headers:new Headers()}}] });
+    try {
+      const result=await h.client.callTool({name:"sn_query",arguments:{profile:SNSDK54_PROFILE_NAME,table,fields:"sys_id",limit:1}});
+      expect(result.isError).not.toBe(true);
+      expect(h.fixture.calls[0].path).toBe(`/api/now/table/${table}`);
+      h.fixture.assertConsumed();
+    } finally {await h.close();}
   });
 });

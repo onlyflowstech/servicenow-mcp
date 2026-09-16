@@ -43,7 +43,7 @@ export async function readAtfRows(services: ServiceNowToolHandlerServices, args:
   if (!fields) throw new Error("ATF read was not preflighted");
   const response = await services.serviceNow.get<{ result: unknown }>(`/api/now/table/${table}`, {
     sysparm_query: `${query}${query ? "^" : ""}ORDERBYsys_id`, sysparm_fields: fieldSelectionToSysparmFields(fields)!,
-    sysparm_display_value: (table === "var_dictionary" || table === "sys_atf_step_config") ? "all" : "false", sysparm_limit: String(limit + 1),
+    sysparm_display_value: (table === "var_dictionary" || table === "sys_atf_step_config" || table === "sys_atf_test_result_step") ? "all" : "false", sysparm_limit: String(limit + 1),
   });
   const rows = z.array(z.record(z.unknown())).parse(filterReadableRecord(response?.result, fields));
   if (rows.length > limit) throw createToolError("upstream", "retry_after_correction");
@@ -56,18 +56,15 @@ export async function resolveSuite(services: ServiceNowToolHandlerServices, args
 }
 const failed = (status: string) => status === "failure" || status === "error";
 const passed = (status: string) => status === "success" || status === "success_with_warnings";
-export function compareAtfRuns(previous: AtfRunSummary, current: AtfRunSummary, history: AtfRunSummary[] = [], threshold = 20) {
+export function compareAtfRuns(previous: AtfRunSummary, current: AtfRunSummary, _history: AtfRunSummary[] = [], threshold = 20) {
   if (previous.suiteId !== current.suiteId) throw new Error("Cannot compare different suites");
   const old = new Map(previous.tests.map(test => [test.testId, test.status]));
   const new_failures = current.tests.filter(test => failed(test.status) && !failed(old.get(test.testId) ?? "")).map(test => test.testId);
   const fixed = current.tests.filter(test => passed(test.status) && failed(old.get(test.testId) ?? "")).map(test => test.testId);
   const still_failing = current.tests.filter(test => failed(test.status) && failed(old.get(test.testId) ?? "")).map(test => test.testId);
-  const states = new Map<string, Set<string>>();
-  for (const run of [previous, current, ...history]) for (const test of run.tests) {
-    const set = states.get(test.testId) ?? new Set<string>(); set.add(test.status); states.set(test.testId, set);
-  }
   return { previous_run: previous.runId, current_run: current.runId, new_failures, fixed, still_failing,
-    flaky: [...states].filter(([, set]) => [...set].some(failed) && [...set].some(passed)).map(([test]) => test),
+    flaky: [],
+    status_changed: current.tests.filter(test => old.has(test.testId) && old.get(test.testId) !== test.status).map(test => test.testId),
     duration_change_ms: current.durationMs - previous.durationMs,
     duration_regression: current.durationMs > previous.durationMs * (1 + threshold / 100),
   };
@@ -79,6 +76,13 @@ export function progress(candidate: unknown) {
   const progress_id = links.progress ? id.parse(record(links.progress).id) : undefined;
   const result_id = links.results ? id.parse(record(links.results).id) : undefined;
   return { status, progress_id, result_id };
+}
+export function atfStepLabel(step: Record<string, unknown> | undefined): string {
+  return (value(step?.description) || (display(step?.step) !== value(step?.step) ? display(step?.step) : "") || (value(step?.step) ? `Step ${value(step?.step)}` : "Step details unavailable")).slice(0, 1000);
+}
+export function failureExcerpt(message: string): string {
+  if (message.length <= 1000) return message;
+  return `${message.slice(0, 450)}\n[… excerpt; retrieve full step details …]\n${message.slice(-450)}`.slice(0, 1000);
 }
 export async function getAtfExecution(services: ServiceNowToolHandlerServices, args: Record<string, unknown>, resultId: string): Promise<AtfExecutionResult> {
   const result_id = id.parse(resultId);
@@ -110,10 +114,11 @@ export async function getAtfExecution(services: ServiceNowToolHandlerServices, a
   for (const test of failing) {
     const testResult = id.parse(value(test.sys_id));
     const step = stepRows.find(row => value(row.sys_id) === value(test.first_failing_step) && value(row.test_result) === testResult);
-    const message = value(step?.summary).slice(0, 500);
+    const rawMessage = value(step?.summary);
+    const message = failureExcerpt(rawMessage);
     const testId = id.parse(value(test.test));
-    failureByTest.set(testId, message);
-    output.failures.push({ test_id: testId, test_name: value(test.test_name).slice(0, 100), step: value(step?.description).slice(0, 1000), message });
+    failureByTest.set(testId, message.slice(0, 500));
+    output.failures.push({ test_id: testId, test_name: value(test.test_name).slice(0, 100), step: atfStepLabel(step), message, message_truncated: rawMessage.length > 1000, test_result_id: testResult, ...(step ? { step_result_id: id.parse(value(step.sys_id)) } : {}), ...(value(step?.step) ? { step_id: id.parse(value(step?.step)) } : {}) });
   }
   const instant = (raw: unknown) => {
     const text = value(raw); const date = new Date(text.includes("T") ? text : `${text.replace(" ", "T")}Z`);
@@ -144,7 +149,15 @@ export async function getAtfExecution(services: ServiceNowToolHandlerServices, a
     if (previous) output.comparison = compareAtfRuns(previous, run, history);
     await services.atfResults.put(run);
   }
-  if (output.run.tests.length > 100) output.warnings.push("Showing the first 100 test summaries; the cache retains up to 1000 for comparison.");
-  if (output.failures.length > 20) output.warnings.push("Showing the first 20 failures; open the suite result for the complete report.");
-  return { ...output, run: { ...run, tests: run.tests.slice(0, 100).map(test => ({ testId: test.testId, status: test.status })) }, failures: output.failures.slice(0, 20) };
+  const testsOffset = Number(args.tests_offset ?? 0), testsLimit = Number(args.tests_limit ?? 200);
+  const failuresOffset = Number(args.failures_offset ?? 0), failuresLimit = Number(args.failures_limit ?? 10);
+  output.pagination = { tests_total: run.tests.length, tests_offset: testsOffset,
+    ...(testsOffset + testsLimit < run.tests.length ? { tests_next_offset: testsOffset + testsLimit } : {}),
+    failures_total: output.failures.length, failures_offset: failuresOffset,
+    ...(failuresOffset + failuresLimit < output.failures.length ? { failures_next_offset: failuresOffset + failuresLimit } : {}),
+  };
+  if (output.pagination.tests_next_offset !== undefined) output.warnings.push("More test summaries are available: call sn_atf_results get with tests_offset set to pagination.tests_next_offset.");
+  if (output.pagination.failures_next_offset !== undefined) output.warnings.push("More failures are available: call sn_atf_results get with failures_offset set to pagination.failures_next_offset.");
+  if (output.failures.some(failure => failure.message_truncated)) output.warnings.push("Failure messages contain excerpts. Use sn_atf_results action=step with step_result_id to read complete summary/output in chunks.");
+  return { ...output, run: { ...run, tests: run.tests.slice(testsOffset, testsOffset + testsLimit).map(test => ({ testId: test.testId, status: test.status })) }, failures: output.failures.slice(failuresOffset, failuresOffset + failuresLimit) };
 }

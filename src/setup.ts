@@ -1393,7 +1393,7 @@ function runGrant(
 
   const ordinary = buildTableAccess(existing, options);
   const tableAccess = options.atf
-    ? buildTableAccess(ordinary, { ...options, read: ["sys_atf_test", "sys_atf_step", "sys_atf_step_config", "var_dictionary", "sys_variable_value", "sys_element_mapping"], write: ATF_AUTHOR_TABLES, tools: ["sn_atf_author"] })
+    ? buildTableAccess(ordinary, { ...options, read: ["sys_atf_test_suite", "sys_atf_test", "sys_atf_step", "sys_atf_step_config", "var_dictionary", "sys_variable_value", "sys_element_mapping"], write: ATF_AUTHOR_TABLES, tools: ["sn_atf_author"] })
     : ordinary;
 
   if (options.dryRun) {
