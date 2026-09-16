@@ -1,4 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  ListToolsRequestSchema,
+  type ServerResult,
+} from "@modelcontextprotocol/sdk/types.js";
 
 import { VERSION } from "./version.js";
 
@@ -59,6 +63,59 @@ function createRegistrationSurface(server: McpServer): McpServerRegistrationSurf
   });
 }
 
+/**
+ * Serve every tool schema without a `$schema` dialect declaration.
+ *
+ * The SDK converts zod schemas with zod-to-json-schema, which stamps each one
+ * `"$schema": "http://json-schema.org/draft-07/schema#"`. Clients built on the
+ * current MCP spec validate with a JSON Schema 2020-12 validator and refuse a
+ * schema that names draft-07, which disabled every tool (SNSDK-86). With no
+ * declaration, those clients read a schema as 2020-12 and older ones read it
+ * as draft-07. Ours use only keywords that mean the same in both, and a
+ * contract test holds them to that. Declaring 2020-12 instead would break the
+ * older clients.
+ *
+ * The SDK installs its tools/list handler through `setRequestHandler` when the
+ * first tool is registered, so the handler is wrapped as it is installed; no
+ * SDK internals are read.
+ */
+function serveDialectNeutralToolSchemas(server: McpServer): void {
+  const lowLevel = server.server;
+  const install = lowLevel.setRequestHandler.bind(lowLevel);
+  const setRequestHandler: typeof lowLevel.setRequestHandler = (requestSchema, handler) => {
+    // Identity against the SDK's own schema object, the one McpServer passes.
+    if ((requestSchema as unknown) !== ListToolsRequestSchema) {
+      install(requestSchema, handler);
+      return;
+    }
+    install(requestSchema, async (request, extra) =>
+      withoutSchemaDialects(await handler(request, extra))
+    );
+  };
+  lowLevel.setRequestHandler = setRequestHandler;
+}
+
+function withoutSchemaDialects(result: ServerResult): ServerResult {
+  if (!("tools" in result) || !Array.isArray(result.tools)) return result;
+  return {
+    ...result,
+    tools: result.tools.map((tool) => ({
+      ...tool,
+      inputSchema: withoutDialect(tool.inputSchema),
+      ...(tool.outputSchema === undefined
+        ? {}
+        : { outputSchema: withoutDialect(tool.outputSchema) }),
+    })),
+  };
+}
+
+function withoutDialect<TSchema extends object>(schema: TSchema): TSchema {
+  if (!Object.hasOwn(schema, "$schema")) return schema;
+  const copy: Record<string, unknown> = { ...(schema as Record<string, unknown>) };
+  delete copy.$schema;
+  return copy as TSchema;
+}
+
 /** Close a connected construction candidate and verify that it disconnected. */
 async function closeConnectedCandidate(server: McpServer): Promise<void> {
   await server.close();
@@ -90,6 +147,8 @@ export async function createMcpServer<TDependencies extends object>(
     }
   );
 
+  // Before registration: the SDK installs tools/list on the first registerTool.
+  serveDialectNeutralToolSchemas(server);
   const registrationSurface = createRegistrationSurface(server);
   try {
     await options.register(registrationSurface, options.dependencies);

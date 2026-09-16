@@ -5,6 +5,8 @@ import {
   type CallToolResult,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import Ajv from "ajv";
+import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -52,6 +54,56 @@ const CANARIES: Readonly<Record<RepresentativeName, string>> = Object.freeze({
 });
 const UPSTREAM_PROFILE_SPOOF = "attacker-selected-profile";
 const UPSTREAM_SECRET = "SNSDK50_RAW_SENSITIVE_VALUE";
+
+/**
+ * The dialects MCP clients validate tool schemas with: 2020-12, the current
+ * spec's default, and draft-07, which older clients assume. Formats are not a
+ * difference between the two, so they are left unchecked.
+ */
+const DIALECT_VALIDATORS = [
+  ["draft-07", () => new Ajv({ strict: true, validateFormats: false })],
+  ["2020-12", () => new Ajv2020({ strict: true, validateFormats: false })],
+] as const;
+
+/** Keywords that exist in only one of the two dialects, or mean different things. */
+const DIALECT_SPECIFIC_KEYWORDS = new Set([
+  "$schema",
+  "additionalItems",
+  "prefixItems",
+  "dependencies",
+  "dependentRequired",
+  "dependentSchemas",
+  "$recursiveRef",
+  "$recursiveAnchor",
+  "$dynamicRef",
+  "$dynamicAnchor",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+]);
+
+/** Paths of every dialect-specific keyword, including array-form (tuple) items. */
+function dialectSpecificKeywords(node: unknown, path = "#"): string[] {
+  if (Array.isArray(node)) {
+    return node.flatMap((item, index) => dialectSpecificKeywords(item, `${path}/${index}`));
+  }
+  if (typeof node !== "object" || node === null) return [];
+  const found: string[] = [];
+  for (const [key, value] of Object.entries(node)) {
+    const at = `${path}/${key}`;
+    if (key === "properties" && typeof value === "object" && value !== null) {
+      // Names under properties are data, not keywords.
+      for (const [name, property] of Object.entries(value)) {
+        found.push(...dialectSpecificKeywords(property, `${at}/${name}`));
+      }
+      continue;
+    }
+    if (DIALECT_SPECIFIC_KEYWORDS.has(key) || (key === "items" && Array.isArray(value))) {
+      found.push(at);
+    }
+    found.push(...dialectSpecificKeywords(value, at));
+  }
+  return found;
+}
 
 interface JsonRpcResponse {
   readonly result?: unknown;
@@ -607,6 +659,57 @@ describe.each(clients)(
         }
         expect(harness.getConfig).not.toHaveBeenCalled();
         expect(harness.getClient).not.toHaveBeenCalled();
+      } finally {
+        await client.close();
+        await closeHarness(harness);
+      }
+    });
+
+    it("advertises every tool schema without a dialect, valid as draft-07 and 2020-12", async () => {
+      // SNSDK-86: a declared draft-07 dialect made current clients refuse every tool.
+      const harness = await createHarness();
+      const client = createClient(harness.url);
+      try {
+        await client.initialize();
+        const tools = await client.listTools();
+        expect(tools.length).toBeGreaterThan(0);
+        for (const tool of tools) {
+          for (const [kind, schema] of [
+            ["input", tool.inputSchema],
+            ["output", tool.outputSchema],
+          ] as const) {
+            if (schema === undefined) continue;
+            const label = `${tool.name} ${kind} schema`;
+            expect(dialectSpecificKeywords(schema), label).toEqual([]);
+            for (const [dialect, createValidator] of DIALECT_VALIDATORS) {
+              expect(() => createValidator().compile(schema), `${label} as ${dialect}`).not.toThrow();
+            }
+          }
+        }
+      } finally {
+        await client.close();
+        await closeHarness(harness);
+      }
+    });
+
+    it("returns structured output that a JSON Schema 2020-12 client accepts", async () => {
+      const harness = await createHarness({ client: representativeClient() });
+      const client = createClient(harness.url);
+      try {
+        await client.initialize();
+        const tools = await client.listTools();
+        const results = await callRepresentativeTools(client);
+        for (const name of REPRESENTATIVE_NAMES) {
+          const outputSchema = tools.find((tool) => tool.name === name)?.outputSchema;
+          if (!outputSchema) throw new Error(`${name} advertises no output schema`);
+          // What a current client does with a result: validate it against the
+          // advertised schema using a 2020-12 validator.
+          const validate = new Ajv2020({ strict: true, validateFormats: false }).compile(
+            outputSchema
+          );
+          const valid = validate(results[name].structuredContent);
+          expect(valid, `${name}: ${JSON.stringify(validate.errors)}`).toBe(true);
+        }
       } finally {
         await client.close();
         await closeHarness(harness);
