@@ -5,6 +5,32 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0-dev.6] — 2026-09-16
+
+### Fixed
+
+- Tool schemas no longer declare JSON Schema draft-07. Clients on the current
+  MCP spec validate with a 2020-12-only validator and refused every tool. The
+  schemas now carry no `$schema`, and each is valid under both dialects.
+- `servicenow-mcp-setup` works on native Windows. Commands are found through
+  PATH and PATHEXT instead of `/bin/sh`, so `doctor` no longer reports a correct
+  global install as missing, and Claude Code and Codex are detected and
+  registered.
+- On Windows, clients are registered to launch `node.exe` with the absolute path
+  to `dist\index.js`, because MCP clients can't start npm's `.cmd` shims. Client
+  CLIs installed as `.cmd` shims run through `cmd.exe` with escaped arguments.
+- The setup wizard rejects an unusable profile name, such as one containing a
+  space, where it is typed, and suggests a valid one, instead of failing at the
+  final save. `servicenow-mcp-profile create` checks `--name` before reading
+  any secret.
+
+### Added
+
+- The setup wizard reports which client CLIs it found before its first
+  question. A Claude Code or Codex CLI installed in its default location but
+  missing from PATH is found and used by full path, and the wizard explains how
+  to fix PATH.
+
 ## [2.2.0-dev.5] — 2026-09-16
 
 ### Fixed
