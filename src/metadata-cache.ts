@@ -9,20 +9,22 @@
  * passing the internal sysparm_force_recache=true parameter, which is stripped
  * before upstream I/O.
  *
- * Freshness is a server watermark: the table's newest row by sys_updated_on,
- * read back as its stored UTC value. Each entry keeps the watermark read just
- * before its rows were fetched, and a cache hit is served only while a new
- * watermark read still matches it. Both sides of the comparison come from the
- * instance, so the session timezone, date format, DST and clock skew between
- * this host and the instance play no part, and no user lookup is needed:
- * caching behaves the same in every auth mode.
+ * Freshness is a server watermark: the table's row count (X-Total-Count) and
+ * its newest row by sys_updated_on, read back as the stored UTC value. Each
+ * entry keeps the watermark read just before its rows were fetched, and a
+ * cache hit is served only while a new watermark read still matches it. Both
+ * sides of the comparison come from the instance, so the session timezone,
+ * date format, DST and clock skew between this host and the instance play no
+ * part, and no user lookup is needed: caching behaves the same in every auth
+ * mode.
  *
- * Every insert and update moves the watermark, but at one-second resolution,
- * and a delete moves it only when it removes the newest row. So a row deleted
- * upstream, or updated within the watermark's own second, stays visible for at
- * most one TTL: a matching watermark refreshes recency for eviction but never
- * extends expiresAt, so the entry still expires on schedule and forces a
- * genuine refetch.
+ * An insert or an update makes its row the newest, and an insert or a delete
+ * changes the count, so every write moves the watermark -- at one-second
+ * resolution. An update within the stored watermark's own second, to a row
+ * other than the newest, can still go unseen; so can a write that skips the
+ * system fields. Such a row stays stale for at most one TTL: a matching
+ * watermark refreshes recency for eviction but never extends expiresAt, so the
+ * entry still expires on schedule and forces a genuine refetch.
  *
  * @module metadata-cache
  */
@@ -68,8 +70,9 @@ export interface MetadataCacheConfig {
 
 type Jsonish = Awaited<ReturnType<Response["json"]>>;
 
-/** A table's newest row, as the instance stores it. */
+/** A table's row count and newest row, as the instance reports them. */
 interface Watermark {
+  readonly count: number;
   readonly sysId: string;
   readonly updatedOn: string;
 }
@@ -86,7 +89,8 @@ interface CacheEntry {
 const SCOPED_CACHES = new Map<string, Map<string, CacheEntry>>();
 const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 /** sys_updated_on as returned with sysparm_display_value=false (UTC). */
-const STORED_DATE_TIME = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/u;
+const STORED_DATE_TIME = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/u;
+const ROW_COUNT = /^(?:0|[1-9]\d{0,15})$/u;
 export const FORCE_RECACHE_PARAM = "sysparm_force_recache";
 const MAX_CACHE_TABLE_PATTERNS = 128;
 const MAX_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -197,10 +201,12 @@ async function cachedGetWithMeta<T>(
     return cloneCachedResult<T>(existing);
   }
 
-  // A refetch replaces the entry or, when its result cannot be kept, removes
-  // it. A forced refresh in particular must never leave behind the rows it was
-  // asked to replace -- it is how a caller surfaces a delete before expiry.
-  cache.delete(key);
+  // A forced refresh must never leave behind the rows it was asked to replace:
+  // it is how a caller surfaces a write the watermark missed. Any other
+  // refetch leaves the entry until it is replaced -- if these rows cannot be
+  // kept, the old ones are still correct against any later watermark read that
+  // matches theirs, so one failed read bypasses the cache for this call only.
+  if (forceRecache) cache.delete(key);
   const fresh = await operations.getWithMeta<T>(path, cleanParams);
   // Only a materialized 200 body is reusable. A 204 carries no rows, and a
   // failed read throws before reaching here, so nothing negative is cached.
@@ -233,38 +239,53 @@ function evictOldest(entries: Map<string, unknown>, limit: number): void {
 }
 
 /**
- * The table's newest row by sys_updated_on, read back as stored (UTC).
+ * The table's row count and newest row by sys_updated_on, read back as stored.
  *
- * The order is evaluated on the instance and the value is compared as an
- * opaque string, so no date literal is ever built on this side. Undefined
- * means the watermark is unusable and nothing may be served from or kept in
- * the cache: the read failed, the table read back empty, or the row came back
- * without a readable sys_updated_on. An empty or blank watermark would compare
- * equal forever and pin stale rows until expiry. An empty read is also what a
- * row ACL that filters after the limit produces when it hides the newest row.
+ * The order is evaluated on the instance and the values are compared as opaque
+ * strings, so no date literal is ever built on this side. The count is the
+ * X-Total-Count header of the same request, which carries the table's total
+ * only while sysparm_no_count is left unset (with it set, the header still
+ * comes back but holds the page size).
+ *
+ * Undefined means the watermark is unusable and nothing may be served from or
+ * kept in the cache:
+ * - the read failed, or the count or a row field came back missing or
+ *   malformed (an unreadable sys_updated_on would compare equal forever);
+ * - the table read back empty, which is also what a row ACL that filters after
+ *   the limit produces when it hides the newest row;
+ * - the newest row is dated after the instance's own clock (the response Date
+ *   header). Such a row stays the newest however many others are updated, so
+ *   only the count would move, and in-place updates would go unseen.
  */
 async function tableWatermark(
   operations: ServiceNowOperations,
   table: string
 ): Promise<Watermark | undefined> {
   try {
-    const response = await operations.get<{ result?: unknown[] }>(
+    const response = await operations.getWithMeta<{ result?: unknown[] }>(
       `/api/now/table/${table}`,
       {
         sysparm_query: "ORDERBYDESCsys_updated_on",
         sysparm_fields: "sys_id,sys_updated_on",
         sysparm_limit: "1",
-        sysparm_no_count: "true",
         sysparm_display_value: "false",
         sysparm_exclude_reference_link: "true",
       }
     );
-    const row = Array.isArray(response?.result) ? response.result[0] : undefined;
+    const count = response.headers.get("x-total-count") ?? "";
+    if (response.status !== 200 || !ROW_COUNT.test(count)) return undefined;
+    const rows = response.data?.result;
+    const row = Array.isArray(rows) ? rows[0] : undefined;
     if (typeof row !== "object" || row === null) return undefined;
     const { sys_id: sysId, sys_updated_on: updatedOn } = row as Record<string, unknown>;
     if (typeof sysId !== "string" || sysId === "") return undefined;
-    if (typeof updatedOn !== "string" || !STORED_DATE_TIME.test(updatedOn)) return undefined;
-    return Object.freeze({ sysId, updatedOn });
+    if (typeof updatedOn !== "string") return undefined;
+    const stored = STORED_DATE_TIME.exec(updatedOn);
+    const updatedAt = stored ? Date.parse(`${stored[1]}T${stored[2]}Z`) : Number.NaN;
+    const serverNow = Date.parse(response.headers.get("date") ?? "");
+    if (!Number.isFinite(updatedAt) || !Number.isFinite(serverNow)) return undefined;
+    if (updatedAt > serverNow) return undefined;
+    return Object.freeze({ count: Number(count), sysId, updatedOn });
   } catch {
     // A failed read must not serve stale metadata.
     return undefined;
@@ -272,12 +293,17 @@ async function tableWatermark(
 }
 
 /**
- * Both fields count. The sys_id also catches the newest row being deleted, or
- * replaced as newest within the same second; a tie at the top that the
- * instance orders differently between reads only costs an extra refresh.
+ * Every field counts. The count catches inserts and deletes; the sys_id also
+ * catches the newest row being replaced as newest within the same second. A
+ * tie at the top that the instance orders differently between reads only
+ * costs an extra refresh.
  */
 function sameWatermark(left: Watermark, right: Watermark): boolean {
-  return left.sysId === right.sysId && left.updatedOn === right.updatedOn;
+  return (
+    left.count === right.count &&
+    left.sysId === right.sysId &&
+    left.updatedOn === right.updatedOn
+  );
 }
 
 function metadataTableFromPath(path: string): string | undefined {

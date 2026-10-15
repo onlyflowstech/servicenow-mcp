@@ -20,55 +20,80 @@ interface TableRow {
   readonly sys_updated_on?: unknown;
 }
 
+const WATERMARK_PARAMS = Object.freeze({
+  sysparm_query: "ORDERBYDESCsys_updated_on",
+  sysparm_fields: "sys_id,sys_updated_on",
+  sysparm_limit: "1",
+  sysparm_display_value: "false",
+  sysparm_exclude_reference_link: "true",
+});
+
+function isWatermarkRead(params: Record<string, string> | undefined): boolean {
+  return params?.sysparm_query === WATERMARK_PARAMS.sysparm_query &&
+    params.sysparm_fields === WATERMARK_PARAMS.sysparm_fields;
+}
+
 /**
- * Upstream double. `table.newest` is the row the instance would return for
- * ORDERBYDESCsys_updated_on, as stored; tests move it to simulate writes.
+ * Upstream double. `table` is what the instance reports for the watermark
+ * read: `newest` is the ORDERBYDESCsys_updated_on row as stored, `count` the
+ * X-Total-Count header, `serverDate` the Date header. Tests mutate it to
+ * simulate writes. `getWithMeta` records full reads only; watermark reads go
+ * to `watermark`.
  */
 function operations() {
-  const table: { newest: TableRow | undefined; watermarkThrows: boolean } = {
+  const table: {
+    newest: TableRow | undefined;
+    count: string | undefined;
+    serverDate: string | undefined;
+    watermarkThrows: boolean;
+  } = {
     newest: { sys_id: "row-1", sys_updated_on: "2025-01-15 12:00:00" },
+    count: "42",
+    serverDate: "Wed, 15 Jan 2025 13:00:00 GMT",
     watermarkThrows: false,
   };
+  const watermark = vi.fn(async (_path: string, _params?: Record<string, string>) => {
+    if (table.watermarkThrows) throw new Error("upstream 500");
+    const headers = new Headers();
+    if (table.count !== undefined) headers.set("x-total-count", table.count);
+    if (table.serverDate !== undefined) headers.set("date", table.serverDate);
+    return {
+      data: { result: table.newest === undefined ? [] : [{ ...table.newest }] },
+      status: 200,
+      headers,
+    } as RequestResult<unknown>;
+  });
   const getWithMeta = vi.fn(async (path: string, params?: Record<string, string>) => {
     return result({ result: [{ sys_id: `${path}:${params?.sysparm_fields ?? "all"}` }] });
   });
-  const get = vi.fn(async (_path: string, _params?: Record<string, string>) => {
-    if (table.watermarkThrows) throw new Error("upstream 500");
-    return { result: table.newest === undefined ? [] : [{ ...table.newest }] };
-  });
   const base = {
-    get,
-    getWithMeta,
+    get: vi.fn(),
+    getWithMeta: (path: string, params?: Record<string, string>) =>
+      isWatermarkRead(params) ? watermark(path, params) : getWithMeta(path, params),
     post: vi.fn(),
     patch: vi.fn(),
     delete: vi.fn(),
     postBinary: vi.fn(),
     getRaw: vi.fn(),
-  } as unknown as ServiceNowOperations & { get: typeof get; getWithMeta: typeof getWithMeta };
-  return { base, get, getWithMeta, table };
+  } as unknown as ServiceNowOperations;
+  return { base, watermark, getWithMeta, table };
 }
 
 describe("metadata cache", () => {
   it("serves metadata table reads from a per-instance cache while the watermark matches", async () => {
-    const { base, get, getWithMeta } = operations();
+    const { base, watermark, getWithMeta } = operations();
     const cached = createCachedServiceNowOperations(base, "https://a.service-now.com", { ttlMs: 60_000 });
 
     await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
     await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
 
     expect(getWithMeta).toHaveBeenCalledTimes(1);
-    // One watermark read before the fetch, one to validate the hit.
-    expect(get).toHaveBeenCalledTimes(2);
-    for (const [path, params] of get.mock.calls) {
+    // One watermark read before the fetch, one to validate the hit. No
+    // sysparm_no_count: with it set, X-Total-Count holds the page size.
+    expect(watermark).toHaveBeenCalledTimes(2);
+    for (const [path, params] of watermark.mock.calls) {
       expect(path).toBe("/api/now/table/sys_dictionary");
-      expect(params).toEqual({
-        sysparm_query: "ORDERBYDESCsys_updated_on",
-        sysparm_fields: "sys_id,sys_updated_on",
-        sysparm_limit: "1",
-        sysparm_no_count: "true",
-        sysparm_display_value: "false",
-        sysparm_exclude_reference_link: "true",
-      });
+      expect(params).toEqual(WATERMARK_PARAMS);
     }
   });
 
@@ -82,6 +107,18 @@ describe("metadata cache", () => {
     await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
 
     // Refetched once for the move, then served against the new watermark.
+    expect(getWithMeta).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes when only the count changes", async () => {
+    // A delete of any row but the newest leaves the newest row in place.
+    const { base, getWithMeta, table } = operations();
+    const cached = createCachedServiceNowOperations(base, "https://deleted.service-now.com|fp", { ttlMs: 60_000 });
+
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+    table.count = "41";
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+
     expect(getWithMeta).toHaveBeenCalledTimes(2);
   });
 
@@ -113,14 +150,14 @@ describe("metadata cache", () => {
   });
 
   it("does not cache non-metadata table reads", async () => {
-    const { base, get, getWithMeta } = operations();
+    const { base, watermark, getWithMeta } = operations();
     const cached = createCachedServiceNowOperations(base, "https://c.service-now.com", { ttlMs: 60_000 });
 
     await cached.getWithMeta("/api/now/table/incident", { sysparm_fields: "sys_id" });
     await cached.getWithMeta("/api/now/table/incident", { sysparm_fields: "sys_id" });
 
     expect(getWithMeta).toHaveBeenCalledTimes(2);
-    expect(get).not.toHaveBeenCalled();
+    expect(watermark).not.toHaveBeenCalled();
   });
 
   it("never shares cached rows between two identities on one instance", async () => {
@@ -163,7 +200,7 @@ describe("metadata cache", () => {
   });
 
   it("expires entries and refuses to serve them past the TTL", async () => {
-    const { base, get, getWithMeta } = operations();
+    const { base, watermark, getWithMeta } = operations();
     const cached = createCachedServiceNowOperations(
       base,
       "https://ttl.service-now.com|fp",
@@ -182,7 +219,7 @@ describe("metadata cache", () => {
     expect(getWithMeta).toHaveBeenCalledTimes(2);
     // Each fetch is preceded by its own watermark read; the expired entry is
     // never served even though its watermark still matches.
-    expect(get).toHaveBeenCalledTimes(2);
+    expect(watermark).toHaveBeenCalledTimes(2);
   });
 
   it("does not cache a 204 no-content response", async () => {
@@ -232,7 +269,7 @@ describe("metadata cache", () => {
     expect(DEFAULT_METADATA_CACHE_TABLES).not.toContain("sys_properties");
     expect(createMetadataCacheConfig(undefined).tables).not.toContain("sys_properties");
 
-    const { base, get, getWithMeta } = operations();
+    const { base, watermark, getWithMeta } = operations();
     const cached = createCachedServiceNowOperations(base, "https://props.service-now.com|fp", {});
 
     await cached.getWithMeta("/api/now/table/sys_properties", {
@@ -245,7 +282,7 @@ describe("metadata cache", () => {
     });
 
     expect(getWithMeta).toHaveBeenCalledTimes(2);
-    expect(get).not.toHaveBeenCalled();
+    expect(watermark).not.toHaveBeenCalled();
   });
 
   it("still caches sys_properties when an operator opts in explicitly", async () => {
@@ -335,7 +372,7 @@ describe("metadata cache", () => {
     // watermark needs none: the only upstream reads are the cached table's own.
     const warn = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     try {
-      const { base, get, getWithMeta } = operations();
+      const { base, watermark, getWithMeta } = operations();
       const cached = createCachedServiceNowOperations(
         base,
         "https://clientcreds.service-now.com|fp",
@@ -346,7 +383,7 @@ describe("metadata cache", () => {
       await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
 
       expect(getWithMeta).toHaveBeenCalledTimes(1);
-      expect(new Set(get.mock.calls.map(([path]) => path))).toEqual(
+      expect(new Set(watermark.mock.calls.map(([path]) => path))).toEqual(
         new Set(["/api/now/table/sys_dictionary"])
       );
       expect(warn).not.toHaveBeenCalled();
@@ -358,7 +395,7 @@ describe("metadata cache", () => {
   it("never builds a date literal, so the host clock and zone play no part", async () => {
     // A host clock years ahead of the instance would have hidden this update
     // from a sys_updated_on>{local time} probe until the entry expired.
-    const { base, get, getWithMeta, table } = operations();
+    const { base, watermark, getWithMeta, table } = operations();
     const cached = createCachedServiceNowOperations(
       base,
       "https://skew.service-now.com|fp",
@@ -377,7 +414,7 @@ describe("metadata cache", () => {
     }
 
     expect(getWithMeta).toHaveBeenCalledTimes(2);
-    for (const [, params] of get.mock.calls) {
+    for (const [, params] of watermark.mock.calls) {
       expect(params?.sysparm_query).toBe("ORDERBYDESCsys_updated_on");
     }
   });
@@ -409,6 +446,12 @@ describe("metadata cache", () => {
     ["sys_updated_on is not readable", { newest: { sys_id: "row-1", sys_updated_on: "" } }],
     ["sys_updated_on is a display value", { newest: { sys_id: "row-1", sys_updated_on: "15/01/2025 07:00:00" } }],
     ["the row has no sys_id", { newest: { sys_updated_on: "2025-01-15 12:00:00" } }],
+    ["there is no X-Total-Count", { count: undefined }],
+    ["X-Total-Count is not a count", { count: "-1" }],
+    ["there is no Date header", { serverDate: undefined }],
+    // Seen live: a sys_metadata row dated a year ahead stays the newest row
+    // however many others are updated, so only the count could move.
+    ["the newest row is dated after the instance clock", { newest: { sys_id: "row-1", sys_updated_on: "2027-09-04 12:21:59" } }],
   ])("serves fresh rows and keeps nothing when %s", async (_label, state) => {
     const { base, getWithMeta, table } = operations();
     Object.assign(table, state);
@@ -426,7 +469,7 @@ describe("metadata cache", () => {
     expect(getWithMeta).toHaveBeenCalledTimes(2);
   });
 
-  it("refetches rather than serving when the watermark read fails on a hit", async () => {
+  it("bypasses the cache for one call when the watermark read fails on a hit", async () => {
     const { base, getWithMeta, table } = operations();
     const cached = createCachedServiceNowOperations(
       base,
@@ -437,14 +480,18 @@ describe("metadata cache", () => {
     await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
     table.watermarkThrows = true;
     await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+    expect(getWithMeta).toHaveBeenCalledTimes(2);
 
+    // The entry survived: nothing changed since its watermark, so it is served.
+    table.watermarkThrows = false;
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
     expect(getWithMeta).toHaveBeenCalledTimes(2);
   });
 
   it("drops the old entry on a forced refresh even when the new one cannot be kept", async () => {
-    // force_recache is how a caller surfaces a delete before expiry. The
-    // watermark would still match the old entry, so leaving it in place would
-    // serve the deleted row again on the next call.
+    // force_recache is how a caller surfaces a write the watermark missed.
+    // The watermark would still match the old entry, so leaving it in place
+    // would serve the missed write's old rows again on the next call.
     const { base, getWithMeta, table } = operations();
     const cached = createCachedServiceNowOperations(
       base,
