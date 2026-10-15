@@ -16,12 +16,16 @@ import { stripEmpty } from "../utils.js";
 const RECORD_NUMBER = /^[A-Za-z0-9_-]{1,80}$/u;
 
 /**
- * Identity of the record a write just touched. It is returned whatever the
+ * Handle of the record a write just touched. It is returned whatever the
  * readable set says: without `sys_id` a create that succeeded upstream reads
  * as an upstream failure, the caller retries, and the record is duplicated
  * (or, for ATF authoring, orphaned because rollback has no handle).
+ *
+ * Only `sys_id`. Every other field, `number` included, follows the readable
+ * set: on an update the record already existed, so forcing `number` would
+ * disclose a field the operator excluded.
  */
-const WRITTEN_RECORD_IDENTITY_FIELDS = Object.freeze(["sys_id", "number"]);
+const WRITTEN_RECORD_HANDLE_FIELD = "sys_id";
 
 export function filteredWriteRecord(
   args: Readonly<Record<string, unknown>>,
@@ -33,7 +37,7 @@ export function filteredWriteRecord(
     resolveWriteResponseFields(args.table);
   const candidate = filterReadableRecord(
     resultProperty(response, retry),
-    withWrittenRecordIdentity(readableFields)
+    withWrittenRecordHandle(readableFields)
   );
   if (
     typeof candidate !== "object" ||
@@ -45,12 +49,11 @@ export function filteredWriteRecord(
   return stripEmpty(candidate as Record<string, unknown>);
 }
 
-function withWrittenRecordIdentity(readable: FieldSelection): FieldSelection {
-  if (isAllFieldSelection(readable)) return readable;
-  const missing = WRITTEN_RECORD_IDENTITY_FIELDS.filter(
-    (field) => !readable.includes(field)
-  );
-  return missing.length === 0 ? readable : [...readable, ...missing];
+function withWrittenRecordHandle(readable: FieldSelection): FieldSelection {
+  if (isAllFieldSelection(readable) || readable.includes(WRITTEN_RECORD_HANDLE_FIELD)) {
+    return readable;
+  }
+  return [...readable, WRITTEN_RECORD_HANDLE_FIELD];
 }
 
 export function requiredCreatedSysId(record: Record<string, unknown>): string {

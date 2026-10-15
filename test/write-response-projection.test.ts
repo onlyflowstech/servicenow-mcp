@@ -35,7 +35,7 @@ const PROFILE = "projection";
 const INSTANCE = "https://projection-test.service-now.com";
 const SYS_ID = "a".repeat(32);
 const OTHER_SYS_ID = "b".repeat(32);
-const WRITE_TABLES = ["u_audit", "change_request", "incident", "sc_req_item"];
+const WRITE_TABLES = ["u_audit", "change_request", "incident", "sc_req_item", "x_acme_card"];
 const ATF_TABLES = ["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test"];
 
 const openHarnesses: Array<{ close(): Promise<void> }> = [];
@@ -258,8 +258,8 @@ describe("write-only field policy (#10)", () => {
   });
 });
 
-describe("the written record keeps its identity (#11)", () => {
-  it("lets sn_create return sys_id and number when readable omits both", async () => {
+describe("the written record keeps its sys_id (#11)", () => {
+  it("lets sn_create return sys_id when readable omits it", async () => {
     const connected = await harness(
       { fieldPolicy: { change_request: { readable: ["number"] } } },
       [
@@ -283,6 +283,7 @@ describe("the written record keeps its identity (#11)", () => {
     });
 
     expect(result.isError).not.toBe(true);
+    // number is returned because it is readable here, not because it is forced.
     expect(structuredData(result)).toEqual({
       sys_id: SYS_ID,
       number: "CHG0010001",
@@ -294,7 +295,7 @@ describe("the written record keeps its identity (#11)", () => {
     expect(connected.fixture.calls.map((call) => call.operation)).toEqual(["post"]);
   });
 
-  it("keeps the readable fields alongside the identity", async () => {
+  it("lets sn_create under a narrowed readable set return sys_id with no upstream error", async () => {
     const connected = await harness(
       { fieldPolicy: { change_request: { readable: ["short_description"] } } },
       [
@@ -320,10 +321,72 @@ describe("the written record keeps its identity (#11)", () => {
     expect(result.isError).not.toBe(true);
     expect(structuredData(result)).toEqual({
       sys_id: SYS_ID,
-      number: "CHG0010002",
       table: "change_request",
       record: { short_description: "Created" },
     });
+    expect(JSON.stringify(result)).not.toContain("CHG0010002");
+    expect(JSON.stringify(result)).not.toContain("not readable");
+    expect(connected.fixture.calls.map((call) => call.operation)).toEqual(["post"]);
+  });
+
+  it("keeps number out of an sn_update response when readable excludes it", async () => {
+    // A scoped table whose `number` is sensitive. The operator lets callers
+    // see only sys_id and status; an update must not disclose number.
+    const connected = await harness(
+      {
+        fieldPolicy: {
+          x_acme_card: { readable: ["sys_id", "status"], writable: ["status"] },
+        },
+      },
+      [
+        {
+          operation: "patch",
+          response: {
+            result: {
+              sys_id: SYS_ID,
+              number: "CARD-4111111111111111",
+              status: "closed",
+              pan: "4111111111111111",
+            },
+          },
+        },
+      ]
+    );
+
+    const result = await connected.call("sn_update", {
+      table: "x_acme_card",
+      sys_id: SYS_ID,
+      fields: { status: "closed" },
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(structuredData(result)).toEqual({
+      sys_id: SYS_ID,
+      record: { status: "closed" },
+    });
+    expect(JSON.stringify(result)).not.toContain("4111");
+  });
+
+  it("keeps number out of a write-only sn_update response", async () => {
+    const connected = await harness(
+      { fieldPolicy: { u_audit: { readable: [], writable: "*" } } },
+      [
+        {
+          operation: "patch",
+          response: { result: { sys_id: SYS_ID, number: "AUD0000001", u_note: "x" } },
+        },
+      ]
+    );
+
+    const result = await connected.call("sn_update", {
+      table: "u_audit",
+      sys_id: SYS_ID,
+      fields: { u_note: "x" },
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(structuredData(result)).toEqual({ sys_id: SYS_ID, record: {} });
+    expect(JSON.stringify(result)).not.toContain("AUD0000001");
   });
 
   it("still rejects an update whose response names a different record", async () => {
@@ -379,7 +442,7 @@ describe("the written record keeps its identity (#11)", () => {
     expect(connected.fixture.calls.map((call) => call.operation)).toEqual(["post"]);
   });
 
-  it("adds sys_id and number to a narrowed projection and leaves '*' alone", () => {
+  it("adds only sys_id to a narrowed projection and leaves '*' alone", () => {
     const response = {
       result: {
         sys_id: SYS_ID,
@@ -399,7 +462,6 @@ describe("the written record keeps its identity (#11)", () => {
         );
         expect(filteredWriteRecord(prepared, response, "do_not_retry")).toEqual({
           sys_id: SYS_ID,
-          number: "INC0010009",
           short_description: "kept",
         });
         // Without an issued marker the projection is recomputed the same way.
@@ -407,7 +469,6 @@ describe("the written record keeps its identity (#11)", () => {
           filteredWriteRecord({ table: "incident" }, response, "do_not_retry")
         ).toEqual({
           sys_id: SYS_ID,
-          number: "INC0010009",
           short_description: "kept",
         });
       }
@@ -424,14 +485,14 @@ describe("the written record keeps its identity (#11)", () => {
     });
   });
 
-  it("omits number for a table that returns none", () => {
+  it("returns only sys_id for a write-only table", () => {
     runWithFieldPolicyConfiguration(
       { fieldPolicy: { u_audit: { readable: [] } } },
       () => {
         expect(
           filteredWriteRecord(
             { table: "u_audit" },
-            { result: { sys_id: SYS_ID, u_note: "dropped" } },
+            { result: { sys_id: SYS_ID, number: "AUD0000002", u_note: "dropped" } },
             "do_not_retry"
           )
         ).toEqual({ sys_id: SYS_ID });
