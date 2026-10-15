@@ -1278,7 +1278,17 @@ function buildFieldPolicyMap(
       const defaults = defaultsCandidate === FIELD_POLICY_WILDCARD ? ALL_FIELDS_SELECTION : defaultsCandidate;
       const readableFields = readable === FIELD_POLICY_WILDCARD ? [] : readable;
       const writableFields = writable === FIELD_POLICY_WILDCARD ? [] : writable;
-      if (!isAllFieldSelection(defaults)) {
+      if (isAllFieldSelection(defaults)) {
+        // "Return every column by default" contradicts a narrowed readable
+        // set: a concise read would ask ServiceNow for every field.
+        if (readable !== FIELD_POLICY_WILDCARD) {
+          rejectConfiguration(
+            root === undefined ? undefined : { key: `${root}.${table}.defaults` },
+            `is "*" (every field), which ${root}.${table}.readable does not allow. ` +
+              'List the default fields, or make readable "*".'
+          );
+        }
+      } else {
         for (const field of defaults) {
           if (!fieldSetAllows(readableFields, readable === FIELD_POLICY_WILDCARD, field)) {
             // Branded so a contradictory operator policy is classified as a

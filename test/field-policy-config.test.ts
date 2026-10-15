@@ -219,6 +219,16 @@ describe("malformed field policy fails at profile load (#8)", () => {
       { fieldPolicy: { incident: { defaults: ["caller_id"], readable: ["number"] } } },
       'fieldPolicy.incident.defaults lists "caller_id", which fieldPolicy.incident.readable does not allow',
     ],
+    [
+      'defaults "*" with a narrowed readable set',
+      { fieldPolicy: { u_card: { defaults: "*", readable: ["sys_id", "status"] } } },
+      'fieldPolicy.u_card.defaults is "*" (every field), which fieldPolicy.u_card.readable does not allow',
+    ],
+    [
+      'defaults ["*"] with a narrowed readable set',
+      { fieldPolicy: { u_card: { defaults: ["*"], readable: ["sys_id", "status"] } } },
+      'fieldPolicy.u_card.defaults is "*" (every field), which fieldPolicy.u_card.readable does not allow',
+    ],
     ["a non-list readableTableFields", { readableTableFields: { table: "incident" } }, "readableTableFields must be a list"],
     ["a list entry without a table", { readableTableFields: [{ fields: "*" }] }, "readableTableFields[0].table is not a valid table name"],
     ["a list entry that is not an object", { writableTableFields: ["incident"] }, "writableTableFields[0] must be an object with table and fields"],
@@ -236,6 +246,54 @@ describe("malformed field policy fails at profile load (#8)", () => {
     const error = loadError();
     expect(error.message).toContain('Profile configuration is invalid: profile "broken": ');
     expect(error.message).toContain(expected);
+  });
+
+  it('rejects defaults "*" beside a narrowed readable set, at load and on the request path', () => {
+    // A concise read under this policy used to ask ServiceNow for every
+    // column, which the narrowed readable set does not allow.
+    writeProfiles({
+      card: {
+        fieldPolicy: {
+          u_card: { defaults: "*", readable: ["sys_id", "status"], writable: ["status"] },
+        },
+      },
+    });
+    expect(loadError().message).toBe(
+      'Profile configuration is invalid: profile "card": fieldPolicy.u_card.defaults is "*" ' +
+        '(every field), which fieldPolicy.u_card.readable does not allow. List the default ' +
+        'fields, or make readable "*".'
+    );
+
+    expect(() =>
+      fieldPolicyInputFromEnvironment({
+        SN_FIELD_POLICY_DEFINITIONS: JSON.stringify({
+          u_card: { defaults: ["*"], readable: ["sys_id"] },
+        }),
+      })
+    ).toThrow(/^SN_FIELD_POLICY_DEFINITIONS\.u_card\.defaults is "\*" \(every field\)/u);
+
+    // A scope that never went through a profile load fails closed.
+    runWithFieldPolicyConfiguration(
+      { fieldPolicy: { u_card: { defaults: "*", readable: ["sys_id", "status"] } } },
+      () => {
+        expect(policyReason(() => resolveReadableFields("u_card"))).toBe(
+          "invalid_argument_shape"
+        );
+      }
+    );
+
+    // A wildcard default stays valid wherever readable is open.
+    for (const fieldPolicy of [
+      { u_card: { defaults: "*" } },
+      { u_card: { defaults: ["*"], readable: "*" } },
+      { incident: { defaults: "*" } },
+    ]) {
+      expect(() => validateFieldPolicyConfiguration({ fieldPolicy })).not.toThrow();
+      runWithFieldPolicyConfiguration({ fieldPolicy }, () => {
+        const table = Object.keys(fieldPolicy)[0]!;
+        expect(resolveReadableFields(table)).toEqual(["*"]);
+      });
+    }
   });
 
   it("never repeats a rejected configured value", () => {
