@@ -10,8 +10,11 @@ import {
 import {
   definition,
   handler,
+  DEFAULT_SCHEMA_CACHE_TTL_MS,
+  MAX_SCHEMA_CACHE_ENTRIES,
   moduleInputSchema,
   schema,
+  schemaCacheBinding,
   schemaToolModule,
 } from "../src/tools/schema-module.js";
 import {
@@ -24,7 +27,10 @@ import {
   finalizeEnvelopeResult,
   productionToolOutputSchemas,
 } from "../src/tools/result-envelope.js";
-import type { ServiceNowToolHandlerServices } from "../src/tools/tool-module.js";
+import type {
+  SchemaCacheBinding,
+  ServiceNowToolHandlerServices,
+} from "../src/tools/tool-module.js";
 import {
   createToolError,
   trustedToolErrorDescriptor,
@@ -120,10 +126,12 @@ function policy() {
 }
 
 function services(
-  serviceNow: ServiceNowOperations
+  serviceNow: ServiceNowOperations,
+  schemaCache?: SchemaCacheBinding
 ): ServiceNowToolHandlerServices {
   return {
     serviceNow,
+    ...(schemaCache === undefined ? {} : { schemaCache }),
     settings: {
       instance: "https://schema-module.service-now.com",
       displayValue: "true",
@@ -429,6 +437,15 @@ describe("SNSDK-46 sn_schema module", () => {
       dictionaryRows[0],
     ];
     const fake = fakeOperations(aclVisibleRows);
+    // Every page is cut from one snapshot, so the walk neither replays nor
+    // skips a row even if the dictionary changes between pages.
+    const binding = schemaCacheBinding({
+      profile: "production",
+      instance: "https://schema-module.service-now.com",
+      credentialIdentity: "paging-walk",
+      policy: { id: "paging-walk" },
+      ttlMs: DEFAULT_SCHEMA_CACHE_TTL_MS,
+    });
 
     const firstAccess = schemaToolModule.resolveAccess(
       {
@@ -442,7 +459,7 @@ describe("SNSDK-46 sn_schema module", () => {
     );
     const first = await schemaToolModule.invoke(
       firstAccess.args,
-      services(fake.operations)
+      services(fake.operations, binding)
     );
     expect(responseData(first)).toEqual(["caller_id"]);
     expect(first.structuredContent).toMatchObject({
@@ -468,7 +485,7 @@ describe("SNSDK-46 sn_schema module", () => {
     );
     const second = await schemaToolModule.invoke(
       secondAccess.args,
-      services(fake.operations)
+      services(fake.operations, binding)
     );
     expect(responseData(second)).toEqual(["short_description"]);
     // `u_unapproved` is now an approved name, so the ACL-visible page set is
@@ -496,7 +513,7 @@ describe("SNSDK-46 sn_schema module", () => {
     );
     const third = await schemaToolModule.invoke(
       thirdAccess.args,
-      services(fake.operations)
+      services(fake.operations, binding)
     );
     expect(responseData(third)).toEqual(["u_unapproved"]);
     expect(third.structuredContent).toMatchObject({
@@ -649,5 +666,163 @@ describe("SNSDK-46 sn_schema module", () => {
     expect(JSON.stringify(trustedToolErrorDescriptor(thrown))).not.toContain(
       "secret-must-not-leak"
     );
+  });
+});
+
+describe("sn_schema cross-call cache", () => {
+  let identitySeq = 0;
+  /** A fresh partition per test: the cache is process-wide. */
+  function bindingFor(overrides: Partial<Parameters<typeof schemaCacheBinding>[0]> = {}) {
+    identitySeq += 1;
+    const binding = schemaCacheBinding({
+      profile: "production",
+      instance: "https://schema-cache.service-now.com",
+      credentialIdentity: `identity-${identitySeq}`,
+      policy: { id: "restricted-table-policy:production", revision: "v1" },
+      ttlMs: DEFAULT_SCHEMA_CACHE_TTL_MS,
+      ...overrides,
+    });
+    if (binding === undefined) throw new Error("expected a configured binding");
+    return binding;
+  }
+
+  async function fieldNames(
+    operations: ServiceNowOperations,
+    binding: SchemaCacheBinding | undefined,
+    table = "incident",
+    extra: Record<string, unknown> = {}
+  ) {
+    const access = schemaToolModule.resolveAccess(
+      { table, fields_only: true, limit: 500, offset: 0, profile: "production", ...extra },
+      policy()
+    );
+    return responseData(await schemaToolModule.invoke(access.args, services(operations, binding)));
+  }
+
+  it("hits on a repeat call even though the dispatcher rebuilds the binding and operations each time", async () => {
+    // The defect this replaces: the cache was keyed on the per-call
+    // operations object, so it never hit across tool calls.
+    const fake = fakeOperations();
+    const credentialIdentity = "stable-identity";
+    const make = () => bindingFor({ credentialIdentity });
+
+    const first = await fieldNames({ get: fake.get } as unknown as ServiceNowOperations, make());
+    const second = await fieldNames({ get: fake.get } as unknown as ServiceNowOperations, make());
+
+    expect(second).toEqual(first);
+    expect(fake.get).toHaveBeenCalledTimes(1);
+  });
+
+  it("misses for a different table", async () => {
+    const fake = fakeOperations();
+    const binding = bindingFor();
+
+    await fieldNames(fake.operations, binding, "incident");
+    await fieldNames(fake.operations, binding, "problem");
+
+    expect(fake.get).toHaveBeenCalledTimes(2);
+    expect(fake.get.mock.calls[1]?.[1]?.sysparm_query).toMatch(/^name=problem\^/u);
+  });
+
+  it("never shares an entry between profiles whose policies differ", async () => {
+    // Same instance and table; only the effective policy differs. Each
+    // profile must see its own read, never the other's filtered result.
+    const narrow = fakeOperations([dictionaryRows[1]]);
+    const wide = fakeOperations(dictionaryRows);
+    const shared = { credentialIdentity: "one-account" };
+    const narrowBinding = bindingFor({
+      ...shared,
+      profile: "narrow",
+      policy: { id: "restricted-table-policy:narrow", fieldPolicy: { readableTableFields: { incident: ["number"] } } },
+    });
+    const wideBinding = bindingFor({
+      ...shared,
+      profile: "wide",
+      policy: { id: "restricted-table-policy:wide", fieldPolicy: {} },
+    });
+    expect(narrowBinding.scope).not.toBe(wideBinding.scope);
+
+    const narrowNames = await fieldNames(narrow.operations, narrowBinding);
+    const wideNames = await fieldNames(wide.operations, wideBinding);
+
+    expect(narrow.get).toHaveBeenCalledTimes(1);
+    expect(wide.get).toHaveBeenCalledTimes(1);
+    expect(narrowNames).toEqual(["number"]);
+    expect(wideNames).not.toEqual(narrowNames);
+  });
+
+  it("separates a policy change within one profile and one identity", () => {
+    const base = { profile: "p", instance: "https://i.service-now.com", credentialIdentity: "c", ttlMs: 1_000 };
+    const before = schemaCacheBinding({ ...base, policy: { tableAccess: { readTables: ["incident"] } } })!;
+    const after = schemaCacheBinding({ ...base, policy: { tableAccess: { readTables: ["incident", "problem"] } } })!;
+    const again = schemaCacheBinding({ ...base, policy: { tableAccess: { readTables: ["incident"] } } })!;
+
+    expect(after.scope).not.toBe(before.scope);
+    expect(again.scope).toBe(before.scope);
+    // An opaque SHA-256 digest: the credential identity never crosses as-is.
+    expect(before.scope).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+  });
+
+  it("expires after the binding TTL and refreshes on force_recache", async () => {
+    const fake = fakeOperations();
+    const binding = bindingFor({ ttlMs: 1_000 });
+
+    vi.useFakeTimers();
+    try {
+      await fieldNames(fake.operations, binding);
+      vi.setSystemTime(Date.now() + 500);
+      await fieldNames(fake.operations, binding);
+      expect(fake.get).toHaveBeenCalledTimes(1);
+
+      await fieldNames(fake.operations, binding, "incident", { force_recache: true });
+      expect(fake.get).toHaveBeenCalledTimes(2);
+      await fieldNames(fake.operations, binding);
+      expect(fake.get).toHaveBeenCalledTimes(2);
+
+      vi.setSystemTime(Date.now() + 1_001);
+      await fieldNames(fake.operations, binding);
+      expect(fake.get).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([0, -1, 1.5, 3_600_001, Number.NaN])(
+    "keeps the five-minute default for a TTL of %s",
+    (ttlMs) => {
+      expect(bindingFor({ ttlMs }).ttlMs).toBe(DEFAULT_SCHEMA_CACHE_TTL_MS);
+    }
+  );
+
+  it("is off under NODE_ENV=test unless configured, like the metadata cache", () => {
+    // Suites reuse one profile and identity across cases with different
+    // upstream doubles; a shared process-wide entry would couple them.
+    expect(process.env.NODE_ENV).toBe("test");
+    expect(bindingFor({ ttlMs: 60_000 }).ttlMs).toBe(60_000);
+    expect(
+      schemaCacheBinding({ profile: "p", instance: "https://i.service-now.com", credentialIdentity: "c", policy: {} })
+    ).toBeUndefined();
+  });
+
+  it("bounds the process-wide cache and evicts the least recently used entry", async () => {
+    const fake = fakeOperations();
+    const bindings = Array.from({ length: MAX_SCHEMA_CACHE_ENTRIES + 1 }, () => bindingFor());
+
+    for (const binding of bindings) await fieldNames(fake.operations, binding);
+    expect(fake.get).toHaveBeenCalledTimes(MAX_SCHEMA_CACHE_ENTRIES + 1);
+    // The newest is still cached; the first was evicted.
+    await fieldNames(fake.operations, bindings.at(-1));
+    expect(fake.get).toHaveBeenCalledTimes(MAX_SCHEMA_CACHE_ENTRIES + 1);
+    await fieldNames(fake.operations, bindings[0]);
+    expect(fake.get).toHaveBeenCalledTimes(MAX_SCHEMA_CACHE_ENTRIES + 2);
+  });
+
+  it("does not cache across calls without a binding", async () => {
+    const fake = fakeOperations();
+
+    await fieldNames(fake.operations, undefined);
+    await fieldNames(fake.operations, undefined);
+
+    expect(fake.get).toHaveBeenCalledTimes(2);
   });
 });

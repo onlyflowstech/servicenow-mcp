@@ -9,6 +9,8 @@
  * @module tools/schema-module
  */
 
+import { createHash } from "node:crypto";
+
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
@@ -33,6 +35,7 @@ import {
 import {
   defineServiceNowToolModule,
   withRequiredProfile,
+  type SchemaCacheBinding,
   type ServiceNowToolSettings,
   type ToolDefinition,
 } from "./tool-module.js";
@@ -92,7 +95,11 @@ type SchemaArguments = z.output<typeof schema>;
 
 const MAX_DICTIONARY_ROWS = MAX_FIELDS_PER_OPERATION + 1;
 const MAX_SCHEMA_HIERARCHY_DEPTH = 8;
-const DEFAULT_SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000;
+export const DEFAULT_SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_SCHEMA_CACHE_TTL_MS = 60 * 60 * 1000;
+/** Process-wide entry cap, evicted least recently used. An entry holds at most
+ * MAX_DICTIONARY_ROWS rows plus their choices. */
+export const MAX_SCHEMA_CACHE_ENTRIES = 256;
 
 interface CachedSchema {
   readonly expiresAt: number;
@@ -100,7 +107,46 @@ interface CachedSchema {
   readonly hierarchy: readonly string[];
 }
 
-const SCHEMA_CACHE = new WeakMap<ServiceNowOperations, Map<string, CachedSchema>>();
+/**
+ * Assembled sn_schema results across tool calls, keyed by the binding's scope
+ * plus everything else the result depends on (table, enrichment, readable
+ * fields). Entries are served for their TTL without revalidation -- several
+ * upstream reads go into one, so there is no single watermark to check -- and
+ * `force_recache` bypasses and replaces them.
+ */
+const SCHEMA_CACHE = new Map<string, CachedSchema>();
+
+/**
+ * Derive the partition for one profile's sn_schema calls.
+ *
+ * Every input changes what a caller may see: ServiceNow applies ACLs per
+ * credential identity, and the profile's effective policy decides which fields
+ * are readable. The digest keeps the credential fingerprint out of the
+ * handler. A TTL outside 1 ms..1 h falls back to the default.
+ *
+ * Like the metadata cache, an unconfigured cache is off under NODE_ENV=test,
+ * so suites that reuse one profile and identity across cases stay isolated;
+ * the default applies everywhere else.
+ */
+export function schemaCacheBinding(input: {
+  readonly profile: string;
+  readonly instance: string;
+  readonly credentialIdentity: string;
+  readonly policy: unknown;
+  readonly ttlMs?: number;
+}): SchemaCacheBinding | undefined {
+  const { ttlMs } = input;
+  if (ttlMs === undefined && process.env.NODE_ENV === "test") return undefined;
+  return Object.freeze({
+    scope: createHash("sha256")
+      .update(JSON.stringify([input.profile, input.instance, input.credentialIdentity, input.policy]))
+      .digest("base64url"),
+    ttlMs:
+      typeof ttlMs === "number" && Number.isSafeInteger(ttlMs) && ttlMs >= 1 && ttlMs <= MAX_SCHEMA_CACHE_TTL_MS
+        ? ttlMs
+        : DEFAULT_SCHEMA_CACHE_TTL_MS,
+  });
+}
 
 interface SchemaEnvelopeMetadata {
   readonly kind: "collection";
@@ -122,9 +168,14 @@ export async function handler(
   return executeSchema(args, client);
 }
 
+/**
+ * @param cacheBinding Partition for cross-call reuse. Without one, as for
+ *   direct source consumers, every call reads upstream.
+ */
 async function executeSchema(
   args: SchemaArguments,
-  client: ServiceNowOperations
+  client: ServiceNowOperations,
+  cacheBinding?: SchemaCacheBinding
 ): Promise<CallToolResult> {
   try {
     const readableFields =
@@ -132,6 +183,7 @@ async function executeSchema(
       resolveReadableFields(args.table, { fields: "all" });
     const schema = await loadSchemaMetadata(
       client,
+      cacheBinding,
       args.table,
       readableFields,
       !args.fields_only,
@@ -183,16 +235,31 @@ async function executeSchema(
 
 async function loadSchemaMetadata(
   client: ServiceNowOperations,
+  cacheBinding: SchemaCacheBinding | undefined,
   table: string,
   readableFields: FieldSelection,
   enrich: boolean,
   forceRecache: boolean
 ): Promise<CachedSchema> {
-  const key = `${table}|${enrich ? "full" : "fields"}|${isAllFieldSelection(readableFields) ? "*" : [...readableFields].sort().join(",")}`;
-  const cache = schemaCacheFor(client);
-  const cached = cache.get(key);
+  const key =
+    cacheBinding === undefined
+      ? undefined
+      : JSON.stringify([
+          cacheBinding.scope,
+          table,
+          enrich,
+          isAllFieldSelection(readableFields) ? "*" : [...readableFields].sort(),
+        ]);
+  const cached = key === undefined ? undefined : SCHEMA_CACHE.get(key);
   const now = Date.now();
-  if (!forceRecache && cached && cached.expiresAt > now) return cached;
+  if (key !== undefined && cached !== undefined) {
+    SCHEMA_CACHE.delete(key);
+    if (!forceRecache && cached.expiresAt > now) {
+      // Re-insert to mark the entry most recently used for eviction order.
+      SCHEMA_CACHE.set(key, cached);
+      return cached;
+    }
+  }
 
   const hierarchy = enrich ? await resolveTableHierarchy(client, table, forceRecache) : Object.freeze([table]);
   const rows = enrich
@@ -202,20 +269,20 @@ async function loadSchemaMetadata(
     ? await enrichSchemaRows(client, table, readableFields, rows, forceRecache)
     : rows;
   const snapshot: CachedSchema = Object.freeze({
-    expiresAt: now + DEFAULT_SCHEMA_CACHE_TTL_MS,
+    expiresAt: now + (cacheBinding?.ttlMs ?? DEFAULT_SCHEMA_CACHE_TTL_MS),
     rows: Object.freeze(enriched.map((row) => Object.freeze({ ...row }))),
     hierarchy: Object.freeze([...hierarchy]),
   });
-  cache.set(key, snapshot);
+  if (key !== undefined) {
+    SCHEMA_CACHE.delete(key);
+    SCHEMA_CACHE.set(key, snapshot);
+    while (SCHEMA_CACHE.size > MAX_SCHEMA_CACHE_ENTRIES) {
+      const oldest = SCHEMA_CACHE.keys().next();
+      if (oldest.done) break;
+      SCHEMA_CACHE.delete(oldest.value);
+    }
+  }
   return snapshot;
-}
-
-function schemaCacheFor(client: ServiceNowOperations): Map<string, CachedSchema> {
-  const existing = SCHEMA_CACHE.get(client);
-  if (existing) return existing;
-  const next = new Map<string, CachedSchema>();
-  SCHEMA_CACHE.set(client, next);
-  return next;
 }
 
 async function resolveTableHierarchy(
@@ -499,5 +566,9 @@ export const schemaToolModule = defineServiceNowToolModule({
   // The contract has already parsed public fields and the access resolver has
   // retained its private issued field-policy marker on this exact object.
   handler: (args, services) =>
-    executeSchema(args as unknown as SchemaArguments, services.serviceNow),
+    executeSchema(
+      args as unknown as SchemaArguments,
+      services.serviceNow,
+      services.schemaCache
+    ),
 });
