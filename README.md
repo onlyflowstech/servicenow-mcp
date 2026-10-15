@@ -750,9 +750,11 @@ for 24 hours by default. The default cached table patterns are
 `sn_get`, and `sn_schema` accept `force_recache: true` to refresh metadata.
 
 **Freshness is checked against the instance, in every auth mode.** Before each
-fetch the cache reads a watermark: the table's newest row by `sys_updated_on`,
-as ServiceNow stores it (UTC). A cache hit is served only while a new read of
-that watermark still matches. Both values come from the instance, so the
+fetch the cache reads a watermark in one small request: the table's row count
+(`X-Total-Count`) and its newest row by `sys_updated_on`, as ServiceNow stores
+it (UTC). A cache hit is served only while a new read of that watermark still
+matches. Inserts and deletes change the count, and inserts and updates change
+the newest row. Both sides of the comparison come from the instance, so the
 session timezone, the date format, and clock skew between this host and the
 instance play no part, and no user lookup is needed. Basic, OAuth (password or
 client_credentials), and API-key profiles all cache the same way. The only
@@ -760,16 +762,21 @@ access it needs is read on the cached table itself.
 
 **The honest tradeoff:** the cache only ever saved payload bytes, never round
 trips — a cache hit still costs one watermark read, and a miss costs one extra.
-If the watermark cannot be read, or comes back without a readable
-`sys_updated_on`, the call goes upstream and nothing is cached for it.
+If the watermark cannot be read or is incomplete, the call goes upstream and is
+not cached; an entry already cached stays valid for later calls. A table whose
+newest row is dated after the instance's own clock is never cached: that row
+would stay the newest however many others were updated.
 
-**Deletions become visible within one TTL.** Inserts and updates move the
-watermark, but a delete moves it only when it removes the newest row, and an
-update within the same second as the watermark may not move it. So a row
-deleted upstream can stay served until its entry expires and is re-fetched — up
-to 24 hours at the default TTL. This is accepted behavior, not a defect; lower
-`SN_METADATA_CACHE_TTL_MS` or pass `force_recache: true` if you need a deletion
-reflected sooner.
+**What the watermark can miss.** An update within the same second as the stored
+watermark, to a row other than the newest, and a write that skips the system
+fields (`autoSysFields(false)`) leave it unchanged. Such a change shows within
+one TTL — up to 24 hours at the default. Lower `SN_METADATA_CACHE_TTL_MS` or
+pass `force_recache: true` to see it sooner.
+
+**`sn_schema` results** are also kept for 5 minutes per profile, credential
+identity, and effective policy, so a repeat call costs no request at all. They
+are not revalidated in that window; `force_recache: true` refreshes them, and
+`schemaCacheTtlMs` / `SN_SCHEMA_CACHE_TTL_MS` (up to 1 hour) changes the window.
 
 ### Unrestricted field selection (`fields=all`, `response_format=detailed`)
 

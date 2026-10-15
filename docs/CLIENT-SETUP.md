@@ -480,20 +480,23 @@ Two consequences for callers:
 
 Caching is per instance *and* credential identity, and it works the same in
 every auth mode, including OAuth client_credentials and API key. Freshness is
-checked against a watermark the instance reports: the table's newest row by
-`sys_updated_on`, read as its stored UTC value. No timezone, username, or
-`sys_user` / `sys_properties` read is involved, so the profile needs read
-access to the cached table and nothing else. If the watermark cannot be read,
-the call goes upstream and nothing is cached for it.
+checked against a watermark the instance reports: the table's row count and its
+newest row by `sys_updated_on`, read as its stored UTC value. No timezone,
+username, or `sys_user` / `sys_properties` read is involved, so the profile
+needs read access to the cached table and nothing else. If the watermark cannot
+be read, the call goes upstream and is not cached.
 
 The practical saving is payload bytes, never round trips: a hit still performs
 one watermark read, and a miss performs one extra.
 
-Deletions to a cached metadata table become visible within one TTL — 24 hours by
-default. The watermark moves on inserts and updates, but a delete moves it only
-when it removes the newest row, so a deleted row can stay served until its
-entry expires. Lower the TTL or pass `force_recache: true` when a deletion must
-be reflected sooner.
+Inserts, updates, and deletes all move the watermark. An update in the same
+second as the stored watermark, to a row other than the newest, can go unseen
+for up to one TTL — 24 hours by default. Lower the TTL or pass
+`force_recache: true` when a change must be reflected sooner.
+
+`sn_schema` keeps its assembled result for 5 minutes per profile, credential
+identity, and effective policy, without revalidating it. `force_recache: true`
+refreshes it.
 
 Incident `comments` and `work_notes` are append-only. Generic `sn_update`
 rejects them before credentials/client construction. After separate human

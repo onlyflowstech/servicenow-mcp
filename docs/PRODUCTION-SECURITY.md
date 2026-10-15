@@ -291,11 +291,12 @@ SN_METADATA_CACHE_TABLES=sys_glide_object,sys_dictionary,sys_db_object,sys_app,s
 ```
 
 Metadata caching works in every auth mode, including the client_credentials
-profile above. Its freshness check reads the cached table's newest row by
-`sys_updated_on`, as the instance stores it, so it needs no timezone, no
-username, and no read access beyond the cached table. Deletions to a cached
-table become visible within one TTL, since a delete moves that watermark only
-when it removes the newest row.
+profile above. Its freshness check reads the cached table's row count and newest
+row by `sys_updated_on`, as the instance stores it, so it needs no timezone, no
+username, and no read access beyond the cached table. Cached entries are
+partitioned by instance and credential identity; `sn_schema` results are also
+partitioned by profile and effective policy, so a narrower profile never sees a
+wider one's schema.
 
 Journal content is readable on request. `comments` and `work_notes` on
 `incident` are returned by `fields=all`, `response_format: "detailed"`, an
