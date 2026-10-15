@@ -12,7 +12,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ServiceNowClient } from "../src/client.js";
+import {
+  MAX_CUMULATIVE_UPSTREAM_JSON_BYTES,
+  ServiceNowClient,
+} from "../src/client.js";
 import type { ServiceNowConfig } from "../src/config.js";
 import type {
   ExecutionContextDependencies,
@@ -53,6 +56,7 @@ interface RestBatchPayload {
 const openHarnesses: Array<Awaited<ReturnType<typeof createHarness>>> = [];
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await Promise.all(
     openHarnesses.splice(0).map(async ({ client, server }) => {
       await client.close();
@@ -94,6 +98,8 @@ async function createHarness(
   options: {
     readonly fieldPolicy?: FieldPolicyConfigurationInput;
     readonly matched?: number;
+    /** A real client, for tests that need its response budgets. */
+    readonly client?: ServiceNowClient;
   } = {}
 ) {
   const records: ToolAuditRecord[] = [];
@@ -124,7 +130,9 @@ async function createHarness(
     authType: "basic" as const,
   }));
   const getConfig = vi.fn(() => CONFIG);
-  const getClient = vi.fn(() => serviceNowClient as unknown as ServiceNowClient);
+  const getClient = vi.fn(
+    () => options.client ?? (serviceNowClient as unknown as ServiceNowClient)
+  );
   const profileManager = {
     getProfile,
     getConfig,
@@ -607,7 +615,6 @@ describe("sn_batch REST Batch API exchange", () => {
     ["not_found", 404],
     ["authorization", 403],
     ["authentication", 401],
-    ["rate_limit", 429],
   ] as const)(
     "falls back to serial calls when the batch request is refused (%s)",
     async (category) => {
@@ -655,13 +662,50 @@ describe("sn_batch REST Batch API exchange", () => {
     }
   );
 
+  it("sends nothing serially when the batch request is rate-limited", async () => {
+    const connected = await harness({ matched: 60 });
+    connected.serviceNowClient.post
+      .mockImplementationOnce(async (_path: string, body: unknown) =>
+        servicedResponse(body as RestBatchPayload)
+      )
+      .mockRejectedValueOnce(createToolError("rate_limit", "retry_later", 10));
+    const result = await callTool(
+      connected,
+      "sn_batch",
+      batchArguments({ work_notes: "Once only" })
+    );
+
+    const data = responseData(result);
+    expect(data).toMatchObject({ matched: 60, processed: 50, failed: 10 });
+    expect(data.message).toContain("rate-limited the request (HTTP 429)");
+    expect(data.message).toContain("Retry after 10 seconds.");
+    expect(data.message).toContain("remaining 10 record(s) were not sent");
+    expect(data.message).not.toContain("did not confirm");
+    expect(connected.serviceNowClient.post).toHaveBeenCalledTimes(2);
+    expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
+  });
+
+  it("omits the retry hint when the rate limit carries none", async () => {
+    const connected = await harness({ matched: 2 });
+    connected.serviceNowClient.post.mockRejectedValueOnce(
+      createToolError("rate_limit", "retry_later")
+    );
+    const result = await callTool(connected, "sn_batch", batchArguments({ state: "2" }));
+
+    const data = responseData(result);
+    expect(data).toMatchObject({ processed: 0, failed: 2 });
+    expect(data.message).toContain("rate-limited the request (HTTP 429)");
+    expect(data.message).not.toContain("Retry after");
+    expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
+  });
+
   it("falls back only for the records after a confirmed batch", async () => {
     const connected = await harness({ matched: 60 });
     connected.serviceNowClient.post
       .mockImplementationOnce(async (_path: string, body: unknown) =>
         servicedResponse(body as RestBatchPayload)
       )
-      .mockRejectedValueOnce(createToolError("rate_limit", "retry_later"));
+      .mockRejectedValueOnce(createToolError("not_found", "do_not_retry"));
     const result = await callTool(
       connected,
       "sn_batch",
@@ -697,5 +741,233 @@ describe("sn_batch REST Batch API exchange", () => {
     expect(data.message).toContain("remaining 10 record(s) were not sent");
     expect(connected.serviceNowClient.post).toHaveBeenCalledTimes(1);
     expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
+  });
+});
+
+describe("sn_batch serial fallback stops when an outcome is unknown", () => {
+  it.each([
+    ["a 5xx", createToolError("upstream", "retry_if_safe_and_idempotent")],
+    ["a timeout", createToolError("timeout", "retry_if_safe_and_idempotent")],
+    ["an exhausted response budget", new RangeError("cumulative upstream byte limit")],
+  ])("stops at %s and reports the rest as not sent", async (_label, failure) => {
+    const connected = await harness({ matched: 5 });
+    connected.serviceNowClient.post.mockRejectedValueOnce(
+      createToolError("not_found", "do_not_retry")
+    );
+    connected.serviceNowClient.patch
+      .mockResolvedValueOnce({ result: { sys_id: SYS_ID } })
+      .mockRejectedValueOnce(failure);
+    const result = await callTool(
+      connected,
+      "sn_batch",
+      batchArguments({ work_notes: "Must never be posted twice" })
+    );
+
+    const data = responseData(result);
+    expect(data).toMatchObject({ matched: 5, processed: 1, failed: 3 });
+    expect(data.message).toContain("did not confirm the outcome for 1 record(s)");
+    expect(data.message).toContain("remaining 3 record(s) were not sent");
+    expect(connected.serviceNowClient.patch).toHaveBeenCalledTimes(2);
+  });
+
+  it("continues past a per-record rejection whose outcome is known", async () => {
+    const connected = await harness({ matched: 5 });
+    connected.serviceNowClient.post.mockRejectedValueOnce(
+      createToolError("not_found", "do_not_retry")
+    );
+    connected.serviceNowClient.patch
+      .mockResolvedValueOnce({ result: { sys_id: SYS_ID } })
+      .mockRejectedValueOnce(createToolError("conflict", "retry_after_correction"))
+      // A 4xx the client has no category for, such as 400.
+      .mockRejectedValueOnce(createToolError("upstream", "do_not_retry"));
+    const result = await callTool(connected, "sn_batch", batchArguments({ state: "2" }));
+
+    const data = responseData(result);
+    expect(data).toMatchObject({ matched: 5, processed: 3, failed: 2 });
+    expect(data.message).toBeUndefined();
+    expect(connected.serviceNowClient.patch).toHaveBeenCalledTimes(5);
+  });
+
+  it("stops serial calls at a rate limit with the retry hint", async () => {
+    const connected = await harness({ matched: 5 });
+    connected.serviceNowClient.post.mockRejectedValueOnce(
+      createToolError("not_found", "do_not_retry")
+    );
+    connected.serviceNowClient.patch
+      .mockResolvedValueOnce({ result: { sys_id: SYS_ID } })
+      .mockRejectedValueOnce(createToolError("rate_limit", "retry_later", 30));
+    const result = await callTool(connected, "sn_batch", batchArguments({ state: "2" }));
+
+    const data = responseData(result);
+    expect(data).toMatchObject({ matched: 5, processed: 1, failed: 4 });
+    expect(data.message).toContain("Retry after 30 seconds.");
+    expect(data.message).toContain("remaining 3 record(s) were not sent");
+    expect(data.message).not.toContain("did not confirm");
+    expect(connected.serviceNowClient.patch).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("sn_batch request size", () => {
+  it("caps each batch request at 4 MiB when a field value is large", async () => {
+    const connected = await harness({ matched: 20 });
+    // 100,000 four-byte characters: 400,000 UTF-8 bytes, within the generic
+    // value bounds, and about 533 KB once base64-encoded.
+    const large = "\u{1F600}".repeat(100_000);
+    const result = await callTool(
+      connected,
+      "sn_batch",
+      batchArguments({ u_body: large }, "u_bench")
+    );
+
+    expect(responseData(result)).toMatchObject({ processed: 20, failed: 0 });
+    const payloads = batchPayloads(connected);
+    expect(payloads.length).toBeGreaterThan(1);
+    for (const payload of payloads) {
+      expect(Buffer.byteLength(JSON.stringify(payload), "utf8")).toBeLessThanOrEqual(
+        4_100_000
+      );
+    }
+    const requests = payloads.flatMap(({ rest_requests }) => rest_requests);
+    expect(requests).toHaveLength(20);
+    expect(new Set(requests.map(({ id }) => id)).size).toBe(20);
+    expect(decodedBody(requests[19]!)).toEqual({ u_body: large });
+  });
+
+  it("keeps 50 records per batch for journal-sized values", async () => {
+    const connected = await harness({ matched: 60 });
+    await callTool(
+      connected,
+      "sn_batch",
+      batchArguments({ work_notes: "n".repeat(8_000) })
+    );
+
+    expect(
+      batchPayloads(connected).map(({ rest_requests }) => rest_requests.length)
+    ).toEqual([50, 10]);
+  });
+});
+
+describe("sn_batch response budgets with the real HTTP client", () => {
+  /** Mock ServiceNow behind the real client; counts calls and bytes served. */
+  function mockInstance(options: {
+    readonly records: number;
+    readonly refuseBatch?: boolean;
+  }) {
+    const stats = { GET: 0, POST: 0, PATCH: 0, DELETE: 0, served: 0 };
+    const respond = (status: number, value: unknown): Response => {
+      const text = JSON.stringify(value);
+      const bytes = Buffer.byteLength(text, "utf8");
+      stats.served += bytes;
+      return new Response(text, {
+        status,
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(bytes),
+        },
+      });
+    };
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        const method = (init?.method ?? "GET") as "GET" | "POST" | "PATCH" | "DELETE";
+        stats[method] += 1;
+        if (method === "GET") {
+          return respond(200, {
+            result: Array.from({ length: options.records }, (_, index) => ({
+              sys_id: sysIdFor(index),
+            })),
+          });
+        }
+        if (method === "POST" && url.pathname === BATCH_PATH) {
+          if (options.refuseBatch) {
+            return respond(404, { error: { message: "Batch API not available" } });
+          }
+          const payload = JSON.parse(String(init?.body)) as RestBatchPayload;
+          return respond(200, {
+            batch_request_id: payload.batch_request_id,
+            serviced_requests: payload.rest_requests.map(
+              ({ id, url: requestUrl }) => ({
+                id,
+                body: Buffer.from(
+                  JSON.stringify({
+                    result: { sys_id: requestUrl.split("/")[5]!.split("?")[0] },
+                  })
+                ).toString("base64"),
+                status_code: 200,
+                status_text: "OK",
+                headers: [],
+                execution_time: 37,
+              })
+            ),
+            unserviced_requests: [],
+          });
+        }
+        if (method === "PATCH") {
+          // A full record, as the Table API returns without sysparm_fields.
+          return respond(200, {
+            result: {
+              sys_id: url.pathname.split("/")[5],
+              ...Object.fromEntries(
+                Array.from({ length: 90 }, (_, index) => [
+                  `field_${index}`,
+                  "v".repeat(60),
+                ])
+              ),
+            },
+          });
+        }
+        return respond(404, {});
+      }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    return stats;
+  }
+
+  it("completes a run of more than 5,000 updates in per-request budgets", async () => {
+    const records = 6_000;
+    const stats = mockInstance({ records });
+    const connected = await harness({
+      client: new ServiceNowClient(CONFIG, { sleep: async () => {} }),
+    });
+    const result = await callTool(connected, "sn_batch", {
+      ...batchArguments({ work_notes: "Bulk triage note" }),
+      limit: records,
+    });
+
+    expect(responseData(result)).toEqual({
+      action: "update",
+      table: "incident",
+      matched: records,
+      processed: records,
+      failed: 0,
+    });
+    expect(stats.POST).toBe(records / 50);
+    expect(stats.PATCH).toBe(0);
+    // The run read more than one per-call budget in total, so it completes
+    // only because each request has its own.
+    expect(stats.served).toBeGreaterThan(MAX_CUMULATIVE_UPSTREAM_JSON_BYTES);
+  });
+
+  it("does not count applied serial updates as failed when full records exceed the budget", async () => {
+    const records = 300;
+    const stats = mockInstance({ records, refuseBatch: true });
+    const connected = await harness({
+      client: new ServiceNowClient(CONFIG, { sleep: async () => {} }),
+    });
+    const result = await callTool(connected, "sn_batch", {
+      ...batchArguments({ work_notes: "Serial note" }),
+      limit: records,
+    });
+
+    expect(responseData(result)).toEqual({
+      action: "update",
+      table: "incident",
+      matched: records,
+      processed: records,
+      failed: 0,
+    });
+    expect(stats.POST).toBe(1);
+    expect(stats.PATCH).toBe(records);
+    expect(stats.served).toBeGreaterThan(MAX_CUMULATIVE_UPSTREAM_JSON_BYTES);
   });
 });

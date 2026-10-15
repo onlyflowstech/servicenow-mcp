@@ -1,6 +1,9 @@
 import { Buffer } from "node:buffer";
 import { z } from "zod";
-import type { ServiceNowOperations } from "../client.js";
+import {
+  runWithServiceNowRequestSignal,
+  type ServiceNowOperations,
+} from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
 import {
@@ -22,6 +25,7 @@ import {
 import {
   trustedToolErrorDescriptor,
   type ToolErrorCategory,
+  type ToolErrorDescriptor,
 } from "../tool-error.js";
 import { prepareWriteFieldValues } from "../write-value-policy.js";
 
@@ -80,7 +84,7 @@ export async function handler(
   args: z.infer<typeof schema>,
   client: ServiceNowOperations,
   _config: ServiceNowToolSettings,
-  _context: ExecutionContext
+  context: ExecutionContext
 ) {
   try {
     rejectRawEncodedWrite(
@@ -155,7 +159,10 @@ export async function handler(
       args.table,
       args.action,
       results,
-      writableFields
+      writableFields,
+      // A direct handler call may pass no context; it then keeps the single
+      // budget of whatever scope it runs in.
+      context?.signal
     );
     const { processed, failed, message } = execution;
 
@@ -176,16 +183,33 @@ const REST_BATCH_CHUNK_SIZE = 50;
 const REST_BATCH_PATH = "/api/now/v1/batch";
 
 /**
+ * Upper bound on one batch request body. ServiceNow caps REST request
+ * payloads (about 10 MB by default), and an oversized batch that is refused
+ * has an unknown outcome, so a chunk holds fewer records when values are
+ * large.
+ */
+const MAX_BATCH_REQUEST_BYTES = 4 * 1024 * 1024;
+/**
+ * Upper bound on the JSON one `rest_requests` entry adds besides its body and
+ * table name: id, method, url, headers and exclude_response_headers.
+ */
+const REST_BATCH_REQUEST_OVERHEAD_BYTES = 300;
+
+/**
  * Failure categories that mean ServiceNow refused a batch request before
- * running any request in it: the Batch API is missing, not permitted for
- * this credential, or rate limited. Only these fall back to serial calls.
- * Any other failure, and every 2xx response, can follow a batch ServiceNow
- * already applied in whole or in part. Replaying it would apply a change
- * twice, which for a journal field is a duplicate entry.
+ * running any request in it, and that serial calls can work around: the
+ * Batch API is missing or not permitted for this credential. Only these fall
+ * back to serial calls. Any other failure, and every 2xx response, can follow
+ * a batch ServiceNow already applied in whole or in part. Replaying it would
+ * apply a change twice, which for a journal field is a duplicate entry.
+ *
+ * A rate limit (429) also means nothing ran, but it is not in the set: serial
+ * calls would add one request per record to the limit the instance is
+ * enforcing. The run stops instead and reports the Retry-After hint.
  */
 const BATCH_REFUSED_BEFORE_PROCESSING: ReadonlySet<ToolErrorCategory> = new Set<
   ToolErrorCategory
->(["authentication", "authorization", "not_found", "rate_limit"]);
+>(["authentication", "authorization", "not_found"]);
 
 /** Per-request headers, as the documented Batch API takes them. */
 const JSON_BODY_HEADERS = Object.freeze([
@@ -202,6 +226,21 @@ interface BatchExecutionResult {
   readonly message?: string;
 }
 
+/** Every matched record lands in exactly one of these counts. */
+interface MutationTally {
+  readonly processed: number;
+  /** Includes unserviced records; excludes records never sent. */
+  readonly failed: number;
+  /** Listed by ServiceNow in unserviced_requests: not run, counted as failed. */
+  readonly unserviced: number;
+  /** Not reported either way: may have been applied, never retried. */
+  readonly unconfirmed: number;
+  /** Never sent because the run stopped; counted as failed. */
+  readonly notSent: number;
+  /** Set when the run stopped on a rate limit (HTTP 429). */
+  readonly rateLimited?: Readonly<{ retryAfterSeconds?: number }>;
+}
+
 interface RestBatchRequest {
   readonly id: string;
   readonly method: "PATCH" | "DELETE";
@@ -214,15 +253,14 @@ interface RestBatchRequest {
 interface ChunkOutcome {
   readonly processed: number;
   readonly failed: number;
-  /** Listed by ServiceNow in unserviced_requests: not run, counted as failed. */
   readonly unserviced: number;
-  /** Not reported either way: may have been applied, never retried. */
   readonly unconfirmed: number;
 }
 
 /**
  * Apply one update or delete to every matched record through the documented
- * REST Batch API (`POST /api/now/v1/batch`), 50 requests per batch.
+ * REST Batch API (`POST /api/now/v1/batch`), up to 50 requests per batch and
+ * at most MAX_BATCH_REQUEST_BYTES per request body.
  *
  * Request: `rest_requests[]` with `id`, `method`, `url`, `headers` as
  * name/value pairs, and a base64-encoded `body`. Response:
@@ -237,7 +275,8 @@ async function executeBatchMutation(
   table: string,
   action: "update" | "delete",
   records: readonly Record<string, unknown>[],
-  fields: Readonly<Record<string, string>> | undefined
+  fields: Readonly<Record<string, string>> | undefined,
+  signal: AbortSignal | undefined
 ): Promise<BatchExecutionResult> {
   let processed = 0;
   let failed = 0;
@@ -251,20 +290,27 @@ async function executeBatchMutation(
     }
   }
   const body = action === "update" ? encodeBatchBody(fields ?? {}) : undefined;
+  const chunkSize = batchChunkSize(table, body);
 
-  for (let offset = 0; offset < sysIds.length; offset += REST_BATCH_CHUNK_SIZE) {
-    const chunk = sysIds.slice(offset, offset + REST_BATCH_CHUNK_SIZE);
+  for (let offset = 0; offset < sysIds.length; offset += chunkSize) {
+    const chunk = sysIds.slice(offset, offset + chunkSize);
     const requests = chunk.map((sysId, index) =>
       restBatchRequest(table, action, sysId, String(offset + index + 1), body)
     );
     let response: unknown;
     try {
-      response = await client.post<unknown>(REST_BATCH_PATH, {
-        batch_request_id: `sn_batch_${Date.now()}_${offset}`,
-        rest_requests: requests,
-      });
+      response = await inOwnResponseBudget(signal, () =>
+        client.post<unknown>(REST_BATCH_PATH, {
+          batch_request_id: `sn_batch_${Date.now()}_${offset}`,
+          rest_requests: requests,
+        })
+      );
     } catch (error) {
-      if (batchRefusedBeforeProcessing(error)) {
+      const descriptor = trustedToolErrorDescriptor(error);
+      if (
+        descriptor !== undefined &&
+        BATCH_REFUSED_BEFORE_PROCESSING.has(descriptor.category)
+      ) {
         // Nothing in this batch ran. The records from here on go through the
         // Table API one at a time; earlier batches are confirmed and are not
         // sent again.
@@ -273,24 +319,35 @@ async function executeBatchMutation(
           table,
           action,
           sysIds.slice(offset),
-          fields
+          fields,
+          signal
         );
-        return batchResult(
-          processed + serial.processed,
-          failed + serial.failed,
+        return batchResult({
+          ...serial,
+          processed: processed + serial.processed,
+          failed: failed + serial.failed,
           unserviced,
-          0,
-          0
-        );
+        });
+      }
+      if (descriptor?.category === "rate_limit") {
+        // Nothing in this batch ran, and the client already retried it.
+        return batchResult({
+          processed,
+          failed,
+          unserviced,
+          unconfirmed: 0,
+          notSent: sysIds.length - offset,
+          rateLimited: { retryAfterSeconds: descriptor.retryAfterSeconds },
+        });
       }
       // The request may have reached ServiceNow and been applied.
-      return batchResult(
+      return batchResult({
         processed,
         failed,
         unserviced,
-        chunk.length,
-        sysIds.length - offset - chunk.length
-      );
+        unconfirmed: chunk.length,
+        notSent: sysIds.length - offset - chunk.length,
+      });
     }
     const outcome = chunkOutcome(
       response,
@@ -300,16 +357,49 @@ async function executeBatchMutation(
     failed += outcome.failed;
     unserviced += outcome.unserviced;
     if (outcome.unconfirmed > 0) {
-      return batchResult(
+      return batchResult({
         processed,
         failed,
         unserviced,
-        outcome.unconfirmed,
-        sysIds.length - offset - chunk.length
-      );
+        unconfirmed: outcome.unconfirmed,
+        notSent: sysIds.length - offset - chunk.length,
+      });
     }
   }
-  return batchResult(processed, failed, unserviced, 0, 0);
+  return batchResult({ processed, failed, unserviced, unconfirmed: 0, notSent: 0 });
+}
+
+/**
+ * Run one upstream request with its own response-byte budget, bound to the
+ * tool call's cancellation signal.
+ *
+ * A single per-call budget would cut a large run short: the sys_id lookup and
+ * every batch response draw on it, so a 10,000-record update would stop after
+ * about 3,400 records. Each response is still capped by the client, and is
+ * parsed and dropped before the next request, so memory stays bounded by one
+ * chunk. Without a signal (a direct handler call) the request runs in the
+ * caller's scope.
+ */
+function inOwnResponseBudget<T>(
+  signal: AbortSignal | undefined,
+  operation: () => Promise<T>
+): Promise<T> {
+  return signal instanceof AbortSignal
+    ? runWithServiceNowRequestSignal(signal, operation)
+    : operation();
+}
+
+/** Up to 50 records, fewer when the encoded body is large. */
+function batchChunkSize(table: string, body: string | undefined): number {
+  const perRequestBytes =
+    (body?.length ?? 0) + table.length + REST_BATCH_REQUEST_OVERHEAD_BYTES;
+  return Math.max(
+    1,
+    Math.min(
+      REST_BATCH_CHUNK_SIZE,
+      Math.floor(MAX_BATCH_REQUEST_BYTES / perRequestBytes)
+    )
+  );
 }
 
 function restBatchRequest(
@@ -323,10 +413,8 @@ function restBatchRequest(
     return {
       id,
       method: "PATCH",
-      // Only sys_id comes back per record. A full record per response would
-      // make each batch response large enough to exhaust the per-call
-      // response budget, and the outcome of a batch whose response cannot be
-      // read is unknown.
+      // Only sys_id comes back per record, which keeps each batch response
+      // small and its parse cheap.
       url: `/api/now/table/${table}/${sysId}?sysparm_fields=sys_id`,
       headers: JSON_BODY_HEADERS,
       exclude_response_headers: true,
@@ -342,16 +430,9 @@ function restBatchRequest(
   };
 }
 
+/** Base64 text is ASCII, so its length is its byte count. */
 function encodeBatchBody(fields: Readonly<Record<string, string>>): string {
   return Buffer.from(JSON.stringify(fields), "utf8").toString("base64");
-}
-
-function batchRefusedBeforeProcessing(error: unknown): boolean {
-  const descriptor = trustedToolErrorDescriptor(error);
-  return (
-    descriptor !== undefined &&
-    BATCH_REFUSED_BEFORE_PROCESSING.has(descriptor.category)
-  );
 }
 
 /**
@@ -402,35 +483,36 @@ function chunkOutcome(response: unknown, ids: readonly string[]): ChunkOutcome {
   return { processed, failed, unserviced: notServiced.size, unconfirmed };
 }
 
-function batchResult(
-  processed: number,
-  failed: number,
-  unserviced: number,
-  unconfirmed: number,
-  notSent: number
-): BatchExecutionResult {
+function batchResult(tally: MutationTally): BatchExecutionResult {
   const notes: string[] = [];
-  if (unconfirmed > 0) {
+  if (tally.unconfirmed > 0) {
     notes.push(
-      `ServiceNow did not confirm the outcome for ${unconfirmed} record(s). ` +
+      `ServiceNow did not confirm the outcome for ${tally.unconfirmed} record(s). ` +
         "They may have been changed. They were not retried, so no change is " +
         "applied twice. Check them before running the batch again."
     );
   }
-  if (notSent > 0) {
+  if (tally.rateLimited !== undefined) {
+    const retryAfter = tally.rateLimited.retryAfterSeconds;
     notes.push(
-      `The remaining ${notSent} record(s) were not sent and are counted as failed.`
+      "ServiceNow rate-limited the request (HTTP 429), so nothing more was sent." +
+        (retryAfter === undefined ? "" : ` Retry after ${retryAfter} seconds.`)
     );
   }
-  if (unserviced > 0) {
+  if (tally.notSent > 0) {
     notes.push(
-      `ServiceNow did not process ${unserviced} record(s) because a batch ` +
+      `The remaining ${tally.notSent} record(s) were not sent and are counted as failed.`
+    );
+  }
+  if (tally.unserviced > 0) {
+    notes.push(
+      `ServiceNow did not process ${tally.unserviced} record(s) because a batch ` +
         "reached a size or time limit. They are counted as failed."
     );
   }
   return {
-    processed,
-    failed: failed + notSent,
+    processed: tally.processed,
+    failed: tally.failed + tally.notSent,
     ...(notes.length === 0 ? {} : { message: notes.join(" ") }),
   };
 }
@@ -464,28 +546,73 @@ function statusCode(candidate: unknown): number | undefined {
     : undefined;
 }
 
+/**
+ * One Table API call per record, each with its own response budget. The run
+ * stops at the first failure whose outcome is unknown, or at a rate limit;
+ * the records after it are reported as not sent.
+ */
 async function executeSerialMutation(
   client: ServiceNowOperations,
   table: string,
   action: "update" | "delete",
   sysIds: readonly string[],
-  fields: Readonly<Record<string, string>> | undefined
-): Promise<BatchExecutionResult> {
+  fields: Readonly<Record<string, string>> | undefined,
+  signal: AbortSignal | undefined
+): Promise<MutationTally> {
   let processed = 0;
   let failed = 0;
-  for (const sysId of sysIds) {
+  for (const [index, sysId] of sysIds.entries()) {
+    const path = `/api/now/table/${table}/${sysId}`;
     try {
       if (action === "update") {
-        await client.patch(`/api/now/table/${table}/${sysId}`, fields);
+        await inOwnResponseBudget(signal, () => client.patch(path, fields));
         processed += 1;
       } else {
-        const delResp = await client.delete(`/api/now/table/${table}/${sysId}`);
+        const delResp = await inOwnResponseBudget(signal, () => client.delete(path));
         if (delResp.status === 204 || delResp.status === 200) processed += 1;
         else failed += 1;
       }
-    } catch {
+    } catch (error) {
+      const notSent = sysIds.length - index - 1;
+      const descriptor = trustedToolErrorDescriptor(error);
+      if (descriptor?.category === "rate_limit") {
+        return {
+          processed,
+          failed: failed + 1,
+          unserviced: 0,
+          unconfirmed: 0,
+          notSent,
+          rateLimited: { retryAfterSeconds: descriptor.retryAfterSeconds },
+        };
+      }
+      if (!serialFailureIsDefinite(descriptor)) {
+        return { processed, failed, unserviced: 0, unconfirmed: 1, notSent };
+      }
       failed += 1;
     }
   }
-  return { processed, failed };
+  return { processed, failed, unserviced: 0, unconfirmed: 0, notSent: 0 };
+}
+
+/**
+ * True when a single-record PATCH or DELETE failed with a status that means
+ * ServiceNow did not apply it. For these methods the client classifies a
+ * 4xx it has no category for as `upstream` with `do_not_retry`, and a 5xx or
+ * connection failure as `upstream` with `retry_if_safe_and_idempotent`. A
+ * 5xx, a timeout, a connection failure, or an unreadable or over-budget
+ * response may follow an applied write, so its outcome is unknown.
+ */
+function serialFailureIsDefinite(descriptor: ToolErrorDescriptor | undefined): boolean {
+  if (descriptor === undefined) return false;
+  switch (descriptor.category) {
+    case "authentication":
+    case "authorization":
+    case "not_found":
+    case "conflict":
+      return true;
+    case "upstream":
+      return descriptor.retry === "do_not_retry";
+    default:
+      return false;
+  }
 }
