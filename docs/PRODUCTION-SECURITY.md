@@ -367,16 +367,15 @@ Decide separately whether an agent may post customer-visible comments:
   caller and watch list. A bulk `sn_batch` update of `comments` posts one
   comment per matched record, up to 10,000 in one call, and each can send a
   notification.
-- **An outbound email channel.** `watch_list` accepts free-form email
-  addresses, and comment notifications commonly go to the watch list. An
-  agent that may write both `watch_list` and `comments` can therefore send
-  record content to an address of its choosing. Withhold one of the two
-  fields, or restrict outbound email recipients on the instance.
+- **An outbound email channel.** Comment notifications commonly go to the
+  watch list, and `watch_list` accepts free-form email addresses, so a
+  profile that may write both fields can direct notification email, including
+  record content, to any address. Withhold one of the two fields, or restrict
+  outbound email recipients on the instance.
 - **Rendered markup.** Where the instance property
   `glide.ui.security.allow_codetag` is enabled, text inside `[code]` tags in a
-  journal entry can render as HTML. The server does not strip these tags.
-  Disable the property, or withhold the field, if agents should not post
-  markup.
+  journal entry can render as HTML. Journal text is sent as written. Disable
+  the property, or withhold the field, if agents should not post markup.
 
 **Opting out.** To withhold journal writes, set `writable` to an explicit
 list that leaves out `comments`, and `work_notes` if needed. A profile with no

@@ -1100,7 +1100,11 @@ If a profile may write a parent table such as `task`, a write addressed to
 `task` is checked against `task`'s policy, whatever the class of the record.
 When you narrow a field such as `comments` on `incident`, narrow it on every
 write-granted parent table too, or do not grant writes on the parent. A
-`"*"` entry covers `incident` and `task` alike.
+`"*"` entry covers `incident` and `task` alike. The same holds for a platform
+table that stores journal entries directly, such as `sys_journal_field`: if a
+profile may write it, per-table narrowing on `incident` does not reach a
+write addressed to it, so either leave it out of the write grant or narrow
+with a `"*"` entry, which reaches it.
 
 **Role and group-membership tables.** Nothing built in blocks
 `sys_user_role`, `sys_user_has_role`, `sys_group_has_role` or
