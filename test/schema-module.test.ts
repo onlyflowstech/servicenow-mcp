@@ -817,6 +817,26 @@ describe("sn_schema cross-call cache", () => {
     expect(fake.get).toHaveBeenCalledTimes(MAX_SCHEMA_CACHE_ENTRIES + 2);
   });
 
+  it("sweeps expired entries on insert, so they never evict a valid one", async () => {
+    const fake = fakeOperations();
+    const valid = bindingFor({ ttlMs: 3_600_000 });
+    const shortLived = Array.from({ length: MAX_SCHEMA_CACHE_ENTRIES - 1 }, () => bindingFor({ ttlMs: 1_000 }));
+
+    vi.useFakeTimers();
+    try {
+      await fieldNames(fake.operations, valid);
+      for (const binding of shortLived) await fieldNames(fake.operations, binding);
+      vi.setSystemTime(Date.now() + 1_001);
+      // A full cache of 1 valid + 255 expired entries takes one more insert.
+      await fieldNames(fake.operations, bindingFor());
+      const before = fake.get.mock.calls.length;
+      await fieldNames(fake.operations, valid);
+      expect(fake.get.mock.calls.length).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not cache across calls without a binding", async () => {
     const fake = fakeOperations();
 

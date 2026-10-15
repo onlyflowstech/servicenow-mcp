@@ -274,6 +274,12 @@ async function loadSchemaMetadata(
     hierarchy: Object.freeze([...hierarchy]),
   });
   if (key !== undefined) {
+    // Sweep expired entries first. Otherwise they linger until LRU pressure,
+    // and a recently used expired entry outlives an older one still valid.
+    const sweptAt = Date.now();
+    for (const [candidate, entry] of SCHEMA_CACHE) {
+      if (entry.expiresAt <= sweptAt) SCHEMA_CACHE.delete(candidate);
+    }
     SCHEMA_CACHE.delete(key);
     SCHEMA_CACHE.set(key, snapshot);
     while (SCHEMA_CACHE.size > MAX_SCHEMA_CACHE_ENTRIES) {
