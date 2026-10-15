@@ -736,10 +736,51 @@ const ITSM_TABLES: ReadonlySet<string> = new Set([
  * ATF, application and dictionary metadata, syslog). It keeps its own
  * built-in entry, a "*" entry never covers it, and it is narrowed only by
  * naming it.
+ *
+ * This list is written out rather than derived as "built-in minus ITSM", so
+ * a new built-in entry never escapes every profile's "*" entry by default.
+ * Each built-in entry must be in exactly one of ITSM_TABLES and
+ * SYSTEM_TABLES; a test enforces this through BUILT_IN_TABLE_CLASSES.
  */
-const SYSTEM_TABLES: ReadonlySet<string> = new Set(
-  Object.keys(POLICY_DEFINITIONS).filter((table) => !ITSM_TABLES.has(table))
-);
+const SYSTEM_TABLES: ReadonlySet<string> = new Set([
+  "sys_user",
+  "sys_user_group",
+  "sys_user_grmember",
+  "syslog",
+  "sys_script",
+  "sys_script_include",
+  "sys_ui_script",
+  "sys_script_client",
+  "sys_ws_operation",
+  "sys_db_object",
+  "sys_app",
+  "sys_store_app",
+  "v_plugin",
+  "sys_atf_test",
+  "sys_atf_test_suite",
+  "sys_atf_test_suite_test",
+  "sys_atf_test_result",
+  "sys_atf_step",
+  "sys_element_mapping",
+  "sys_variable_value",
+  "sys_atf_test_suite_result",
+  "sys_atf_test_result_step",
+  "sys_atf_agent",
+]);
+
+/**
+ * The built-in tables and how each is classified for a profile's "*" entry.
+ * Frozen copies for tests; the policy reads the sets above.
+ */
+export const BUILT_IN_TABLE_CLASSES: Readonly<{
+  builtIn: readonly string[];
+  itsm: readonly string[];
+  system: readonly string[];
+}> = Object.freeze({
+  builtIn: Object.freeze(Object.keys(POLICY_DEFINITIONS)),
+  itsm: Object.freeze([...ITSM_TABLES]),
+  system: Object.freeze([...SYSTEM_TABLES]),
+});
 
 const GENERIC_RECORD_TABLES = new Set([
   "incident",
