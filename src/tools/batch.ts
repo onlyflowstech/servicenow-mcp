@@ -587,8 +587,11 @@ function batchResult(tally: MutationTally): BatchExecutionResult {
           ? ". "
           : `; ${serverErrors} of them returned a server error (HTTP 5xx or ` +
             "408), which can follow a partly applied change. ") +
-        "They may have been changed. They were not retried, so no change is " +
-        "applied twice. Check them before running the batch again."
+        "They may have been changed. The run has not retried them. A journal " +
+        "write (comments, work_notes) is never re-sent, but when records are " +
+        "sent one at a time, other fields may have been sent up to three " +
+        "times by the HTTP client's retry on a transient error. Check them " +
+        "before running the batch again."
     );
   }
   if (tally.stoppedOn === "server_errors") {
