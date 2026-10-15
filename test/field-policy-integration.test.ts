@@ -375,13 +375,11 @@ describe("SNSDK-30 registered-tool field boundary", () => {
   });
 
 
-  it("allows wildcard table access to reach custom tables when generic field policy is configured", async () => {
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({
-        "*": { defaults: ["sys_id"], readable: "*", writable: "*" },
-      })
-    );
+  it('reads a granted custom table through the built-in "*" field policy when the profile states none', async () => {
+    // The harness profile states no field policy and u_unclassified has no
+    // built-in entry, so the read resolves through the built-in "*" entry.
+    // SN_FIELD_POLICY_DEFINITIONS configures only the SN_PROFILE_NAME
+    // environment profile; that case is in field-policy-config.test.ts.
     const connected = await harness();
     const result = await connected.client.callTool({
       name: "sn_query",
