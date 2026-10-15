@@ -20,7 +20,7 @@ if you used the affected surface.
 | 3 | Table access | any table the credential could reach | deny-by-default per profile; explicit allowlist plus target entries |
 | 4 | Attachments | host `file_path` / `output_path` | inline base64 both directions; no host filesystem access, and no flag restores it |
 | 5 | Queries | raw ServiceNow encoded queries | structured filters; raw reads are opt-in per tool/table |
-| 6 | Incident journals | `sn_update` accepted `comments` / `work_notes` | dedicated `sn_incident_add_comment` / `sn_incident_add_work_note` |
+| 6 | Incident journals | `sn_update` accepted `comments` / `work_notes` | dedicated `sn_incident_add_comment` / `sn_incident_add_work_note`; from 2.2.0 the generic write tools accept both fields again, on every table, under field policy |
 | 7 | Tool surface | 17 tools, one `bin` | 19 tools, three `bin` entries; `sn_script` withdrawn |
 | 8 | Field selection limit | `MAX_FIELDS_PER_OPERATION` was `32`; over-selection raised `excessive_field_selection` | limit is `10_000`; `excessive_field_selection` is removed from the exported `FieldPolicyFailureReason` union |
 | 9 | Capabilities | `tools` only | adds `prompts` (`servicenow-mcp.add-profile`) |
@@ -255,9 +255,16 @@ end of this document.
 
 **Before:** `sn_update` on `incident` with `{"comments": "…"}`.
 
-**After:** `sn_incident_add_comment` with `{profile, sys_id, content}` for a
-customer-visible comment, or `sn_incident_add_work_note` for an internal note.
-`sn_update` rejects both fields before credentials are resolved.
+**After (2.0 and 2.1):** `sn_incident_add_comment` with
+`{profile, sys_id, content}` for a customer-visible comment, or
+`sn_incident_add_work_note` for an internal note. `sn_update` rejects both
+fields before credentials are resolved.
+
+**After (2.2.0 and later):** both shapes work. `sn_create`, `sn_update` and
+`sn_batch` accept `comments` and `work_notes` again, on `incident` and every
+other table granted for writes, and the configured field policy decides
+whether a profile may write them. The dedicated tools remain. See
+[Incident journal migration](#incident-journal-migration).
 
 ### 7. Tool surface and executables
 
@@ -453,10 +460,24 @@ side-effect plan. Legacy ATF execution actions return migration guidance; use
 
 ### Incident journal migration
 
-Generic `sn_update` no longer accepts the append-only incident fields
-`comments` or `work_notes`. Those inputs fail before profile credentials or a
-ServiceNow client are resolved and direct the caller to the matching dedicated
-tool:
+**2.2.0 reverses the generic-write rule below.** In 2.0 and 2.1 the generic
+write tools rejected `comments` and `work_notes` by name, on every table,
+ahead of field policy, and no configuration could lift the rejection. Tables
+other than `incident` had no journal route at all. From 2.2.0:
+
+- `sn_create`, `sn_update` and `sn_batch` write `comments` and `work_notes`
+  on any table granted for writes. A Table API write to a journal field
+  appends one entry; it cannot rewrite earlier entries.
+- Each value gets the same content bounds as the dedicated tools (below).
+- The field policy decides permission. To withhold customer-visible comments
+  from a profile, leave `comments` out of `fieldPolicy.<table>.writable`; on
+  `incident` this also denies `sn_incident_add_comment`.
+- Calls written for 2.0 keep working unchanged.
+
+In 2.0 and 2.1, generic `sn_update` did not accept the append-only incident
+fields `comments` or `work_notes`. Those inputs failed before profile
+credentials or a ServiceNow client were resolved and directed the caller to
+the matching dedicated tool:
 
 - use `sn_incident_add_comment` with `{profile, sys_id, content}` for a
   customer-visible comment;
