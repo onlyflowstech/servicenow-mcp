@@ -138,6 +138,13 @@ const INCIDENT_DEFAULTS = [
   "active",
 ] as const;
 
+/**
+ * Built-in table entries. Only `defaults`, the bounded projection a read gets
+ * when it names no fields, is applied (see FIELD_POLICY_BASE). The `readable`
+ * and `writable` lists below are not read by any code path: a `writable: []`
+ * here denies nothing. What a profile may read or write is decided by its
+ * own field policy, its tableAccess grant, and ServiceNow's ACLs.
+ */
 const POLICY_DEFINITIONS = {
   incident: {
     defaults: INCIDENT_DEFAULTS,
@@ -371,11 +378,12 @@ const POLICY_DEFINITIONS = {
     ],
     writable: [],
   },
-  // Group membership grants every role the group holds. A write here escalates
-  // the integration account to instance admin as surely as a sys_script write,
-  // so the writable set is empty for the same reason. sys_user_role,
-  // sys_user_has_role, and sys_group_has_role are hard-denied at the table
-  // boundary (table-policy.ts); this table is not, so it is denied here.
+  // Group membership grants every role the group holds, so a write here can
+  // escalate the integration account as surely as a sys_script write. Nothing
+  // in this module denies it: like sys_user_role, sys_user_has_role, and
+  // sys_group_has_role (which have no entry here and no table-level block in
+  // table-policy.ts), it is writable exactly when the profile's tableAccess
+  // grants it and its field policy does not narrow it. Grant it deliberately.
   sys_user_grmember: {
     defaults: ["sys_id", "user", "group"],
     readable: ["sys_id", "user", "group", "sys_created_on", "sys_updated_on"],
