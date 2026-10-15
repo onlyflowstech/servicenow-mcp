@@ -171,10 +171,23 @@ servicenow-mcp-setup grant --profile dev --read incident --dry-run
 
 Grants are additive; `--replace` discards the existing rules instead. Every
 grant is validated with the same loader the server uses at request time, so a
-rejected policy fails at the CLI rather than at the first tool call. Default
-tools are `sn_query,sn_get,sn_aggregate,sn_schema` for a read grant and those
-plus `sn_create,sn_update` for a write grant — `sn_delete`, `sn_batch`, and
-`sn_atf` are never granted implicitly and must be named with `--tools`.
+rejected policy fails at the CLI rather than at the first tool call.
+
+Without `--tools`, each table named with `--read` gets
+`sn_query,sn_get,sn_aggregate,sn_schema`, and each table named with `--write`
+gets `sn_create,sn_update`. A write grant on `incident` also binds
+`sn_incident_add_comment` and `sn_incident_add_work_note`. Comments are
+customer-visible, so a comment the agent appends can notify the incident's
+caller. Defaults apply only to the tables named in that command, never to
+tables the profile already allows or reaches as related tables. A re-grant adds
+the defaults to the tools already on an existing target, so re-running
+`--write incident` on a target you narrowed earlier restores `sn_create` and
+both journal tools. To withhold the journal tools, pass an explicit `--tools`
+list, such as `--tools sn_create,sn_update`. A grant never removes a tool, so on
+a profile that already has them, use `--replace` with `--tools`; `--replace`
+discards every rule on the profile, so grant its other tables again afterwards.
+`sn_delete`, `sn_batch`, and `sn_atf` are never granted implicitly and must be
+named with `--tools`.
 
 `grant` refuses `*` and rejects anything that is not a valid table name. It
 does **not** refuse any particular table: `tableAccess` is the sole table-level

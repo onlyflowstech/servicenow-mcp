@@ -17,6 +17,11 @@ import {
   type ProfileEncryptionKeyProvider,
 } from "../src/profile-credentials.js";
 import { ProfileManager } from "../src/profile-manager.js";
+import {
+  authorizeTableAccess,
+  createTableAccessPolicy,
+  type TableAccessPolicy,
+} from "../src/table-policy.js";
 import { createToolError } from "../src/tool-error.js";
 import {
   classifyVerificationFailure,
@@ -603,6 +608,174 @@ describe("setup grant", () => {
     );
   });
 
+  const JOURNAL_TOOLS = ["sn_incident_add_comment", "sn_incident_add_work_note"];
+  const READ_DEFAULTS = ["sn_aggregate", "sn_get", "sn_query", "sn_schema"];
+
+  async function grant(argv: readonly string[]): Promise<void> {
+    await runSetupCli({
+      home,
+      argv: ["grant", "--profile", "dev", ...argv],
+      profileManager: manager,
+      writeStdout: () => undefined,
+    });
+  }
+
+  function toolsOn(table: string): readonly string[] | undefined {
+    return new ProfileManager({ configFilePath: profileConfigPath(home) })
+      .getProfile("dev")
+      .tableAccess?.targets?.find((target) => target.table === table)?.tools;
+  }
+
+  /** Load the persisted rules with the loader the server uses at request time. */
+  function persistedPolicy(): TableAccessPolicy {
+    const persisted = new ProfileManager({
+      configFilePath: profileConfigPath(home),
+    }).getProfile("dev");
+    return createTableAccessPolicy(persisted.tableAccess!);
+  }
+
+  function expectDenied(
+    operation: "read" | "write",
+    table: string,
+    tools: readonly string[]
+  ): void {
+    const policy = persistedPolicy();
+    for (const tool of tools) {
+      expect(() => authorizeTableAccess(policy, { operation, table }, tool)).toThrow(
+        /denied by policy/u
+      );
+    }
+  }
+
+  describe("incident journal tools", () => {
+    it("adds both journal tools to a default incident write grant, and the policy loads", async () => {
+      await grant(["--write", "incident"]);
+
+      expect(toolsOn("incident")).toEqual([
+        "sn_create",
+        "sn_incident_add_comment",
+        "sn_incident_add_work_note",
+        "sn_update",
+      ]);
+      const policy = persistedPolicy();
+      for (const tool of JOURNAL_TOOLS) {
+        expect(
+          authorizeTableAccess(policy, { operation: "write", table: "incident" }, tool)
+        ).toBe("incident");
+      }
+      // Destructive tools are still never granted implicitly.
+      expect(() =>
+        authorizeTableAccess(policy, { operation: "write", table: "incident" }, "sn_delete")
+      ).toThrow(/denied by policy/u);
+    });
+
+    it("adds neither journal tool to a write grant on another table, or a read-only incident grant", async () => {
+      await grant(["--read", "incident", "--write", "change_request"]);
+
+      expect(toolsOn("change_request")).toEqual(["sn_create", "sn_update"]);
+      for (const tool of JOURNAL_TOOLS) {
+        expect(toolsOn("incident")).not.toContain(tool);
+      }
+    });
+
+    it("honours an explicit --tools list without adding the journal tools", async () => {
+      await grant(["--write", "incident", "--tools", "sn_update"]);
+
+      expect(toolsOn("incident")).toEqual(["sn_update"]);
+      expectDenied("write", "incident", JOURNAL_TOOLS);
+    });
+
+    it("keeps the existing tools when re-granting, and adds the journal tools to an older target", async () => {
+      // A target written before the journal tools were a default, carrying a
+      // tool the operator once named explicitly.
+      await grant(["--write", "incident", "--tools", "sn_create,sn_delete,sn_update"]);
+      expect(toolsOn("incident")).toEqual(["sn_create", "sn_delete", "sn_update"]);
+
+      await grant(["--write", "incident"]);
+
+      expect(toolsOn("incident")).toEqual([
+        "sn_create",
+        "sn_delete",
+        "sn_incident_add_comment",
+        "sn_incident_add_work_note",
+        "sn_update",
+      ]);
+      persistedPolicy();
+    });
+
+    it("keeps the journal tools when a later grant names --tools", async () => {
+      await grant(["--write", "incident"]);
+      await grant(["--write", "incident", "--tools", "sn_batch"]);
+
+      expect(toolsOn("incident")).toEqual([
+        "sn_batch",
+        "sn_create",
+        "sn_incident_add_comment",
+        "sn_incident_add_work_note",
+        "sn_update",
+      ]);
+      persistedPolicy();
+    });
+
+    it("removes the journal tools from an existing profile under --replace with --tools", async () => {
+      await grant(["--write", "incident"]);
+      await grant(["--replace", "--write", "incident", "--tools", "sn_update"]);
+
+      expect(toolsOn("incident")).toEqual(["sn_update"]);
+      expectDenied("write", "incident", JOURNAL_TOOLS);
+    });
+
+    it("names the journal tools in the grant help", async () => {
+      await expect(grant(["--help"])).rejects.toMatchObject({
+        help: expect.stringContaining(JOURNAL_TOOLS.join(",")),
+      });
+    });
+  });
+
+  // The merged allowlists also hold the profile's earlier grants and the
+  // related tables of other targets. Default tools must follow only the
+  // tables this invocation names, or a later read grant widens writes.
+  describe("defaults follow the tables this grant names", () => {
+    it("adds no write or journal tool when a read grant follows a narrowed write grant", async () => {
+      await grant(["--write", "incident", "--tools", "sn_update"]);
+      await grant(["--read", "incident"]);
+
+      expect(toolsOn("incident")).toEqual([...READ_DEFAULTS, "sn_update"].sort());
+      expectDenied("write", "incident", ["sn_create", ...JOURNAL_TOOLS]);
+      expect(
+        authorizeTableAccess(persistedPolicy(), { operation: "write", table: "incident" }, "sn_update")
+      ).toBe("incident");
+    });
+
+    it("keeps a table reachable only through another target unwritable after a read grant", async () => {
+      await grant(["--write", "task", "--related", "task=incident"]);
+      expect(toolsOn("incident")).toBeUndefined();
+      expectDenied("write", "incident", ["sn_create", "sn_update", ...JOURNAL_TOOLS]);
+
+      await grant(["--read", "incident"]);
+
+      expect(toolsOn("incident")).toEqual(READ_DEFAULTS);
+      expectDenied("write", "incident", ["sn_create", "sn_update", ...JOURNAL_TOOLS]);
+      // The task target still reaches incident through its closure.
+      expect(
+        authorizeTableAccess(persistedPolicy(), { operation: "write", table: "task" }, "sn_update")
+      ).toBe("task");
+    });
+
+    it("adds no read tool when a write grant names a table readable only through another target", async () => {
+      await grant(["--read", "task", "--related", "task=incident"]);
+      await grant(["--write", "incident"]);
+
+      expect(toolsOn("incident")).toEqual([
+        "sn_create",
+        "sn_incident_add_comment",
+        "sn_incident_add_work_note",
+        "sn_update",
+      ]);
+      expectDenied("read", "incident", READ_DEFAULTS);
+    });
+  });
+
   it("refuses a wildcard grant", async () => {
     await expect(
       runSetupCli({
@@ -1060,6 +1233,8 @@ describe("setup wizard", () => {
     const incident = profile.tableAccess?.targets?.find((t) => t.table === "incident");
     expect(incident?.closureComplete).toBe(true);
     expect(incident?.tools).toContain("sn_update");
+    expect(incident?.tools).toContain("sn_incident_add_comment");
+    expect(incident?.tools).toContain("sn_incident_add_work_note");
     expect(incident?.tools).not.toContain("sn_delete");
 
     expect(out).toContain("Setup complete.");
