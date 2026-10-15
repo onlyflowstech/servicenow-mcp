@@ -1622,7 +1622,7 @@ function buildTableAccess(
 ): TableAccessPolicyInput {
   const readTables = new Set([...(existing.readTables ?? []), ...options.read]);
   const writeTables = new Set([...(existing.writeTables ?? []), ...options.write]);
-  const targets = mergeTargets(existing.targets, options, readTables, writeTables);
+  const targets = mergeTargets(existing.targets, options);
 
   // A target asserts that relatedTables is its complete reachable closure, and
   // the policy loader requires every one of those tables to carry the same
@@ -1655,9 +1655,7 @@ function sorted(values: ReadonlySet<string>): readonly string[] {
 
 function mergeTargets(
   existing: readonly TableAccessTargetInput[] | undefined,
-  options: GrantOptions,
-  readTables: ReadonlySet<string>,
-  writeTables: ReadonlySet<string>
+  options: GrantOptions
 ): readonly TableAccessTargetInput[] {
   const byTable = new Map<string, TableAccessTargetInput>();
   for (const target of existing ?? []) byTable.set(target.table, target);
@@ -1668,10 +1666,14 @@ function mergeTargets(
     if (options.tools) {
       for (const tool of options.tools) tools.add(tool);
     } else {
-      if (readTables.has(table)) {
+      // Defaults follow what this invocation granted, not the merged
+      // allowlists. Those also hold the profile's earlier grants and the
+      // related tables of other targets, so gating on them would let a
+      // read-only grant add write tools to a target.
+      if (options.read.includes(table)) {
         for (const tool of DEFAULT_READ_TOOLS) tools.add(tool);
       }
-      if (writeTables.has(table)) {
+      if (options.write.includes(table)) {
         for (const tool of DEFAULT_WRITE_TOOLS) tools.add(tool);
         if (table === "incident") {
           for (const tool of INCIDENT_JOURNAL_TOOLS) tools.add(tool);
