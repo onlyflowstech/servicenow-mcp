@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > - `sn_create`, `sn_update` and `sn_batch` can append `comments` and
 >   `work_notes` on every table a profile may write. Leaving the dedicated
 >   journal tools off a target no longer withholds journals.
+> - `sn_create` and `sn_update` writes to `incident` are no longer limited to
+>   14 typed fields: every field the profile's field policy allows, such as
+>   `watch_list`, can now be written.
+> - `["*"]` in a field set now means every field. A profile that used it, and
+>   so failed every call, becomes fully open.
 >
 > [Upgrading to the next release](docs/V2-MIGRATION.md#upgrading-to-the-next-release)
 > lists every case with its remedy.
@@ -102,7 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **`sn_batch` never re-sends a request that may have reached the instance.**
+- **`sn_batch` never re-sends a batch request that may have reached the
+  instance.**
   Confirmed updates and deletes go through the ServiceNow REST Batch API, up
   to 50 records per request and fewer when values are large, so a request
   body stays under 4 MiB unless one record's fields alone exceed about 3 MiB
@@ -118,7 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     serviced record in one batch returns a server error, or when more than 10
     records in the run are unconfirmed.
   - The serial fallback stops at the first outcome it cannot confirm, at a
-    429, and at a 401.
+    429, and at a 401. It follows the HTTP client's retry rules: a journal
+    write is never re-sent, and an ordinary (non-journal) `PATCH` is retried
+    up to twice after a 502, 503, 504 or connection error.
   - Unconfirmed records count as neither processed nor failed. Records not
     sent count as failed.
 - `servicenow-mcp-setup grant --write incident` also binds
@@ -163,8 +171,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sn_create` and `sn_update` to a target narrowed with `--tools`, and a
   re-grant could make a table that was reachable only as another target's
   related table directly writable or readable.
-- `sn_batch` changes each matched record at most once per run, even when the
-  lookup names a record twice, and `matched` counts it once. The serial
+- `sn_batch` targets each matched record once per run, even when the lookup
+  names a record twice, and `matched` counts it once. The serial
   fallback stops at a 401 instead of retrying every remaining record with
   credentials ServiceNow has rejected.
 

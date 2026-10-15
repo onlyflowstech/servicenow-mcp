@@ -548,7 +548,9 @@ from starting.
 | [Field policy is validated at load](#field-policy-load-errors) | a profile states `fieldPolicy`, `readableTableFields` or `writableTableFields` | Fix any load error by editing `config.json` |
 | [Journal fields through the generic write tools](#journal-fields-and-the-dedicated-tools) | a profile grants `sn_create`, `sn_update` or `sn_batch` on a table | State an explicit `writable` list wherever comments must be withheld |
 | [The dedicated journal tools follow field policy](#journal-fields-and-the-dedicated-tools) | a profile narrows `writable` on `incident` or on a `"*"` entry | List `comments` or `work_notes` wherever the matching tool must keep working |
+| [`incident` accepts every field](#incident-accepts-every-field) | a profile grants `sn_create` or `sn_update` on `incident` without an explicit `writable` list | If you relied on the old 14-field limit, set `fieldPolicy.incident.writable` (or a `"*"` entry's `writable`) to the fields agents may set |
 | [A `"*"` entry reaches the ITSM and custom tables](#the--entry-reaches-the-itsm-and-custom-tables) | a profile has a `"*"` entry that states `readable` or `writable` | State the key on each table that must stay open |
+| [`["*"]` now means every field](#a-wildcard-list-now-means-every-field) | a profile used `["*"]` in a field set, so every call on it failed | Replace it with an explicit list unless every field is intended |
 | [Class and domain fields must be listed](#class-and-domain-fields) | anything writes `sys_class_name`, `sys_class_path`, `sys_domain` or `sys_domain_path` | List each field in the table's `writable` |
 | [`readable: []` no longer blocks writes](#readable--and-writable-) | a profile uses `readable: []` to hide a table | Add `writable: []`, or leave the table out of `tableAccess` |
 | [Setup grant defaults](#setup-grant-defaults) | you run `servicenow-mcp-setup grant` | Review the incident target after `--write incident` |
@@ -613,7 +615,11 @@ For a `config.json` profile the server prints:
 
 A message names the key path and table, never a configured value. For the
 environment profile there is no prefix, and the key path starts with
-`SN_FIELD_POLICY_DEFINITIONS` instead of `fieldPolicy`.
+`SN_FIELD_POLICY_DEFINITIONS` instead of `fieldPolicy`. Under the dormant HTTP
+transport, these load errors and the `SN_FIELD_POLICY_DEFINITIONS` refusal
+print only `[servicenow-mcp] Fatal HTTP service startup error.`; run the stdio
+server with the same environment, or `servicenow-mcp-setup doctor`, to see the
+full message.
 
 | Configuration | Message (after the prefix) |
 |---|---|
@@ -687,6 +693,49 @@ comes from `fieldPolicy.incident.writable`, or from a `"*"` entry's
 either without the journal fields loses the matching tool, with a denial that
 names the field and `fieldPolicy.incident.writable`. To keep a tool, add its
 field to the list, for example `"incident": {"writable": [..., "comments"]}`.
+
+### `incident` accepts every field
+
+Through 2.2.0-dev.6, `sn_create` and `sn_update` accepted only the 14
+`incident` fields with typed checks (`short_description`, `description`,
+`caller_id`, `assignment_group`, `assigned_to`, `impact`, `urgency`,
+`priority`, `category`, `subcategory`, `state`, `close_code`, `close_notes`
+and `contact_type`), whatever the field policy said. (`sn_batch` applied no
+value checks at all then, so it was never limited this way.) Every other
+incident field is now writable wherever field policy allows it, with the
+generic value bounds: for example `watch_list`, `active`, `parent_incident`,
+`opened_by`, `company`, `cmdb_ci`, and every `u_` or `x_` field. The 14 keep
+their typed checks.
+
+So a profile with no field policy that grants `sn_create` or `sn_update` on
+`incident` can now write all of them. Combined with journal
+writes, a profile that may write both `watch_list` and `comments` can direct
+comment notifications to any address (see
+[Production security boundaries](PRODUCTION-SECURITY.md#writing-journals)).
+If you relied on the old limit, list the fields agents may set:
+
+```json
+{
+  "fieldPolicy": {
+    "incident": {
+      "writable": ["short_description", "description", "state", "assigned_to", "assignment_group", "work_notes"]
+    }
+  }
+}
+```
+
+A `"*"` entry's `writable` list covers `incident` too, when `incident` does
+not state its own.
+
+### A wildcard list now means every field
+
+`["*"]` in `defaults`, `readable` or `writable`, or as a list entry's
+`fields`, now means the same as `"*"`. Through 2.2.0-dev.6 it was read as a
+field named `*`, which is not a field name, so every call on the profile
+failed. After the upgrade, a profile that used it is fully open for that set.
+If you did not intend every field, replace it with an explicit list. Only the
+exact form `["*"]` is widened: `["*", "number"]` and similar look-alikes now
+fail at load.
 
 ### The `"*"` entry reaches the ITSM and custom tables
 
