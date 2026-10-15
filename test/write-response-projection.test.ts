@@ -672,3 +672,36 @@ describe("sys_class_name and sys_domain through sn_update", () => {
     ]);
   });
 });
+
+describe('a named custom table under a narrowing "*" through sn_update', () => {
+  it("denies the write when the table is named only for reads", async () => {
+    const connected = await harness(
+      { fieldPolicy: { "*": { writable: [] }, u_audit: { readable: ["sys_id", "u_note"] } } },
+      []
+    );
+    const result = await connected.call("sn_update", {
+      table: "u_audit",
+      sys_id: SYS_ID,
+      fields: { u_note: "x" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(responseText(result)).toContain("fieldPolicy.u_audit.writable");
+    expect(connected.managerCalls).toEqual({ config: 0, client: 0 });
+  });
+
+  it("writes when the table states its writable set", async () => {
+    const connected = await harness(
+      { fieldPolicy: { "*": { writable: [] }, u_audit: { writable: ["u_note"] } } },
+      [{ operation: "patch", response: { result: { sys_id: SYS_ID } } }]
+    );
+    const result = await connected.call("sn_update", {
+      table: "u_audit",
+      sys_id: SYS_ID,
+      fields: { u_note: "x" },
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(connected.fixture.calls.map((call) => call.operation)).toEqual(["patch"]);
+  });
+});

@@ -685,8 +685,9 @@ const POLICY_DEFINITIONS = {
  * a granted custom table needs no field-policy entry to be usable.
  *
  * A profile's own "*" entry reaches further: it also covers the ITSM tables
- * (ITSM_TABLES), key by key, wherever the table's own entry is silent. The
- * remaining built-in tables are system tables; a "*" entry never covers them.
+ * (ITSM_TABLES) and every table the profile names, key by key, wherever the
+ * table's own entry is silent. Only the system tables (SYSTEM_TABLES) are
+ * never covered by a "*" entry.
  */
 const FIELD_POLICY_BASE: Readonly<Record<string, TableFieldPolicyDefinition>> =
   Object.freeze({
@@ -710,15 +711,11 @@ const FIELD_POLICY_BASE: Readonly<Record<string, TableFieldPolicyDefinition>> =
 const BUILT_IN_TABLE_FIELD_POLICIES = buildFieldPolicyMap(FIELD_POLICY_BASE);
 
 /**
- * Built-in tables whose field policy belongs to the profile. For these,
- * `readable` and `writable` resolve from the profile's own table entry, then
- * the profile's "*" entry, then the built-in "*" (open). Their built-in
- * `defaults` stay as a read-projection convenience, clamped to the effective
- * readable set.
- *
- * Every other built-in table is a system table (scripts, users and groups,
- * ATF, application and dictionary metadata, syslog). It keeps its own
- * built-in entry and is narrowed only by naming it.
+ * Built-in tables whose field policy belongs to the profile, like every
+ * custom table. For these, `readable` and `writable` resolve from the
+ * profile's own table entry, then the profile's "*" entry, then the built-in
+ * "*" (open). Their built-in `defaults` stay as a read-projection
+ * convenience, clamped to the effective readable set.
  */
 const ITSM_TABLES: ReadonlySet<string> = new Set([
   "incident",
@@ -733,6 +730,16 @@ const ITSM_TABLES: ReadonlySet<string> = new Set([
   "cmdb_ci_computer",
   "kb_knowledge",
 ]);
+
+/**
+ * Every other built-in table is a system table (scripts, users and groups,
+ * ATF, application and dictionary metadata, syslog). It keeps its own
+ * built-in entry, a "*" entry never covers it, and it is narrowed only by
+ * naming it.
+ */
+const SYSTEM_TABLES: ReadonlySet<string> = new Set(
+  Object.keys(POLICY_DEFINITIONS).filter((table) => !ITSM_TABLES.has(table))
+);
 
 const GENERIC_RECORD_TABLES = new Set([
   "incident",
@@ -1291,9 +1298,14 @@ function mergeFieldPolicyDefinitions(
       ? configured[table]!
       : {};
     const existing = merged[table];
-    // ITSM tables resolve each set from their own entry, then the profile's
-    // "*" entry, then the base. System tables never take the "*" entry.
-    const fallback = ITSM_TABLES.has(table) ? profileWildcard : undefined;
+    // Every table but the system tables (ITSM and custom alike) resolves each
+    // set from its own entry, then the profile's "*" entry, then the base. A
+    // named custom table therefore cannot escape a narrowing "*" by stating
+    // only the other key. System tables never take the "*" entry.
+    const fallback =
+      table === FIELD_POLICY_WILDCARD || SYSTEM_TABLES.has(table)
+        ? undefined
+        : profileWildcard;
     const readable = definition.readable ?? fallback?.readable;
     merged[table] = {
       // Built-in defaults are clamped to the effective readable set, so a

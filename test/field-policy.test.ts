@@ -1468,3 +1468,100 @@ describe("sys_class_name and sys_domain must be listed explicitly", () => {
     });
   });
 });
+
+describe('a named custom table follows the profile "*" entry key by key', () => {
+  function reason(action: () => unknown): string {
+    try {
+      action();
+      return "allowed";
+    } catch (error) {
+      if (error instanceof FieldPolicyError) return error.reason;
+      throw error;
+    }
+  }
+
+  it("cannot escape a narrowing \"*\" writable set by naming itself for reads", () => {
+    // The fail-open case: before, u_x took the open built-in writable set
+    // because its own entry said nothing about writes.
+    withFieldPolicy({ "*": { writable: [] }, u_x: { readable: ["sys_id", "u_note"] } }, () => {
+      expect(reason(() => validateWritableFields("u_x", { u_note: "x" }))).toBe(
+        "non_writable_field"
+      );
+      expect(resolveReadableFields("u_x")).toEqual(["sys_id", "u_note"]);
+      expect(reason(() => resolveReadableFields("u_x", { fields: "u_other" }))).toBe(
+        "unreadable_field"
+      );
+    });
+    // The same holds in the list form, whose "*" entry is a list entry.
+    runWithFieldPolicyConfiguration(
+      {
+        readableTableFields: [{ table: "u_x", fields: ["sys_id"] }],
+        writableTableFields: [{ table: "*", fields: [] }],
+      },
+      () => {
+        expect(reason(() => validateWritableFields("u_x", { u_note: "x" }))).toBe(
+          "non_writable_field"
+        );
+      }
+    );
+  });
+
+  it("keeps a writable set it states explicitly", () => {
+    withFieldPolicy({ "*": { writable: [] }, u_x: { writable: "*" } }, () => {
+      expect(validateWritableFields("u_x", { u_note: "x" })).toEqual({ u_note: "x" });
+      expect(reason(() => validateWritableFields("u_y", { u_note: "x" }))).toBe(
+        "non_writable_field"
+      );
+    });
+    withFieldPolicy({ "*": { writable: [] }, u_x: { writable: ["u_note"] } }, () => {
+      expect(validateWritableFields("u_x", { u_note: "x" })).toEqual({ u_note: "x" });
+      expect(reason(() => validateWritableFields("u_x", { u_other: "x" }))).toBe(
+        "non_writable_field"
+      );
+    });
+  });
+
+  it('takes its readable set from the "*" entry when it states only writable', () => {
+    withFieldPolicy(
+      { "*": { readable: ["sys_id", "name"] }, u_x: { writable: "*" } },
+      () => {
+        expect(validateWritableFields("u_x", { u_note: "x" })).toEqual({ u_note: "x" });
+        expect(resolveReadableFields("u_x")).toEqual(["sys_id", "name"]);
+        expect(reason(() => resolveReadableFields("u_x", { fields: "u_private" }))).toBe(
+          "unreadable_field"
+        );
+      }
+    );
+  });
+
+  it('checks a defaults-only entry against the "*" readable set', () => {
+    // Without a "*" readable set, an entry that states only defaults still
+    // reads exactly those fields.
+    withFieldPolicy({ u_x: { defaults: ["sys_id", "name"] } }, () => {
+      expect(resolveReadableFields("u_x")).toEqual(["sys_id", "name"]);
+      expect(reason(() => resolveReadableFields("u_x", { fields: "u_other" }))).toBe(
+        "unreadable_field"
+      );
+    });
+    // With one, the readable key resolves from "*", so a default outside it
+    // is a configuration error, reported at load.
+    expect(() =>
+      validateFieldPolicyConfiguration({
+        fieldPolicy: { "*": { readable: ["sys_id"] }, u_x: { defaults: ["sys_id", "name"] } },
+      })
+    ).toThrow('fieldPolicy.u_x.defaults lists "name", which fieldPolicy.u_x.readable does not allow.');
+  });
+
+  it("still never applies the \"*\" entry to a named system table", () => {
+    withFieldPolicy(
+      { "*": { writable: [] }, sys_script: { readable: ["sys_id", "name"] } },
+      () => {
+        expect(validateWritableFields("sys_script", { script: "x" })).toEqual({ script: "x" });
+        expect(resolveReadableFields("sys_script", { fields: "all" })).toEqual([
+          "sys_id",
+          "name",
+        ]);
+      }
+    );
+  });
+});
