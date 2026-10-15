@@ -1308,10 +1308,18 @@ function mergeFieldPolicyDefinitions(
         : profileWildcard;
     const readable = definition.readable ?? fallback?.readable;
     merged[table] = {
-      // Built-in defaults are clamped to the effective readable set, so a
-      // narrowed "*" never leaves a default the table may not read. sys_id
-      // leads every built-in list and stays whenever it is readable.
-      defaults: definition.defaults ?? inheritedDefaults(existing?.defaults, readable),
+      defaults:
+        definition.defaults ??
+        (existing === undefined && definition.readable === undefined
+          ? // A named custom table that leaves readable to the "*" entry
+            // projects what an unnamed table does: the "*" entry's defaults,
+            // else sys_id, clamped. Inheriting the whole "*" readable list
+            // made a concise read ask for every readable column.
+            clampedDefaults(fallback?.defaults ?? GENERIC_DEFAULT_FIELDS, readable)
+          : // Built-in defaults are clamped to the effective readable set, so
+            // a narrowed "*" never leaves a default the table may not read.
+            // sys_id leads every built-in list and stays whenever readable.
+            inheritedDefaults(existing?.defaults, readable)),
       // An entry that states only `defaults` reads exactly those fields.
       readable: readable ?? existing?.readable ?? definition.defaults,
       // Omission no longer denies. An operator who states nothing about
@@ -1321,6 +1329,22 @@ function mergeFieldPolicyDefinitions(
     };
   }
   return merged;
+}
+
+/**
+ * Clamp a default projection to a readable set, the way the "*" entry's own
+ * defaults are clamped for an unnamed table: keep the defaults the set
+ * allows, and fall back to the set itself only when none survive.
+ */
+function clampedDefaults(
+  defaults: FieldPolicySet,
+  readable: FieldPolicySet | undefined
+): FieldPolicySet {
+  if (readable === undefined || readable === FIELD_POLICY_WILDCARD) return defaults;
+  if (defaults === FIELD_POLICY_WILDCARD) return readable;
+  const allowed = new Set(readable);
+  const permitted = defaults.filter((field) => allowed.has(field));
+  return permitted.length > 0 ? permitted : readable;
 }
 
 /**

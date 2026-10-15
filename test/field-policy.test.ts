@@ -1526,10 +1526,62 @@ describe('a named custom table follows the profile "*" entry key by key', () => 
       { "*": { readable: ["sys_id", "name"] }, u_x: { writable: "*" } },
       () => {
         expect(validateWritableFields("u_x", { u_note: "x" })).toEqual({ u_note: "x" });
-        expect(resolveReadableFields("u_x")).toEqual(["sys_id", "name"]);
+        expect(resolveReadableFields("u_x", { fields: "all" })).toEqual(["sys_id", "name"]);
+        // Its concise projection is what an unnamed table gets, not the
+        // whole "*" readable list.
+        expect(resolveReadableFields("u_x")).toEqual(["sys_id"]);
         expect(reason(() => resolveReadableFields("u_x", { fields: "u_private" }))).toBe(
           "unreadable_field"
         );
+      }
+    );
+  });
+
+  it('projects the "*" defaults, else sys_id, under a wide "*" readable list', () => {
+    const wide = ["sys_id", ...Array.from({ length: 299 }, (_, index) => `u_f${index}`)];
+    withFieldPolicy({ "*": { readable: wide }, u_named: { writable: ["u_f1"] } }, () => {
+      expect(resolveReadableFields("u_named")).toEqual(["sys_id"]);
+      // Named and unnamed custom tables project the same way.
+      expect(resolveReadableFields("u_unnamed")).toEqual(["sys_id"]);
+      expect(resolveReadableFields("u_named", { fields: "all" })).toHaveLength(300);
+    });
+    withFieldPolicy(
+      { "*": { defaults: ["sys_id", "u_f7"], readable: wide }, u_named: { writable: ["u_f1"] } },
+      () => {
+        expect(resolveReadableFields("u_named")).toEqual(["sys_id", "u_f7"]);
+        expect(resolveReadableFields("u_unnamed")).toEqual(["sys_id", "u_f7"]);
+      }
+    );
+    // The fallback is clamped: a "*" readable set without sys_id keeps no
+    // default the table may not read.
+    withFieldPolicy({ "*": { readable: ["u_f1", "u_f2"] }, u_named: { writable: "*" } }, () => {
+      expect(resolveReadableFields("u_named")).toEqual(["u_f1", "u_f2"]);
+      expect(resolveReadableFields("u_unnamed")).toEqual(["u_f1", "u_f2"]);
+    });
+    // ITSM and system-table defaults are unchanged by this rule.
+    withFieldPolicy({ "*": { readable: wide } }, () => {
+      expect(resolveReadableFields("incident")).toEqual(["sys_id"]);
+      expect(resolveReadableFields("sys_script")).toEqual(["sys_id", "name", "script"]);
+    });
+  });
+
+  it("keeps the defaults a named custom table states itself", () => {
+    const wide = ["sys_id", ...Array.from({ length: 299 }, (_, index) => `u_f${index}`)];
+    withFieldPolicy(
+      {
+        "*": { defaults: ["sys_id", "u_f7"], readable: wide },
+        u_named: { defaults: ["sys_id", "u_f5", "u_f6"], writable: ["u_f1"] },
+      },
+      () => {
+        expect(resolveReadableFields("u_named")).toEqual(["sys_id", "u_f5", "u_f6"]);
+      }
+    );
+    // A table that states its own readable set keeps the pre-existing
+    // behaviour: with no defaults stated, it projects that set.
+    withFieldPolicy(
+      { "*": { readable: wide }, u_named: { readable: ["sys_id", "u_f3"] } },
+      () => {
+        expect(resolveReadableFields("u_named")).toEqual(["sys_id", "u_f3"]);
       }
     );
   });
