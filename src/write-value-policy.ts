@@ -17,7 +17,10 @@
 import { Buffer } from "node:buffer";
 
 import { validateWritableFields } from "./field-policy.js";
-import { incidentJournalContentSchema } from "./incident-journal-policy.js";
+import {
+  incidentJournalContentSchema,
+  isJournalFieldName,
+} from "./incident-journal-policy.js";
 import { normalizeServiceNowSysId } from "./servicenow-identifiers.js";
 import { normalizeTableName } from "./table-policy.js";
 
@@ -72,9 +75,6 @@ const FIELD_KINDS: Readonly<Record<string, FieldKind>> = Object.freeze({
   close_notes: "long_text",
   contact_type: "choice",
 });
-
-/** Journal fields share these names on incident and every other task table. */
-const JOURNAL_FIELDS: ReadonlySet<string> = new Set(["comments", "work_notes"]);
 
 /** The read shape of a field when display values are requested ("all"). */
 const VALUE_OBJECT_KEYS: ReadonlySet<string> = new Set([
@@ -231,7 +231,7 @@ export function prepareWriteFieldValues(
 }
 
 function fieldValue(table: string, field: string, value: unknown): string {
-  if (JOURNAL_FIELDS.has(field)) return journalValue(table, field, value);
+  if (isJournalFieldName(field)) return journalValue(table, field, value);
   if (table === "incident" && Object.hasOwn(FIELD_KINDS, field)) {
     return canonicalValue(FIELD_KINDS[field]!, field, value);
   }

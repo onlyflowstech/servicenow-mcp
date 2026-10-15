@@ -18,6 +18,21 @@ export const INCIDENT_JOURNAL_MAX_UTF8_BYTES = 16_384;
 
 export type IncidentJournalField = "comments" | "work_notes";
 
+/** Journal fields share these names on incident and every other task table. */
+const JOURNAL_FIELD_NAMES: ReadonlySet<string> = new Set<IncidentJournalField>([
+  "comments",
+  "work_notes",
+]);
+
+/**
+ * True for a canonical journal field name. A write to one appends an entry,
+ * so the value policy bounds it as journal text and the HTTP client never
+ * re-sends it after the request may have reached the instance.
+ */
+export function isJournalFieldName(field: string): boolean {
+  return JOURNAL_FIELD_NAMES.has(field);
+}
+
 const JOURNAL_TOOLS: Readonly<Record<IncidentJournalField, string>> =
   Object.freeze({
     comments: "sn_incident_add_comment",

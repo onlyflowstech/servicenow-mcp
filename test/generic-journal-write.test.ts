@@ -16,6 +16,7 @@ import {
   MAX_CUMULATIVE_UPSTREAM_JSON_BYTES,
   ServiceNowClient,
 } from "../src/client.js";
+import type { AuthProvider } from "../src/auth.js";
 import type { ServiceNowConfig } from "../src/config.js";
 import type {
   ExecutionContextDependencies,
@@ -25,7 +26,10 @@ import type { FieldPolicyConfigurationInput } from "../src/field-policy.js";
 import type { ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy } from "../src/table-policy.js";
-import { createToolError } from "../src/tool-error.js";
+import {
+  createToolError,
+  trustedToolErrorDescriptor,
+} from "../src/tool-error.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
 
 const PROFILE = "journal-write";
@@ -969,5 +973,194 @@ describe("sn_batch response budgets with the real HTTP client", () => {
     expect(stats.POST).toBe(1);
     expect(stats.PATCH).toBe(records);
     expect(stats.served).toBeGreaterThan(MAX_CUMULATIVE_UPSTREAM_JSON_BYTES);
+  });
+});
+
+/**
+ * Scripted fetch behind the real ServiceNowClient. `respond` gets the method,
+ * the URL and how many earlier calls used the same method, and returns a
+ * status and body, or throws to simulate a connection failure.
+ */
+function scriptedFetch(
+  respond: (call: {
+    readonly method: string;
+    readonly url: URL;
+    readonly body: string | undefined;
+    readonly nth: number;
+  }) => { readonly status: number; readonly body?: unknown }
+) {
+  const calls: Array<{ method: string; path: string; body: string | undefined }> = [];
+  const counts = new Map<string, number>();
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    const nth = counts.get(method) ?? 0;
+    counts.set(method, nth + 1);
+    const body = typeof init?.body === "string" ? init.body : undefined;
+    calls.push({ method, path: url.pathname, body });
+    const { status, body: value } = respond({ method, url, body, nth });
+    const text = value === undefined ? "" : JSON.stringify(value);
+    return new Response(status === 204 ? null : text, {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return {
+    calls,
+    count: (method: string) => calls.filter((call) => call.method === method).length,
+  };
+}
+
+function realClient(auth?: AuthProvider) {
+  return new ServiceNowClient(CONFIG, {
+    sleep: async () => {},
+    ...(auth === undefined ? {} : { auth }),
+  });
+}
+
+async function rejection(operation: Promise<unknown>) {
+  try {
+    await operation;
+  } catch (error) {
+    return trustedToolErrorDescriptor(error);
+  }
+  throw new Error("Expected the request to fail");
+}
+
+describe("Security finding 2: journal writes are never re-sent after they may have applied", () => {
+  const RECORD_PATH = `/api/now/table/incident/${SYS_ID}`;
+  const ok = { status: 200, body: { result: { sys_id: SYS_ID } } };
+
+  it.each([
+    ["PATCH comments", "patch", { comments: "Customer update" }],
+    ["PATCH work_notes", "patch", { work_notes: "Internal note" }],
+    ["PUT comments", "put", { comments: "Customer update" }],
+  ] as const)("sends %s once after a 502", async (_label, method, body) => {
+    const fetchLog = scriptedFetch(({ nth }) => (nth < 2 ? { status: 502 } : ok));
+    const descriptor = await rejection(realClient()[method](RECORD_PATH, body));
+
+    expect(fetchLog.calls).toHaveLength(1);
+    // The classification is unchanged: the outcome still reads as unknown.
+    expect(descriptor).toMatchObject({
+      category: "upstream",
+      retry: "retry_if_safe_and_idempotent",
+    });
+  });
+
+  it("sends a journal PATCH once after a connection reset", async () => {
+    let sends = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        sends += 1;
+        throw new TypeError("fetch failed: ECONNRESET");
+      })
+    );
+    const descriptor = await rejection(
+      realClient().patch(RECORD_PATH, { work_notes: "Internal note" })
+    );
+
+    expect(sends).toBe(1);
+    expect(descriptor).toMatchObject({
+      category: "upstream",
+      retry: "retry_if_safe_and_idempotent",
+    });
+  });
+
+  it("still retries an ordinary PATCH on 502", async () => {
+    const fetchLog = scriptedFetch(({ nth }) => (nth < 2 ? { status: 502 } : ok));
+    await realClient().patch(RECORD_PATH, { state: "2" });
+
+    expect(fetchLog.count("PATCH")).toBe(3);
+  });
+
+  it("still retries a journal PATCH on 429", async () => {
+    const fetchLog = scriptedFetch(({ nth }) => (nth < 1 ? { status: 429 } : ok));
+    await realClient().patch(RECORD_PATH, { comments: "Customer update" });
+
+    expect(fetchLog.count("PATCH")).toBe(2);
+  });
+
+  it("still makes the single 401 refresh for a journal PATCH", async () => {
+    const fetchLog = scriptedFetch(({ nth }) => (nth < 1 ? { status: 401 } : ok));
+    const onAuthFailure = vi.fn(async () => true);
+    await realClient({
+      kind: "basic",
+      getAuthHeaders: async () => ({ Authorization: "Basic test" }),
+      onAuthFailure,
+    }).patch(RECORD_PATH, { comments: "Customer update" });
+
+    expect(onAuthFailure).toHaveBeenCalledTimes(1);
+    expect(fetchLog.count("PATCH")).toBe(2);
+  });
+
+  it("serial fallback: 404 batch, then PATCH 502/502/200, appends nothing twice", async () => {
+    // The reviewer's probe D scenario.
+    const second = sysIdFor(1);
+    const fetchLog = scriptedFetch(({ method, nth }) => {
+      if (method === "GET") {
+        return { status: 200, body: { result: [{ sys_id: SYS_ID }, { sys_id: second }] } };
+      }
+      if (method === "POST") return { status: 404, body: {} };
+      return nth < 2 ? { status: 502 } : ok;
+    });
+    const connected = await harness({ client: realClient() });
+    const result = await callTool(connected, "sn_batch", {
+      ...batchArguments({ comments: "Customer update" }),
+      limit: 10,
+    });
+
+    const data = responseData(result);
+    expect(data).toMatchObject({ matched: 2, processed: 0, failed: 1 });
+    expect(data.message).toContain("did not confirm the outcome for 1 record(s)");
+    expect(data.message).toContain("remaining 1 record(s) were not sent");
+    expect(fetchLog.calls.filter(({ method }) => method === "PATCH")).toEqual([
+      expect.objectContaining({ path: `/api/now/table/incident/${SYS_ID}` }),
+    ]);
+  });
+
+  it("sn_update sends a journal PATCH once and reports the failure", async () => {
+    const fetchLog = scriptedFetch(({ nth }) => (nth < 2 ? { status: 502 } : ok));
+    const connected = await harness({ client: realClient() });
+    const result = await callTool(connected, "sn_update", {
+      table: "incident",
+      sys_id: SYS_ID,
+      fields: { comments: "Customer update" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(responseText(result)).toContain("Error category: upstream");
+    expect(fetchLog.count("PATCH")).toBe(1);
+
+    // An ordinary update still gets the transient-5xx retry.
+    const ordinary = scriptedFetch(({ nth }) => (nth < 2 ? { status: 502 } : ok));
+    const updated = await callTool(connected, "sn_update", {
+      table: "incident",
+      sys_id: SYS_ID,
+      fields: { state: "2" },
+    });
+    expect(updated.isError).toBeUndefined();
+    expect(ordinary.count("PATCH")).toBe(3);
+  });
+
+  it.each([
+    ["sn_incident_add_comment", "comments"],
+    ["sn_incident_add_work_note", "work_notes"],
+  ] as const)("%s sends its PATCH once after a 502", async (tool, field) => {
+    const fetchLog = scriptedFetch(({ nth }) => (nth < 2 ? { status: 502 } : ok));
+    const connected = await harness({ client: realClient() });
+    const result = await callTool(connected, tool, {
+      sys_id: SYS_ID,
+      content: "Journal entry",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(fetchLog.calls).toEqual([
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ [field]: "Journal entry" }),
+      }),
+    ]);
   });
 });
