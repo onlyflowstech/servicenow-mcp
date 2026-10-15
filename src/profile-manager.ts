@@ -180,6 +180,7 @@ export class ProfileManager {
 
     const fileConfig = this.loadConfigFile();
     if (fileConfig) {
+      rejectEnvironmentFieldPolicyForFileProfiles();
       this.config = fileConfig;
     } else {
       this.config = this.buildExplicitEnvironmentProfile();
@@ -585,7 +586,8 @@ export class ProfileManager {
     // Like SN_ALLOWED_*, SN_FIELD_POLICY_DEFINITIONS configures this profile
     // only. It used to be a process-wide fallback for every profile that
     // stated no field policy, so it could narrow a file-backed profile the
-    // operator had granted in full.
+    // operator had granted in full. Set alongside a config file, it now
+    // stops startup (rejectEnvironmentFieldPolicyForFileProfiles).
     const fieldPolicy = fieldPolicyInputFromEnvironment(
       process.env as FieldPolicyEnvironment
     );
@@ -699,6 +701,27 @@ export class ProfileManager {
 }
 
 // ── Module-level helpers ───────────────────────────────────────────
+
+/**
+ * Refuse to start when SN_FIELD_POLICY_DEFINITIONS is set but profiles come
+ * from the config file.
+ *
+ * Up to 2.1.0 the variable narrowed every profile that stated no field policy
+ * of its own, config-file profiles included. It now configures only the
+ * SN_PROFILE_NAME environment profile, which a config file replaces, so in
+ * this combination it can do nothing. Ignoring it would silently widen access
+ * for an operator who relied on it; failing names the remedy instead. The
+ * value is never repeated.
+ */
+function rejectEnvironmentFieldPolicyForFileProfiles(): void {
+  if (process.env.SN_FIELD_POLICY_DEFINITIONS?.trim()) {
+    throw new FieldPolicyConfigurationError(
+      "SN_FIELD_POLICY_DEFINITIONS is set, but profiles are loaded from the config " +
+        "file; it now applies only to the SN_PROFILE_NAME environment profile. Move " +
+        "the policy into each profile's fieldPolicy, or unset the variable."
+    );
+  }
+}
 
 function resolvedMetadataCache(profile: Profile): { readonly metadataCache?: MetadataCacheConfigInput } {
   const environmentCache = metadataCacheConfigFromEnvironment();

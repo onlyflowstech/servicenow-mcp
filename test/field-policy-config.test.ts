@@ -321,28 +321,35 @@ describe("SN_FIELD_POLICY_DEFINITIONS configures only the environment profile (#
     vi.stubEnv("SN_USER", "env-user");
   }
 
-  it("leaves a profile with no field policy open on custom tables", () => {
+  it("is never read on the request path", () => {
+    // Only the environment profile carries the variable, as its own keys. A
+    // scope without a field policy stays open even with the variable set.
     vi.stubEnv("SN_FIELD_POLICY_DEFINITIONS", README_READ_ONLY_POLICY);
-    writeProfiles({ full: { tableAccess: { readTables: ["*"], writeTables: ["*"] } } });
 
-    const manager = new ProfileManager({ configFilePath });
-    const profile = manager.getProfile("full");
-    expect(profile.fieldPolicy).toBeUndefined();
-
-    runWithFieldPolicyConfiguration(profileScope(profile), () => {
+    runWithFieldPolicyConfiguration({}, () => {
       for (const table of ["u_custom", "change_task", "hr_case", "x_acme_app_table"]) {
         expect(validateWritableFields(table, { u_note: "x" }), table).toEqual({
           u_note: "x",
         });
       }
     });
-    // Outside any profile scope the variable is not read either.
     expect(validateWritableFields("u_custom", { u_note: "x" })).toEqual({ u_note: "x" });
   });
 
-  it("still applies to the SN_PROFILE_NAME environment profile", () => {
+  it("leaves a config-file profile with no field policy open on custom tables", () => {
+    writeProfiles({ full: { tableAccess: { readTables: ["*"], writeTables: ["*"] } } });
+
+    const profile = new ProfileManager({ configFilePath }).getProfile("full");
+    expect(profile.fieldPolicy).toBeUndefined();
+    runWithFieldPolicyConfiguration(profileScope(profile), () => {
+      expect(validateWritableFields("u_custom", { u_note: "x" })).toEqual({ u_note: "x" });
+    });
+  });
+
+  it("still applies to the SN_PROFILE_NAME environment profile when there is no config file", () => {
     vi.stubEnv("SN_FIELD_POLICY_DEFINITIONS", README_READ_ONLY_POLICY);
     environmentProfile();
+    expect(fs.existsSync(configFilePath)).toBe(false);
 
     const manager = new ProfileManager({ configFilePath });
     const profile = manager.getProfile("env-profile");
@@ -407,9 +414,39 @@ describe("SN_FIELD_POLICY_DEFINITIONS configures only the environment profile (#
     expect(() => new ProfileManager({ configFilePath })).toThrow(expected);
   });
 
-  it("is not read at all when a config file supplies the profiles", () => {
-    vi.stubEnv("SN_FIELD_POLICY_DEFINITIONS", "{not json");
+  it.each<[string, string]>([
+    ["the README recipe", README_READ_ONLY_POLICY],
+    ["a narrowing", JSON.stringify({ zqxcanary_table: { writable: ["zqxcanary_field"] } })],
+    ["invalid JSON", "{zqxcanary"],
+  ])("refuses to start when a config file supplies the profiles and it holds %s", (_label, value) => {
+    // Up to 2.1.0 this value narrowed the file profiles. Ignoring it now would
+    // silently widen them, so startup stops and names the remedy.
+    vi.stubEnv("SN_FIELD_POLICY_DEFINITIONS", value);
+    writeProfiles({ full: { tableAccess: { readTables: ["*"], writeTables: ["*"] } } });
+
+    let error: unknown;
+    try {
+      new ProfileManager({ configFilePath });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(FieldPolicyConfigurationError);
+    const message = (error as Error).message;
+    expect(message).toBe(
+      "SN_FIELD_POLICY_DEFINITIONS is set, but profiles are loaded from the config " +
+        "file; it now applies only to the SN_PROFILE_NAME environment profile. Move " +
+        "the policy into each profile's fieldPolicy, or unset the variable."
+    );
+    expect(message).not.toContain(value);
+    expect(message.toLowerCase()).not.toContain("canary");
+
+    // A mapped environment profile does not change that: the file wins.
     environmentProfile();
+    expect(() => new ProfileManager({ configFilePath })).toThrow(FieldPolicyConfigurationError);
+  });
+
+  it("starts with a config file when the variable is blank", () => {
+    vi.stubEnv("SN_FIELD_POLICY_DEFINITIONS", "  ");
     writeProfiles({ full: {} });
 
     const manager = new ProfileManager({ configFilePath });

@@ -133,7 +133,14 @@ describe("explicit named SN_* environment profile", () => {
     expect(environment.readableTableFields).toBeUndefined();
     expect(environment.writableTableFields).toBeUndefined();
 
-    // A config file replaces the environment profile, and the variable with it.
+  });
+
+  it("refuses to start when SN_FIELD_POLICY_DEFINITIONS is set beside a config file", () => {
+    // A config file replaces the environment profile, so the variable could
+    // no longer narrow anything. Up to 2.1.0 it narrowed these profiles.
+    process.env.SN_FIELD_POLICY_DEFINITIONS = JSON.stringify({
+      u_secret_table: { writable: [] },
+    });
     writeConfigFile({
       version: 2,
       profiles: {
@@ -144,6 +151,19 @@ describe("explicit named SN_* environment profile", () => {
         },
       },
     });
+
+    let message = "";
+    try {
+      new ProfileManager();
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(
+      /^SN_FIELD_POLICY_DEFINITIONS is set, but profiles are loaded from the config file; .*Move the policy into each profile's fieldPolicy, or unset the variable\.$/u
+    );
+    expect(message).not.toContain("u_secret_table");
+
+    delete process.env.SN_FIELD_POLICY_DEFINITIONS;
     expect(new ProfileManager().getProfile("file").fieldPolicy).toBeUndefined();
   });
 
