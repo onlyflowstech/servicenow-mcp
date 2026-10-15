@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   FieldPolicyConfigurationError,
   FieldPolicyError,
+  fieldPolicyInputFromEnvironment,
   resolveReadableFields,
   runWithFieldPolicyConfiguration,
   validateFieldPolicyConfiguration,
@@ -16,9 +17,9 @@ import {
 import { ProfileManager, type Profile } from "../src/profile-manager.js";
 
 /**
- * Field-policy configuration: wildcard spellings and load-time validation.
- * Every ProfileManager here reads a throwaway config path, never the host's
- * ~/.servicenow-mcp.
+ * Field-policy configuration: wildcard spellings, load-time validation, and
+ * the scope of SN_FIELD_POLICY_DEFINITIONS. Every ProfileManager here reads a
+ * throwaway config path, never the host's ~/.servicenow-mcp.
  */
 
 const ENV_KEYS = [
@@ -32,6 +33,11 @@ const ENV_KEYS = [
   "SN_TABLE_ACCESS_TARGETS",
   "SN_FIELD_POLICY_DEFINITIONS",
 ] as const;
+
+/** The README's read-only custom-table recipe for the variable. */
+const README_READ_ONLY_POLICY = JSON.stringify({
+  "*": { defaults: ["sys_id"], readable: "*", writable: [] },
+});
 
 let directory: string;
 let configFilePath: string;
@@ -305,5 +311,108 @@ describe("malformed field policy fails at profile load (#8)", () => {
           .not.toBe("invalid_field_selection");
       });
     }
+  });
+});
+
+describe("SN_FIELD_POLICY_DEFINITIONS configures only the environment profile (#9)", () => {
+  function environmentProfile(name = "env-profile"): void {
+    vi.stubEnv("SN_PROFILE_NAME", name);
+    vi.stubEnv("SN_INSTANCE", "https://env-profile.service-now.com");
+    vi.stubEnv("SN_USER", "env-user");
+  }
+
+  it("leaves a profile with no field policy open on custom tables", () => {
+    vi.stubEnv("SN_FIELD_POLICY_DEFINITIONS", README_READ_ONLY_POLICY);
+    writeProfiles({ full: { tableAccess: { readTables: ["*"], writeTables: ["*"] } } });
+
+    const manager = new ProfileManager({ configFilePath });
+    const profile = manager.getProfile("full");
+    expect(profile.fieldPolicy).toBeUndefined();
+
+    runWithFieldPolicyConfiguration(profileScope(profile), () => {
+      for (const table of ["u_custom", "change_task", "hr_case", "x_acme_app_table"]) {
+        expect(validateWritableFields(table, { u_note: "x" }), table).toEqual({
+          u_note: "x",
+        });
+      }
+    });
+    // Outside any profile scope the variable is not read either.
+    expect(validateWritableFields("u_custom", { u_note: "x" })).toEqual({ u_note: "x" });
+  });
+
+  it("still applies to the SN_PROFILE_NAME environment profile", () => {
+    vi.stubEnv("SN_FIELD_POLICY_DEFINITIONS", README_READ_ONLY_POLICY);
+    environmentProfile();
+
+    const manager = new ProfileManager({ configFilePath });
+    const profile = manager.getProfile("env-profile");
+    expect(profile.fieldPolicy).toEqual(JSON.parse(README_READ_ONLY_POLICY));
+
+    runWithFieldPolicyConfiguration(profileScope(profile), () => {
+      expect(policyReason(() => validateWritableFields("u_custom", { u_note: "x" }))).toBe(
+        "non_writable_field"
+      );
+      expect(resolveReadableFields("u_custom", { fields: "u_note" })).toEqual(["u_note"]);
+    });
+  });
+
+  it("maps the profile-key form onto the same profile keys", () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({
+        writableTableFields: [{ table: "incident", fields: ["state"] }],
+      })
+    );
+    environmentProfile();
+
+    const profile = new ProfileManager({ configFilePath }).getProfile("env-profile");
+    expect(profile.fieldPolicy).toBeUndefined();
+    expect(profile.writableTableFields).toEqual([{ table: "incident", fields: ["state"] }]);
+    runWithFieldPolicyConfiguration(profileScope(profile), () => {
+      expect(
+        policyReason(() => validateWritableFields("incident", { short_description: "x" }))
+      ).toBe("non_writable_field");
+    });
+  });
+
+  it("states no field policy when the variable is unset or blank", () => {
+    environmentProfile();
+    expect(new ProfileManager({ configFilePath }).getProfile("env-profile").fieldPolicy)
+      .toBeUndefined();
+
+    vi.stubEnv("SN_FIELD_POLICY_DEFINITIONS", "   ");
+    expect(fieldPolicyInputFromEnvironment({ SN_FIELD_POLICY_DEFINITIONS: "   " })).toEqual({});
+    expect(new ProfileManager({ configFilePath }).getProfile("env-profile").fieldPolicy)
+      .toBeUndefined();
+  });
+
+  it.each<[string, string, RegExp]>([
+    ["invalid JSON", "{not json", /^SN_FIELD_POLICY_DEFINITIONS is not valid JSON\.$/u],
+    ["a non-object", "[]", /^SN_FIELD_POLICY_DEFINITIONS must be a JSON object\.$/u],
+    ["an oversized value", JSON.stringify({ "*": { readable: "*", u: "x".repeat(70_000) } }), /exceeds 65536 characters/u],
+    [
+      "a pattern",
+      JSON.stringify({ u_audit: { writable: ["u_*"] } }),
+      /^SN_FIELD_POLICY_DEFINITIONS\.u_audit\.writable\[0\] is not a field name/u,
+    ],
+    [
+      "a pattern in the profile-key form",
+      JSON.stringify({ writableTableFields: [{ table: "incident", fields: ["u_*"] }] }),
+      /^SN_FIELD_POLICY_DEFINITIONS\.writableTableFields\[0\]\.fields\[0\] \(table "incident"\)/u,
+    ],
+  ])("fails the environment profile at startup on %s", (_label, value, expected) => {
+    vi.stubEnv("SN_FIELD_POLICY_DEFINITIONS", value);
+    environmentProfile();
+
+    expect(() => new ProfileManager({ configFilePath })).toThrow(expected);
+  });
+
+  it("is not read at all when a config file supplies the profiles", () => {
+    vi.stubEnv("SN_FIELD_POLICY_DEFINITIONS", "{not json");
+    environmentProfile();
+    writeProfiles({ full: {} });
+
+    const manager = new ProfileManager({ configFilePath });
+    expect(manager.listProfiles().map(({ name }) => name)).toEqual(["full"]);
   });
 });

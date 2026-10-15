@@ -32,7 +32,9 @@ import {
 } from "./atf-config.js";
 import {
   FieldPolicyConfigurationError,
+  fieldPolicyInputFromEnvironment,
   validateFieldPolicyConfiguration,
+  type FieldPolicyEnvironment,
 } from "./field-policy.js";
 import { tableAccessPolicyInputFromEnvironment, type TableAccessPolicyInput } from "./table-policy.js";
 import { metadataCacheConfigFromEnvironment, type MetadataCacheConfigInput } from "./metadata-cache.js";
@@ -88,7 +90,8 @@ export interface Profile {
   tableAccess?: TableAccessPolicyInput;
   /**
    * Per-profile field policy: { table | "*": { defaults, readable, writable } }.
-   * Validated at load.
+   * Validated at load. On the SN_PROFILE_NAME environment profile it comes
+   * from SN_FIELD_POLICY_DEFINITIONS; no other profile reads that variable.
    */
   fieldPolicy?: unknown;
   /** Per-profile readable fields: [{ table, fields }]. Missing readable fields means all fields are readable. Validated at load. */
@@ -577,6 +580,23 @@ export class ProfileManager {
       tableAccess.targets !== undefined
     ) {
       profile.tableAccess = tableAccess;
+    }
+
+    // Like SN_ALLOWED_*, SN_FIELD_POLICY_DEFINITIONS configures this profile
+    // only. It used to be a process-wide fallback for every profile that
+    // stated no field policy, so it could narrow a file-backed profile the
+    // operator had granted in full.
+    const fieldPolicy = fieldPolicyInputFromEnvironment(
+      process.env as FieldPolicyEnvironment
+    );
+    if (fieldPolicy.fieldPolicy !== undefined) {
+      profile.fieldPolicy = fieldPolicy.fieldPolicy;
+    }
+    if (fieldPolicy.readableTableFields !== undefined) {
+      profile.readableTableFields = fieldPolicy.readableTableFields;
+    }
+    if (fieldPolicy.writableTableFields !== undefined) {
+      profile.writableTableFields = fieldPolicy.writableTableFields;
     }
 
     const metadataCache = metadataCacheConfigFromEnvironment();

@@ -37,6 +37,7 @@ const ENV_KEYS = [
   "SN_ALLOWED_INSTANCE_HOSTS",
   "SN_METADATA_CACHE_TTL_MS",
   "SN_METADATA_CACHE_TABLES",
+  "SN_FIELD_POLICY_DEFINITIONS",
   "SN_PROFILE_ENCRYPTION_KEY",
   "UNSET_PROFILE_SECRET",
   // Test-only variables referenced by sn_profile add round-trip tests
@@ -118,6 +119,32 @@ describe("explicit named SN_* environment profile", () => {
       ttlMs: 86400000,
       tables: ["sys_dictionary", "sys_metadata*"],
     });
+  });
+
+  it("maps SN_FIELD_POLICY_DEFINITIONS onto the environment profile only", () => {
+    const policy = { incident: { writable: ["state"] } };
+    process.env.SN_FIELD_POLICY_DEFINITIONS = JSON.stringify(policy);
+    process.env.SN_PROFILE_NAME = "field-env";
+    process.env.SN_INSTANCE = "https://field-env.service-now.com";
+
+    const environment = new ProfileManager().getProfile("field-env");
+    expect(environment.fieldPolicy).toEqual(policy);
+    expect(Object.isFrozen(environment.fieldPolicy)).toBe(true);
+    expect(environment.readableTableFields).toBeUndefined();
+    expect(environment.writableTableFields).toBeUndefined();
+
+    // A config file replaces the environment profile, and the variable with it.
+    writeConfigFile({
+      version: 2,
+      profiles: {
+        file: {
+          instance: "https://file.service-now.com",
+          username: "admin",
+          credential: "env:SN_PASSWORD",
+        },
+      },
+    });
+    expect(new ProfileManager().getProfile("file").fieldPolicy).toBeUndefined();
   });
 
   it("rejects a malformed field policy at load and names the profile, table, and key", () => {

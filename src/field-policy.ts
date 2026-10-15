@@ -4,8 +4,10 @@
  * Table authorization answers whether a tool may reach a table. This module
  * supplies the second, independent boundary: which fields may be requested,
  * written, or returned for the supported V2 table domains. Built-in defaults
- * can be extended or overridden with SN_FIELD_POLICY_DEFINITIONS, including a
- * generic "*" table fallback for operator-approved custom-table access.
+ * can be narrowed per profile (`fieldPolicy`, `readableTableFields`,
+ * `writableTableFields`), including a generic "*" table fallback. The
+ * SN_FIELD_POLICY_DEFINITIONS variable feeds only the SN_PROFILE_NAME
+ * environment profile; this module never reads the process environment.
  *
  * @module field-policy
  */
@@ -64,6 +66,10 @@ export interface FieldPolicyConfigurationInput {
   readonly writableTableFields?: unknown;
 }
 
+export interface FieldPolicyEnvironment {
+  readonly SN_FIELD_POLICY_DEFINITIONS?: string;
+}
+
 interface FieldPolicyConfiguration {
   readonly definitions: Record<string, MutableTableFieldPolicyDefinition>;
 }
@@ -95,6 +101,12 @@ const ALL_FIELDS_SELECTION = Object.freeze([FIELD_POLICY_WILDCARD]) as readonly 
  * defaults the operator did not state. An unstated default must stay finite:
  * "may read any field" is not "return every field on every query". */
 const GENERIC_DEFAULT_FIELDS = Object.freeze(["sys_id"]) as readonly string[];
+/** Configuration keys a scoped field policy may carry. */
+const FIELD_POLICY_CONFIGURATION_KEYS = Object.freeze([
+  "fieldPolicy",
+  "readableTableFields",
+  "writableTableFields",
+] as const);
 const FIELD_NAME_RULE =
   "letters, digits, and underscores, starting with a letter, at most 80 characters";
 
@@ -1274,22 +1286,14 @@ function buildFieldPolicyMap(
 function readConfiguredFieldPolicyDefinitions():
   | FieldPolicyConfiguration
   | undefined {
+  // Only the profile scope configures field policy. SN_FIELD_POLICY_DEFINITIONS
+  // reaches this point solely as the SN_PROFILE_NAME environment profile's
+  // own keys (profile-manager.ts), never as a process-wide fallback.
   const scoped = FIELD_POLICY_CONFIGURATION_SCOPE.getStore();
   if (scoped && (scoped.fieldPolicy !== undefined || scoped.readableTableFields !== undefined || scoped.writableTableFields !== undefined)) {
     return normalizeConfiguredFieldPolicy(scoped);
   }
-  const text = process.env[FIELD_POLICY_DEFINITIONS_ENV];
-  if (text === undefined || text.trim() === "") return undefined;
-  if (text.length > MAX_FIELD_POLICY_DEFINITIONS_TEXT_LENGTH) {
-    throw new FieldPolicyError("invalid_argument_shape");
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new FieldPolicyError("invalid_argument_shape");
-  }
-  return normalizeConfiguredFieldPolicy(parsed);
+  return undefined;
 }
 
 /**
@@ -1332,6 +1336,63 @@ export function validateFieldPolicyConfiguration(
   input: FieldPolicyConfigurationInput
 ): void {
   validateConfiguration(input, PROFILE_CONFIGURATION_LABELS);
+}
+
+/**
+ * Map SN_FIELD_POLICY_DEFINITIONS onto the field-policy keys of the
+ * SN_PROFILE_NAME environment profile. The caller passes the environment:
+ * this module never reads process.env, so the variable cannot reach a
+ * file-backed profile.
+ *
+ * The value is either a table map (`{"incident":{...}}`) or an object holding
+ * the profile keys themselves (`fieldPolicy`, `readableTableFields`,
+ * `writableTableFields`); both keep their previous meaning.
+ */
+export function fieldPolicyInputFromEnvironment(
+  environment: FieldPolicyEnvironment
+): FieldPolicyConfigurationInput {
+  const text = environment.SN_FIELD_POLICY_DEFINITIONS;
+  if (text === undefined || text.trim() === "") return Object.freeze({});
+  if (text.length > MAX_FIELD_POLICY_DEFINITIONS_TEXT_LENGTH) {
+    throw new FieldPolicyConfigurationError(
+      `${FIELD_POLICY_DEFINITIONS_ENV} exceeds ${MAX_FIELD_POLICY_DEFINITIONS_TEXT_LENGTH} characters.`
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new FieldPolicyConfigurationError(
+      `${FIELD_POLICY_DEFINITIONS_ENV} is not valid JSON.`
+    );
+  }
+  if (!isPlainRecordCandidate(parsed)) {
+    throw new FieldPolicyConfigurationError(
+      `${FIELD_POLICY_DEFINITIONS_ENV} must be a JSON object.`
+    );
+  }
+  const record = definedOwnProperties(parsed as Record<string, unknown>);
+  const stated = FIELD_POLICY_CONFIGURATION_KEYS.filter((key) =>
+    Object.hasOwn(record, key)
+  );
+  const input: FieldPolicyConfigurationInput =
+    stated.length > 0
+      ? Object.freeze(Object.fromEntries(stated.map((key) => [key, record[key]])))
+      : Object.freeze({ fieldPolicy: record });
+  validateConfiguration(
+    input,
+    stated.length > 0
+      ? {
+          fieldPolicy: `${FIELD_POLICY_DEFINITIONS_ENV}.fieldPolicy`,
+          readableTableFields: `${FIELD_POLICY_DEFINITIONS_ENV}.readableTableFields`,
+          writableTableFields: `${FIELD_POLICY_DEFINITIONS_ENV}.writableTableFields`,
+        }
+      : {
+          ...PROFILE_CONFIGURATION_LABELS,
+          fieldPolicy: FIELD_POLICY_DEFINITIONS_ENV,
+        }
+  );
+  return input;
 }
 
 function validateConfiguration(
@@ -1416,9 +1477,6 @@ function normalizeConfiguredFieldPolicy(
     throw new FieldPolicyError("invalid_argument_shape");
   }
   const outerRecord = definedOwnProperties(parsed as Record<string, unknown>);
-  const policySource = Object.hasOwn(outerRecord, "fieldPolicy")
-    ? outerRecord.fieldPolicy
-    : outerRecord;
   if (
     Object.hasOwn(outerRecord, "readableTableFields") ||
     Object.hasOwn(outerRecord, "writableTableFields")
@@ -1428,8 +1486,10 @@ function normalizeConfiguredFieldPolicy(
     applyTableFieldList(definitions, outerRecord.writableTableFields, "writable");
     return Object.freeze({ definitions });
   }
-  if (policySource === undefined) return undefined;
-  return Object.freeze({ definitions: fieldPolicyDefinitions(policySource) });
+  if (outerRecord.fieldPolicy === undefined) return undefined;
+  return Object.freeze({
+    definitions: fieldPolicyDefinitions(outerRecord.fieldPolicy),
+  });
 }
 
 /**
