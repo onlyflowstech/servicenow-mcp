@@ -15,6 +15,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createEncodedQueryAccessPolicy } from "../src/encoded-query-policy.js";
+import { STRUCTURAL_UNCACHEABLE_MS } from "../src/metadata-cache.js";
 import type {
   EffectivePolicyProvider,
   ExecutionContextDependencies,
@@ -95,6 +96,15 @@ function stubInstances() {
         date: "Wed, 15 Jan 2025 13:00:00 GMT",
       });
     }
+    if (url.pathname === "/api/now/table/sys_db_object") {
+      // incident -> task, by label as the walk reads super_class today.
+      const name = /^name=([a-z_]+)/u.exec(params.get("sysparm_query") ?? "")?.[1];
+      const parent = name === "incident" ? "Task" : "";
+      return json(200, { result: name ? [{ name, super_class: parent }] : [] });
+    }
+    if (url.pathname === "/api/now/table/sys_documentation" || url.pathname === "/api/now/table/sys_choice") {
+      return json(200, { result: [] });
+    }
     if (url.pathname === "/api/now/table/sys_dictionary") {
       const query = params.get("sysparm_query") ?? "";
       const allowed = /\^elementIN([^^]+)/u.exec(query)?.[1]?.split(",");
@@ -145,8 +155,8 @@ const GRANTS = Object.freeze({
   ],
 });
 // Any explicit setting turns either cache on under NODE_ENV=test; production
-// runs with both on by default.
-const METADATA_CACHE = Object.freeze({ ttlMs: 60_000 });
+// runs with both on by default, and with this TTL.
+const METADATA_CACHE = Object.freeze({ ttlMs: 24 * 60 * 60 * 1000 });
 const SCHEMA_CACHE_TTL_MS = 300_000;
 
 const openClients: Client[] = [];
@@ -254,25 +264,37 @@ describe.each([
     ]);
   });
 
-  it("bypasses the cache for one call when the watermark read fails, then serves from it again", async () => {
+  it("passes a table straight through after a refused watermark read, then serves the kept entry", async () => {
     const upstream = stubInstances();
     vi.stubGlobal("fetch", upstream.fetchStub);
     const client = await connect(PROFILES);
-    const reads = () => upstream.calls.filter((call) => call.host === host && call.kind === "read");
+    const since = (start: number) => upstream.calls.slice(start).filter((call) => call.host === host).map((call) => call.kind);
 
-    await query(client);
-    await query(client);
-    expect(reads()).toHaveLength(1);
+    // Only Date is faked: transport and client timers stay real.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      await query(client);
+      await query(client);
 
-    // 403 is not retried by the client, so this is exactly one failed read.
-    upstream.state(host).watermarkStatuses.push(403);
-    await query(client);
-    expect(reads()).toHaveLength(2);
+      // 403 is not retried by the client and is a structural cause.
+      upstream.state(host).watermarkStatuses.push(403);
+      let start = upstream.calls.length;
+      await query(client);
+      expect(since(start)).toEqual(["watermark", "read"]);
 
-    const before = upstream.calls.length;
-    await query(client);
-    expect(reads()).toHaveLength(2);
-    expect(upstream.calls.slice(before).map((call) => call.kind)).toEqual(["watermark"]);
+      // Remembered: straight through, no watermark request.
+      start = upstream.calls.length;
+      await query(client);
+      expect(since(start)).toEqual(["read"]);
+
+      // After the period the entry kept from the first call serves again.
+      vi.setSystemTime(Date.now() + STRUCTURAL_UNCACHEABLE_MS + 1_000);
+      start = upstream.calls.length;
+      await query(client);
+      expect(since(start)).toEqual(["watermark"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("refreshes when the watermark moves, including a delete that only changes the count", async () => {
@@ -322,6 +344,24 @@ describe("sn_schema cache end to end", () => {
     expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
     return (result.structuredContent as { data: { fields: string[] } }).data.fields;
   }
+
+  it("reads each table's watermark once in a call that walks the hierarchy", async () => {
+    const upstream = stubInstances();
+    vi.stubGlobal("fetch", upstream.fetchStub);
+    const client = await connect({ basic: PROFILES.basic });
+
+    const result = await client.callTool({
+      name: "sn_schema",
+      arguments: { profile: "basic", table: "incident" },
+    });
+
+    expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
+    const hierarchyReads = upstream.calls.filter((call) => call.path === "/api/now/table/sys_db_object");
+    // Two hops (incident, task), one sys_db_object watermark.
+    expect(hierarchyReads.map((call) => call.kind)).toEqual(["watermark", "read", "read"]);
+    const watermarks = upstream.calls.filter((call) => call.kind === "watermark").map((call) => call.path);
+    expect(watermarks).toEqual(["/api/now/table/sys_db_object", "/api/now/table/sys_dictionary"]);
+  });
 
   it("hits across tool calls, so a repeat costs no upstream request", async () => {
     const upstream = stubInstances();

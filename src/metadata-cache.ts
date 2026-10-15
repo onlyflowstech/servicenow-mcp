@@ -26,14 +26,23 @@
  * watermark refreshes recency for eviction but never extends expiresAt, so the
  * entry still expires on schedule and forces a genuine refetch.
  *
+ * Two memos keep the watermark from costing more than it saves. Within one
+ * tool call each table's watermark is read once, however many reads of the
+ * table the call makes. Across calls, a table whose watermark proved unusable
+ * is read straight through, without a watermark, for a while: long for causes
+ * that persist (an incomplete or future-dated watermark, a 4xx), short for
+ * transient ones (429, 5xx, timeouts, network).
+ *
  * @module metadata-cache
  */
 
-import type {
-  RequestResult,
-  ServiceNowOperations,
+import {
+  isServiceNowRequestCancellation,
+  type RequestResult,
+  type ServiceNowOperations,
 } from "./client.js";
 import { parsePositiveIntegerEnv } from "./config.js";
+import { trustedToolErrorDescriptor } from "./tool-error.js";
 
 export const DEFAULT_METADATA_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 /**
@@ -70,12 +79,25 @@ export interface MetadataCacheConfig {
 
 type Jsonish = Awaited<ReturnType<Response["json"]>>;
 
-/** A table's row count and newest row, as the instance reports them. */
+/**
+ * A table's row count and newest row, as the instance reports them. An empty
+ * table has count 0 and blank row fields.
+ */
 interface Watermark {
   readonly count: number;
   readonly sysId: string;
   readonly updatedOn: string;
 }
+
+/**
+ * Why a watermark cannot be used, which decides how long the table's reads go
+ * straight through. A cancelled read says nothing about the table.
+ */
+type UnusableReason = "structural" | "transient" | "cancelled";
+
+type WatermarkRead =
+  | { readonly usable: true; readonly watermark: Watermark }
+  | { readonly usable: false; readonly reason: UnusableReason };
 
 interface CacheEntry {
   readonly expiresAt: number;
@@ -86,7 +108,13 @@ interface CacheEntry {
   readonly headers: readonly [string, string][];
 }
 
-const SCOPED_CACHES = new Map<string, Map<string, CacheEntry>>();
+interface ScopeState {
+  readonly entries: Map<string, CacheEntry>;
+  /** Table -> epoch ms until which its reads pass through without a watermark. */
+  readonly uncacheable: Map<string, number>;
+}
+
+const SCOPED_CACHES = new Map<string, ScopeState>();
 const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 /** sys_updated_on as returned with sysparm_display_value=false (UTC). */
 const STORED_DATE_TIME = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/u;
@@ -99,6 +127,10 @@ const MAX_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  * so both are capped and evicted in least-recently-used order. */
 export const MAX_METADATA_CACHE_SCOPES = 64;
 export const MAX_METADATA_CACHE_ENTRIES_PER_SCOPE = 512;
+/** How long a table goes uncached after its watermark proved unusable; never
+ * longer than the cache TTL. */
+export const STRUCTURAL_UNCACHEABLE_MS = 15 * 60 * 1000;
+export const TRANSIENT_UNCACHEABLE_MS = 30 * 1000;
 
 interface MetadataCacheEnvironment {
   readonly SN_METADATA_CACHE_TTL_MS?: string;
@@ -142,30 +174,45 @@ export function createCachedServiceNowOperations(
     return operations;
   }
   const cacheConfig = createMetadataCacheConfig(config);
-  const scopedCache = cacheForScope(scope);
+  const state = stateForScope(scope);
+  // One watermark per table for this wrapper's lifetime, which is one tool
+  // call: the dispatcher builds a wrapper per call. A hierarchy walk then
+  // reads sys_db_object's watermark once, not once per hop. Any write the call
+  // makes clears it, so the call's later reads see its own writes. No memo
+  // spans calls: that would add staleness across calls for almost no time.
+  const watermarks = new Map<string, Promise<WatermarkRead>>();
+  const clearingWatermarks = <A extends unknown[], R>(write: (...args: A) => Promise<R>) =>
+    async (...args: A): Promise<R> => {
+      try {
+        return await write(...args);
+      } finally {
+        watermarks.clear();
+      }
+    };
   const cached = Object.create(null) as ServiceNowOperations;
   Object.defineProperties(cached, {
     get: {
       value: async <T = Jsonish>(path: string, params?: Record<string, string>) =>
-        (await cachedGetWithMeta<T>(operations, scopedCache, cacheConfig, path, params)).data,
+        (await cachedGetWithMeta<T>(operations, state, watermarks, cacheConfig, path, params)).data,
     },
     getWithMeta: {
       value: <T = Jsonish>(path: string, params?: Record<string, string>) =>
-        cachedGetWithMeta<T>(operations, scopedCache, cacheConfig, path, params),
+        cachedGetWithMeta<T>(operations, state, watermarks, cacheConfig, path, params),
     },
-    post: { value: operations.post.bind(operations) },
-    patch: { value: operations.patch.bind(operations) },
-    delete: { value: operations.delete.bind(operations) },
-    postBinary: { value: operations.postBinary.bind(operations) },
+    post: { value: clearingWatermarks(operations.post.bind(operations)) },
+    patch: { value: clearingWatermarks(operations.patch.bind(operations)) },
+    delete: { value: clearingWatermarks(operations.delete.bind(operations)) },
+    postBinary: { value: clearingWatermarks(operations.postBinary.bind(operations)) },
     getRaw: { value: operations.getRaw.bind(operations) },
-    ...(operations.saveAtfStepInputs ? { saveAtfStepInputs: { value: operations.saveAtfStepInputs.bind(operations) } } : {}),
+    ...(operations.saveAtfStepInputs ? { saveAtfStepInputs: { value: clearingWatermarks(operations.saveAtfStepInputs.bind(operations)) } } : {}),
   });
   return Object.freeze(cached);
 }
 
 async function cachedGetWithMeta<T>(
   operations: ServiceNowOperations,
-  cache: Map<string, CacheEntry>,
+  state: ScopeState,
+  watermarks: Map<string, Promise<WatermarkRead>>,
   config: MetadataCacheConfig,
   path: string,
   params: Record<string, string> | undefined
@@ -179,15 +226,29 @@ async function cachedGetWithMeta<T>(
     return operations.getWithMeta<T>(path, cleanParams);
   }
 
-  const key = cacheKey(path, cleanParams);
   const now = Date.now();
+  const uncacheableUntil = state.uncacheable.get(match);
+  if (uncacheableUntil !== undefined) {
+    if (!forceRecache && uncacheableUntil > now) {
+      return operations.getWithMeta<T>(path, cleanParams);
+    }
+    // Expired, or the caller asked for a refresh: try the watermark again.
+    state.uncacheable.delete(match);
+    watermarks.delete(match);
+  }
+
+  const cache = state.entries;
+  const key = cacheKey(path, cleanParams);
   const existing = cache.get(key);
 
   // Read on a miss too, and always before the rows. An update landing between
   // the two reads is then in the rows but not the watermark, which costs one
   // extra refresh; read the other way round it would be in the watermark but
   // not the rows, and the next comparison would serve it stale until expiry.
-  const watermark = await tableWatermark(operations, match);
+  // A watermark memoized earlier in the call was also read before these rows.
+  const read = await callWatermark(operations, watermarks, match);
+  if (!read.usable) markUncacheable(state, match, read.reason, config.ttlMs);
+  const watermark = read.usable ? read.watermark : undefined;
   if (
     !forceRecache &&
     existing !== undefined &&
@@ -205,7 +266,7 @@ async function cachedGetWithMeta<T>(
   // it is how a caller surfaces a write the watermark missed. Any other
   // refetch leaves the entry until it is replaced -- if these rows cannot be
   // kept, the old ones are still correct against any later watermark read that
-  // matches theirs, so one failed read bypasses the cache for this call only.
+  // matches theirs, so they serve again once the table is cacheable again.
   if (forceRecache) cache.delete(key);
   const fresh = await operations.getWithMeta<T>(path, cleanParams);
   // Only a materialized 200 body is reusable. A 204 carries no rows, and a
@@ -229,6 +290,32 @@ async function cachedGetWithMeta<T>(
   return fresh;
 }
 
+function callWatermark(
+  operations: ServiceNowOperations,
+  watermarks: Map<string, Promise<WatermarkRead>>,
+  table: string
+): Promise<WatermarkRead> {
+  let pending = watermarks.get(table);
+  if (pending === undefined) {
+    pending = tableWatermark(operations, table);
+    watermarks.set(table, pending);
+  }
+  return pending;
+}
+
+function markUncacheable(
+  state: ScopeState,
+  table: string,
+  reason: UnusableReason,
+  ttlMs: number
+): void {
+  if (reason === "cancelled") return;
+  const period = reason === "structural" ? STRUCTURAL_UNCACHEABLE_MS : TRANSIENT_UNCACHEABLE_MS;
+  state.uncacheable.delete(table);
+  state.uncacheable.set(table, Date.now() + Math.min(period, ttlMs));
+  evictOldest(state.uncacheable, MAX_METADATA_CACHE_ENTRIES_PER_SCOPE);
+}
+
 /** Drop least-recently-used entries until the map is within `limit`. */
 function evictOldest(entries: Map<string, unknown>, limit: number): void {
   while (entries.size > limit) {
@@ -247,20 +334,25 @@ function evictOldest(entries: Map<string, unknown>, limit: number): void {
  * only while sysparm_no_count is left unset (with it set, the header still
  * comes back but holds the page size).
  *
- * Undefined means the watermark is unusable and nothing may be served from or
- * kept in the cache:
- * - the read failed, or the count or a row field came back missing or
+ * A count of 0 with no rows is a valid watermark for an empty table: the
+ * header counts rows before row ACLs filter them (a table whose newest row is
+ * ACL-hidden reads back a positive count and no row), so any insert moves it.
+ *
+ * The watermark is unusable, structurally, when:
+ * - the response is not a 200, or the count or a row field is missing or
  *   malformed (an unreadable sys_updated_on would compare equal forever);
- * - the table read back empty, which is also what a row ACL that filters after
- *   the limit produces when it hides the newest row;
+ * - the count is positive but no row came back, which is what a row ACL that
+ *   filters after the limit produces when it hides the newest row;
  * - the newest row is dated after the instance's own clock (the response Date
  *   header). Such a row stays the newest however many others are updated, so
  *   only the count would move, and in-place updates would go unseen.
+ * A thrown read is classified by readFailureReason.
  */
 async function tableWatermark(
   operations: ServiceNowOperations,
   table: string
-): Promise<Watermark | undefined> {
+): Promise<WatermarkRead> {
+  const structural = { usable: false, reason: "structural" } as const;
   try {
     const response = await operations.getWithMeta<{ result?: unknown[] }>(
       `/api/now/table/${table}`,
@@ -273,22 +365,49 @@ async function tableWatermark(
       }
     );
     const count = response.headers.get("x-total-count") ?? "";
-    if (response.status !== 200 || !ROW_COUNT.test(count)) return undefined;
+    if (response.status !== 200 || !ROW_COUNT.test(count)) return structural;
     const rows = response.data?.result;
-    const row = Array.isArray(rows) ? rows[0] : undefined;
-    if (typeof row !== "object" || row === null) return undefined;
+    if (!Array.isArray(rows)) return structural;
+    if (rows.length === 0) {
+      return count === "0"
+        ? { usable: true, watermark: Object.freeze({ count: 0, sysId: "", updatedOn: "" }) }
+        : structural;
+    }
+    const row: unknown = rows[0];
+    if (typeof row !== "object" || row === null) return structural;
     const { sys_id: sysId, sys_updated_on: updatedOn } = row as Record<string, unknown>;
-    if (typeof sysId !== "string" || sysId === "") return undefined;
-    if (typeof updatedOn !== "string") return undefined;
+    if (typeof sysId !== "string" || sysId === "") return structural;
+    if (typeof updatedOn !== "string") return structural;
     const stored = STORED_DATE_TIME.exec(updatedOn);
     const updatedAt = stored ? Date.parse(`${stored[1]}T${stored[2]}Z`) : Number.NaN;
     const serverNow = Date.parse(response.headers.get("date") ?? "");
-    if (!Number.isFinite(updatedAt) || !Number.isFinite(serverNow)) return undefined;
-    if (updatedAt > serverNow) return undefined;
-    return Object.freeze({ count: Number(count), sysId, updatedOn });
-  } catch {
+    if (!Number.isFinite(updatedAt) || !Number.isFinite(serverNow)) return structural;
+    if (updatedAt > serverNow) return structural;
+    return { usable: true, watermark: Object.freeze({ count: Number(count), sysId, updatedOn }) };
+  } catch (error) {
     // A failed read must not serve stale metadata.
-    return undefined;
+    return { usable: false, reason: readFailureReason(error) };
+  }
+}
+
+/**
+ * A 403, 404, 409 or other fixed rejection of this request shape will repeat,
+ * so it is structural. A 401 (a token refresh can fix it), 429, 5xx, timeout,
+ * network or unrecognized failure is transient.
+ */
+function readFailureReason(error: unknown): UnusableReason {
+  if (isServiceNowRequestCancellation(error)) return "cancelled";
+  const descriptor = trustedToolErrorDescriptor(error);
+  switch (descriptor?.category) {
+    case "authorization":
+    case "not_found":
+    case "conflict":
+      return "structural";
+    case "upstream":
+      // The client marks a 5xx GET retryable and any other status do_not_retry.
+      return descriptor.retry === "do_not_retry" ? "structural" : "transient";
+    default:
+      return "transient";
   }
 }
 
@@ -333,14 +452,14 @@ function stripForceRecache(params: Record<string, string> | undefined): {
   };
 }
 
-function cacheForScope(scope: string): Map<string, CacheEntry> {
+function stateForScope(scope: string): ScopeState {
   const existing = SCOPED_CACHES.get(scope);
   if (existing) {
     SCOPED_CACHES.delete(scope);
     SCOPED_CACHES.set(scope, existing);
     return existing;
   }
-  const next = new Map<string, CacheEntry>();
+  const next: ScopeState = Object.freeze({ entries: new Map(), uncacheable: new Map() });
   SCOPED_CACHES.set(scope, next);
   evictOldest(SCOPED_CACHES, MAX_METADATA_CACHE_SCOPES);
   return next;
