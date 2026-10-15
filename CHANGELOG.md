@@ -105,7 +105,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`sn_batch` never re-sends a request that may have reached the instance.**
   Confirmed updates and deletes go through the ServiceNow REST Batch API, up
   to 50 records per request and fewer when values are large, so a request
-  body stays under 4 MiB. Each request gets its own 1 MiB response budget.
+  body stays under 4 MiB unless one record's fields alone exceed about 3 MiB
+  of JSON; such a record is sent one per request. Each request gets its own
+  1 MiB response budget.
   - Serial Table API calls replace the batch only when the instance refuses
     it outright (401, 403 or 404), and only for the records not yet sent.
   - A rate limit (429) stops the run with the `Retry-After` hint instead.
@@ -188,9 +190,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response. The old request and parser did not match it, so a batch the
   instance had already applied was replayed one record at a time.
 - A rate-limited `sn_batch` (429) no longer falls back to one request per
-  record, each retried against the same limit, and a batch request no longer
-  grows past 4 MiB. Fifty records with large values used to make a request
-  of tens of megabytes.
+  record, each retried against the same limit, and a batch request stays
+  under 4 MiB unless one record's fields alone exceed about 3 MiB of JSON;
+  such a record is sent one per request. Fifty records with large values
+  used to make a request of tens of megabytes.
 - Write responses always include the written record's `sys_id`. A readable
   set that left it out made a successful create read as an upstream failure,
   which invited a retry and a duplicate record. Every other field, `number`

@@ -1172,8 +1172,9 @@ and cannot be cleared. Every other incident field gets the generic bounds.
 
 `sn_batch` sends confirmed updates and deletes through the ServiceNow REST
 Batch API (`/api/now/v1/batch`), up to 50 records per request and fewer when
-field values are large, so a request body stays under 4 MiB. Each request
-gets its own 1 MiB response budget, so a run can reach the 10,000-record cap
+field values are large, so a request body stays under 4 MiB unless one
+record's fields alone exceed about 3 MiB of JSON; such a record is sent one
+per request. Each request gets its own 1 MiB response budget, so a run can reach the 10,000-record cap
 (`limit` defaults to 200). The lookup's `sys_id`s are de-duplicated, so each
 matched record is targeted once per run.
 

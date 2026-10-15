@@ -184,10 +184,12 @@ const REST_BATCH_CHUNK_SIZE = 50;
 const REST_BATCH_PATH = "/api/now/v1/batch";
 
 /**
- * Upper bound on one batch request body. ServiceNow caps REST request
+ * Target size of one batch request body. ServiceNow caps REST request
  * payloads (about 10 MB by default), and an oversized batch that is refused
  * has an unknown outcome, so a chunk holds fewer records when values are
- * large.
+ * large. A request stays under this size unless one record's fields alone
+ * exceed about 3 MiB of JSON; such a record is sent one per request, because
+ * a chunk never holds fewer than one record.
  */
 const MAX_BATCH_REQUEST_BYTES = 4 * 1024 * 1024;
 /**
