@@ -728,7 +728,9 @@ describe("SNSDK-54 reference tool behavior matrix", () => {
         profile: SNSDK54_PROFILE_NAME,
         table: "incident",
         sys_id: SNSDK54_SYS_ID,
-        fields: { comments: SNSDK54_FAILURE_CANARIES.journal },
+        // Journal fields are writable under the field policy; content outside
+        // the journal bounds is a value denial that never echoes the content.
+        fields: { comments: `${SNSDK54_FAILURE_CANARIES.journal}\u0000` },
       }),
     ]);
 
@@ -756,20 +758,23 @@ describe("SNSDK-54 reference tool behavior matrix", () => {
           outcome: "policy_rejected",
           reason: "field_access_denied",
         }),
-        // An out-of-range urgency is likewise a bounded-value denial from the
-        // incident write policy.
+        // An out-of-range urgency and an unsafe journal entry are likewise
+        // bounded-value denials from the write value policy.
         expect.objectContaining({
           tool: "sn_update",
           outcome: "policy_rejected",
           reason: "write_value_denied",
         }),
-        expect.objectContaining({
-          tool: "sn_update",
-          outcome: "policy_rejected",
-          reason: "journal_update_denied",
-        }),
       ])
     );
+    expect(
+      connected.audits.filter(
+        ({ tool, outcome, reason }) =>
+          tool === "sn_update" &&
+          outcome === "policy_rejected" &&
+          reason === "write_value_denied"
+      )
+    ).toHaveLength(2);
     expect(
       connected.audits.filter(
         ({ tool, outcome, reason }) =>

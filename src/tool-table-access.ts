@@ -37,8 +37,11 @@ import { compileStructuredQuery, StructuredQueryError } from "./structured-query
 import {
   isIncidentJournalPolicyError,
   prepareIncidentJournalArguments,
-  rejectGenericIncidentJournalFields,
 } from "./incident-journal-policy.js";
+import {
+  isWriteValuePolicyError,
+  prepareWriteFieldValues,
+} from "./write-value-policy.js";
 
 export interface ToolTableAccessResolution {
   readonly args: Record<string, unknown>;
@@ -147,7 +150,6 @@ export function resolveToolTableAccess(
       }
       case "sn_update": {
         rejectRawEncodedWrite(args.query);
-        rejectGenericIncidentJournalFields(args.fields);
         const table = requiredTable(args.table);
         if (!Object.hasOwn(args, "fields")) {
           return resolution(withFieldPolicyArgumentValues(args, { table }), [write(table)]);
@@ -217,7 +219,10 @@ export function resolveToolTableAccess(
       error instanceof TablePolicyError ||
       isFieldPolicyError(error) ||
       isEncodedQueryPolicyError(error) ||
-      isIncidentJournalPolicyError(error)
+      isIncidentJournalPolicyError(error) ||
+      // A value denial is fixed in no table key, so it must keep its own
+      // classification instead of becoming a table denial.
+      isWriteValuePolicyError(error)
     ) {
       throw error;
     }
@@ -494,6 +499,10 @@ function batchResolution(
   });
   if (args.action === "update") {
     prepared = prepareWriteFieldArguments(prepared, table);
+    // The same value policy as sn_update, before any credential or client
+    // work, so the handler receives the canonical strings it sends upstream.
+    const fields = prepareWriteFieldValues("update", table, prepared.fields);
+    prepared = withFieldPolicyArgumentValues(prepared, { fields });
   }
   return resolution(
     prepared,

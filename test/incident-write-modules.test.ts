@@ -2,8 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ServiceNowOperations } from "../src/client.js";
 import { ENCODED_QUERY_MIGRATION_MESSAGE } from "../src/encoded-query-policy.js";
-import { incidentJournalMigrationMessage } from "../src/incident-journal-policy.js";
 import { trustedToolErrorDescriptor } from "../src/tool-error.js";
+import {
+  isWriteValuePolicyError,
+  writeValueDenialMessage,
+  type WriteValuePolicyError,
+} from "../src/write-value-policy.js";
 import {
   createToolModule,
   definition as createDefinition,
@@ -346,7 +350,7 @@ describe("SNSDK-49 canonical incident write modules", () => {
     });
   });
 
-  it("rejects raw queries, multi-target selectors, journals, and invalid values preflight", () => {
+  it("rejects raw queries, multi-target selectors, and invalid values preflight", () => {
     for (const selector of [
       { query: "active=true" },
       { sys_ids: [CANONICAL_SYS_ID] },
@@ -401,23 +405,85 @@ describe("SNSDK-49 canonical incident write modules", () => {
       })
     ).toThrow();
 
+    // A journal value outside the journal bounds is a value denial that never
+    // echoes the content.
     const canary = "journal-value-must-not-echo";
-    let message = "";
+    let denial: unknown;
     try {
       resolveUpdateAccess({
         profile: PROFILE,
         table: "incident",
         sys_id: CANONICAL_SYS_ID,
-        fields: { comments: canary },
+        fields: { comments: `${canary}\u0000` },
       });
     } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+      denial = error;
     }
-    expect(message).toBe("Incident journal policy rejected the request");
-    expect(message).not.toContain(canary);
-    expect(incidentJournalMigrationMessage("comments")).toContain(
-      "sn_incident_add_comment"
+    expect(isWriteValuePolicyError(denial)).toBe(true);
+    expect((denial as WriteValuePolicyError).field).toBe("comments");
+    expect((denial as Error).message).not.toContain(canary);
+    expect(
+      writeValueDenialMessage(denial as WriteValuePolicyError, "sn_update")
+    ).not.toContain(canary);
+  });
+
+  it("plans journal fields like any other field on create and update", () => {
+    const update = resolveUpdateAccess({
+      profile: PROFILE,
+      table: "incident",
+      sys_id: CANONICAL_SYS_ID,
+      fields: { comments: "Customer called back", work_notes: "Escalated" },
+    });
+    expect(update.requests).toEqual([{ operation: "write", table: "incident" }]);
+    expect(update.args.fields).toEqual({
+      comments: "Customer called back",
+      work_notes: "Escalated",
+    });
+
+    const create = resolveCreateAccess({
+      profile: PROFILE,
+      table: "change_request",
+      fields: { short_description: "Patch window", comments: "Scheduled" },
+    });
+    expect(create.requests).toEqual([
+      { operation: "write", table: "change_request" },
+    ]);
+    expect(create.args.fields).toEqual({
+      short_description: "Patch window",
+      comments: "Scheduled",
+    });
+  });
+
+  it("sends journal fields upstream exactly as validated", async () => {
+    const patch = vi.fn(async () => ({
+      result: { sys_id: CANONICAL_SYS_ID, work_notes: "" },
+    }));
+    const post = vi.fn(async () => ({
+      result: { sys_id: CANONICAL_SYS_ID, number: "CHG0000001" },
+    }));
+    const operations = { patch, post } as unknown as ServiceNowOperations;
+    const update = resolveUpdateAccess({
+      profile: PROFILE,
+      table: "incident",
+      sys_id: CANONICAL_SYS_ID,
+      fields: { work_notes: "Investigating" },
+    });
+    await updateToolModule.invoke(update.args, services(operations));
+    expect(patch).toHaveBeenCalledWith(
+      `/api/now/table/incident/${CANONICAL_SYS_ID}`,
+      { work_notes: "Investigating" }
     );
+
+    const create = resolveCreateAccess({
+      profile: PROFILE,
+      table: "change_request",
+      fields: { short_description: "Patch window", comments: "Scheduled" },
+    });
+    await createToolModule.invoke(create.args, services(operations));
+    expect(post).toHaveBeenCalledWith("/api/now/table/change_request", {
+      short_description: "Patch window",
+      comments: "Scheduled",
+    });
   });
 
   it("fails closed on malformed upstream wrappers without invoking traps", async () => {

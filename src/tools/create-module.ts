@@ -17,7 +17,6 @@ import {
   normalizeWriteTable,
   prepareWriteFieldValues,
 } from "../write-value-policy.js";
-import { rejectGenericIncidentJournalFields } from "../incident-journal-policy.js";
 import { ok } from "../utils.js";
 import {
   filteredWriteRecord,
@@ -40,7 +39,7 @@ export const definition = Object.freeze({
   description:
     "Create one record on any table the configured policy grants for writes. " +
     "Fields are bounded by the field policy; incident additionally requires a " +
-    "short_description. Journal fields require dedicated tools.",
+    "short_description. Journal fields (comments, work_notes) add an entry.",
   annotations: Object.freeze({
     title: "Create record",
     readOnlyHint: false,
@@ -92,7 +91,6 @@ export function resolveCreateAccess(candidate: unknown): CreateAccessResolution 
   rejectRawEncodedWrite(
     (parsed as unknown as Readonly<Record<string, unknown>>).query
   );
-  rejectGenericIncidentJournalFields(parsed.fields);
   const table = normalizeWriteTable(parsed.table);
   let prepared = prepareWriteFieldArguments(parsed, table);
   const fields = prepareWriteFieldValues("create", table, prepared.fields);
@@ -112,7 +110,6 @@ async function executeCreate(
   rejectRawEncodedWrite(
     (args as unknown as Readonly<Record<string, unknown>>).query
   );
-  rejectGenericIncidentJournalFields(args.fields);
   const table = normalizeWriteTable(args.table);
   const fields = prepareWriteFieldValues("create", table, args.fields);
   const response = await client.post(`/api/now/table/${table}`, fields);
