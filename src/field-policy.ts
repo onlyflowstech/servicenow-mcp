@@ -1270,13 +1270,98 @@ function fieldSetAllows(
   return allowAny || fields.includes(field);
 }
 
-function currentTableFieldPolicies(): ReadonlyMap<string, TableFieldPolicy> {
-  const configured = readConfiguredFieldPolicyDefinitions();
+type TableFieldPolicyMap = ReadonlyMap<string, TableFieldPolicy>;
+
+/**
+ * Policy maps for configurations that validateFieldPolicyConfiguration
+ * accepted, keyed by the identity of their three parts (fieldPolicy,
+ * readableTableFields, writableTableFields; ABSENT_CONFIGURATION_PART for an
+ * unstated one). Only deep-frozen parts are recorded, so an entry can never
+ * describe content that changed after validation. The keys are the profile
+ * snapshots ProfileManager hands out, so entries go when the snapshots go.
+ */
+const VALIDATED_POLICY_MAPS = new WeakMap<
+  object,
+  WeakMap<object, WeakMap<object, TableFieldPolicyMap>>
+>();
+const ABSENT_CONFIGURATION_PART: object = Object.freeze({});
+/** Deeper than any valid field policy: fieldPolicy.table.kind[entry]. */
+const MAX_CACHED_CONFIGURATION_DEPTH = 8;
+
+function currentTableFieldPolicies(): TableFieldPolicyMap {
+  // Only the profile scope configures field policy. SN_FIELD_POLICY_DEFINITIONS
+  // reaches this point solely as the SN_PROFILE_NAME environment profile's
+  // own keys (profile-manager.ts), never as a process-wide fallback.
+  const scoped = FIELD_POLICY_CONFIGURATION_SCOPE.getStore();
+  if (
+    !scoped ||
+    (scoped.fieldPolicy === undefined &&
+      scoped.readableTableFields === undefined &&
+      scoped.writableTableFields === undefined)
+  ) {
+    return BUILT_IN_TABLE_FIELD_POLICIES;
+  }
+  // A configuration that passed profile load was built once, there.
+  const validated = validatedPolicyMap(scoped);
+  if (validated) return validated;
+  // Anything else takes the full fail-closed path on every call.
+  const configured = normalizeConfiguredFieldPolicy(scoped);
   if (!configured) return BUILT_IN_TABLE_FIELD_POLICIES;
   // Configuration narrows the base; it is the only thing that denies a field.
   return buildFieldPolicyMap(
     mergeFieldPolicyDefinitions(FIELD_POLICY_BASE, configured.definitions)
   );
+}
+
+function configurationParts(
+  input: FieldPolicyConfigurationInput
+): readonly [object, object, object] | undefined {
+  const parts = [input.fieldPolicy, input.readableTableFields, input.writableTableFields].map(
+    (part) => (part === undefined ? ABSENT_CONFIGURATION_PART : part)
+  );
+  return parts.every((part) => typeof part === "object" && part !== null)
+    ? (parts as [object, object, object])
+    : undefined;
+}
+
+function validatedPolicyMap(
+  input: FieldPolicyConfigurationInput
+): TableFieldPolicyMap | undefined {
+  const parts = configurationParts(input);
+  if (!parts) return undefined;
+  return VALIDATED_POLICY_MAPS.get(parts[0])?.get(parts[1])?.get(parts[2]);
+}
+
+/** Record a validated map, but only for parts that can no longer change. */
+function rememberValidatedPolicyMap(
+  input: FieldPolicyConfigurationInput,
+  map: TableFieldPolicyMap
+): void {
+  const parts = configurationParts(input);
+  if (!parts || !parts.every((part) => isDeepFrozen(part, 0))) return;
+  let second = VALIDATED_POLICY_MAPS.get(parts[0]);
+  if (!second) {
+    second = new WeakMap();
+    VALIDATED_POLICY_MAPS.set(parts[0], second);
+  }
+  let third = second.get(parts[1]);
+  if (!third) {
+    third = new WeakMap();
+    second.set(parts[1], third);
+  }
+  third.set(parts[2], map);
+}
+
+function isDeepFrozen(candidate: unknown, depth: number): boolean {
+  if (typeof candidate !== "object" || candidate === null) return true;
+  if (
+    depth > MAX_CACHED_CONFIGURATION_DEPTH ||
+    nodeUtilTypes.isProxy(candidate) ||
+    !Object.isFrozen(candidate)
+  ) {
+    return false;
+  }
+  return Object.values(candidate).every((value) => isDeepFrozen(value, depth + 1));
 }
 
 function mergeFieldPolicyDefinitions(
@@ -1437,19 +1522,6 @@ function buildFieldPolicyMap(
   );
 }
 
-function readConfiguredFieldPolicyDefinitions():
-  | FieldPolicyConfiguration
-  | undefined {
-  // Only the profile scope configures field policy. SN_FIELD_POLICY_DEFINITIONS
-  // reaches this point solely as the SN_PROFILE_NAME environment profile's
-  // own keys (profile-manager.ts), never as a process-wide fallback.
-  const scoped = FIELD_POLICY_CONFIGURATION_SCOPE.getStore();
-  if (scoped && (scoped.fieldPolicy !== undefined || scoped.readableTableFields !== undefined || scoped.writableTableFields !== undefined)) {
-    return normalizeConfiguredFieldPolicy(scoped);
-  }
-  return undefined;
-}
-
 /**
  * A malformed field-policy configuration, raised when a profile is loaded.
  *
@@ -1488,11 +1560,16 @@ const PROFILE_CONFIGURATION_LABELS: ConfigurationLabels = Object.freeze({
  * path applied only the lists), unknown keys in a table or list entry (a
  * `writeable` typo narrowed nothing), table keys that differ only in case,
  * and a table repeated within one list (the last entry won).
+ *
+ * The map built here is kept for the request path when every part is deep
+ * frozen, as ProfileManager's snapshots are: requests on a loaded profile
+ * then reuse it instead of rebuilding it on each lookup.
  */
 export function validateFieldPolicyConfiguration(
   input: FieldPolicyConfigurationInput
 ): void {
-  validateConfiguration(input, PROFILE_CONFIGURATION_LABELS);
+  const map = validateConfiguration(input, PROFILE_CONFIGURATION_LABELS);
+  if (map !== undefined) rememberValidatedPolicyMap(input, map);
 }
 
 /**
@@ -1561,16 +1638,24 @@ export function fieldPolicyInputFromEnvironment(
   return input;
 }
 
+/**
+ * @returns The policy map the request path would build for this input, or
+ * undefined when the input states no field policy at all (the request path
+ * then uses the built-in map).
+ */
 function validateConfiguration(
   input: unknown,
   labels: ConfigurationLabels
-): void {
+): TableFieldPolicyMap | undefined {
   if (!isPlainRecordCandidate(input)) {
     throw new FieldPolicyConfigurationError(
       "Field policy configuration must be an object."
     );
   }
   const record = definedOwnProperties(input as Record<string, unknown>);
+  if (!FIELD_POLICY_CONFIGURATION_KEYS.some((key) => Object.hasOwn(record, key))) {
+    return undefined;
+  }
   const statedLists = TABLE_FIELD_LIST_KEYS.filter((key) => Object.hasOwn(record, key));
   if (Object.hasOwn(record, "fieldPolicy") && statedLists.length > 0) {
     // The request path applied only the lists and dropped every narrowing in
@@ -1585,22 +1670,23 @@ function validateConfiguration(
   }
   try {
     // The same normalizers the request path runs, with key paths attached.
+    // The labels only shape error messages, so the map is the one a request
+    // would build.
     if (Object.hasOwn(record, "fieldPolicy")) {
-      buildFieldPolicyMap(
+      return buildFieldPolicyMap(
         mergeFieldPolicyDefinitions(
           FIELD_POLICY_BASE,
           fieldPolicyDefinitions(record.fieldPolicy, labels.fieldPolicy)
         ),
         labels.fieldPolicy
       );
-    } else {
-      buildFieldPolicyMap(
-        mergeFieldPolicyDefinitions(
-          FIELD_POLICY_BASE,
-          tableFieldListDefinitions(record, labels)
-        )
-      );
     }
+    return buildFieldPolicyMap(
+      mergeFieldPolicyDefinitions(
+        FIELD_POLICY_BASE,
+        tableFieldListDefinitions(record, labels)
+      )
+    );
   } catch (error) {
     if (error instanceof FieldPolicyConfigurationError) throw error;
     if (isFieldPolicyError(error)) {

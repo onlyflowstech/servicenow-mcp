@@ -9,6 +9,7 @@ import {
   FieldPolicyError,
   fieldPolicyInputFromEnvironment,
   resolveReadableFields,
+  resolveWriteResponseFields,
   runWithFieldPolicyConfiguration,
   validateFieldPolicyConfiguration,
   validateWritableFields,
@@ -844,5 +845,242 @@ describe("SN_FIELD_POLICY_DEFINITIONS configures only the environment profile (#
 
     const manager = new ProfileManager({ configFilePath });
     expect(manager.listProfiles().map(({ name }) => name)).toEqual(["full"]);
+  });
+});
+
+describe("validated policy maps are built once and reused", () => {
+  function deepFrozenClone<T>(value: T): T {
+    const freeze = (node: unknown): unknown => {
+      if (typeof node === "object" && node !== null) {
+        for (const child of Object.values(node)) freeze(child);
+        Object.freeze(node);
+      }
+      return node;
+    };
+    return freeze(JSON.parse(JSON.stringify(value))) as T;
+  }
+
+  /** A fresh outer object per call, as the dispatcher's policy provider builds. */
+  function scopeOf(profile: Profile): FieldPolicyConfigurationInput {
+    return profileScope(profile);
+  }
+
+  it("reuses the map built at profile load for every request on that profile", () => {
+    writeProfiles({
+      narrowed: {
+        fieldPolicy: { incident: { readable: ["sys_id", "number"], writable: ["state"] } },
+      },
+    });
+    const profile = new ProfileManager({ configFilePath }).getProfile("narrowed");
+
+    const first = runWithFieldPolicyConfiguration(scopeOf(profile), () =>
+      resolveReadableFields("incident")
+    );
+    const second = runWithFieldPolicyConfiguration(scopeOf(profile), () =>
+      resolveReadableFields("incident")
+    );
+    expect(first).toEqual(["sys_id", "number"]);
+    // The same frozen projection object: the map was not rebuilt.
+    expect(second).toBe(first);
+    runWithFieldPolicyConfiguration(scopeOf(profile), () => {
+      expect(resolveReadableFields("u_custom")).toBe(resolveReadableFields("u_custom"));
+      expect(policyReason(() => validateWritableFields("incident", { short_description: "x" })))
+        .toBe("non_writable_field");
+    });
+
+    // The same content, never validated, is rebuilt on every lookup.
+    const unvalidated = { fieldPolicy: JSON.parse(JSON.stringify(profile.fieldPolicy)) };
+    const rebuiltA = runWithFieldPolicyConfiguration(unvalidated, () =>
+      resolveReadableFields("incident")
+    );
+    const rebuiltB = runWithFieldPolicyConfiguration(unvalidated, () =>
+      resolveReadableFields("incident")
+    );
+    expect(rebuiltA).toEqual(first);
+    expect(rebuiltA).not.toBe(rebuiltB);
+  });
+
+  it("keeps two profiles' policies apart", () => {
+    writeProfiles({
+      stateOnly: { fieldPolicy: { incident: { writable: ["state"] } } },
+      readNarrow: {
+        fieldPolicy: { incident: { readable: ["sys_id", "number"], writable: "*" } },
+      },
+      // Same content as stateOnly, separate snapshot.
+      stateOnlyTwin: { fieldPolicy: { incident: { writable: ["state"] } } },
+    });
+    const manager = new ProfileManager({ configFilePath });
+    const stateOnly = scopeOf(manager.getProfile("stateOnly"));
+    const readNarrow = scopeOf(manager.getProfile("readNarrow"));
+    const twin = scopeOf(manager.getProfile("stateOnlyTwin"));
+
+    for (let round = 0; round < 3; round += 1) {
+      runWithFieldPolicyConfiguration(stateOnly, () => {
+        expect(
+          policyReason(() => validateWritableFields("incident", { short_description: "x" }))
+        ).toBe("non_writable_field");
+        expect(resolveReadableFields("incident", { fields: "caller_id" })).toEqual([
+          "caller_id",
+        ]);
+      });
+      runWithFieldPolicyConfiguration(readNarrow, () => {
+        expect(validateWritableFields("incident", { short_description: "x" })).toEqual({
+          short_description: "x",
+        });
+        expect(
+          policyReason(() => resolveReadableFields("incident", { fields: "caller_id" }))
+        ).toBe("unreadable_field");
+      });
+      runWithFieldPolicyConfiguration(twin, () => {
+        expect(
+          policyReason(() => validateWritableFields("incident", { short_description: "x" }))
+        ).toBe("non_writable_field");
+      });
+    }
+    const projectionOf = (scope: FieldPolicyConfigurationInput) =>
+      runWithFieldPolicyConfiguration(scope, () => resolveReadableFields("incident"));
+    expect(projectionOf(readNarrow)).not.toBe(projectionOf(stateOnly));
+    expect(projectionOf(twin)).not.toBe(projectionOf(stateOnly));
+  });
+
+  it("never caches an unvalidated policy, which still fails closed on every call", () => {
+    // Malformed, deep-frozen, never validated.
+    const malformed = deepFrozenClone({ fieldPolicy: { incident: { writable: ["u_*"] } } });
+    for (let round = 0; round < 3; round += 1) {
+      runWithFieldPolicyConfiguration(malformed, () => {
+        expect(policyReason(() => validateWritableFields("incident", { state: "2" }))).toBe(
+          "invalid_field_selection"
+        );
+      });
+    }
+
+    // Validated parts in a combination that was never validated (A2).
+    const fieldPolicyOnly = deepFrozenClone({ fieldPolicy: { incident: { writable: ["state"] } } });
+    const listsOnly = deepFrozenClone({
+      writableTableFields: [{ table: "incident", fields: "*" }],
+    });
+    validateFieldPolicyConfiguration(fieldPolicyOnly);
+    validateFieldPolicyConfiguration(listsOnly);
+    const recombined = {
+      fieldPolicy: fieldPolicyOnly.fieldPolicy,
+      writableTableFields: listsOnly.writableTableFields,
+    };
+    for (let round = 0; round < 3; round += 1) {
+      runWithFieldPolicyConfiguration(recombined, () => {
+        expect(policyReason(() => validateWritableFields("incident", { state: "2" }))).toBe(
+          "invalid_argument_shape"
+        );
+      });
+    }
+
+    // Validated but still mutable: not cached, so a later change is seen.
+    const mutable = { fieldPolicy: { incident: { writable: ["state"] } } };
+    validateFieldPolicyConfiguration(mutable);
+    runWithFieldPolicyConfiguration(mutable, () => {
+      expect(
+        policyReason(() => validateWritableFields("incident", { short_description: "x" }))
+      ).toBe("non_writable_field");
+    });
+    mutable.fieldPolicy.incident.writable.push("short_description");
+    runWithFieldPolicyConfiguration(mutable, () => {
+      expect(validateWritableFields("incident", { short_description: "x" })).toEqual({
+        short_description: "x",
+      });
+    });
+  });
+
+  it("resolves exactly as the uncached path does across the field-policy test configurations", () => {
+    const wide = ["sys_id", ...Array.from({ length: 299 }, (_, index) => `u_f${index}`)];
+    const corpus: FieldPolicyConfigurationInput[] = [
+      { fieldPolicy: { incident: { readable: ["sys_id", "number"] } } },
+      { fieldPolicy: { "*": { defaults: ["sys_id", "name"], readable: "*", writable: [] } } },
+      {
+        fieldPolicy: {
+          incident: { defaults: ["sys_id", "u_public"], readable: ["sys_id", "u_public"], writable: ["u_public"] },
+        },
+      },
+      { readableTableFields: [{ table: "incident", fields: "*" }] },
+      { fieldPolicy: { incident: { readable: ["sys_id"], writable: ["state"] } } },
+      { fieldPolicy: { "*": { defaults: ["sys_id"], readable: "*", writable: "*" } } },
+      { writableTableFields: [{ table: "incident", fields: "*" }] },
+      { fieldPolicy: { incident: { writable: ["state"] } } },
+      { fieldPolicy: { incident: { readable: ["number"] } } },
+      { fieldPolicy: { sys_atf_test: { readable: ["sys_id", "name"] } } },
+      { fieldPolicy: { sys_script: { writable: [] }, sys_user_grmember: { writable: [] } } },
+      { fieldPolicy: { u_write_only: { readable: [], writable: ["u_note"] } } },
+      { fieldPolicy: { incident: { defaults: "*" } } },
+      { fieldPolicy: { incident: { readable: ["number"], writable: ["number"] } } },
+      { writableTableFields: [{ table: "incident", fields: ["state"] }] },
+      { fieldPolicy: { "*": { writable: [] } } },
+      { fieldPolicy: { "*": { writable: [] }, incident: { writable: "*" } } },
+      { fieldPolicy: { "*": { writable: [] }, incident: { writable: ["state"] } } },
+      { fieldPolicy: { "*": { writable: [] }, incident: { readable: ["sys_id", "number"] } } },
+      { fieldPolicy: { "*": { readable: ["sys_id", "number", "state", "u_custom"] } } },
+      { fieldPolicy: { "*": { defaults: ["sys_id"], readable: ["sys_id"], writable: [] } } },
+      { fieldPolicy: { "*": { writable: [] }, u_x: { readable: ["sys_id", "u_note"] } } },
+      { fieldPolicy: { "*": { readable: ["sys_id", "name"] }, u_x: { writable: "*" } } },
+      { fieldPolicy: { u_x: { defaults: ["sys_id", "name"] } } },
+      {
+        fieldPolicy: {
+          "*": { defaults: ["sys_id", "u_f7"], readable: wide },
+          u_named: { writable: ["u_f1"] },
+        },
+      },
+      { fieldPolicy: { incident: { writable: ["state", "sys_class_name", "sys_domain"] } } },
+      { fieldPolicy: { "*": { writable: ["sys_domain"] } } },
+      { fieldPolicy: { u_audit: { readable: [], writable: "*" } } },
+      {
+        readableTableFields: [{ table: "u_x", fields: ["sys_id"] }],
+        writableTableFields: [{ table: "*", fields: [] }],
+      },
+    ];
+    const tables = [
+      "incident", "change_request", "problem", "task", "u_custom", "u_x", "u_named",
+      "u_audit", "u_write_only", "sys_script", "sys_script_include", "sys_user",
+      "sys_user_grmember", "sys_atf_test",
+    ];
+    const readFields = ["sys_id", "number", "state", "name", "u_note", "u_public", "caller_id", "script"];
+    const writeFields = [
+      "state", "short_description", "u_note", "u_public", "number", "script",
+      "sys_domain", "sys_class_name", "user",
+    ];
+    const outcome = (action: () => unknown): unknown => {
+      try {
+        return { value: action() };
+      } catch (error) {
+        if (error instanceof FieldPolicyError) return { reason: error.reason };
+        throw error;
+      }
+    };
+    const probe = (): unknown[] =>
+      tables.flatMap((table) => [
+        outcome(() => resolveReadableFields(table)),
+        outcome(() => resolveReadableFields(table, { fields: "all" })),
+        outcome(() => resolveWriteResponseFields(table)),
+        ...readFields.map((field) => outcome(() => resolveReadableFields(table, { fields: field }))),
+        ...writeFields.map((field) =>
+          outcome(() => validateWritableFields(table, { [field]: "x" }))
+        ),
+      ]);
+
+    for (const [index, configuration] of corpus.entries()) {
+      const uncached = JSON.parse(JSON.stringify(configuration)) as FieldPolicyConfigurationInput;
+      const cached = deepFrozenClone(configuration);
+      validateFieldPolicyConfiguration(cached);
+
+      const expected = runWithFieldPolicyConfiguration(uncached, probe);
+      const actual = runWithFieldPolicyConfiguration(cached, probe);
+      expect(actual, `configuration ${index}`).toEqual(expected);
+      // And the cached run really used the cache.
+      runWithFieldPolicyConfiguration(cached, () => {
+        const once = outcome(() => resolveReadableFields("incident"));
+        const twice = outcome(() => resolveReadableFields("incident"));
+        if ("value" in (once as object)) {
+          expect((twice as { value: unknown }).value, `configuration ${index}`).toBe(
+            (once as { value: unknown }).value
+          );
+        }
+      });
+    }
   });
 });
