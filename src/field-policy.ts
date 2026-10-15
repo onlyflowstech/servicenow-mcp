@@ -117,6 +117,10 @@ const TABLE_FIELD_LIST_KEYS = Object.freeze([
   "readableTableFields",
   "writableTableFields",
 ] as const);
+/** Keys a `fieldPolicy` table entry may state. */
+const TABLE_ENTRY_KEYS = Object.freeze(["defaults", "readable", "writable"] as const);
+/** Keys a `{ table, fields }` list entry may state. */
+const LIST_ENTRY_KEYS = Object.freeze(["table", "fields"] as const);
 const FIELD_NAME_RULE =
   "letters, digits, and underscores, starting with a letter, at most 80 characters";
 
@@ -1367,8 +1371,11 @@ const PROFILE_CONFIGURATION_LABELS: ConfigurationLabels = Object.freeze({
  * path attached and throws FieldPolicyConfigurationError naming the table and
  * key. A configuration that passes cannot fail normalization on a request.
  *
- * It also rejects `fieldPolicy` stated beside a table list, which used to load
- * and then fail open: the request path applied only the lists.
+ * Beyond malformed names and shapes, it rejects what used to load and then
+ * silently fail open: `fieldPolicy` stated beside a table list (the request
+ * path applied only the lists), unknown keys in a table or list entry (a
+ * `writeable` typo narrowed nothing), table keys that differ only in case,
+ * and a table repeated within one list (the last entry won).
  */
 export function validateFieldPolicyConfiguration(
   input: FieldPolicyConfigurationInput
@@ -1384,7 +1391,8 @@ export function validateFieldPolicyConfiguration(
  *
  * The value is either a table map (`{"incident":{...}}`) or an object holding
  * the profile keys themselves (`fieldPolicy`, `readableTableFields`,
- * `writableTableFields`); both keep their previous meaning.
+ * `writableTableFields`); both keep their previous meaning. A value that
+ * mixes the two is rejected: the table keys used to be dropped silently.
  */
 export function fieldPolicyInputFromEnvironment(
   environment: FieldPolicyEnvironment
@@ -1413,6 +1421,14 @@ export function fieldPolicyInputFromEnvironment(
   const stated = FIELD_POLICY_CONFIGURATION_KEYS.filter((key) =>
     Object.hasOwn(record, key)
   );
+  if (stated.length > 0 && Object.keys(record).length > stated.length) {
+    // The other keys are table names; they are not repeated here.
+    throw new FieldPolicyConfigurationError(
+      `${FIELD_POLICY_DEFINITIONS_ENV} mixes table keys with the profile keys ` +
+        `${stated.join(", ")}. Use either a table map or the profile keys ` +
+        `(${FIELD_POLICY_CONFIGURATION_KEYS.join(", ")}), not both.`
+    );
+  }
   const input: FieldPolicyConfigurationInput =
     stated.length > 0
       ? Object.freeze(Object.fromEntries(stated.map((key) => [key, record[key]])))
@@ -1555,13 +1571,25 @@ function fieldPolicyDefinitions(
   }
   const record = source as Record<string, unknown>;
   const definitions: Record<string, MutableTableFieldPolicyDefinition> = {};
+  const firstPosition = new Map<string, number>();
   const keys = Object.keys(record);
   for (let position = 0; position < keys.length; position += 1) {
     const key = keys[position]!;
-    const table = normalizePolicyTableName(
-      key,
-      configurationLocation(root === undefined ? undefined : `${root} key ${position + 1}`)
+    const keyLocation = configurationLocation(
+      root === undefined ? undefined : `${root} key ${position + 1}`
     );
+    const table = normalizePolicyTableName(key, keyLocation);
+    // Table names are case-insensitive, so "INCIDENT" and "incident" are one
+    // table, and the later entry used to replace the earlier one silently.
+    const earlier = firstPosition.get(table);
+    if (earlier !== undefined) {
+      rejectConfiguration(
+        keyLocation,
+        `names table "${table}" again (table names are case-insensitive); ` +
+          `it repeats key ${earlier + 1}. State each table once.`
+      );
+    }
+    firstPosition.set(table, position);
     const path = root === undefined ? undefined : `${root}.${table}`;
     const value = record[key];
     if (!isPlainRecordCandidate(value)) {
@@ -1571,8 +1599,14 @@ function fieldPolicyDefinitions(
       );
     }
     const candidate = definedOwnProperties(value as Record<string, unknown>);
+    rejectUnknownKeys(
+      candidate,
+      TABLE_ENTRY_KEYS,
+      configurationLocation(path),
+      "A table entry accepts only defaults, readable, and writable."
+    );
     const definition: Record<string, FieldPolicySet> = {};
-    for (const kind of ["defaults", "readable", "writable"] as const) {
+    for (const kind of TABLE_ENTRY_KEYS) {
       if (Object.hasOwn(candidate, kind)) {
         definition[kind] = normalizePolicyFieldSet(
           candidate[kind] as FieldPolicySet,
@@ -1583,6 +1617,28 @@ function fieldPolicyDefinitions(
     definitions[table] = Object.freeze(definition) as MutableTableFieldPolicyDefinition;
   }
   return definitions;
+}
+
+/**
+ * Reject a key outside `allowed`. An unknown key used to be ignored, so a
+ * typo such as `writeable` loaded and narrowed nothing. The key is named only
+ * when it is a valid identifier; anything else is identified by position.
+ */
+function rejectUnknownKeys(
+  record: Record<string, unknown>,
+  allowed: readonly string[],
+  location: ConfigurationLocation | undefined,
+  accepted: string
+): void {
+  const keys = Object.keys(record);
+  for (let position = 0; position < keys.length; position += 1) {
+    const key = keys[position]!;
+    if (allowed.includes(key)) continue;
+    rejectConfiguration(
+      location,
+      `has an unknown key ${FIELD_NAME.test(key) ? `"${key}"` : `at position ${position + 1}`}. ${accepted}`
+    );
+  }
 }
 
 /**
@@ -1644,11 +1700,20 @@ function applyTableFieldList(
       "must be a list of { table, fields } entries."
     );
   }
+  // A table may appear in both lists, but only once in each: a repeated
+  // entry used to replace the earlier one, so the last entry won.
+  const firstIndex = new Map<string, number>();
   for (let index = 0; index < candidate.length; index += 1) {
-    const normalized = normalizeTableFieldListDefinition(
-      candidate[index],
-      root === undefined ? undefined : `${root}[${index}]`
-    );
+    const path = root === undefined ? undefined : `${root}[${index}]`;
+    const normalized = normalizeTableFieldListDefinition(candidate[index], path);
+    const earlier = firstIndex.get(normalized.table);
+    if (earlier !== undefined) {
+      rejectConfiguration(
+        configurationLocation(path, normalized.table),
+        `repeats a table already listed at ${root}[${earlier}]. List each table once.`
+      );
+    }
+    firstIndex.set(normalized.table, index);
     const previous = definitions[normalized.table] ?? {};
     definitions[normalized.table] = Object.freeze({
       ...previous,
@@ -1671,6 +1736,12 @@ function normalizeTableFieldListDefinition(
   const table = normalizePolicyTableName(
     record.table,
     configurationLocation(path === undefined ? undefined : `${path}.table`)
+  );
+  rejectUnknownKeys(
+    definedOwnProperties(record),
+    LIST_ENTRY_KEYS,
+    configurationLocation(path, table),
+    "A list entry accepts only table and fields."
   );
   const fields = normalizePolicyFieldSet(
     record.fields as FieldPolicySet,

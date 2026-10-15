@@ -562,6 +562,151 @@ describe("fieldPolicy beside a table list is rejected (A2)", () => {
   });
 });
 
+describe("configurations that used to fail open are rejected (finding 4)", () => {
+  it.each<[string, Record<string, unknown>, string]>([
+    [
+      "an unknown key in a table entry",
+      { fieldPolicy: { incident: { writeable: [] } } },
+      'fieldPolicy.incident has an unknown key "writeable". A table entry accepts only ' +
+        "defaults, readable, and writable.",
+    ],
+    [
+      "a misspelled readable",
+      { fieldPolicy: { incident: { readable: ["number"], readble: ["sys_id"] } } },
+      'fieldPolicy.incident has an unknown key "readble".',
+    ],
+    [
+      "an unknown key that is not an identifier",
+      { fieldPolicy: { incident: { writable: [], "zqx canary": true } } },
+      "fieldPolicy.incident has an unknown key at position 2.",
+    ],
+    [
+      "a comment key",
+      { fieldPolicy: { incident: { _comment: "zqxcanary", writable: [] } } },
+      "fieldPolicy.incident has an unknown key at position 1.",
+    ],
+    [
+      "an unknown key in a list entry",
+      { writableTableFields: [{ table: "incident", fields: "*", writable: [] }] },
+      'writableTableFields[0] (table "incident") has an unknown key "writable". A list ' +
+        "entry accepts only table and fields.",
+    ],
+    [
+      "table keys that differ only in case",
+      { fieldPolicy: { INCIDENT: { writable: [] }, incident: { writable: "*" } } },
+      'fieldPolicy key 2 names table "incident" again (table names are case-insensitive); ' +
+        "it repeats key 1. State each table once.",
+    ],
+    [
+      "a table repeated in a list",
+      {
+        writableTableFields: [
+          { table: "incident", fields: [] },
+          { table: "change_request", fields: "*" },
+          { table: "INCIDENT", fields: "*" },
+        ],
+      },
+      'writableTableFields[2] (table "incident") repeats a table already listed at ' +
+        "writableTableFields[0]. List each table once.",
+    ],
+  ])("rejects %s at load and fails closed on the request path", (_label, profile, expected) => {
+    writeProfiles({ loose: profile });
+    const message = loadError().message;
+    expect(message).toContain(`Profile configuration is invalid: profile "loose": ${expected}`);
+    expect(message.toLowerCase()).not.toContain("canary");
+
+    expect(() => validateFieldPolicyConfiguration(profile)).toThrow(
+      FieldPolicyConfigurationError
+    );
+    // Each of these left incident open before. A scope that skipped the
+    // load now fails closed instead.
+    runWithFieldPolicyConfiguration(profile, () => {
+      expect(
+        policyReason(() => validateWritableFields("incident", { short_description: "x" }))
+      ).toBe("invalid_argument_shape");
+    });
+  });
+
+  it("rejects table keys mixed with profile keys in the variable", () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({
+        zqxcanary_table: { writable: [] },
+        writableTableFields: [{ table: "incident", fields: "*" }],
+      })
+    );
+    vi.stubEnv("SN_PROFILE_NAME", "env-profile");
+    vi.stubEnv("SN_INSTANCE", "https://env-profile.service-now.com");
+
+    const message = loadError().message;
+    expect(message).toBe(
+      "SN_FIELD_POLICY_DEFINITIONS mixes table keys with the profile keys " +
+        "writableTableFields. Use either a table map or the profile keys (fieldPolicy, " +
+        "readableTableFields, writableTableFields), not both."
+    );
+    expect(message.toLowerCase()).not.toContain("canary");
+  });
+
+  it("still loads well-formed configurations that sit close to the rejected ones", () => {
+    writeProfiles({
+      // The same table in both lists is one table, once per list.
+      bothLists: {
+        readableTableFields: [
+          { table: "incident", fields: ["sys_id", "number"] },
+          { table: "sys_user", fields: "*" },
+        ],
+        writableTableFields: [{ table: "incident", fields: ["state"] }],
+      },
+      // Distinct tables, the "*" fallback, and every table-entry key.
+      mapped: {
+        fieldPolicy: {
+          "*": { defaults: ["sys_id"], readable: "*", writable: [] },
+          incident: { defaults: ["number"], readable: ["sys_id", "number"], writable: ["state"] },
+          Change_Request: { writable: "*" },
+          u_audit: { readable: [] },
+        },
+      },
+    });
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({ writableTableFields: [{ table: "incident", fields: ["state"] }] })
+    );
+    expect(() => new ProfileManager({ configFilePath })).toThrow(FieldPolicyConfigurationError);
+    vi.stubEnv("SN_FIELD_POLICY_DEFINITIONS", undefined);
+
+    const manager = new ProfileManager({ configFilePath });
+    expect(manager.listProfiles().map(({ name }) => name).sort()).toEqual([
+      "bothLists",
+      "mapped",
+    ]);
+    runWithFieldPolicyConfiguration(profileScope(manager.getProfile("bothLists")), () => {
+      expect(resolveReadableFields("incident", { fields: "number" })).toEqual(["number"]);
+      expect(policyReason(() => validateWritableFields("incident", { state: "2" }))).toBe(
+        "allowed"
+      );
+    });
+    runWithFieldPolicyConfiguration(profileScope(manager.getProfile("mapped")), () => {
+      expect(validateWritableFields("change_request", { u_x: "1" })).toEqual({ u_x: "1" });
+      expect(policyReason(() => validateWritableFields("u_custom", { u_x: "1" }))).toBe(
+        "non_writable_field"
+      );
+    });
+
+    // The variable's profile-key form alone still maps onto the env profile.
+    expect(
+      fieldPolicyInputFromEnvironment({
+        SN_FIELD_POLICY_DEFINITIONS: JSON.stringify({
+          readableTableFields: [{ table: "incident", fields: "*" }],
+          writableTableFields: [{ table: "incident", fields: ["state"] }],
+        }),
+      })
+    ).toEqual({
+      readableTableFields: [{ table: "incident", fields: "*" }],
+      writableTableFields: [{ table: "incident", fields: ["state"] }],
+    });
+  });
+});
+
 describe("SN_FIELD_POLICY_DEFINITIONS configures only the environment profile (#9)", () => {
   function environmentProfile(name = "env-profile"): void {
     vi.stubEnv("SN_PROFILE_NAME", name);
