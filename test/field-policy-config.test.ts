@@ -286,14 +286,6 @@ describe("malformed field policy fails at profile load (#8)", () => {
     ["a non-list readableTableFields", { readableTableFields: { table: "incident" } }, "readableTableFields must be a list"],
     ["a list entry without a table", { readableTableFields: [{ fields: "*" }] }, "readableTableFields[0].table is not a valid table name"],
     ["a list entry that is not an object", { writableTableFields: ["incident"] }, "writableTableFields[0] must be an object with table and fields"],
-    [
-      "a shadowed fieldPolicy",
-      {
-        fieldPolicy: { u_audit: { writable: ["u_*"] } },
-        writableTableFields: [{ table: "incident", fields: "*" }],
-      },
-      "fieldPolicy.u_audit.writable[0] is not a field name",
-    ],
   ])("rejects %s", (_label, profile, expected) => {
     writeProfiles({ broken: profile });
 
@@ -478,6 +470,95 @@ describe("malformed field policy fails at profile load (#8)", () => {
           .not.toBe("invalid_field_selection");
       });
     }
+  });
+});
+
+describe("fieldPolicy beside a table list is rejected (A2)", () => {
+  const ONE_FORM =
+    "State the field policy in one form: fieldPolicy alone, or readableTableFields " +
+    "and writableTableFields without fieldPolicy.";
+  // Values carry a canary; only key names may appear in a message.
+  const narrowing = { incident: { writable: ["state"], readable: ["sys_id", "zqxcanary"] } };
+  const userList = [{ table: "sys_user", fields: ["sys_id", "zqxcanary"] }];
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ["readableTableFields", { fieldPolicy: narrowing, readableTableFields: userList }, "readableTableFields"],
+    ["writableTableFields", { fieldPolicy: narrowing, writableTableFields: userList }, "writableTableFields"],
+    [
+      "both lists",
+      { fieldPolicy: narrowing, readableTableFields: userList, writableTableFields: userList },
+      "readableTableFields and writableTableFields",
+    ],
+    ["an empty list", { fieldPolicy: narrowing, writableTableFields: [] }, "writableTableFields"],
+  ])("rejects fieldPolicy with %s at load", (_label, profile, lists) => {
+    writeProfiles({ mixed: profile });
+
+    const message = loadError().message;
+    expect(message).toBe(
+      `Profile configuration is invalid: profile "mixed": fieldPolicy cannot be combined ` +
+        `with ${lists}. ${ONE_FORM}`
+    );
+    expect(message.toLowerCase()).not.toContain("canary");
+  });
+
+  it("rejects the combination in the variable's profile-key form", () => {
+    vi.stubEnv(
+      "SN_FIELD_POLICY_DEFINITIONS",
+      JSON.stringify({ fieldPolicy: narrowing, writableTableFields: userList })
+    );
+    vi.stubEnv("SN_PROFILE_NAME", "env-profile");
+    vi.stubEnv("SN_INSTANCE", "https://env-profile.service-now.com");
+
+    const message = loadError().message;
+    expect(message).toBe(
+      "SN_FIELD_POLICY_DEFINITIONS.fieldPolicy cannot be combined with " +
+        `SN_FIELD_POLICY_DEFINITIONS.writableTableFields. ${ONE_FORM}`
+    );
+    expect(message.toLowerCase()).not.toContain("canary");
+  });
+
+  it("fails closed on the request path when the combination skipped profile load", () => {
+    // Before: the lists applied and the incident narrowing was dropped, so
+    // this write was allowed and caller_id was readable.
+    runWithFieldPolicyConfiguration(
+      { fieldPolicy: narrowing, readableTableFields: userList },
+      () => {
+        expect(
+          policyReason(() => validateWritableFields("incident", { short_description: "x" }))
+        ).toBe("invalid_argument_shape");
+        expect(
+          policyReason(() => resolveReadableFields("incident", { fields: "caller_id" }))
+        ).toBe("invalid_argument_shape");
+      }
+    );
+  });
+
+  it("still applies each form on its own", () => {
+    writeProfiles({
+      mapped: { fieldPolicy: { incident: { writable: ["state"] } } },
+      listed: {
+        readableTableFields: [{ table: "sys_user", fields: ["sys_id", "name"] }],
+        writableTableFields: [{ table: "sys_user", fields: ["name"] }],
+      },
+    });
+    const manager = new ProfileManager({ configFilePath });
+
+    runWithFieldPolicyConfiguration(profileScope(manager.getProfile("mapped")), () => {
+      expect(policyReason(() => validateWritableFields("incident", { state: "2" }))).toBe(
+        "allowed"
+      );
+      expect(
+        policyReason(() => validateWritableFields("incident", { short_description: "x" }))
+      ).toBe("non_writable_field");
+    });
+    runWithFieldPolicyConfiguration(profileScope(manager.getProfile("listed")), () => {
+      expect(policyReason(() => validateWritableFields("sys_user", { name: "x" }))).toBe(
+        "allowed"
+      );
+      expect(policyReason(() => resolveReadableFields("sys_user", { fields: "email" }))).toBe(
+        "unreadable_field"
+      );
+    });
   });
 });
 

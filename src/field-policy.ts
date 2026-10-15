@@ -112,6 +112,11 @@ const FIELD_POLICY_CONFIGURATION_KEYS = Object.freeze([
   "readableTableFields",
   "writableTableFields",
 ] as const);
+/** The two table-list keys; neither may be combined with `fieldPolicy`. */
+const TABLE_FIELD_LIST_KEYS = Object.freeze([
+  "readableTableFields",
+  "writableTableFields",
+] as const);
 const FIELD_NAME_RULE =
   "letters, digits, and underscores, starting with a letter, at most 80 characters";
 
@@ -1362,8 +1367,8 @@ const PROFILE_CONFIGURATION_LABELS: ConfigurationLabels = Object.freeze({
  * path attached and throws FieldPolicyConfigurationError naming the table and
  * key. A configuration that passes cannot fail normalization on a request.
  *
- * Each stated key is checked on its own, including a `fieldPolicy` that the
- * request path does not apply because the profile also states a table list.
+ * It also rejects `fieldPolicy` stated beside a table list, which used to load
+ * and then fail open: the request path applied only the lists.
  */
 export function validateFieldPolicyConfiguration(
   input: FieldPolicyConfigurationInput
@@ -1438,7 +1443,20 @@ function validateConfiguration(
     );
   }
   const record = definedOwnProperties(input as Record<string, unknown>);
+  const statedLists = TABLE_FIELD_LIST_KEYS.filter((key) => Object.hasOwn(record, key));
+  if (Object.hasOwn(record, "fieldPolicy") && statedLists.length > 0) {
+    // The request path applied only the lists and dropped every narrowing in
+    // fieldPolicy. There is no unambiguous merge, so the two forms exclude
+    // each other.
+    throw new FieldPolicyConfigurationError(
+      `${labels.fieldPolicy} cannot be combined with ` +
+        `${statedLists.map((key) => labels[key]).join(" and ")}. State the field ` +
+        "policy in one form: fieldPolicy alone, or readableTableFields and " +
+        "writableTableFields without fieldPolicy."
+    );
+  }
   try {
+    // The same normalizers the request path runs, with key paths attached.
     if (Object.hasOwn(record, "fieldPolicy")) {
       buildFieldPolicyMap(
         mergeFieldPolicyDefinitions(
@@ -1447,16 +1465,12 @@ function validateConfiguration(
         ),
         labels.fieldPolicy
       );
-    }
-    const listed: Record<string, MutableTableFieldPolicyDefinition> = {};
-    applyTableFieldList(listed, record.readableTableFields, "readable", labels.readableTableFields);
-    applyTableFieldList(listed, record.writableTableFields, "writable", labels.writableTableFields);
-    buildFieldPolicyMap(mergeFieldPolicyDefinitions(FIELD_POLICY_BASE, listed));
-    // Finally the exact configuration the request path will build.
-    const effective = normalizeConfiguredFieldPolicy(record);
-    if (effective) {
+    } else {
       buildFieldPolicyMap(
-        mergeFieldPolicyDefinitions(FIELD_POLICY_BASE, effective.definitions)
+        mergeFieldPolicyDefinitions(
+          FIELD_POLICY_BASE,
+          tableFieldListDefinitions(record, labels)
+        )
       );
     }
   } catch (error) {
@@ -1510,14 +1524,13 @@ function normalizeConfiguredFieldPolicy(
     throw new FieldPolicyError("invalid_argument_shape");
   }
   const outerRecord = definedOwnProperties(parsed as Record<string, unknown>);
-  if (
-    Object.hasOwn(outerRecord, "readableTableFields") ||
-    Object.hasOwn(outerRecord, "writableTableFields")
-  ) {
-    const definitions: Record<string, MutableTableFieldPolicyDefinition> = {};
-    applyTableFieldList(definitions, outerRecord.readableTableFields, "readable");
-    applyTableFieldList(definitions, outerRecord.writableTableFields, "writable");
-    return Object.freeze({ definitions });
+  if (TABLE_FIELD_LIST_KEYS.some((key) => Object.hasOwn(outerRecord, key))) {
+    // Profile load rejects this combination. A scope that skipped the load
+    // fails closed rather than applying one form and dropping the other.
+    if (Object.hasOwn(outerRecord, "fieldPolicy")) {
+      throw new FieldPolicyError("invalid_argument_shape");
+    }
+    return Object.freeze({ definitions: tableFieldListDefinitions(outerRecord) });
   }
   if (outerRecord.fieldPolicy === undefined) return undefined;
   return Object.freeze({
@@ -1569,6 +1582,21 @@ function fieldPolicyDefinitions(
     }
     definitions[table] = Object.freeze(definition) as MutableTableFieldPolicyDefinition;
   }
+  return definitions;
+}
+
+/**
+ * Normalize the `readableTableFields` / `writableTableFields` form.
+ *
+ * @param labels Configuration keys the lists came from; given only at load.
+ */
+function tableFieldListDefinitions(
+  record: Record<string, unknown>,
+  labels?: ConfigurationLabels
+): Record<string, MutableTableFieldPolicyDefinition> {
+  const definitions: Record<string, MutableTableFieldPolicyDefinition> = {};
+  applyTableFieldList(definitions, record.readableTableFields, "readable", labels?.readableTableFields);
+  applyTableFieldList(definitions, record.writableTableFields, "writable", labels?.writableTableFields);
   return definitions;
 }
 
