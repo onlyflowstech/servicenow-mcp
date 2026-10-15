@@ -141,6 +141,9 @@ describe("SNSDK-49 bounded write-value policy", () => {
       { category: "  " },
       { caller_id: "not-a-sys-id" },
       { caller_id: { value: "not-a-sys-id", display_value: "Beth Anglin" } },
+      // {value} is unwrapped first, then the typed check still applies.
+      { category: { value: "x^ORactive=true", display_value: "Software" } },
+      { caller_id: { value: "x^ORactive=true" } },
       { assigned_to: { value: SYS_ID, unexpected: "x" } },
       { assigned_to: [SYS_ID] },
       { impact: null },

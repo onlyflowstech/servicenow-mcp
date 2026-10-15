@@ -1219,6 +1219,92 @@ describe("Security finding 6: a sub-request server error is unconfirmed", () => 
   });
 });
 
+describe("Security finding 8: field policy narrows every journal route", () => {
+  const NARROWED = {
+    fieldPolicy: {
+      incident: { writable: ["short_description", "state", "work_notes"] },
+    },
+  } as const;
+
+  function expectFieldDenial(
+    connected: Harness,
+    result: Awaited<ReturnType<Client["callTool"]>>,
+    tool: string
+  ) {
+    expect(result.isError).toBe(true);
+    const text = responseText(result);
+    expect(text).toContain('field "comments" is not writable on "incident"');
+    expect(text).toContain("fieldPolicy.incident.writable");
+    expect(connected.records.at(-1)).toMatchObject({
+      tool,
+      outcome: "policy_rejected",
+      reason: "field_access_denied",
+    });
+    expect(connected.getConfig).not.toHaveBeenCalled();
+    expect(connected.getClient).not.toHaveBeenCalled();
+  }
+
+  it("denies sn_create {comments}", async () => {
+    const connected = await harness({ fieldPolicy: NARROWED });
+    const result = await callTool(connected, "sn_create", {
+      table: "incident",
+      fields: { short_description: "Printer jam", comments: "Customer update" },
+    });
+
+    expectFieldDenial(connected, result, "sn_create");
+    expect(connected.serviceNowClient.post).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])(
+    "denies sn_batch {comments} with confirm %s",
+    async (confirm) => {
+      const connected = await harness({ fieldPolicy: NARROWED });
+      const result = await callTool(connected, "sn_batch", {
+        ...batchArguments({ comments: "Customer update" }),
+        confirm,
+      });
+
+      expectFieldDenial(connected, result, "sn_batch");
+      expect(connected.serviceNowClient.get).not.toHaveBeenCalled();
+      expect(connected.serviceNowClient.post).not.toHaveBeenCalled();
+    }
+  );
+
+  it("still allows the journal field the policy lists", async () => {
+    const connected = await harness({ fieldPolicy: NARROWED, matched: 1 });
+    const result = await callTool(
+      connected,
+      "sn_batch",
+      batchArguments({ work_notes: "Internal note" })
+    );
+
+    expect(responseData(result)).toMatchObject({ processed: 1, failed: 0 });
+  });
+
+  it.each([
+    ["category", { value: "x^ORactive=true", display_value: "Software" }],
+    ["caller_id", { value: "x^ORactive=true" }],
+  ] as const)(
+    "unwraps {value} on typed incident field %s before the typed check",
+    async (field, value) => {
+      const connected = await harness();
+      const result = await callTool(connected, "sn_update", {
+        table: "incident",
+        sys_id: SYS_ID,
+        fields: { [field]: value },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(responseText(result)).toContain(`rejected a field value for "${field}"`);
+      expect(responseText(result)).not.toContain("x^ORactive=true");
+      expect(connected.records.at(-1)).toMatchObject({
+        reason: "write_value_denied",
+      });
+      expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
+    }
+  );
+});
+
 describe("Security finding 9: each record is changed once per run", () => {
   it("de-duplicates sys_ids the lookup returns more than once", async () => {
     const connected = await harness();
