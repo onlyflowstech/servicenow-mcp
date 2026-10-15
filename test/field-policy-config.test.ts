@@ -149,23 +149,77 @@ describe('["*"] means "*" (#8)', () => {
     });
   });
 
-  it("does not widen a list that merely contains \"*\"", () => {
-    for (const fields of [["*", "number"], ["*", "*"], [" * "]]) {
-      runWithFieldPolicyConfiguration(
-        { writableTableFields: [{ table: "change_request", fields }] },
-        () => {
-          expect(
-            policyReason(() => validateWritableFields("change_request", { state: "2" })),
-            JSON.stringify(fields)
-          ).not.toBe("allowed");
-        }
+  /** Wildcard look-alikes: none of them may mean "every field". */
+  const sparseOne = (): unknown[] => {
+    const sparse: unknown[] = [];
+    sparse.length = 1;
+    return sparse;
+  };
+  const lookAlikes: ReadonlyArray<[string, () => unknown]> = [
+    ['["*","number"]', () => ["*", "number"]],
+    ['["*","*"]', () => ["*", "*"]],
+    ['[" * "]', () => [" * "]],
+    ['[["*"]]', () => [["*"]]],
+    ["[null]", () => [null]],
+    ["a sparse length-1 array", sparseOne],
+    ['{0:"*",length:1}', () => ({ 0: "*", length: 1 })],
+    ['"**"', () => "**"],
+    ['"ALL"', () => "ALL"],
+  ];
+
+  it.each(lookAlikes)("does not widen writableTableFields fields %s", (_label, make) => {
+    const configuration = { writableTableFields: [{ table: "change_request", fields: make() }] };
+    expect(() => validateFieldPolicyConfiguration(configuration)).toThrow(
+      FieldPolicyConfigurationError
+    );
+    runWithFieldPolicyConfiguration(configuration, () => {
+      expect(policyReason(() => validateWritableFields("change_request", { u_x: "1" })))
+        .not.toBe("allowed");
+    });
+  });
+
+  it.each(lookAlikes)("does not widen fieldPolicy writable %s", (_label, make) => {
+    const configuration = { fieldPolicy: { change_request: { writable: make() } } };
+    expect(() => validateFieldPolicyConfiguration(configuration)).toThrow(
+      FieldPolicyConfigurationError
+    );
+    runWithFieldPolicyConfiguration(configuration, () => {
+      expect(policyReason(() => validateWritableFields("change_request", { u_x: "1" })))
+        .not.toBe("allowed");
+    });
+  });
+
+  it.each(lookAlikes)("does not widen fieldPolicy readable %s", (_label, make) => {
+    const configuration = { fieldPolicy: { change_request: { readable: make() } } };
+    expect(() => validateFieldPolicyConfiguration(configuration)).toThrow(
+      FieldPolicyConfigurationError
+    );
+    runWithFieldPolicyConfiguration(configuration, () => {
+      expect(policyReason(() => resolveReadableFields("change_request", { fields: "u_x" })))
+        .not.toBe("allowed");
+      expect(policyReason(() => resolveReadableFields("change_request", { fields: "all" })))
+        .not.toBe("allowed");
+    });
+  });
+
+  it.each(lookAlikes)("does not widen fieldPolicy defaults %s", (_label, make) => {
+    const configuration = { fieldPolicy: { change_request: { defaults: make() } } };
+    expect(() => validateFieldPolicyConfiguration(configuration)).toThrow(
+      FieldPolicyConfigurationError
+    );
+    runWithFieldPolicyConfiguration(configuration, () => {
+      expect(policyReason(() => resolveReadableFields("change_request"))).not.toBe(
+        "allowed"
       );
-      expect(() =>
-        validateFieldPolicyConfiguration({
-          writableTableFields: [{ table: "change_request", fields }],
-        })
-      ).toThrow(FieldPolicyConfigurationError);
-    }
+    });
+  });
+
+  it('does not accept ["*"] as a table name in the list form', () => {
+    expect(() =>
+      validateFieldPolicyConfiguration({
+        writableTableFields: [{ table: ["*"], fields: ["*"] }],
+      })
+    ).toThrow(/^writableTableFields\[0\]\.table is not a valid table name/u);
   });
 
   it("loads a profile that spells the wildcard as a list", () => {
@@ -296,21 +350,76 @@ describe("malformed field policy fails at profile load (#8)", () => {
     }
   });
 
-  it("never repeats a rejected configured value", () => {
-    writeProfiles({
-      canary: {
-        fieldPolicy: {
-          "u_canary table": {},
-        },
-      },
-      other: { writableTableFields: [{ table: "incident", fields: ["u_CANARY*"] }] },
-    });
-    expect(loadError().message.toLowerCase()).not.toContain("canary table");
+  /** Malformed shapes that each carry a canary in the rejected part. */
+  const CANARY = "zqxcanary";
+  const canaryShapes: ReadonlyArray<[string, Record<string, unknown>]> = [
+    ["a table key with a space", { fieldPolicy: { [`${CANARY} table`]: {} } }],
+    ["a table key with punctuation", { fieldPolicy: { [`${CANARY}!`]: { writable: [] } } }],
+    ["a pattern entry", { fieldPolicy: { incident: { writable: [`${CANARY}*`] } } }],
+    [
+      "an upper-case pattern entry",
+      { writableTableFields: [{ table: "incident", fields: [`u_${CANARY.toUpperCase()}*`] }] },
+    ],
+    ["a dotted entry", { fieldPolicy: { incident: { writable: ["u_x", `${CANARY}.x`] } } }],
+    ["an object field set", { fieldPolicy: { incident: { writable: { [CANARY]: 1 } } } }],
+    [
+      "a non-string entry beside a pattern",
+      { fieldPolicy: { incident: { readable: [1, CANARY], defaults: [`${CANARY}*`] } } },
+    ],
+    ["a string table entry", { fieldPolicy: { incident: CANARY } }],
+    ["a string fieldPolicy", { fieldPolicy: CANARY }],
+    ["a list fieldPolicy", { fieldPolicy: [CANARY] }],
+    ["an invalid list-form table", { readableTableFields: [{ table: `${CANARY}/x`, fields: "*" }] }],
+    [
+      "an invalid list-form field",
+      { readableTableFields: [{ table: "incident", fields: [`${CANARY}-x`] }] },
+    ],
+    ["a string list entry", { readableTableFields: [CANARY] }],
+    ["a string list", { readableTableFields: CANARY }],
+    ["a string list-form fields", { writableTableFields: [{ table: "incident", fields: CANARY }] }],
+  ];
 
-    writeProfiles({
-      other: { writableTableFields: [{ table: "incident", fields: ["u_CANARY*"] }] },
-    });
-    expect(loadError().message.toLowerCase()).not.toContain("canary");
+  it.each(canaryShapes)("never repeats the rejected value for %s", (_label, shape) => {
+    let direct = "";
+    try {
+      validateFieldPolicyConfiguration(shape);
+    } catch (error) {
+      expect(error).toBeInstanceOf(FieldPolicyConfigurationError);
+      direct = (error as Error).message;
+    }
+    expect(direct).not.toBe("");
+    expect(direct.toLowerCase()).not.toContain(CANARY);
+
+    writeProfiles({ broken: shape });
+    const loaded = loadError().message;
+    expect(loaded).toContain('Profile configuration is invalid: profile "broken": ');
+    expect(loaded.toLowerCase()).not.toContain(CANARY);
+  });
+
+  it.each<[string, string]>([
+    ["invalid JSON", `{"${CANARY}": `],
+    ["a JSON list", JSON.stringify([CANARY])],
+    ["an invalid table key", JSON.stringify({ [`${CANARY} t`]: {} })],
+    [
+      "a pattern in the profile-key form",
+      JSON.stringify({ fieldPolicy: { a: { writable: [`${CANARY}*`] } } }),
+    ],
+  ])("never repeats the SN_FIELD_POLICY_DEFINITIONS value for %s", (_label, value) => {
+    let parsed = "";
+    try {
+      fieldPolicyInputFromEnvironment({ SN_FIELD_POLICY_DEFINITIONS: value });
+    } catch (error) {
+      expect(error).toBeInstanceOf(FieldPolicyConfigurationError);
+      parsed = (error as Error).message;
+    }
+    expect(parsed).toMatch(/^SN_FIELD_POLICY_DEFINITIONS/u);
+    expect(parsed.toLowerCase()).not.toContain(CANARY);
+
+    // The same value on the environment profile fails startup just as cleanly.
+    vi.stubEnv("SN_FIELD_POLICY_DEFINITIONS", value);
+    vi.stubEnv("SN_PROFILE_NAME", "env-profile");
+    vi.stubEnv("SN_INSTANCE", "https://env-profile.service-now.com");
+    expect(loadError().message.toLowerCase()).not.toContain(CANARY);
   });
 
   it("rejects a malformed field policy on addProfile without persisting it", () => {
