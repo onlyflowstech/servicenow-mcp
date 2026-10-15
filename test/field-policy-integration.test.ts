@@ -268,11 +268,6 @@ afterEach(async () => {
   );
 });
 
-function responseText(result: Awaited<ReturnType<Client["callTool"]>>): string {
-  const content = (result as { content?: { type: string; text?: string }[] }).content;
-  return content?.[0]?.type === "text" ? (content[0].text ?? "") : "";
-}
-
 function responseData(result: Awaited<ReturnType<Client["callTool"]>>): unknown {
   const structured = result.structuredContent;
   if (typeof structured !== "object" || structured === null) {
@@ -437,12 +432,15 @@ describe("SNSDK-30 registered-tool field boundary", () => {
     expect(connected.serviceNowClient.get).not.toHaveBeenCalled();
   });
 
-  it("rejects a journal write through sn_batch, as through create and update", async () => {
-    // The append-only journal discipline is uniform across every write path.
-    // sn_batch was the one gap: the built-in incident writable list used to
-    // deny work_notes here, and once field policy stopped denying at table
-    // granularity nothing did.
+  it("sends a journal write through sn_batch once per record, never replayed", async () => {
+    // Journal fields are decided by field policy on every write path, and
+    // sn_batch now applies the same value policy as create and update.
     const connected = await harness();
+    vi.mocked(connected.serviceNowClient.post).mockResolvedValueOnce({
+      batch_request_id: "sn_batch",
+      serviced_requests: [{ id: "1", status_code: 200, status_text: "OK" }],
+      unserviced_requests: [],
+    });
     const batch = await connected.client.callTool({
       name: "sn_batch",
       arguments: {
@@ -453,43 +451,55 @@ describe("SNSDK-30 registered-tool field boundary", () => {
         },
         action: "update",
         confirm: true,
-        fields: { work_notes: "must go through the journal tool" },
+        fields: { work_notes: "Bulk triage note" },
       },
     });
 
-    expect(batch.isError).toBe(true);
-    const text = responseText(batch);
-    expect(text).toContain("work_notes");
-    expect(text).toContain("sn_incident_add_work_note");
-    // The message must name the tool that was actually called.
-    expect(text).toContain("sn_batch");
-    expect(text).not.toContain("sn_update cannot write");
+    expect(batch.isError).toBeUndefined();
+    expect(responseData(batch)).toEqual({
+      action: "update",
+      table: "incident",
+      matched: 1,
+      processed: 1,
+      failed: 0,
+    });
+    expect(connected.serviceNowClient.post).toHaveBeenCalledTimes(1);
+    const [path, payload] = vi.mocked(connected.serviceNowClient.post).mock
+      .calls[0] as unknown as [string, { rest_requests: Array<{ body: string }> }];
+    expect(path).toBe("/api/now/v1/batch");
+    expect(payload.rest_requests).toHaveLength(1);
+    expect(
+      JSON.parse(Buffer.from(payload.rest_requests[0]!.body, "base64").toString("utf8"))
+    ).toEqual({ work_notes: "Bulk triage note" });
+    expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
   });
 
-  it("rejects a journal write through sn_create and tells the caller to sequence", async () => {
+  it("creates an incident with a journal field through sn_create", async () => {
     const connected = await harness();
     const created = await connected.client.callTool({
       name: "sn_create",
       arguments: {
         profile: "field",
         table: "incident",
-        fields: { short_description: "ok", comments: "must go through the journal tool" },
+        fields: { short_description: "ok", comments: "Customer reported it" },
       },
     });
 
-    expect(created.isError).toBe(true);
-    const text = responseText(created);
-    expect(text).toContain("sn_create");
-    // At create time there is no sys_id yet, so "pass sys_id" is advice the
-    // caller cannot follow. The message must sequence the two calls instead.
-    expect(text).toContain("Create the record first");
-    expect(text).toContain("sn_incident_add_comment");
+    expect(created.isError).toBeUndefined();
+    expect(connected.serviceNowClient.post).toHaveBeenCalledWith(
+      "/api/now/table/incident",
+      { short_description: "ok", comments: "Customer reported it" }
+    );
+    // The response projection still drops sensitive names.
+    expect(JSON.stringify(created)).not.toMatch(/"password"/u);
   });
 
-  it("uses the validated REST batch payload and filters aggregate raw output", async () => {
+  it("uses the documented REST batch payload and filters aggregate raw output", async () => {
     const connected = await harness();
     vi.mocked(connected.serviceNowClient.post).mockResolvedValueOnce({
-      result: { responses: [{ status_code: 200 }] },
+      batch_request_id: "sn_batch",
+      serviced_requests: [{ id: "1", status_code: 200, status_text: "OK" }],
+      unserviced_requests: [],
     });
     const batch = await connected.client.callTool({
       name: "sn_batch",
@@ -522,8 +532,15 @@ describe("SNSDK-30 registered-tool field boundary", () => {
           {
             id: "1",
             method: "PATCH",
-            url: `/api/now/table/incident/${"1".repeat(32)}`,
-            body: { state: "2" },
+            url: `/api/now/table/incident/${"1".repeat(32)}?sysparm_fields=sys_id`,
+            headers: [
+              { name: "Content-Type", value: "application/json" },
+              { name: "Accept", value: "application/json" },
+            ],
+            exclude_response_headers: true,
+            body: Buffer.from(JSON.stringify({ state: "2" }), "utf8").toString(
+              "base64"
+            ),
           },
         ],
       })

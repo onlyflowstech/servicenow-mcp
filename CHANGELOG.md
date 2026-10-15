@@ -5,6 +5,63 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Journal fields are written through the generic write tools again.**
+  `sn_create`, `sn_update` and `sn_batch` accept `comments` and `work_notes`
+  on every table granted for writes, which reverses the 2.0 rule that moved
+  them to dedicated tools. The rule rejected both names on every table ahead
+  of field policy, no configuration could lift it, and tables other than
+  `incident` had no journal route at all. Each entry gets the bounds the
+  dedicated tools apply (1-8,000 characters, 16,384 UTF-8 bytes, no control
+  characters), and the configured field policy decides permission: leave
+  `comments` out of `fieldPolicy.<table>.writable` to withhold
+  customer-visible comments. `sn_incident_add_comment` and
+  `sn_incident_add_work_note` remain.
+
+### Fixed
+
+- `incident` fields outside the 14 with typed checks are writable. Task
+  fields such as `cmdb_ci`, `business_service`, `watch_list` and
+  `hold_reason`, and every `u_`/`x_` custom field, were rejected whatever the
+  field policy said. They now get the generic value bounds; the 14 fields
+  keep their typed checks, and the sensitive-name blocklist is unchanged.
+- Incident `description`, `close_notes`, choice fields and the reference
+  fields `caller_id`, `assignment_group` and `assigned_to` can be cleared with
+  `""` or `null`. `short_description` stays required.
+- Generic writes accept `null` (clears the field), finite decimals such as
+  `12.5`, arrays of comma-free scalars for list fields such as `watch_list`,
+  and the `{value, display_value, link}` read shape, which is written as its
+  `value`. Unsafe integers and exponent forms are still rejected.
+- `sn_batch` applies the same value policy as `sn_update`, before any
+  credential or client is used, and sends the canonical values. It used to
+  send raw values unchecked.
+- `sn_batch` uses the documented ServiceNow REST Batch API shape: per-request
+  headers, base64 bodies, and `serviced_requests`/`unserviced_requests` in the
+  response. The old request and parser did not match it, so every confirmed
+  batch fell back to a serial replay of all records after the batch had been
+  sent. A batch is now never replayed: serial calls replace it only when the
+  instance refused it outright (401, 403 or 404), and only for records not
+  already confirmed. Outcomes ServiceNow does not confirm are reported in the
+  result `message` instead of being retried, and the run stops there.
+- `sn_batch` can reach its 10,000-record cap. One 1 MiB response budget used
+  to cover the whole call, so a 10,000-record update stopped after about 3,400
+  records; each batch and serial request now has its own budget. The serial
+  fallback no longer counts applied updates as failed when full records exceed
+  the budget.
+- A rate-limited `sn_batch` (429) stops and reports the remaining records as
+  not sent, with the `Retry-After` hint. It used to fall back to one request
+  per record, each retried against the same limit.
+- `sn_batch` keeps each batch request body under 4 MiB by sending fewer
+  records per batch when values are large. A 400 KB field value used to
+  produce a 27 MB request.
+- `sn_incident_add_comment` and `sn_incident_add_work_note` honour
+  `fieldPolicy.incident.writable`, so a writable set that leaves out a journal
+  field denies the dedicated tool and `sn_update` alike.
+- A write-value denial names the field and table it rejected.
+
 ## [2.2.0-dev.6] — 2026-09-16
 
 ### Fixed

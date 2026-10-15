@@ -596,12 +596,12 @@ in this section is needed to use this server.
 |------|-------------|
 | `sn_query` | Query an approved table with structured filters, field selection, pagination, and sorting; bounded raw reads require an explicit policy rule |
 | `sn_get` | Get a single record by sys_id from an approved table |
-| `sn_create` | Create a record on any table granted for writes, using only field-policy-approved writable fields; `incident` additionally requires a bounded `short_description` |
-| `sn_update` | Update one record selected by exact `sys_id` on any table granted for writes, using only field-policy-approved writable fields; rejects `comments` and `work_notes` with dedicated-tool migration guidance |
+| `sn_create` | Create a record on any table granted for writes, using only field-policy-approved writable fields, including the journal fields `comments` and `work_notes`; `incident` additionally requires a bounded `short_description` |
+| `sn_update` | Update one record selected by exact `sys_id` on any table granted for writes, using only field-policy-approved writable fields; `comments` and `work_notes` append a journal entry |
 | `sn_incident_add_comment` | Append one bounded customer-visible comment to an incident; repeated calls append again |
 | `sn_incident_add_work_note` | Append one bounded internal work note to an incident; repeated calls append again |
 | `sn_delete` | Delete a record on an approved write table (requires `confirm: true`) |
-| `sn_batch` | Bulk update/delete using a required structured filter and dry-run safety (raw encoded selectors are prohibited; requires `confirm: true` to execute) |
+| `sn_batch` | Bulk update/delete using a required structured filter and dry-run safety (raw encoded selectors are prohibited; requires `confirm: true` to execute). Values get the same policy as `sn_update`; execution uses the ServiceNow REST Batch API and never re-sends a batch |
 
 ### Analytics & Schema
 
@@ -935,11 +935,61 @@ complete. File-backed profile example:
 `atf.execute` profile grant. Typed ATF steps use the authenticated native form
 to save and verify inputs and output references without ACL changes or an
 installed application. See [ATF workflow](docs/ATF-WORKFLOW.md).
-Incident journal fields are append-only: generic `sn_update` rejects `comments`
-and `work_notes` before credentials or client creation. Use
-`sn_incident_add_comment` or `sn_incident_add_work_note` with exactly
-`profile`, incident `sys_id`, and bounded `content`; grant the selected tool
-explicitly on the `incident` target as well as write access to that table.
+
+#### Journal fields
+
+`comments` (customer-visible) and `work_notes` (internal) are written like any
+other field through `sn_create`, `sn_update` and `sn_batch`, on any table
+granted for writes: `incident`, `change_request`, `problem`, `sc_task`, custom
+task tables. A Table API write to a journal field appends one entry; it never
+edits or removes earlier entries. Each entry is 1-8,000 characters of
+non-blank text, at most 16,384 UTF-8 bytes, without control characters other
+than newline, carriage return and tab.
+
+The field policy decides who may write them. To keep a profile from posting
+customer-visible comments, leave `comments` out of
+`fieldPolicy.<table>.writable`. The same setting also denies
+`sn_incident_add_comment`, so both routes to the field agree. The dedicated
+incident tools take exactly `profile`, incident `sys_id` and bounded
+`content`; grant the selected tool on the `incident` target as well as write
+access to that table.
+
+#### Write values
+
+A field approved by the field policy accepts:
+
+- a string, a boolean, a safe integer, or a finite decimal such as `12.5`
+  (not exponent forms such as `1e21`);
+- `""` or `null` to clear the field;
+- an array of scalars for a list field such as `watch_list`, sent as one
+  comma-separated value, so no element may contain a comma;
+- a `{"value": ..., "display_value": ..., "link": ...}` object, the shape
+  reads return with display values, which is written as its `value`.
+
+Values cannot contain control characters (newline, carriage return and tab are
+allowed) and are bounded to 100,000 characters. On `incident`,
+`short_description`, `description`, `close_notes`, the reference fields
+`caller_id`, `assignment_group` and `assigned_to`, and the choice fields keep
+typed checks: a reference takes a 32-character `sys_id` or `""`, a choice
+cannot contain `^`, `=` or `,`, and `short_description` is required on create
+and cannot be cleared. Every other incident field gets the generic bounds.
+
+#### Bulk writes
+
+`sn_batch` sends confirmed updates and deletes through the ServiceNow REST
+Batch API (`/api/now/v1/batch`), up to 50 records per request and fewer when
+field values are large, so a request body stays under 4 MiB. Each request
+gets its own 1 MiB response budget, so a run can reach the 10,000-record cap.
+
+It falls back to one Table API call per record only when the instance refuses
+the batch request outright (401, 403 or 404), and then only for records not
+already confirmed. A rate limit (429) stops the run instead: the remaining
+records are reported as not sent, with the `Retry-After` hint, because serial
+calls would only add load. It never re-sends a request that may have reached
+the instance: when ServiceNow does not confirm a record's outcome, in a batch
+or a serial call, the run stops and the result reports it in `message` instead
+of retrying it. A batch is therefore never replayed, which matters for journal
+fields, where a replay would append a second entry.
 
 ### ServiceNow profiles
 

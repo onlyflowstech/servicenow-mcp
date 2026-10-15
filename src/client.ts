@@ -7,6 +7,9 @@
  *     network errors (max 2 retries).
  *   - POST retries ONLY on 429 — a 429 is rejected before processing, so
  *     a retry is safe; a 5xx POST may have executed side effects.
+ *   - A PATCH or PUT whose body sets a journal field (comments, work_notes)
+ *     is treated like a POST: each send can append an entry, so it retries
+ *     only on 429.
  *   - Retry-After headers (delta-seconds and HTTP-date) are honored,
  *     capped at MAX_RETRY_DELAY_MS per wait.
  *   - A 401 triggers at most one AuthProvider refresh + retry.
@@ -19,6 +22,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 import { ServiceNowConfig } from "./config.js";
 import { AuthProvider, createAuthProvider } from "./auth.js";
+import { isJournalFieldName } from "./incident-journal-policy.js";
 import {
   boundedRetryAfterSeconds,
   createToolError,
@@ -307,6 +311,15 @@ export class ServiceNowClient {
     options: { params?: Record<string, string>; body?: unknown } = {}
   ): Promise<RequestResult<T>> {
     const url = this.buildUrl(path, options.params);
+    // A journal write appends an entry each time it is applied. Once such a
+    // request may have reached the instance (a 5xx or a network failure), a
+    // re-send could append a second entry, so it is not re-sent. A 429 and
+    // the one 401 refresh still retry: both mean nothing was processed.
+    // The error classification is unchanged, so the failure still reads as
+    // an unknown outcome (retry_if_safe_and_idempotent) to callers.
+    const resendAfterSend =
+      method !== "POST" &&
+      !((method === "PATCH" || method === "PUT") && setsJournalField(options.body));
     const response = await this.fetchWithPolicy(
       method,
       url,
@@ -314,7 +327,9 @@ export class ServiceNowClient {
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      options.body !== undefined ? JSON.stringify(options.body) : undefined
+      options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      false,
+      resendAfterSend
     );
 
     if (!response.ok) {
@@ -361,13 +376,18 @@ export class ServiceNowClient {
    * fetch() with the full request policy applied: auth headers, timeout,
    * bounded retries with backoff, Retry-After, and a single 401
    * refresh-and-retry via the AuthProvider.
+   *
+   * `resendAfterSend` says whether a request that may have reached the
+   * instance (a 5xx or a network failure) can be sent again. It defaults to
+   * false for POST and true for every other method.
    */
   private async fetchWithPolicy(
     method: HttpMethod,
     url: string,
     headers: Record<string, string>,
     body?: BodyInit,
-    nativeForm = false
+    nativeForm = false,
+    resendAfterSend = method !== "POST"
   ): Promise<Response> {
     let attempt = 0;
     let authRetried = false;
@@ -401,8 +421,9 @@ export class ServiceNowClient {
           throw requestPolicyError("timeout", method);
         }
         // Transient network error (DNS, reset, refused...). Never retry a
-        // POST -- the request may have reached the server before failing.
-        if (!nativeForm && method !== "POST" && attempt < this.#maxRetries) {
+        // POST or a journal write -- the request may have reached the server
+        // before failing.
+        if (!nativeForm && resendAfterSend && attempt < this.#maxRetries) {
           attempt++;
           throwIfRequestCancelled(requestSignal);
           await waitForRequestCancellation(
@@ -429,7 +450,7 @@ export class ServiceNowClient {
       }
 
       if (
-        !nativeForm && isRetryableStatus(response.status, method) &&
+        !nativeForm && isRetryableStatus(response.status, resendAfterSend) &&
         attempt < this.#maxRetries
       ) {
         attempt++;
@@ -854,11 +875,25 @@ export function retryDelayMs(
 
 // ── Module-level helpers ───────────────────────────────────────────
 
-function isRetryableStatus(status: number, method: HttpMethod): boolean {
+function isRetryableStatus(status: number, resendAfterSend: boolean): boolean {
   if (status === 429) return true;
-  // A 5xx POST may have executed side effects on the instance -- never retry.
-  if (method === "POST") return false;
+  // A 5xx POST or journal write may have executed side effects on the
+  // instance -- never retry.
+  if (!resendAfterSend) return false;
   return RETRYABLE_STATUSES.includes(status);
+}
+
+/**
+ * True when a JSON body sets a journal field. Only own enumerable keys are
+ * read, the way JSON.stringify serializes the body, and no value is read.
+ */
+function setsJournalField(body: unknown): boolean {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return false;
+  }
+  return Object.keys(body).some((key) =>
+    isJournalFieldName(key.trim().toLowerCase())
+  );
 }
 
 interface HttpFailureClassification {

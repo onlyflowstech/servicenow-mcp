@@ -314,6 +314,23 @@ caller can override. Field names matching the sensitive-name pattern are
 excluded from an unrestricted selection before the request is built, so those
 values are never requested rather than being requested and scrubbed on arrival.
 
+Journal content is writable under the same field policy. A profile granted
+writes to a task table can append `comments` and `work_notes` through
+`sn_create`, `sn_update` and `sn_batch`, not only through the dedicated
+incident tools. `comments` is customer-visible and usually triggers customer
+notifications, so decide separately whether an agent may post it. To grant
+updates without customer-visible comments, set `fieldPolicy.<table>.writable`
+to an explicit list that leaves `comments` out; on `incident` that also denies
+`sn_incident_add_comment`. A journal write appends one entry and cannot
+rewrite or remove earlier ones. Each entry is bounded to 8,000 characters and
+16,384 UTF-8 bytes without control characters. `sn_batch` never re-sends a
+batch request that may have reached the instance; a record whose outcome
+ServiceNow did not confirm is reported, not retried. Single-record `PATCH`
+calls, including the dedicated tools and the `sn_batch` serial fallback, keep
+the HTTP client's bounded retry on 502, 503, 504 and connection errors, so a
+gateway failure after the instance applied a journal write can still append
+that entry twice.
+
 `sys_properties` is deliberately absent from that list. Rows in it are
 ACL-restricted per user and routinely hold integration secrets in the `value`
 column, and a cache hit is served without re-contacting ServiceNow, so the

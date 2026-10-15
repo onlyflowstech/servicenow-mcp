@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
+import * as incidentJournalPolicy from "../src/incident-journal-policy.js";
 import {
   INCIDENT_JOURNAL_MAX_CHARACTERS,
   INCIDENT_JOURNAL_MAX_UTF8_BYTES,
@@ -8,8 +9,8 @@ import {
   incidentJournalMigrationMessage,
   isIncidentJournalPolicyError,
   prepareIncidentJournalArguments,
-  rejectGenericIncidentJournalFields,
 } from "../src/incident-journal-policy.js";
+import { prepareWriteFieldValues } from "../src/write-value-policy.js";
 
 describe("SNSDK-35 incident journal content policy", () => {
   it("accepts exact character and UTF-8 byte boundaries", () => {
@@ -65,27 +66,45 @@ describe("SNSDK-35 incident journal content policy", () => {
   });
 });
 
-describe("SNSDK-35 generic update migration policy", () => {
+describe("generic journal writes", () => {
+  it("no longer rejects journal fields by name", () => {
+    // The name-based deny ran ahead of field policy and could not be lifted
+    // by configuration. Field policy now decides; the value policy applies
+    // the journal bounds.
+    expect(Object.keys(incidentJournalPolicy)).not.toContain(
+      "rejectGenericIncidentJournalFields"
+    );
+    for (const field of ["comments", "work_notes"] as const) {
+      expect(
+        prepareWriteFieldValues("update", "incident", {
+          [` ${field.toUpperCase()} `]: "appended entry",
+        })
+      ).toEqual({ [field]: "appended entry" });
+    }
+  });
+
+  it("applies the same content bounds as the dedicated journal tools", () => {
+    for (const value of [
+      "a".repeat(INCIDENT_JOURNAL_MAX_CHARACTERS + 1),
+      "unsafe-\u0000-text",
+      " \r\n\t ",
+    ]) {
+      expect(incidentJournalContentSchema.safeParse(value).success).toBe(false);
+      expect(() =>
+        prepareWriteFieldValues("update", "problem", { work_notes: value })
+      ).toThrow(expect.objectContaining({ reason: "invalid_value" }));
+    }
+  });
+
   it.each([
     ["comments", "sn_incident_add_comment"],
     ["work_notes", "sn_incident_add_work_note"],
-  ] as const)("rejects %s with fixed dedicated-tool guidance", (field, tool) => {
-    expect(() =>
-      rejectGenericIncidentJournalFields({ [` ${field.toUpperCase()} `]: "canary" })
-    ).toThrow(IncidentJournalPolicyError);
-    expect(incidentJournalMigrationMessage(field)).toContain(tool);
-    expect(incidentJournalMigrationMessage(field)).not.toContain("canary");
-  });
-
-  it("does not invoke journal value getters while rejecting the key", () => {
-    const getter = vi.fn(() => "must-not-be-read");
-    const payload = Object.create(null) as Record<string, unknown>;
-    Object.defineProperty(payload, "comments", { enumerable: true, get: getter });
-    expect(() => rejectGenericIncidentJournalFields(payload)).toThrow(
-      IncidentJournalPolicyError
-    );
-    expect(getter).not.toHaveBeenCalled();
-  });
+  ] as const)(
+    "keeps fixed %s migration text for the dispatcher's legacy branch",
+    (field, tool) => {
+      expect(incidentJournalMigrationMessage(field)).toContain(tool);
+    }
+  );
 
   it("recognizes only module-issued errors without touching hostile proxies", () => {
     const issued = new IncidentJournalPolicyError(

@@ -239,7 +239,7 @@ describe("high-level tool discovery", () => {
     sn_relationships: { title: "Traverse CI relationships", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_schema: { title: "Get table schema", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_syslog: { title: "Query system logs", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    sn_update: { title: "Update record", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    sn_update: { title: "Update record", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   };
 
   it("publishes 23 unique sn_* tools from Zod with required profile", async () => {

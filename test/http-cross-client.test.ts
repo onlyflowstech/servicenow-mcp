@@ -185,7 +185,7 @@ const expectedAnnotations: Record<string, CompleteAnnotations> = {
   sn_relationships: { title: "Traverse CI relationships", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_schema: { title: "Get table schema", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_syslog: { title: "Query system logs", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  sn_update: { title: "Update record", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  sn_update: { title: "Update record", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 };
 
 interface JsonRpcResponse {
@@ -849,8 +849,8 @@ describe.each(clientFactories)("SNSDK-27 %s contract", (_label, createClient) =>
     }
   });
 
-  it("rejects generic journal updates with exact migration guidance before clients", async () => {
-    const patch = vi.fn();
+  it("appends generic journal updates and bounds their content before clients", async () => {
+    const patch = vi.fn(async () => ({ result: { sys_id: "1".repeat(32) } }));
     const harness = await createHarness({
       client: { patch } as unknown as ServiceNowClient,
       writeTables: ["incident"],
@@ -859,25 +859,38 @@ describe.each(clientFactories)("SNSDK-27 %s contract", (_label, createClient) =>
     const client = createClient(harness.url);
     try {
       await client.initialize();
-      for (const [field, dedicatedTool] of [
-        ["comments", "sn_incident_add_comment"],
-        ["work_notes", "sn_incident_add_work_note"],
-      ] as const) {
+      for (const field of ["comments", "work_notes"] as const) {
+        const result = await client.callTool("sn_update", {
+          profile: PROFILE_NAME,
+          table: "incident",
+          sys_id: "1".repeat(32),
+          fields: { [field]: `${field} entry` },
+        });
+        expect(result.isError).toBeUndefined();
+        expect(patch).toHaveBeenLastCalledWith(
+          `/api/now/table/incident/${"1".repeat(32)}`,
+          { [field]: `${field} entry` }
+        );
+      }
+      expect(patch).toHaveBeenCalledTimes(2);
+
+      // Content outside the journal bounds never reaches config or a client.
+      harness.getConfig.mockClear();
+      harness.getClient.mockClear();
+      for (const field of ["comments", "work_notes"] as const) {
         const canary = `${field}-must-not-return`;
         const result = await client.callTool("sn_update", {
           profile: PROFILE_NAME,
           table: "incident",
           sys_id: "1".repeat(32),
-          fields: { [field]: canary },
+          fields: { [field]: `${canary}\u0000` },
         });
         expect(result.isError).toBe(true);
-        expect(JSON.stringify(result)).toContain(dedicatedTool);
         expect(JSON.stringify(result)).not.toContain(canary);
       }
-      expect(harness.getProfile).toHaveBeenCalledTimes(2);
       expect(harness.getConfig).not.toHaveBeenCalled();
       expect(harness.getClient).not.toHaveBeenCalled();
-      expect(patch).not.toHaveBeenCalled();
+      expect(patch).toHaveBeenCalledTimes(2);
     } finally {
       await client.close();
     }
