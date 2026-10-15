@@ -762,10 +762,18 @@ access it needs is read on the cached table itself.
 
 **The honest tradeoff:** the cache only ever saved payload bytes, never round
 trips — a cache hit still costs one watermark read, and a miss costs one extra.
-If the watermark cannot be read or is incomplete, the call goes upstream and is
-not cached; an entry already cached stays valid for later calls. A table whose
-newest row is dated after the instance's own clock is never cached: that row
-would stay the newest however many others were updated.
+A tool call reads each table's watermark once, however many times it reads the
+table (a hierarchy walk reads `sys_db_object` once per hop), until the call
+writes. An empty table caches like any other.
+
+If a table's watermark cannot be used, its reads go straight upstream, without
+a watermark request, for a while: 15 minutes when the cause persists (an
+incomplete or future-dated watermark, a 403 or 404), 30 seconds when it may not
+(429, 5xx, timeouts, network), never longer than the TTL. A table whose newest
+row is dated after the instance's own clock is one of these: that row would
+stay the newest however many others were updated. Entries cached earlier are
+kept and serve again once the table is cacheable, and `force_recache: true`
+asks again at once.
 
 **What the watermark can miss.** An update within the same second as the stored
 watermark, to a row other than the newest, and a write that skips the system

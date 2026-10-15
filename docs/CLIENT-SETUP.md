@@ -483,11 +483,14 @@ every auth mode, including OAuth client_credentials and API key. Freshness is
 checked against a watermark the instance reports: the table's row count and its
 newest row by `sys_updated_on`, read as its stored UTC value. No timezone,
 username, or `sys_user` / `sys_properties` read is involved, so the profile
-needs read access to the cached table and nothing else. If the watermark cannot
-be read, the call goes upstream and is not cached.
+needs read access to the cached table and nothing else. If a table's watermark
+cannot be used, its reads go straight upstream for a while: 15 minutes for a
+lasting cause such as a 403 or an incomplete watermark, 30 seconds for a 429,
+5xx, or network failure.
 
 The practical saving is payload bytes, never round trips: a hit still performs
-one watermark read, and a miss performs one extra.
+one watermark read, and a miss performs one extra. Within one tool call each
+table's watermark is read once.
 
 Inserts, updates, and deletes all move the watermark. An update in the same
 second as the stored watermark, to a row other than the newest, can go unseen
