@@ -1408,6 +1408,170 @@ describe("Security finding 8: field policy narrows every journal route", () => {
   );
 });
 
+/**
+ * sys_class_name and sys_domain must be listed by name in the table's
+ * writable set; no wildcard covers them. The value policy accepts both as
+ * generic incident fields, so these tests pin that the field policy runs
+ * first on sn_create and sn_batch as well as sn_update (whose wildcard
+ * denial is in write-response-projection.test.ts).
+ */
+describe("sys_class_name and sys_domain through sn_create and sn_batch", () => {
+  const CANARY = "zqxcanary-value";
+
+  // [table, field as sent, canonical field, field policy (a wildcard form)]
+  type WildcardCase = [string, string, string, FieldPolicyConfigurationInput | undefined];
+  const WILDCARD_CASES: WildcardCase[] = [
+    ["incident", "sys_domain", "sys_domain", undefined],
+    ["incident", "sys_class_name", "sys_class_name", undefined],
+    ["incident", "SYS_DOMAIN", "sys_domain", { fieldPolicy: { incident: { writable: "*" } } }],
+    ["incident", "sys_class_name", "sys_class_name", { fieldPolicy: { "*": { writable: "*" } } }],
+    ["u_custom", "sys_domain", "sys_domain", { fieldPolicy: { u_custom: { writable: ["*"] } } }],
+    [
+      "u_custom",
+      " Sys_Class_Name ",
+      "sys_class_name",
+      { writableTableFields: [{ table: "u_custom", fields: "*" }] },
+    ],
+  ];
+
+  function expectExplicitFieldDenial(
+    connected: Harness,
+    result: Awaited<ReturnType<Client["callTool"]>>,
+    tool: string,
+    table: string,
+    field: string
+  ) {
+    expect(result.isError).toBe(true);
+    const text = responseText(result);
+    expect(text).toContain(`field "${field}" on "${table}"`);
+    expect(text).toContain(`List it explicitly in fieldPolicy.${table}.writable`);
+    expect(text).not.toContain("zqxcanary");
+    expect(connected.records.at(-1)).toMatchObject({
+      tool,
+      outcome: "policy_rejected",
+      reason: "field_access_denied",
+    });
+    expect(connected.getConfig).not.toHaveBeenCalled();
+    expect(connected.getClient).not.toHaveBeenCalled();
+    expect(connected.serviceNowClient.get).not.toHaveBeenCalled();
+    expect(connected.serviceNowClient.post).not.toHaveBeenCalled();
+    expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
+  }
+
+  it.each(WILDCARD_CASES)(
+    "denies sn_create %s.%s under a writable wildcard",
+    async (table, sent, canonical, fieldPolicy) => {
+      const connected = await harness(fieldPolicy === undefined ? {} : { fieldPolicy });
+      const result = await callTool(connected, "sn_create", {
+        table,
+        fields: { short_description: "Printer jam", [sent]: CANARY },
+      });
+
+      expectExplicitFieldDenial(connected, result, "sn_create", table, canonical);
+    }
+  );
+
+  it.each(
+    WILDCARD_CASES.flatMap((row): Array<[...WildcardCase, boolean]> => [
+      [...row, true],
+      [...row, false],
+    ])
+  )(
+    "denies sn_batch %s.%s under a writable wildcard (confirm %s)",
+    async (table, sent, canonical, fieldPolicy, confirm) => {
+      const connected = await harness(fieldPolicy === undefined ? {} : { fieldPolicy });
+      const result = await callTool(connected, "sn_batch", {
+        ...batchArguments({ u_note: "x", [sent]: CANARY }, table),
+        confirm,
+      });
+
+      expectExplicitFieldDenial(connected, result, "sn_batch", table, canonical);
+    }
+  );
+
+  it.each(["sn_create", "sn_update", "sn_batch"])(
+    "%s applies the field policy before the value policy",
+    async (tool) => {
+      // "\u0000" would fail the value policy (write_value_denied). The field
+      // policy must deny the unlisted field first.
+      const connected = await harness();
+      const fields = { short_description: "Printer jam", sys_domain: "bad\u0000" };
+      const args =
+        tool === "sn_create"
+          ? { table: "incident", fields }
+          : tool === "sn_update"
+            ? { table: "incident", sys_id: SYS_ID, fields }
+            : batchArguments(fields);
+      const result = await callTool(connected, tool, args);
+
+      expectExplicitFieldDenial(connected, result, tool, "incident", "sys_domain");
+    }
+  );
+
+  const LISTED = {
+    fieldPolicy: {
+      incident: { writable: ["short_description", "sys_domain", "sys_class_name"] },
+    },
+  } as const;
+
+  it("lets sn_create write them where the profile lists them", async () => {
+    const connected = await harness({ fieldPolicy: LISTED });
+    const result = await callTool(connected, "sn_create", {
+      table: "incident",
+      fields: {
+        short_description: "Printer jam",
+        " SYS_DOMAIN ": "global",
+        sys_class_name: "incident",
+      },
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(connected.serviceNowClient.post).toHaveBeenCalledTimes(1);
+    expect(connected.serviceNowClient.post).toHaveBeenCalledWith("/api/now/table/incident", {
+      short_description: "Printer jam",
+      sys_domain: "global",
+      sys_class_name: "incident",
+    });
+  });
+
+  it("lets sn_batch write them where the profile lists them, under the canonical keys", async () => {
+    const connected = await harness({ fieldPolicy: LISTED, matched: 2 });
+    const result = await callTool(
+      connected,
+      "sn_batch",
+      batchArguments({ " SYS_DOMAIN ": "global", Sys_Class_Name: "incident" })
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(responseData(result)).toMatchObject({ matched: 2, processed: 2, failed: 0 });
+    const requests = batchPayloads(connected).flatMap(({ rest_requests }) => rest_requests);
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      expect(decodedBody(request)).toEqual({
+        sys_domain: "global",
+        sys_class_name: "incident",
+      });
+    }
+    expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
+  });
+
+  it('lets sn_batch write them on a custom table through a "*" entry that lists them', async () => {
+    const connected = await harness({
+      fieldPolicy: { fieldPolicy: { "*": { writable: ["u_note", "sys_domain"] } } },
+      matched: 1,
+    });
+    const result = await callTool(
+      connected,
+      "sn_batch",
+      batchArguments({ u_note: "x", sys_domain: "global" }, "u_custom")
+    );
+
+    expect(result.isError).toBeUndefined();
+    const [request] = batchPayloads(connected)[0]!.rest_requests;
+    expect(decodedBody(request!)).toEqual({ u_note: "x", sys_domain: "global" });
+  });
+});
+
 describe("Security finding 9: each record is changed once per run", () => {
   it("de-duplicates sys_ids the lookup returns more than once", async () => {
     const connected = await harness();
