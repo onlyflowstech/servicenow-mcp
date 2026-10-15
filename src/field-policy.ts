@@ -101,6 +101,10 @@ const ALL_FIELDS_SELECTION = Object.freeze([FIELD_POLICY_WILDCARD]) as readonly 
  * defaults the operator did not state. An unstated default must stay finite:
  * "may read any field" is not "return every field on every query". */
 const GENERIC_DEFAULT_FIELDS = Object.freeze(["sys_id"]) as readonly string[];
+/** Write-response projection for a write-only table (`readable: []`). The
+ * record's own handle is all a write returns there; denying the write instead
+ * would make a write-only policy unable to write anything. */
+const WRITE_ONLY_RESPONSE_FIELDS = Object.freeze(["sys_id"]) as readonly string[];
 /** Configuration keys a scoped field policy may carry. */
 const FIELD_POLICY_CONFIGURATION_KEYS = Object.freeze([
   "fieldPolicy",
@@ -958,6 +962,19 @@ export function prepareAdditionalReadFieldArguments(
   return prepared;
 }
 
+/**
+ * The projection a write returns for one table: the table's readable set, or
+ * `sys_id` alone when an operator made the table write-only (`readable: []`).
+ * A write is authorized by the writable set; an empty readable set narrows
+ * what comes back, it does not turn the write into a denial.
+ */
+export function resolveWriteResponseFields(
+  tableCandidate: unknown
+): FieldSelection {
+  const selection = readableSelection(requirePolicy(tableCandidate));
+  return selection.length === 0 ? WRITE_ONLY_RESPONSE_FIELDS : selection;
+}
+
 /** Validate write keys and prepare the corresponding safe response projection. */
 export function prepareWriteFieldArguments(
   args: Readonly<Record<string, unknown>>,
@@ -965,10 +982,7 @@ export function prepareWriteFieldArguments(
 ): Record<string, unknown> {
   const canonicalArgs = withFieldPolicyArgumentValues(args);
   const fields = validateWritableFields(table, canonicalArgs.fields);
-  const readableFields = resolveReadableFields(table, {
-    fields: "all",
-    responseFormat: "detailed",
-  });
+  const readableFields = resolveWriteResponseFields(table);
   const prepared = withFieldPolicyArgumentValues(canonicalArgs, { table, fields });
   safeDefineArgument(
     prepared,
