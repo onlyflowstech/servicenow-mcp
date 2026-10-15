@@ -151,7 +151,9 @@ rules. For a **file-backed profile** — anything created with
 `servicenow-mcp-profile` — those rules live in the profile itself, and
 `SN_ALLOWED_READ_TABLES` / `SN_ALLOWED_WRITE_TABLES` / `SN_TABLE_ACCESS_TARGETS`
 in the environment **do not apply**. This is the single most common reason a
-freshly installed server answers every call with a policy denial.
+freshly installed server answers every call with a policy denial. Field
+policy also lives on the profile (`fieldPolicy`); with a profile file
+present, a set `SN_FIELD_POLICY_DEFINITIONS` stops the server from starting.
 
 ```sh
 # Reads on two tables, writes on one.
@@ -182,12 +184,25 @@ caller. Defaults apply only to the tables named in that command, never to
 tables the profile already allows or reaches as related tables. A re-grant adds
 the defaults to the tools already on an existing target, so re-running
 `--write incident` on a target you narrowed earlier restores `sn_create` and
-both journal tools. To withhold the journal tools, pass an explicit `--tools`
-list, such as `--tools sn_create,sn_update`. A grant never removes a tool, so on
-a profile that already has them, use `--replace` with `--tools`; `--replace`
-discards every rule on the profile, so grant its other tables again afterwards.
-`sn_delete`, `sn_batch`, and `sn_atf` are never granted implicitly and must be
-named with `--tools`.
+both journal tools. That includes a re-grant made only to add `--related`,
+such as `--write incident --related incident=task`: repeat `--tools` with the
+target's current list to keep it narrow. To withhold the journal tools, pass
+an explicit `--tools` list, such as `--tools sn_create,sn_update`. A grant
+never removes a tool, so on a profile that already has them, use `--replace`
+with `--tools`; `--replace` discards every rule on the profile, so grant its
+other tables again afterwards. `sn_delete`, `sn_batch`, and `sn_atf` are never
+granted implicitly and must be named with `--tools`.
+
+A grant decides which tools reach a table; the profile's field policy still
+decides which fields they may write. The journal tools follow it like
+`sn_update` does: if the incident's effective `writable` list, from
+`fieldPolicy.incident.writable` or from a `"*"` entry's `writable`, leaves
+out `comments`, `sn_incident_add_comment` is denied even though the grant
+binds it, and likewise `sn_incident_add_work_note` without `work_notes`.
+Withholding the journal tools does not withhold journals: `sn_create`,
+`sn_update` and `sn_batch` write `comments` and `work_notes` wherever field
+policy allows them. See the
+[field policy reference](../README.md#field-policy).
 
 `grant` refuses `*` and rejects anything that is not a valid table name. It
 does **not** refuse any particular table: `tableAccess` is the sole table-level
@@ -514,9 +529,12 @@ default. The probe detects updates, not deletes, so a deleted row stays served
 until its entry expires. Lower the TTL or pass `force_recache: true` when a
 deletion must be reflected sooner.
 
-Incident `comments` and `work_notes` are append-only. Generic `sn_update`
-rejects them before credentials/client construction. After separate human
-authorization on a disposable non-production incident, use a dedicated tool:
+Incident `comments` and `work_notes` are append-only journal fields. Both
+`sn_update` and the dedicated incident tools can write them, and the
+profile's field policy decides for both routes. For a controlled validation
+write, after separate human authorization on a disposable non-production
+incident, use a dedicated tool, which can only append one entry to one
+incident:
 
 ```ts
 const writeResult = await client.callTool({
@@ -529,8 +547,9 @@ const writeResult = await client.callTool({
 });
 ```
 
-The staging policy must grant write access to `incident` and list
-`sn_incident_add_comment` on its exact target. A repeated call appends again;
+The staging policy must grant write access to `incident`, list
+`sn_incident_add_comment` on its exact target, and leave `comments` writable
+in its field policy. A repeated call appends again;
 the operation is intentionally non-idempotent. Do not substitute a generic
 journal update, production record, unrestricted query, batch, ATF execution,
 or script.
