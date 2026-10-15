@@ -1167,22 +1167,37 @@ describe("Security finding 2: journal writes are never re-sent after they may ha
 });
 
 describe("Security finding 6: a sub-request server error is unconfirmed", () => {
+  /** Answer every batch with a per-record status; 200 unless `statusFor` says otherwise. */
+  function answerBatches(
+    connected: Harness,
+    statusFor: (sysId: string) => number | undefined
+  ) {
+    connected.serviceNowClient.post.mockImplementation(
+      async (_path: string, body: unknown) => {
+        const payload = body as RestBatchPayload;
+        return {
+          serviced_requests: payload.rest_requests.map(({ id, url }) => ({
+            id,
+            status_code: statusFor(url.split("/")[5]!.split("?")[0]!) ?? 200,
+          })),
+          unserviced_requests: [],
+        };
+      }
+    );
+  }
+
+  /** Every sub-request URL sent, across all batch POSTs. */
+  function sentUrls(connected: Harness): string[] {
+    return batchPayloads(connected).flatMap(({ rest_requests }) =>
+      rest_requests.map(({ url }) => url)
+    );
+  }
+
   it.each([500, 503, 408])(
-    "counts a sub-request %s as unconfirmed and stops",
+    "counts a sub-request %s as unconfirmed and continues",
     async (status) => {
       const connected = await harness({ matched: 60 });
-      connected.serviceNowClient.post.mockImplementationOnce(
-        async (_path: string, body: unknown) => {
-          const payload = body as RestBatchPayload;
-          return {
-            serviced_requests: payload.rest_requests.map(({ id }) => ({
-              id,
-              status_code: id === "2" ? status : 200,
-            })),
-            unserviced_requests: [],
-          };
-        }
-      );
+      answerBatches(connected, (sysId) => (sysId === sysIdFor(1) ? status : undefined));
       const result = await callTool(
         connected,
         "sn_batch",
@@ -1190,14 +1205,102 @@ describe("Security finding 6: a sub-request server error is unconfirmed", () => 
       );
 
       const data = responseData(result);
-      expect(data).toMatchObject({ matched: 60, processed: 49, failed: 10 });
+      expect(data).toMatchObject({ matched: 60, processed: 59, failed: 0 });
       expect(data.message).toContain("did not confirm the outcome for 1 record(s)");
       expect(data.message).toContain("1 of them returned a server error");
-      expect(data.message).toContain("remaining 10 record(s) were not sent");
-      expect(connected.serviceNowClient.post).toHaveBeenCalledTimes(1);
+      expect(data.message).toContain("They may have been changed");
+      expect(data.message).not.toContain("not sent");
+      expect(connected.serviceNowClient.post).toHaveBeenCalledTimes(2);
       expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
     }
   );
+
+  it("completes a 10,000-record run past one bad record at #1234", async () => {
+    const records = 10_000;
+    const connected = await harness({ matched: records });
+    const bad = sysIdFor(1_233);
+    answerBatches(connected, (sysId) => (sysId === bad ? 500 : undefined));
+    const result = await callTool(connected, "sn_batch", {
+      ...batchArguments({ comments: "Customer update" }),
+      limit: records,
+    });
+
+    const data = responseData(result);
+    expect(data).toMatchObject({
+      matched: records,
+      processed: records - 1,
+      failed: 0,
+    });
+    expect(data.message).toContain("did not confirm the outcome for 1 record(s)");
+    expect(data.message).toContain("They may have been changed");
+    expect(data.message).not.toContain("not sent");
+    expect(connected.serviceNowClient.post).toHaveBeenCalledTimes(records / 50);
+    // Every record was sent exactly once, the bad one included.
+    const urls = sentUrls(connected);
+    expect(urls).toHaveLength(records);
+    expect(new Set(urls).size).toBe(records);
+    expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
+  });
+
+  it("stops when every sub-request in a batch returns a server error", async () => {
+    const connected = await harness({ matched: 120 });
+    answerBatches(connected, () => 503);
+    const result = await callTool(
+      connected,
+      "sn_batch",
+      batchArguments({ comments: "Customer update" })
+    );
+
+    const data = responseData(result);
+    expect(data).toMatchObject({ matched: 120, processed: 0, failed: 70 });
+    expect(data.message).toContain("did not confirm the outcome for 50 record(s)");
+    expect(data.message).toContain("Every record in one batch returned a server error");
+    expect(data.message).toContain("remaining 70 record(s) were not sent");
+    expect(connected.serviceNowClient.post).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops after the 11th scattered sub-request server error", async () => {
+    const records = 1_000;
+    const connected = await harness({ matched: records });
+    // One bad record in each of the first 11 batches (records 0, 50, … 500).
+    const bad = new Set(Array.from({ length: 11 }, (_, index) => sysIdFor(index * 50)));
+    answerBatches(connected, (sysId) => (bad.has(sysId) ? 500 : undefined));
+    const result = await callTool(connected, "sn_batch", {
+      ...batchArguments({ comments: "Customer update" }),
+      limit: records,
+    });
+
+    const data = responseData(result);
+    expect(data).toMatchObject({
+      matched: records,
+      processed: 11 * 50 - 11,
+      failed: records - 11 * 50,
+    });
+    expect(data.message).toContain("did not confirm the outcome for 11 record(s)");
+    expect(data.message).toContain("11 of them returned a server error");
+    expect(data.message).toContain("More than 10 records had an unconfirmed outcome");
+    expect(data.message).toContain(`remaining ${records - 11 * 50} record(s) were not sent`);
+    expect(connected.serviceNowClient.post).toHaveBeenCalledTimes(11);
+    const urls = sentUrls(connected);
+    expect(new Set(urls).size).toBe(urls.length);
+  });
+
+  it("completes the run with 10 scattered sub-request server errors", async () => {
+    const records = 1_000;
+    const connected = await harness({ matched: records });
+    const bad = new Set(Array.from({ length: 10 }, (_, index) => sysIdFor(index * 50)));
+    answerBatches(connected, (sysId) => (bad.has(sysId) ? 500 : undefined));
+    const result = await callTool(connected, "sn_batch", {
+      ...batchArguments({ comments: "Customer update" }),
+      limit: records,
+    });
+
+    const data = responseData(result);
+    expect(data).toMatchObject({ matched: records, processed: records - 10, failed: 0 });
+    expect(data.message).toContain("did not confirm the outcome for 10 record(s)");
+    expect(data.message).not.toContain("not sent");
+    expect(connected.serviceNowClient.post).toHaveBeenCalledTimes(records / 50);
+  });
 
   it("still counts a sub-request 4xx as failed", async () => {
     const connected = await harness({ matched: 2 });

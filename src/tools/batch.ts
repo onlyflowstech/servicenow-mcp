@@ -197,6 +197,15 @@ const MAX_BATCH_REQUEST_BYTES = 4 * 1024 * 1024;
 const REST_BATCH_REQUEST_OVERHEAD_BYTES = 300;
 
 /**
+ * A sub-request that returns a 5xx or 408 inside a readable batch response
+ * is unconfirmed and never retried, but the run continues: the instance is
+ * answering, and every other record is still sent at most once. Past this
+ * many unconfirmed records in one run, the run stops and reports the rest as
+ * not sent, because that many server errors suggest an unhealthy instance.
+ */
+const MAX_UNCONFIRMED_SUB_REQUESTS = 10;
+
+/**
  * Failure categories that mean ServiceNow refused a batch request before
  * running any request in it, and that serial calls can work around: the
  * Batch API is missing or not permitted for this credential. Only these fall
@@ -244,6 +253,8 @@ interface MutationTally {
   readonly rateLimited?: Readonly<{ retryAfterSeconds?: number }>;
   /** Set when the run stopped because ServiceNow rejected the credentials. */
   readonly authenticationFailed?: true;
+  /** Why a run stopped after ServiceNow answered a batch request with a 2xx. */
+  readonly stoppedOn?: "unreadable_response" | "server_errors" | "unconfirmed_limit";
 }
 
 /** The records one run changes: each valid sys_id once. */
@@ -264,10 +275,16 @@ interface RestBatchRequest {
 
 interface ChunkOutcome {
   readonly processed: number;
+  /** Serviced with a 4xx, or listed as unserviced. */
   readonly failed: number;
   readonly unserviced: number;
-  readonly unconfirmed: number;
+  /** Serviced with a 5xx or 408: may have been applied. */
   readonly serverErrors: number;
+  /**
+   * Missing from the response or reported more than once: the response
+   * cannot be attributed, so it is treated like an unreadable one.
+   */
+  readonly unattributed: number;
 }
 
 /**
@@ -300,6 +317,12 @@ function targetSysIds(records: readonly Record<string, unknown>[]): BatchTargets
  *
  * A batch request is never replayed. Serial Table API calls replace it only
  * when ServiceNow refused the request before running any of it.
+ *
+ * The run stops, reporting the rest as not sent, when a batch request fails
+ * or its response cannot be read or attributed, when every serviced
+ * sub-request in a batch returns a server error, or when more than
+ * MAX_UNCONFIRMED_SUB_REQUESTS records are unconfirmed. An isolated
+ * sub-request server error is reported as unconfirmed and the run continues.
  */
 async function executeBatchMutation(
   client: ServiceNowOperations,
@@ -312,6 +335,8 @@ async function executeBatchMutation(
   let processed = 0;
   let failed = targets.invalid;
   let unserviced = 0;
+  let unconfirmed = 0;
+  let serverErrors = 0;
   const { sysIds } = targets;
   const body = action === "update" ? encodeBatchBody(fields ?? {}) : undefined;
   const chunkSize = batchChunkSize(table, body);
@@ -351,6 +376,8 @@ async function executeBatchMutation(
           processed: processed + serial.processed,
           failed: failed + serial.failed,
           unserviced,
+          unconfirmed: unconfirmed + serial.unconfirmed,
+          serverErrors,
         });
       }
       if (descriptor?.category === "rate_limit") {
@@ -359,7 +386,8 @@ async function executeBatchMutation(
           processed,
           failed,
           unserviced,
-          unconfirmed: 0,
+          unconfirmed,
+          serverErrors,
           notSent: sysIds.length - offset,
           rateLimited: { retryAfterSeconds: descriptor.retryAfterSeconds },
         });
@@ -369,7 +397,8 @@ async function executeBatchMutation(
         processed,
         failed,
         unserviced,
-        unconfirmed: chunk.length,
+        unconfirmed: unconfirmed + chunk.length,
+        serverErrors,
         notSent: sysIds.length - offset - chunk.length,
       });
     }
@@ -380,18 +409,38 @@ async function executeBatchMutation(
     processed += outcome.processed;
     failed += outcome.failed;
     unserviced += outcome.unserviced;
-    if (outcome.unconfirmed > 0) {
+    unconfirmed += outcome.serverErrors + outcome.unattributed;
+    serverErrors += outcome.serverErrors;
+    const serviced =
+      outcome.processed + outcome.failed - outcome.unserviced + outcome.serverErrors;
+    const stoppedOn: MutationTally["stoppedOn"] =
+      outcome.unattributed > 0
+        ? "unreadable_response"
+        : outcome.serverErrors > 0 && outcome.serverErrors === serviced
+          ? "server_errors"
+          : unconfirmed > MAX_UNCONFIRMED_SUB_REQUESTS
+            ? "unconfirmed_limit"
+            : undefined;
+    if (stoppedOn !== undefined) {
       return batchResult({
         processed,
         failed,
         unserviced,
-        unconfirmed: outcome.unconfirmed,
-        serverErrors: outcome.serverErrors,
+        unconfirmed,
+        serverErrors,
         notSent: sysIds.length - offset - chunk.length,
+        stoppedOn,
       });
     }
   }
-  return batchResult({ processed, failed, unserviced, unconfirmed: 0, notSent: 0 });
+  return batchResult({
+    processed,
+    failed,
+    unserviced,
+    unconfirmed,
+    serverErrors,
+    notSent: 0,
+  });
 }
 
 /**
@@ -462,13 +511,14 @@ function encodeBatchBody(fields: Readonly<Record<string, string>>): string {
 
 /**
  * Count one batch response against the ids that were sent. An id ServiceNow
- * neither serviced nor listed as unserviced is unconfirmed, and so is an id
+ * neither serviced nor listed as unserviced is unattributed, and so is an id
  * reported more than once, because its result cannot be attributed.
  *
- * A sub-request answered with a 5xx or a 408 is unconfirmed too, matching
- * the serial path: a server error can follow a change that was partly
- * applied (ServiceNow does not roll back a journal insert when a later
- * business rule fails), so it must not read as "failed, safe to re-run".
+ * A sub-request answered with a 5xx or a 408 is a server error. It is
+ * reported as unconfirmed, matching the serial path: a server error can
+ * follow a change that was partly applied (ServiceNow does not roll back a
+ * journal insert when a later business rule fails), so it must not read as
+ * "failed, safe to re-run".
  */
 function chunkOutcome(response: unknown, ids: readonly string[]): ChunkOutcome {
   const requested = new Set(ids);
@@ -498,15 +548,14 @@ function chunkOutcome(response: unknown, ids: readonly string[]): ChunkOutcome {
 
   let processed = 0;
   let failed = 0;
-  let unconfirmed = 0;
   let serverErrors = 0;
+  let unattributed = 0;
   for (const id of ids) {
     const status = statuses.get(id);
     if (status !== undefined) {
       if (status >= 200 && status < 300) {
         processed += 1;
       } else if (status >= 500 || status === 408) {
-        unconfirmed += 1;
         serverErrors += 1;
       } else {
         failed += 1;
@@ -514,15 +563,15 @@ function chunkOutcome(response: unknown, ids: readonly string[]): ChunkOutcome {
     } else if (notServiced.has(id)) {
       failed += 1;
     } else {
-      unconfirmed += 1;
+      unattributed += 1;
     }
   }
   return {
     processed,
     failed,
     unserviced: notServiced.size,
-    unconfirmed,
     serverErrors,
+    unattributed,
   };
 }
 
@@ -538,6 +587,16 @@ function batchResult(tally: MutationTally): BatchExecutionResult {
             "408), which can follow a partly applied change. ") +
         "They may have been changed. They were not retried, so no change is " +
         "applied twice. Check them before running the batch again."
+    );
+  }
+  if (tally.stoppedOn === "server_errors") {
+    notes.push(
+      "Every record in one batch returned a server error, so nothing more was sent."
+    );
+  } else if (tally.stoppedOn === "unconfirmed_limit") {
+    notes.push(
+      `More than ${MAX_UNCONFIRMED_SUB_REQUESTS} records had an unconfirmed ` +
+        "outcome, so nothing more was sent."
     );
   }
   if (tally.authenticationFailed === true) {
