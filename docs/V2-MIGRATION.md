@@ -11,6 +11,12 @@ running: every call names a profile, and table access is granted rather than
 inherited from the credential. Those two are the migration; the rest apply only
 if you used the affected surface.
 
+**Already on 2.x?** The release after 2.2.0-dev.6 changes how field policy
+loads and who may write journal fields, and it can refuse to start on a
+configuration that loads today. Read
+[Upgrading to the next release](#upgrading-to-the-next-release) before you
+upgrade.
+
 ## Breaking changes at a glance
 
 | # | Change | Before (1.0.0) | After (2.0.0) |
@@ -20,7 +26,7 @@ if you used the affected surface.
 | 3 | Table access | any table the credential could reach | deny-by-default per profile; explicit allowlist plus target entries |
 | 4 | Attachments | host `file_path` / `output_path` | inline base64 both directions; no host filesystem access, and no flag restores it |
 | 5 | Queries | raw ServiceNow encoded queries | structured filters; raw reads are opt-in per tool/table |
-| 6 | Incident journals | `sn_update` accepted `comments` / `work_notes` | dedicated `sn_incident_add_comment` / `sn_incident_add_work_note`; from 2.2.0 the generic write tools accept both fields again, on every table, under field policy |
+| 6 | Incident journals | `sn_update` accepted `comments` / `work_notes` | dedicated `sn_incident_add_comment` / `sn_incident_add_work_note`; from the [next release](#upgrading-to-the-next-release) the generic write tools accept both fields again, on every table, under field policy |
 | 7 | Tool surface | 17 tools, one `bin` | 19 tools, three `bin` entries; `sn_script` withdrawn |
 | 8 | Field selection limit | `MAX_FIELDS_PER_OPERATION` was `32`; over-selection raised `excessive_field_selection` | limit is `10_000`; `excessive_field_selection` is removed from the exported `FieldPolicyFailureReason` union |
 | 9 | Capabilities | `tools` only | adds `prompts` (`servicenow-mcp.add-profile`) |
@@ -255,15 +261,16 @@ end of this document.
 
 **Before:** `sn_update` on `incident` with `{"comments": "…"}`.
 
-**After (2.0 and 2.1):** `sn_incident_add_comment` with
+**After (2.0.0 through 2.2.0-dev.6):** `sn_incident_add_comment` with
 `{profile, sys_id, content}` for a customer-visible comment, or
 `sn_incident_add_work_note` for an internal note. `sn_update` rejects both
 fields before credentials are resolved.
 
-**After (2.2.0 and later):** both shapes work. `sn_create`, `sn_update` and
-`sn_batch` accept `comments` and `work_notes` again, on `incident` and every
-other table granted for writes, and the configured field policy decides
-whether a profile may write them. The dedicated tools remain. See
+**After (the [next release](#upgrading-to-the-next-release)):** both shapes
+work. `sn_create`, `sn_update` and `sn_batch` accept `comments` and
+`work_notes` again, on `incident` and every other table granted for writes,
+and the configured field policy decides whether a profile may write them,
+through either route. The dedicated tools remain. See
 [Incident journal migration](#incident-journal-migration).
 
 ### 7. Tool surface and executables
@@ -431,13 +438,17 @@ table caller-addressable unless it also has its own target entry. Omit the
 target—and therefore deny direct access—when the metadata closure cannot be
 proven complete.
 
-Table allowlists are paired with a separate field-policy gate. Built-in field
-policy remains finite for known tables, and operators can extend/override it
-with `SN_FIELD_POLICY_DEFINITIONS`, keyed by exact table name or `*` for a
-generic fallback. Each entry may define `defaults`, `readable`, and `writable`;
-`readable`/`writable` accept exact field arrays or `"*"`. Sensitive field-name
-families remain denied even when wildcard field access is configured. Example
-read-only custom-table exploration:
+Table allowlists are paired with a separate field-policy gate. Field policy
+narrows what a granted table exposes; it never denies the table itself. Each
+`config.json` profile states its own with `fieldPolicy`, or with
+`readableTableFields` and `writableTableFields`; for the `SN_PROFILE_NAME`
+environment profile, `SN_FIELD_POLICY_DEFINITIONS` supplies it. Entries are
+keyed by exact table name or `*`, and each may define `defaults`, `readable`,
+and `writable` as exact field lists or `"*"`. Sensitive field-name families
+remain denied even when wildcard field access is configured. The
+[field policy reference](../README.md#field-policy) covers the forms, the `*`
+entry, and the fields that must be listed explicitly. Example read-only
+exploration on the environment profile, with no `config.json`:
 
 ```sh
 export SN_ALLOWED_READ_TABLES='*'
@@ -445,8 +456,11 @@ export SN_ALLOWED_WRITE_TABLES=''
 export SN_FIELD_POLICY_DEFINITIONS='{"*":{"defaults":["sys_id"],"readable":"*","writable":[]}}'
 ```
 
-Use `writable:"*"` only when broad mutation access is intentional; write field
-wildcards do not imply read field access or table write access.
+`SN_ALLOWED_WRITE_TABLES=''` is what makes this read-only: the `*` entry never
+reaches the built-in system tables, so `writable: []` alone does not stop
+every write. Use `writable:"*"` only when broad mutation access is
+intentional; write field wildcards do not imply read field access or table
+write access.
 
 The service normalizes identifiers and rejects malformed entries. It does not
 refuse any particular table: since 2.0 there is no built-in deny list, so a
@@ -460,24 +474,29 @@ side-effect plan. Legacy ATF execution actions return migration guidance; use
 
 ### Incident journal migration
 
-**2.2.0 reverses the generic-write rule below.** In 2.0 and 2.1 the generic
-write tools rejected `comments` and `work_notes` by name, on every table,
-ahead of field policy, and no configuration could lift the rejection. Tables
-other than `incident` had no journal route at all. From 2.2.0:
+**The [next release](#upgrading-to-the-next-release) reverses the
+generic-write rule below.** From 2.0.0 through 2.2.0-dev.6 the generic write
+tools rejected `comments` and `work_notes` by name, on every table, ahead of
+field policy, and no configuration could lift the rejection. Tables other than
+`incident` had no journal route at all. From the next release:
 
 - `sn_create`, `sn_update` and `sn_batch` write `comments` and `work_notes`
   on any table granted for writes. A Table API write to a journal field
   appends one entry; it cannot rewrite earlier entries.
 - Each value gets the same content bounds as the dedicated tools (below).
-- The field policy decides permission. To withhold customer-visible comments
-  from a profile, leave `comments` out of `fieldPolicy.<table>.writable`; on
-  `incident` this also denies `sn_incident_add_comment`.
-- Calls written for 2.0 keep working unchanged.
+- Field policy decides permission, for the generic tools and the dedicated
+  tools alike. With no field policy, every write-granted table accepts both
+  fields. To withhold customer-visible comments from a profile, set
+  `writable` to an explicit list without `comments`; on `incident` this also
+  denies `sn_incident_add_comment`. See
+  [Journal fields and the dedicated tools](#journal-fields-and-the-dedicated-tools).
+- Calls written for 2.0 keep working, except where field policy now denies a
+  dedicated tool.
 
-In 2.0 and 2.1, generic `sn_update` did not accept the append-only incident
-fields `comments` or `work_notes`. Those inputs failed before profile
-credentials or a ServiceNow client were resolved and directed the caller to
-the matching dedicated tool:
+From 2.0.0 through 2.2.0-dev.6, generic `sn_update` did not accept the
+append-only incident fields `comments` or `work_notes`. Those inputs failed
+before profile credentials or a ServiceNow client were resolved and directed
+the caller to the matching dedicated tool:
 
 - use `sn_incident_add_comment` with `{profile, sys_id, content}` for a
   customer-visible comment;
@@ -512,3 +531,251 @@ The server parses every opted-in query and still rejects OR/NQ/order/group
 control tokens, JavaScript values, unsupported fields/operators, malformed
 Unicode, and any request exceeding the rule. Policy errors never echo the raw
 query value. There is no stdio or transport-specific exception.
+
+## Upgrading to the next release
+
+This section is for installs already on 2.x, from 2.0.0 through
+2.2.0-dev.6. "The next release" means the first release after 2.2.0-dev.6;
+until it ships, its notes are under `[Unreleased]` in the
+[CHANGELOG](../CHANGELOG.md).
+
+Check this table before you upgrade. The first two rows can stop the server
+from starting.
+
+| Change | Affects you if | What to do |
+|---|---|---|
+| [`SN_FIELD_POLICY_DEFINITIONS` applies only to the environment profile](#sn_field_policy_definitions-and-configjson) | the variable is set and `~/.servicenow-mcp/config.json` exists | Move the policy into each profile's `fieldPolicy`, then unset the variable |
+| [Field policy is validated at load](#field-policy-load-errors) | a profile states `fieldPolicy`, `readableTableFields` or `writableTableFields` | Fix any load error by editing `config.json` |
+| [Journal fields through the generic write tools](#journal-fields-and-the-dedicated-tools) | a profile grants `sn_create`, `sn_update` or `sn_batch` on a table | State an explicit `writable` list wherever comments must be withheld |
+| [The dedicated journal tools follow field policy](#journal-fields-and-the-dedicated-tools) | a profile narrows `writable` on `incident` or on a `"*"` entry | List `comments` or `work_notes` wherever the matching tool must keep working |
+| [A `"*"` entry reaches the ITSM and custom tables](#the--entry-reaches-the-itsm-and-custom-tables) | a profile has a `"*"` entry that states `readable` or `writable` | State the key on each table that must stay open |
+| [Class and domain fields must be listed](#class-and-domain-fields) | anything writes `sys_class_name`, `sys_class_path`, `sys_domain` or `sys_domain_path` | List each field in the table's `writable` |
+| [`readable: []` no longer blocks writes](#readable--and-writable-) | a profile uses `readable: []` to hide a table | Add `writable: []`, or leave the table out of `tableAccess` |
+| [Setup grant defaults](#setup-grant-defaults) | you run `servicenow-mcp-setup grant` | Review the incident target after `--write incident` |
+
+The [field policy reference](../README.md#field-policy) describes the
+settings these changes refer to.
+
+### `SN_FIELD_POLICY_DEFINITIONS` and `config.json`
+
+Through 2.2.0-dev.6, `SN_FIELD_POLICY_DEFINITIONS` narrowed every profile that
+stated no field policy of its own, including the profiles in `config.json`.
+It now configures only the `SN_PROFILE_NAME` environment profile, the one used
+when no `config.json` exists, the same way the `SN_ALLOWED_*` variables do.
+
+Ignoring the variable would silently widen any `config.json` profile it used
+to narrow. So when `config.json` exists and the variable is set to anything
+but a blank value, the server refuses to start:
+
+```text
+[servicenow-mcp] Fatal stdio startup error: SN_FIELD_POLICY_DEFINITIONS is set, but profiles are loaded from the config file; it now applies only to the SN_PROFILE_NAME environment profile. Move the policy into each profile's fieldPolicy, or unset the variable.
+```
+
+`servicenow-mcp-setup` and `servicenow-mcp-profile` refuse the same way when
+the variable is set in their own environment.
+
+To fix it:
+
+1. Copy the variable's value into each `config.json` profile it should narrow.
+   A table map such as `{"*": {...}, "incident": {...}}` becomes that
+   profile's `fieldPolicy`. A value that holds the profile keys
+   (`fieldPolicy`, or `readableTableFields` and `writableTableFields`)
+   supplies those keys.
+2. Remove the variable everywhere the server reads it: the client's `env`
+   block, your shell profile, and `~/.servicenow-mcp/server.env`, which the
+   server reads at startup.
+3. Restart the client, which starts the server again.
+
+If no profile relied on the variable, step 2 is enough.
+
+The environment profile still takes the variable. It is now read once, at
+startup, and a malformed value stops startup with the key named, instead of
+denying every request.
+
+### Field-policy load errors
+
+`fieldPolicy`, `readableTableFields` and `writableTableFields` are validated
+when profiles load, with the same rules each request applies. A malformed
+entry used to load and then deny every call on its profile, and a few
+mistakes loaded and narrowed nothing. Each case below now stops startup.
+
+One bad profile stops the whole `config.json` from loading, so every profile
+in the file is unavailable until you fix it. `servicenow-mcp-setup` and
+`servicenow-mcp-profile` load the same file and refuse it too, and
+`servicenow-mcp-setup doctor` reports the message under its `profiles` check,
+so fix the file by hand.
+
+For a `config.json` profile the server prints:
+
+```text
+[servicenow-mcp] Fatal stdio startup error: Profile configuration is invalid: profile "<name>": <message>
+```
+
+A message names the key path and table, never a configured value. For the
+environment profile there is no prefix, and the key path starts with
+`SN_FIELD_POLICY_DEFINITIONS` instead of `fieldPolicy`.
+
+| Configuration | Message (after the prefix) |
+|---|---|
+| A field that is not a field name: a pattern such as `"u_*"`, or `"*"` mixed with names | `fieldPolicy.u_audit.writable[0] is not a field name. List exact field names (letters, digits, and underscores, starting with a letter, at most 80 characters), or use "*" on its own for every field; patterns such as "u_*" are not supported.` |
+| The same field twice in one set, ignoring case | `fieldPolicy.incident.writable[4] repeats the field "state".` |
+| A field set that is neither `"*"` nor a list | `fieldPolicy.incident.writable must be "*" or a list of field names.` |
+| `fieldPolicy` that is not an object | `fieldPolicy must be an object that maps table names to { defaults, readable, writable }.` |
+| A table key that is not a table name | `fieldPolicy key 2 is not a valid table name. Use a table name (letters, digits, and underscores, starting with a letter, at most 80 characters) or "*".` |
+| A table entry that is not an object | `fieldPolicy.incident must be an object with defaults, readable, or writable.` |
+| `defaults` outside `readable`, including a named table's `defaults` outside a `"*"` entry's `readable` | `fieldPolicy.incident.defaults lists "caller_id", which fieldPolicy.incident.readable does not allow.` |
+| `defaults: "*"` beside a narrowed `readable` | `fieldPolicy.u_card.defaults is "*" (every field), which fieldPolicy.u_card.readable does not allow. List the default fields, or make readable "*".` |
+| `fieldPolicy` together with one or both table lists | `fieldPolicy cannot be combined with readableTableFields. State the field policy in one form: fieldPolicy alone, or readableTableFields and writableTableFields without fieldPolicy.` |
+| An unknown key in a table entry | `fieldPolicy.incident has an unknown key "writeable". A table entry accepts only defaults, readable, and writable.` |
+| Two table keys that differ only in case | `fieldPolicy key 2 names table "incident" again (table names are case-insensitive); it repeats key 1. State each table once.` |
+| A table list that is not a list | `writableTableFields must be a list of { table, fields } entries.` |
+| A list entry that is not an object | `writableTableFields[0] must be an object with table and fields.` |
+| An unknown key in a list entry | `writableTableFields[0] (table "incident") has an unknown key "writable". A list entry accepts only table and fields.` |
+| One table twice in the same list, ignoring case | `writableTableFields[2] (table "incident") repeats a table already listed at writableTableFields[0]. List each table once.` |
+
+An unknown key is named only when it is a valid identifier. Any other key,
+including a comment key such as `_comment`, is reported by position, as in
+`fieldPolicy.incident has an unknown key at position 2.` There is no
+exemption for comment keys, so keep notes outside the policy.
+
+`SN_FIELD_POLICY_DEFINITIONS` can also fail on its own:
+
+| Value | Message |
+|---|---|
+| Set while `config.json` exists | The refusal [above](#sn_field_policy_definitions-and-configjson) |
+| Not valid JSON | `SN_FIELD_POLICY_DEFINITIONS is not valid JSON.` |
+| Valid JSON, but not an object | `SN_FIELD_POLICY_DEFINITIONS must be a JSON object.` |
+| Longer than 65,536 characters | `SN_FIELD_POLICY_DEFINITIONS exceeds 65536 characters.` |
+| Table keys mixed with the profile keys | `SN_FIELD_POLICY_DEFINITIONS mixes table keys with the profile keys writableTableFields. Use either a table map or the profile keys (fieldPolicy, readableTableFields, writableTableFields), not both.` |
+
+### Journal fields and the dedicated tools
+
+`sn_create`, `sn_update` and `sn_batch` now append `comments` and
+`work_notes` on every table a profile may write
+([Incident journal migration](#incident-journal-migration)). Two consequences
+need a decision before you upgrade.
+
+**Omitting the dedicated tools no longer withholds journals.** In 2.x
+releases up to 2.2.0-dev.6, a profile whose `incident` target listed
+`sn_update` but not `sn_incident_add_comment` could not post comments. After
+the upgrade it can, through `sn_update`, `sn_create` and, where granted,
+`sn_batch`, and on every other write-granted table too. To withhold
+customer-visible comments, set `writable` to an explicit list without
+`comments`. With no field policy, the effective list is every field, so there
+is nothing to leave a field out of until you write one:
+
+```json
+{
+  "fieldPolicy": {
+    "incident": {
+      "writable": ["short_description", "description", "state", "assigned_to", "assignment_group", "work_notes"]
+    }
+  }
+}
+```
+
+State it on every table that needs it, or once on a `"*"` entry, which also
+reaches the other ITSM tables and every custom table. Field policy is
+evaluated against the table a call names, so narrow write-granted parent
+tables such as `task` the same way, or do not grant writes on them.
+
+**The dedicated tools now follow field policy.** `sn_incident_add_comment` is
+denied when the incident's effective `writable` set leaves out `comments`, and
+`sn_incident_add_work_note` when it leaves out `work_notes`. The effective set
+comes from `fieldPolicy.incident.writable`, or from a `"*"` entry's
+`writable` when `incident` does not state one. A profile that already narrows
+either without the journal fields loses the matching tool, with a denial that
+names the field and `fieldPolicy.incident.writable`. To keep a tool, add its
+field to the list, for example `"incident": {"writable": [..., "comments"]}`.
+
+### The `"*"` entry reaches the ITSM and custom tables
+
+Through 2.2.0-dev.6, a profile's `"*"` entry applied only to tables that had
+no entry of their own, built-in or named. The 34 built-in tables were never
+narrowed by it, and a custom table the profile named took its unstated keys
+from the open default.
+
+Now `readable` and `writable` resolve key by key, from the table's own entry,
+then the `"*"` entry, then every field, on:
+
+- the 11 ITSM tables: `incident`, `change_request`, `problem`, `sc_request`,
+  `sc_req_item`, `sc_task`, `task`, `cmdb_ci`, `cmdb_ci_server`,
+  `cmdb_ci_computer`, `kb_knowledge`;
+- every table without a built-in entry, named in the policy or not.
+
+The other 23 built-in tables are system tables, listed in the
+[field policy reference](../README.md#field-policy). A `"*"` entry never
+reaches them, named or not.
+
+What changes:
+
+- `{"*": {"writable": []}}` on a profile that grants writes on `incident` used
+  to allow incident writes, and now denies them, including the dedicated
+  journal tools.
+- `{"*": {"writable": []}, "u_x": {"readable": ["sys_id", "name"]}}` used to
+  leave `u_x` writable, and now denies writes to it.
+- A named custom table that states only `defaults`, under a `"*"` entry that
+  states `readable`, now fails to load if its defaults fall outside that
+  readable set.
+- The ITSM tables' default read projections are trimmed to a narrowed `"*"`
+  `readable` set.
+
+To keep a key open on one table, state it on that table:
+
+```json
+{
+  "fieldPolicy": {
+    "*": { "writable": [] },
+    "incident": { "writable": "*" },
+    "u_x": { "readable": ["sys_id", "name"], "writable": "*" }
+  }
+}
+```
+
+A `"*"` entry still does not make a profile read-only, because it never
+reaches the system tables. Use `tableAccess.writeTables: []` for that.
+
+### Class and domain fields
+
+`sys_class_name`, `sys_class_path`, `sys_domain` and `sys_domain_path` move a
+record to another class or domain. No writable wildcard covers them any more,
+including the open default of a profile with no field policy. Up to
+2.2.0-dev.6, any table except `incident` accepted them under a wildcard.
+
+To allow one, list it by name in the table's `writable`, or in a `"*"`
+entry's `writable` for a table that entry reaches. Listing `sys_domain` does
+not list `sys_domain_path`, and the reverse. Otherwise the write is denied
+with:
+
+```text
+Write denied by policy: field "sys_domain" on "incident" changes the record's class or domain, so a writable wildcard never covers it. List it explicitly in fieldPolicy.incident.writable to allow this write.
+```
+
+### `readable: []` and `writable: []`
+
+`readable: []` used to block writes to a table as a side effect: the write
+was denied while its response projection was prepared, before anything was
+sent. Writes to such a table now succeed and
+return only the record's `sys_id`. Reads stay denied, and `sn_batch` still
+cannot run there, because it reads the matching `sys_id`s first.
+
+If you used `readable: []` to hide a table entirely, add `writable: []`, or
+leave the table out of `tableAccess`.
+
+Every write response now includes the written record's `sys_id`, even when
+the readable set leaves it out. Every other field, `number` included, follows
+the readable set.
+
+### Setup grant defaults
+
+- Without `--tools`, `servicenow-mcp-setup grant --write incident` now binds
+  `sn_incident_add_comment` and `sn_incident_add_work_note` to the incident
+  target, next to `sn_create` and `sn_update`. Existing profiles are not
+  changed on upgrade; re-run the grant to add the tools.
+- Defaults apply only to the tables, and the operations, named in that
+  command. A read grant adds no write tools and a write grant adds no read
+  tools, including on a table that was reachable only as another target's
+  related table.
+
+See [Granting table access](CLIENT-SETUP.md#granting-table-access) for the
+opt-outs.
