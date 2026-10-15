@@ -1871,11 +1871,16 @@ function isPlainRecordCandidate(candidate: unknown): boolean {
  * Normalizing here keeps an object built with optional keys spread in
  * identical to one that never carried the key at all, so the same policy
  * cannot mean different things depending on how the caller constructed it.
+ *
+ * The copy has no prototype. On a plain `{}`, assigning a JSON own key
+ * `__proto__` would replace the copy's prototype instead of defining a key,
+ * so the unknown-key and mixed-key checks would never see it, and stated keys
+ * could then be read through that prototype.
  */
 function definedOwnProperties(
   record: Record<string, unknown>
 ): Record<string, unknown> {
-  const defined: Record<string, unknown> = {};
+  const defined = Object.create(null) as Record<string, unknown>;
   for (const [key, value] of Object.entries(record)) {
     if (value !== undefined) defined[key] = value;
   }

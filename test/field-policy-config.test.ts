@@ -708,6 +708,80 @@ describe("configurations that used to fail open are rejected (finding 4)", () =>
   });
 });
 
+/**
+ * A JSON own key "__proto__" used to become the prototype of the copy the
+ * unknown-key checks inspect, so it was ignored, or failed with a raw
+ * TypeError. It is now an unknown key like any other. It is not a valid
+ * identifier, so the message identifies it by position, as for _comment.
+ * Computed keys below create an own "__proto__" property, as JSON.parse does.
+ */
+describe('a "__proto__" key is rejected like any other unknown key (RR1)', () => {
+  it.each<[string, Record<string, unknown>, string]>([
+    [
+      "alone in a table entry",
+      { fieldPolicy: { incident: { ["__proto__"]: { writable: [] } } } },
+      "fieldPolicy.incident has an unknown key at position 1. A table entry accepts only " +
+        "defaults, readable, and writable.",
+    ],
+    [
+      "beside a real key in a table entry",
+      { fieldPolicy: { incident: { ["__proto__"]: { writable: [] }, writable: ["state"] } } },
+      "fieldPolicy.incident has an unknown key at position 1. A table entry accepts only " +
+        "defaults, readable, and writable.",
+    ],
+    [
+      "in a list entry",
+      {
+        writableTableFields: [
+          { table: "incident", fields: "*", ["__proto__"]: { fields: [] } },
+        ],
+      },
+      'writableTableFields[0] (table "incident") has an unknown key at position 3. A list ' +
+        "entry accepts only table and fields.",
+    ],
+  ])("rejects one %s at load and fails closed on the request path", (_label, profile, expected) => {
+    writeProfiles({ proto: profile });
+    expect(fs.readFileSync(configFilePath, "utf8")).toContain('"__proto__"');
+
+    // Named, not the generic "could not be loaded safely" failure.
+    expect(loadError().message).toBe(
+      `Profile configuration is invalid: profile "proto": ${expected}`
+    );
+
+    const parsed = JSON.parse(JSON.stringify(profile)) as Record<string, unknown>;
+    expect(() => validateFieldPolicyConfiguration(parsed)).toThrow(
+      FieldPolicyConfigurationError
+    );
+    runWithFieldPolicyConfiguration(parsed, () => {
+      expect(
+        policyReason(() => validateWritableFields("incident", { short_description: "x" }))
+      ).toBe("invalid_argument_shape");
+    });
+  });
+
+  it("rejects it in SN_FIELD_POLICY_DEFINITIONS, in a table entry and beside profile keys", () => {
+    expect(() =>
+      fieldPolicyInputFromEnvironment({
+        SN_FIELD_POLICY_DEFINITIONS: '{"incident":{"__proto__":{"writable":[]}}}',
+      })
+    ).toThrow(
+      "SN_FIELD_POLICY_DEFINITIONS.incident has an unknown key at position 1. A table " +
+        "entry accepts only defaults, readable, and writable."
+    );
+    // It used to become the copy's prototype, so the variable escaped the
+    // mixed-key check.
+    expect(() =>
+      fieldPolicyInputFromEnvironment({
+        SN_FIELD_POLICY_DEFINITIONS:
+          '{"__proto__":{"incident":{"writable":[]}},' +
+          '"writableTableFields":[{"table":"incident","fields":"*"}]}',
+      })
+    ).toThrow(
+      "SN_FIELD_POLICY_DEFINITIONS mixes table keys with the profile keys writableTableFields."
+    );
+  });
+});
+
 describe("SN_FIELD_POLICY_DEFINITIONS configures only the environment profile (#9)", () => {
   function environmentProfile(name = "env-profile"): void {
     vi.stubEnv("SN_PROFILE_NAME", name);
