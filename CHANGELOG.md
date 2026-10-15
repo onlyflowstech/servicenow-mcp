@@ -43,9 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response. The old request and parser did not match it, so every confirmed
   batch fell back to a serial replay of all records after the batch had been
   sent. A batch is now never replayed: serial calls replace it only when the
-  instance refused it outright (401, 403, 404 or 429), and only for records
-  not already confirmed. Outcomes ServiceNow does not confirm are reported in
-  the result `message` instead of being retried.
+  instance refused it outright (401, 403 or 404), and only for records not
+  already confirmed. Outcomes ServiceNow does not confirm are reported in the
+  result `message` instead of being retried, and the run stops there.
+- `sn_batch` can reach its 10,000-record cap. One 1 MiB response budget used
+  to cover the whole call, so a 10,000-record update stopped after about 3,400
+  records; each batch and serial request now has its own budget. The serial
+  fallback no longer counts applied updates as failed when full records exceed
+  the budget.
+- A rate-limited `sn_batch` (429) stops and reports the remaining records as
+  not sent, with the `Retry-After` hint. It used to fall back to one request
+  per record, each retried against the same limit.
+- `sn_batch` keeps each batch request body under 4 MiB by sending fewer
+  records per batch when values are large. A 400 KB field value used to
+  produce a 27 MB request.
 - `sn_incident_add_comment` and `sn_incident_add_work_note` honour
   `fieldPolicy.incident.writable`, so a writable set that leaves out a journal
   field denies the dedicated tool and `sn_update` alike.

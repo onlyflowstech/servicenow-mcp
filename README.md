@@ -977,13 +977,19 @@ and cannot be cleared. Every other incident field gets the generic bounds.
 #### Bulk writes
 
 `sn_batch` sends confirmed updates and deletes through the ServiceNow REST
-Batch API (`/api/now/v1/batch`), 50 records per request. It falls back to one
-Table API call per record only when the instance refuses the batch request
-outright (401, 403, 404 or 429), and then only for records not already
-confirmed. It never re-sends a batch that may have reached the instance: when
-ServiceNow does not confirm a record's outcome, the result reports it in
-`message` instead of retrying it. A batch is therefore never replayed, which
-matters for journal fields, where a replay would append a second entry.
+Batch API (`/api/now/v1/batch`), up to 50 records per request and fewer when
+field values are large, so a request body stays under 4 MiB. Each request
+gets its own 1 MiB response budget, so a run can reach the 10,000-record cap.
+
+It falls back to one Table API call per record only when the instance refuses
+the batch request outright (401, 403 or 404), and then only for records not
+already confirmed. A rate limit (429) stops the run instead: the remaining
+records are reported as not sent, with the `Retry-After` hint, because serial
+calls would only add load. It never re-sends a request that may have reached
+the instance: when ServiceNow does not confirm a record's outcome, in a batch
+or a serial call, the run stops and the result reports it in `message` instead
+of retrying it. A batch is therefore never replayed, which matters for journal
+fields, where a replay would append a second entry.
 
 ### ServiceNow profiles
 
