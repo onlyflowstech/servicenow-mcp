@@ -69,8 +69,9 @@ afterEach(async () => {
   );
 });
 
+/** A distinct sys_id per index. Zero padding keeps every index unique. */
 function sysIdFor(index: number): string {
-  return (index + 1).toString(16).padStart(32, "a");
+  return (index + 1).toString(16).padStart(32, "0");
 }
 
 /** A batch response that services every request with one status. */
@@ -1162,5 +1163,117 @@ describe("Security finding 2: journal writes are never re-sent after they may ha
         body: JSON.stringify({ [field]: "Journal entry" }),
       }),
     ]);
+  });
+});
+
+describe("Security finding 6: a sub-request server error is unconfirmed", () => {
+  it.each([500, 503, 408])(
+    "counts a sub-request %s as unconfirmed and stops",
+    async (status) => {
+      const connected = await harness({ matched: 60 });
+      connected.serviceNowClient.post.mockImplementationOnce(
+        async (_path: string, body: unknown) => {
+          const payload = body as RestBatchPayload;
+          return {
+            serviced_requests: payload.rest_requests.map(({ id }) => ({
+              id,
+              status_code: id === "2" ? status : 200,
+            })),
+            unserviced_requests: [],
+          };
+        }
+      );
+      const result = await callTool(
+        connected,
+        "sn_batch",
+        batchArguments({ comments: "Customer update" })
+      );
+
+      const data = responseData(result);
+      expect(data).toMatchObject({ matched: 60, processed: 49, failed: 10 });
+      expect(data.message).toContain("did not confirm the outcome for 1 record(s)");
+      expect(data.message).toContain("1 of them returned a server error");
+      expect(data.message).toContain("remaining 10 record(s) were not sent");
+      expect(connected.serviceNowClient.post).toHaveBeenCalledTimes(1);
+      expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
+    }
+  );
+
+  it("still counts a sub-request 4xx as failed", async () => {
+    const connected = await harness({ matched: 2 });
+    connected.serviceNowClient.post.mockResolvedValueOnce({
+      serviced_requests: [
+        { id: "1", status_code: 200 },
+        { id: "2", status_code: 400 },
+      ],
+    });
+    const result = await callTool(connected, "sn_batch", batchArguments({ state: "2" }));
+
+    expect(responseData(result)).toEqual({
+      action: "update",
+      table: "incident",
+      matched: 2,
+      processed: 1,
+      failed: 1,
+    });
+  });
+});
+
+describe("Security finding 9: each record is changed once per run", () => {
+  it("de-duplicates sys_ids the lookup returns more than once", async () => {
+    const connected = await harness();
+    const second = sysIdFor(1);
+    connected.serviceNowClient.get.mockResolvedValue({
+      result: [
+        { sys_id: SYS_ID },
+        { sys_id: SYS_ID.toUpperCase() },
+        { sys_id: second },
+        { sys_id: SYS_ID },
+      ],
+    });
+    const result = await callTool(
+      connected,
+      "sn_batch",
+      batchArguments({ comments: "Customer update" })
+    );
+
+    expect(responseData(result)).toEqual({
+      action: "update",
+      table: "incident",
+      matched: 2,
+      processed: 2,
+      failed: 0,
+    });
+    const [payload] = batchPayloads(connected);
+    expect(payload!.rest_requests.map(({ url }) => url.split("?")[0])).toEqual([
+      `/api/now/table/incident/${SYS_ID}`,
+      `/api/now/table/incident/${second}`,
+    ]);
+
+    const dryRun = await callTool(connected, "sn_batch", {
+      ...batchArguments({ comments: "Customer update" }),
+      confirm: false,
+    });
+    expect(responseData(dryRun)).toMatchObject({ matched: 2, dry_run: true });
+  });
+});
+
+describe("Security finding 10: the serial fallback stops on an authentication failure", () => {
+  it("stops at a 401 and reports the rest as not sent", async () => {
+    const connected = await harness({ matched: 5 });
+    connected.serviceNowClient.post.mockRejectedValueOnce(
+      createToolError("not_found", "do_not_retry")
+    );
+    connected.serviceNowClient.patch
+      .mockResolvedValueOnce({ result: { sys_id: SYS_ID } })
+      .mockRejectedValueOnce(createToolError("authentication", "retry_after_correction"));
+    const result = await callTool(connected, "sn_batch", batchArguments({ state: "2" }));
+
+    const data = responseData(result);
+    expect(data).toMatchObject({ matched: 5, processed: 1, failed: 4 });
+    expect(data.message).toContain("rejected the credentials (HTTP 401)");
+    expect(data.message).toContain("remaining 3 record(s) were not sent");
+    expect(data.message).not.toContain("did not confirm");
+    expect(connected.serviceNowClient.patch).toHaveBeenCalledTimes(2);
   });
 });

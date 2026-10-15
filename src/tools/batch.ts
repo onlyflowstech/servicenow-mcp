@@ -128,7 +128,8 @@ export async function handler(
             typeof record === "object" && record !== null && !Array.isArray(record)
         ))
       : [];
-    const matched = results.length;
+    const targets = targetSysIds(results);
+    const matched = targets.sysIds.length + targets.invalid;
 
     // Step 2: Dry-run?
     if (!args.confirm) {
@@ -158,7 +159,7 @@ export async function handler(
       client,
       args.table,
       args.action,
-      results,
+      targets,
       writableFields,
       // A direct handler call may pass no context; it then keeps the single
       // budget of whatever scope it runs in.
@@ -233,12 +234,23 @@ interface MutationTally {
   readonly failed: number;
   /** Listed by ServiceNow in unserviced_requests: not run, counted as failed. */
   readonly unserviced: number;
-  /** Not reported either way: may have been applied, never retried. */
+  /** Not confirmed either way: may have been applied, never retried. */
   readonly unconfirmed: number;
+  /** Of the unconfirmed: a sub-request ServiceNow answered with 5xx or 408. */
+  readonly serverErrors?: number;
   /** Never sent because the run stopped; counted as failed. */
   readonly notSent: number;
   /** Set when the run stopped on a rate limit (HTTP 429). */
   readonly rateLimited?: Readonly<{ retryAfterSeconds?: number }>;
+  /** Set when the run stopped because ServiceNow rejected the credentials. */
+  readonly authenticationFailed?: true;
+}
+
+/** The records one run changes: each valid sys_id once. */
+interface BatchTargets {
+  readonly sysIds: readonly string[];
+  /** Lookup rows without a valid sys_id; counted as failed. */
+  readonly invalid: number;
 }
 
 interface RestBatchRequest {
@@ -255,6 +267,25 @@ interface ChunkOutcome {
   readonly failed: number;
   readonly unserviced: number;
   readonly unconfirmed: number;
+  readonly serverErrors: number;
+}
+
+/**
+ * Validate and de-duplicate the sys_ids the lookup returned. The lookup can
+ * name a record more than once; each record is changed at most once per run,
+ * so a journal entry is never appended twice to it.
+ */
+function targetSysIds(records: readonly Record<string, unknown>[]): BatchTargets {
+  const unique = new Set<string>();
+  let invalid = 0;
+  for (const record of records) {
+    try {
+      unique.add(serviceNowSysIdPathSegment(record.sys_id));
+    } catch {
+      invalid += 1;
+    }
+  }
+  return { sysIds: [...unique], invalid };
 }
 
 /**
@@ -274,21 +305,14 @@ async function executeBatchMutation(
   client: ServiceNowOperations,
   table: string,
   action: "update" | "delete",
-  records: readonly Record<string, unknown>[],
+  targets: BatchTargets,
   fields: Readonly<Record<string, string>> | undefined,
   signal: AbortSignal | undefined
 ): Promise<BatchExecutionResult> {
   let processed = 0;
-  let failed = 0;
+  let failed = targets.invalid;
   let unserviced = 0;
-  const sysIds: string[] = [];
-  for (const record of records) {
-    try {
-      sysIds.push(serviceNowSysIdPathSegment(record.sys_id));
-    } catch {
-      failed += 1;
-    }
-  }
+  const { sysIds } = targets;
   const body = action === "update" ? encodeBatchBody(fields ?? {}) : undefined;
   const chunkSize = batchChunkSize(table, body);
 
@@ -362,6 +386,7 @@ async function executeBatchMutation(
         failed,
         unserviced,
         unconfirmed: outcome.unconfirmed,
+        serverErrors: outcome.serverErrors,
         notSent: sysIds.length - offset - chunk.length,
       });
     }
@@ -439,6 +464,11 @@ function encodeBatchBody(fields: Readonly<Record<string, string>>): string {
  * Count one batch response against the ids that were sent. An id ServiceNow
  * neither serviced nor listed as unserviced is unconfirmed, and so is an id
  * reported more than once, because its result cannot be attributed.
+ *
+ * A sub-request answered with a 5xx or a 408 is unconfirmed too, matching
+ * the serial path: a server error can follow a change that was partly
+ * applied (ServiceNow does not roll back a journal insert when a later
+ * business rule fails), so it must not read as "failed, safe to re-run".
  */
 function chunkOutcome(response: unknown, ids: readonly string[]): ChunkOutcome {
   const requested = new Set(ids);
@@ -469,27 +499,50 @@ function chunkOutcome(response: unknown, ids: readonly string[]): ChunkOutcome {
   let processed = 0;
   let failed = 0;
   let unconfirmed = 0;
+  let serverErrors = 0;
   for (const id of ids) {
     const status = statuses.get(id);
     if (status !== undefined) {
-      if (status >= 200 && status < 300) processed += 1;
-      else failed += 1;
+      if (status >= 200 && status < 300) {
+        processed += 1;
+      } else if (status >= 500 || status === 408) {
+        unconfirmed += 1;
+        serverErrors += 1;
+      } else {
+        failed += 1;
+      }
     } else if (notServiced.has(id)) {
       failed += 1;
     } else {
       unconfirmed += 1;
     }
   }
-  return { processed, failed, unserviced: notServiced.size, unconfirmed };
+  return {
+    processed,
+    failed,
+    unserviced: notServiced.size,
+    unconfirmed,
+    serverErrors,
+  };
 }
 
 function batchResult(tally: MutationTally): BatchExecutionResult {
   const notes: string[] = [];
   if (tally.unconfirmed > 0) {
+    const serverErrors = tally.serverErrors ?? 0;
     notes.push(
-      `ServiceNow did not confirm the outcome for ${tally.unconfirmed} record(s). ` +
+      `ServiceNow did not confirm the outcome for ${tally.unconfirmed} record(s)` +
+        (serverErrors === 0
+          ? ". "
+          : `; ${serverErrors} of them returned a server error (HTTP 5xx or ` +
+            "408), which can follow a partly applied change. ") +
         "They may have been changed. They were not retried, so no change is " +
         "applied twice. Check them before running the batch again."
+    );
+  }
+  if (tally.authenticationFailed === true) {
+    notes.push(
+      "ServiceNow rejected the credentials (HTTP 401), so nothing more was sent."
     );
   }
   if (tally.rateLimited !== undefined) {
@@ -548,8 +601,10 @@ function statusCode(candidate: unknown): number | undefined {
 
 /**
  * One Table API call per record, each with its own response budget. The run
- * stops at the first failure whose outcome is unknown, or at a rate limit;
- * the records after it are reported as not sent.
+ * stops at the first failure whose outcome is unknown, at a rate limit, or at
+ * an authentication failure (a 401 the client could not refresh); the records
+ * after it are reported as not sent. Sending them would only repeat the same
+ * rejection, and repeated failed logins can trip an account lockout.
  */
 async function executeSerialMutation(
   client: ServiceNowOperations,
@@ -585,6 +640,17 @@ async function executeSerialMutation(
           rateLimited: { retryAfterSeconds: descriptor.retryAfterSeconds },
         };
       }
+      if (descriptor?.category === "authentication") {
+        // Rejected before processing, so this record failed definitely.
+        return {
+          processed,
+          failed: failed + 1,
+          unserviced: 0,
+          unconfirmed: 0,
+          notSent,
+          authenticationFailed: true,
+        };
+      }
       if (!serialFailureIsDefinite(descriptor)) {
         return { processed, failed, unserviced: 0, unconfirmed: 1, notSent };
       }
@@ -596,16 +662,17 @@ async function executeSerialMutation(
 
 /**
  * True when a single-record PATCH or DELETE failed with a status that means
- * ServiceNow did not apply it. For these methods the client classifies a
- * 4xx it has no category for as `upstream` with `do_not_retry`, and a 5xx or
- * connection failure as `upstream` with `retry_if_safe_and_idempotent`. A
- * 5xx, a timeout, a connection failure, or an unreadable or over-budget
- * response may follow an applied write, so its outcome is unknown.
+ * ServiceNow did not apply it, and the run can continue with the next record.
+ * For these methods the client classifies a 4xx it has no category for as
+ * `upstream` with `do_not_retry`, and a 5xx or connection failure as
+ * `upstream` with `retry_if_safe_and_idempotent`. A 5xx, a timeout, a
+ * connection failure, or an unreadable or over-budget response may follow an
+ * applied write, so its outcome is unknown. Authentication and rate-limit
+ * failures stop the run before this is consulted.
  */
 function serialFailureIsDefinite(descriptor: ToolErrorDescriptor | undefined): boolean {
   if (descriptor === undefined) return false;
   switch (descriptor.category) {
-    case "authentication":
     case "authorization":
     case "not_found":
     case "conflict":
