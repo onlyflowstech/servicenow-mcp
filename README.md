@@ -747,42 +747,29 @@ for 24 hours by default. The default cached table patterns are
 `sys_metadata*`, and `sys_flow*`. Set `metadataCache.ttlMs` and
 `metadataCache.tables` on a file-backed profile, or `SN_METADATA_CACHE_TTL_MS`
 / `SN_METADATA_CACHE_TABLES` for the explicit environment profile. `sn_query`,
-`sn_get`, and `sn_schema` accept `force_recache: true` to refresh metadata. A
-cache hit performs a lightweight `sys_updated_on` probe and is used only when no
-matching metadata rows changed since the previous sync.
+`sn_get`, and `sn_schema` accept `force_recache: true` to refresh metadata.
 
-**Prerequisite: a resolvable session timezone.** The freshness probe compares
-`sys_updated_on`, which ServiceNow evaluates in the *session user's* timezone,
-not UTC. Resolving that zone requires the authenticating account's `user_name`
-to look up `sys_user.time_zone`, falling back to the `glide.sys.default.tz`
-property. When it cannot be resolved the cache **disables itself** for that
-identity rather than assuming UTC — a wrong assumption would silently serve
-stale metadata for the length of the offset. The server logs a warning naming
-the reads it needs.
-
-This has one consequence worth knowing before you configure it:
-
-| Profile auth | Metadata caching |
-|---|---|
-| Basic | works — the profile carries a username |
-| OAuth **password** grant | works — the profile carries a username |
-| OAuth **client_credentials** | **disabled** — no username to resolve a timezone from |
-| API key | **disabled** — no username to resolve a timezone from |
-
-The profile also needs read access to `sys_user` (for `time_zone`) and
-`sys_properties` (for `glide.sys.default.tz`) for the lookup to succeed at all.
+**Freshness is checked against the instance, in every auth mode.** Before each
+fetch the cache reads a watermark: the table's newest row by `sys_updated_on`,
+as ServiceNow stores it (UTC). A cache hit is served only while a new read of
+that watermark still matches. Both values come from the instance, so the
+session timezone, the date format, and clock skew between this host and the
+instance play no part, and no user lookup is needed. Basic, OAuth (password or
+client_credentials), and API-key profiles all cache the same way. The only
+access it needs is read on the cached table itself.
 
 **The honest tradeoff:** the cache only ever saved payload bytes, never round
-trips — a cache hit still costs one freshness probe. So on a client-credentials
-or API-key profile the practical loss is bandwidth on `sys_dictionary` reads,
-not latency. If you are choosing an auth mode, this should not be the deciding
-factor.
+trips — a cache hit still costs one watermark read, and a miss costs one extra.
+If the watermark cannot be read, or comes back without a readable
+`sys_updated_on`, the call goes upstream and nothing is cached for it.
 
-**Deletions become visible within one TTL.** The freshness probe detects
-updates, not deletes, so a row deleted upstream stays served until its entry
-expires and is re-fetched — up to 24 hours at the default TTL. This is accepted
-behavior, not a defect; lower `SN_METADATA_CACHE_TTL_MS` or pass
-`force_recache: true` if you need a deletion reflected sooner.
+**Deletions become visible within one TTL.** Inserts and updates move the
+watermark, but a delete moves it only when it removes the newest row, and an
+update within the same second as the watermark may not move it. So a row
+deleted upstream can stay served until its entry expires and is re-fetched — up
+to 24 hours at the default TTL. This is accepted behavior, not a defect; lower
+`SN_METADATA_CACHE_TTL_MS` or pass `force_recache: true` if you need a deletion
+reflected sooner.
 
 ### Unrestricted field selection (`fields=all`, `response_format=detailed`)
 

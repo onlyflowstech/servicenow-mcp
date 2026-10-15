@@ -15,41 +15,26 @@ function result(payload: unknown): RequestResult<unknown> {
   return { data: payload, status: 200, headers: new Headers({ "x-total-count": "1" }) };
 }
 
-interface OperationsOptions {
-  /** sys_user.time_zone for the session account; "" means the field is empty. */
-  readonly userTimeZone?: string;
-  /** glide.sys.default.tz; undefined means the property is absent. */
-  readonly systemTimeZone?: string;
-  /** Throw on the sys_user lookup, as an unreadable table would. */
-  readonly userLookupThrows?: boolean;
+interface TableRow {
+  readonly sys_id?: unknown;
+  readonly sys_updated_on?: unknown;
 }
 
-const SESSION_USER = "integration.user";
-
-/** Probe calls only -- the timezone lookups share the same `get` mock. */
-function probeCalls(get: { mock: { calls: unknown[][] } }): unknown[][] {
-  return get.mock.calls.filter(
-    ([path]) =>
-      path !== "/api/now/table/sys_user" && path !== "/api/now/table/sys_properties"
-  );
-}
-
-function operations(changed = false, options: OperationsOptions = {}) {
-  const { userTimeZone = "UTC", systemTimeZone, userLookupThrows = false } = options;
+/**
+ * Upstream double. `table.newest` is the row the instance would return for
+ * ORDERBYDESCsys_updated_on, as stored; tests move it to simulate writes.
+ */
+function operations() {
+  const table: { newest: TableRow | undefined; watermarkThrows: boolean } = {
+    newest: { sys_id: "row-1", sys_updated_on: "2025-01-15 12:00:00" },
+    watermarkThrows: false,
+  };
   const getWithMeta = vi.fn(async (path: string, params?: Record<string, string>) => {
     return result({ result: [{ sys_id: `${path}:${params?.sysparm_fields ?? "all"}` }] });
   });
-  const get = vi.fn(async (path: string) => {
-    if (path === "/api/now/table/sys_user") {
-      if (userLookupThrows) throw new Error("ACL denied");
-      return { result: [{ time_zone: userTimeZone }] };
-    }
-    if (path === "/api/now/table/sys_properties") {
-      return {
-        result: systemTimeZone === undefined ? [] : [{ value: systemTimeZone }],
-      };
-    }
-    return { result: changed ? [{ sys_id: "changed" }] : [] };
+  const get = vi.fn(async (_path: string, _params?: Record<string, string>) => {
+    if (table.watermarkThrows) throw new Error("upstream 500");
+    return { result: table.newest === undefined ? [] : [{ ...table.newest }] };
   });
   const base = {
     get,
@@ -60,28 +45,62 @@ function operations(changed = false, options: OperationsOptions = {}) {
     postBinary: vi.fn(),
     getRaw: vi.fn(),
   } as unknown as ServiceNowOperations & { get: typeof get; getWithMeta: typeof getWithMeta };
-  return { base, get, getWithMeta };
+  return { base, get, getWithMeta, table };
 }
 
 describe("metadata cache", () => {
-  it("serves metadata table reads from a per-instance cache after a clean changed-since probe", async () => {
-    const { base, get, getWithMeta } = operations(false);
-    const cached = createCachedServiceNowOperations(base, "https://a.service-now.com", { ttlMs: 60_000 }, SESSION_USER);
+  it("serves metadata table reads from a per-instance cache while the watermark matches", async () => {
+    const { base, get, getWithMeta } = operations();
+    const cached = createCachedServiceNowOperations(base, "https://a.service-now.com", { ttlMs: 60_000 });
 
     await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
     await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
 
     expect(getWithMeta).toHaveBeenCalledTimes(1);
-    expect(probeCalls(get)).toHaveLength(1);
-    expect(get).toHaveBeenCalledWith("/api/now/table/sys_dictionary", expect.objectContaining({
-      sysparm_fields: "sys_id,sys_updated_on",
-      sysparm_limit: "1",
-    }));
+    // One watermark read before the fetch, one to validate the hit.
+    expect(get).toHaveBeenCalledTimes(2);
+    for (const [path, params] of get.mock.calls) {
+      expect(path).toBe("/api/now/table/sys_dictionary");
+      expect(params).toEqual({
+        sysparm_query: "ORDERBYDESCsys_updated_on",
+        sysparm_fields: "sys_id,sys_updated_on",
+        sysparm_limit: "1",
+        sysparm_no_count: "true",
+        sysparm_display_value: "false",
+        sysparm_exclude_reference_link: "true",
+      });
+    }
+  });
+
+  it("refreshes once the watermark moves", async () => {
+    const { base, getWithMeta, table } = operations();
+    const cached = createCachedServiceNowOperations(base, "https://moved.service-now.com|fp", { ttlMs: 60_000 });
+
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+    table.newest = { sys_id: "row-2", sys_updated_on: "2025-01-15 12:00:07" };
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+
+    // Refetched once for the move, then served against the new watermark.
+    expect(getWithMeta).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes when only the newest row's sys_id changes", async () => {
+    // The newest row was deleted, or another row took the top within the same
+    // second. The timestamp alone would call this unchanged.
+    const { base, getWithMeta, table } = operations();
+    const cached = createCachedServiceNowOperations(base, "https://sysid.service-now.com|fp", { ttlMs: 60_000 });
+
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+    table.newest = { sys_id: "row-0", sys_updated_on: "2025-01-15 12:00:00" };
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+
+    expect(getWithMeta).toHaveBeenCalledTimes(2);
   });
 
   it("refreshes metadata cache when forced and strips the internal force flag upstream", async () => {
-    const { base, getWithMeta } = operations(false);
-    const cached = createCachedServiceNowOperations(base, "https://b.service-now.com", { ttlMs: 60_000 }, SESSION_USER);
+    const { base, getWithMeta } = operations();
+    const cached = createCachedServiceNowOperations(base, "https://b.service-now.com", { ttlMs: 60_000 });
 
     await cached.getWithMeta("/api/now/table/sys_metadata_action", {
       sysparm_fields: "sys_id",
@@ -94,14 +113,14 @@ describe("metadata cache", () => {
   });
 
   it("does not cache non-metadata table reads", async () => {
-    const { base, get, getWithMeta } = operations(false);
-    const cached = createCachedServiceNowOperations(base, "https://c.service-now.com", { ttlMs: 60_000 }, SESSION_USER);
+    const { base, get, getWithMeta } = operations();
+    const cached = createCachedServiceNowOperations(base, "https://c.service-now.com", { ttlMs: 60_000 });
 
     await cached.getWithMeta("/api/now/table/incident", { sysparm_fields: "sys_id" });
     await cached.getWithMeta("/api/now/table/incident", { sysparm_fields: "sys_id" });
 
     expect(getWithMeta).toHaveBeenCalledTimes(2);
-    expect(probeCalls(get)).toHaveLength(0);
+    expect(get).not.toHaveBeenCalled();
   });
 
   it("never shares cached rows between two identities on one instance", async () => {
@@ -109,19 +128,17 @@ describe("metadata cache", () => {
     // read entirely, so an instance-only scope would serve one identity's
     // authorized rows to another.
     const instance = "https://shared.service-now.com";
-    const admin = operations(false);
-    const readonlyUser = operations(false);
+    const admin = operations();
+    const readonlyUser = operations();
     const adminCache = createCachedServiceNowOperations(
       admin.base,
       `${instance}|fingerprint-admin`,
-      { ttlMs: 60_000 },
-      SESSION_USER
+      { ttlMs: 60_000 }
     );
     const readonlyCache = createCachedServiceNowOperations(
       readonlyUser.base,
       `${instance}|fingerprint-readonly`,
-      { ttlMs: 60_000 },
-      SESSION_USER
+      { ttlMs: 60_000 }
     );
     const selector = { sysparm_query: "nameLIKEglide" };
 
@@ -134,11 +151,11 @@ describe("metadata cache", () => {
   });
 
   it("reuses one identity's cache across repeated tool invocations", async () => {
-    const { base, getWithMeta } = operations(false);
+    const { base, getWithMeta } = operations();
     const scope = "https://reuse.service-now.com|fingerprint-a";
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const cached = createCachedServiceNowOperations(base, scope, { ttlMs: 60_000 }, SESSION_USER);
+      const cached = createCachedServiceNowOperations(base, scope, { ttlMs: 60_000 });
       await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
     }
 
@@ -146,12 +163,11 @@ describe("metadata cache", () => {
   });
 
   it("expires entries and refuses to serve them past the TTL", async () => {
-    const { base, get, getWithMeta } = operations(false);
+    const { base, get, getWithMeta } = operations();
     const cached = createCachedServiceNowOperations(
       base,
       "https://ttl.service-now.com|fp",
-      { ttlMs: 1_000 },
-      SESSION_USER
+      { ttlMs: 1_000 }
     );
 
     vi.useFakeTimers();
@@ -164,18 +180,18 @@ describe("metadata cache", () => {
     }
 
     expect(getWithMeta).toHaveBeenCalledTimes(2);
-    // An expired entry is dropped without spending a freshness probe.
-    expect(probeCalls(get)).toHaveLength(0);
+    // Each fetch is preceded by its own watermark read; the expired entry is
+    // never served even though its watermark still matches.
+    expect(get).toHaveBeenCalledTimes(2);
   });
 
   it("does not cache a 204 no-content response", async () => {
-    const { base, getWithMeta } = operations(false);
+    const { base, getWithMeta } = operations();
     getWithMeta.mockResolvedValue({ data: null, status: 204, headers: new Headers() });
     const cached = createCachedServiceNowOperations(
       base,
       "https://empty.service-now.com|fp",
-      { ttlMs: 60_000 },
-      SESSION_USER
+      { ttlMs: 60_000 }
     );
 
     await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
@@ -185,9 +201,9 @@ describe("metadata cache", () => {
   });
 
   it("bounds a single scope to the entry cap", async () => {
-    const { base, getWithMeta } = operations(false);
+    const { base, getWithMeta } = operations();
     const scope = "https://bounded.service-now.com|fp";
-    const cached = createCachedServiceNowOperations(base, scope, { ttlMs: 60_000 }, SESSION_USER);
+    const cached = createCachedServiceNowOperations(base, scope, { ttlMs: 60_000 });
     const overflow = MAX_METADATA_CACHE_ENTRIES_PER_SCOPE + 1;
 
     for (let index = 0; index < overflow; index += 1) {
@@ -200,8 +216,8 @@ describe("metadata cache", () => {
   });
 
   it("applies the production default TTL and table set when config is empty", async () => {
-    const { base, getWithMeta } = operations(false);
-    const cached = createCachedServiceNowOperations(base, "https://default.service-now.com|fp", {}, SESSION_USER);
+    const { base, getWithMeta } = operations();
+    const cached = createCachedServiceNowOperations(base, "https://default.service-now.com|fp", {});
 
     await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "element" });
     await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "element" });
@@ -216,8 +232,8 @@ describe("metadata cache", () => {
     expect(DEFAULT_METADATA_CACHE_TABLES).not.toContain("sys_properties");
     expect(createMetadataCacheConfig(undefined).tables).not.toContain("sys_properties");
 
-    const { base, get, getWithMeta } = operations(false);
-    const cached = createCachedServiceNowOperations(base, "https://props.service-now.com|fp", {}, SESSION_USER);
+    const { base, get, getWithMeta } = operations();
+    const cached = createCachedServiceNowOperations(base, "https://props.service-now.com|fp", {});
 
     await cached.getWithMeta("/api/now/table/sys_properties", {
       sysparm_query: "name=glide.war",
@@ -233,12 +249,11 @@ describe("metadata cache", () => {
   });
 
   it("still caches sys_properties when an operator opts in explicitly", async () => {
-    const { base, getWithMeta } = operations(false);
+    const { base, getWithMeta } = operations();
     const cached = createCachedServiceNowOperations(
       base,
       "https://optin.service-now.com|fp",
-      { ttlMs: 60_000, tables: ["sys_properties"] },
-      SESSION_USER
+      { ttlMs: 60_000, tables: ["sys_properties"] }
     );
 
     await cached.getWithMeta("/api/now/table/sys_properties", { sysparm_fields: "value" });
@@ -264,12 +279,12 @@ describe("metadata cache", () => {
     // Identical credential material must keep reusing one partition.
     expect(`${instance}|${credentialFingerprint({ ...base })}`).toBe(adminScope);
 
-    const admin = operations(false);
-    const readonlyUser = operations(false);
+    const admin = operations();
+    const readonlyUser = operations();
     const selector = { sysparm_query: "nameLIKEglide" };
-    await createCachedServiceNowOperations(admin.base, adminScope, { ttlMs: 60_000 }, SESSION_USER)
+    await createCachedServiceNowOperations(admin.base, adminScope, { ttlMs: 60_000 })
       .getWithMeta("/api/now/table/sys_properties", selector);
-    await createCachedServiceNowOperations(readonlyUser.base, readonlyScope, { ttlMs: 60_000 }, SESSION_USER)
+    await createCachedServiceNowOperations(readonlyUser.base, readonlyScope, { ttlMs: 60_000 })
       .getWithMeta("/api/now/table/sys_properties", selector);
 
     expect(readonlyUser.getWithMeta).toHaveBeenCalledTimes(1);
@@ -288,17 +303,19 @@ describe("metadata cache", () => {
     expect(call, "createCachedServiceNowOperations call not found").not.toBeNull();
     expect(call![1]).toContain("credentialFingerprint(config)");
     expect(call![1]).toContain("context.profile.instance");
+    // Caching must not depend on a configured user name, which
+    // client-credentials and API-key profiles do not have.
+    expect(call![1]).not.toContain("config.user");
   });
 
   it("strips the internal force flag on non-metadata passthrough reads too", () => {
     // sysparm_force_recache is this module's own parameter. It must never
     // reach ServiceNow, cached table or not.
-    const { base, getWithMeta } = operations(false);
+    const { base, getWithMeta } = operations();
     const cached = createCachedServiceNowOperations(
       base,
       "https://strip.service-now.com|fp",
-      { ttlMs: 60_000 },
-      SESSION_USER
+      { ttlMs: 60_000 }
     );
 
     return cached
@@ -313,189 +330,164 @@ describe("metadata cache", () => {
       });
   });
 
-  it("formats the freshness probe in the session timezone, not UTC", async () => {
-    const { base, get } = operations(false, { userTimeZone: "US/Eastern" });
+  it("caches with no user name or lookup, in every auth mode", async () => {
+    // Client-credentials and API-key profiles carry no user name. The
+    // watermark needs none: the only upstream reads are the cached table's own.
+    const warn = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      const { base, get, getWithMeta } = operations();
+      const cached = createCachedServiceNowOperations(
+        base,
+        "https://clientcreds.service-now.com|fp",
+        {}
+      );
+
+      await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+      await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+
+      expect(getWithMeta).toHaveBeenCalledTimes(1);
+      expect(new Set(get.mock.calls.map(([path]) => path))).toEqual(
+        new Set(["/api/now/table/sys_dictionary"])
+      );
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("never builds a date literal, so the host clock and zone play no part", async () => {
+    // A host clock years ahead of the instance would have hidden this update
+    // from a sys_updated_on>{local time} probe until the entry expired.
+    const { base, get, getWithMeta, table } = operations();
     const cached = createCachedServiceNowOperations(
       base,
-      "https://tz.service-now.com|fp",
-      { ttlMs: 60_000 },
-      SESSION_USER
+      "https://skew.service-now.com|fp",
+      { ttlMs: 60_000 }
     );
 
     vi.useFakeTimers();
     try {
-      // 2025-01-15T12:00:00Z is 07:00 in US/Eastern (UTC-5).
-      vi.setSystemTime(Date.parse("2025-01-15T12:00:00Z"));
+      vi.setSystemTime(Date.parse("2030-06-15T00:00:00Z"));
       await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
-      vi.setSystemTime(Date.parse("2025-01-15T12:00:30Z"));
+      table.newest = { sys_id: "row-1", sys_updated_on: "2025-01-15 12:00:05" };
+      vi.setSystemTime(Date.parse("2030-06-15T00:00:30Z"));
       await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
     } finally {
       vi.useRealTimers();
     }
 
-    const [, params] = probeCalls(get)[0] as [string, Record<string, string>];
-    expect(params.sysparm_query).toBe("sys_updated_on>2025-01-15 07:00:00");
-    expect(params.sysparm_query).not.toContain("12:00:00");
-  });
-
-  it("resolves the offset per instant, so a DST transition is not skewed", async () => {
-    // The whole reason a NAME is cached and not an offset: the same zone is
-    // UTC-5 before the transition and UTC-4 after it, and a cached -05:00
-    // would silently reintroduce the skew for half the year.
-    const probeQueries: string[] = [];
-    for (const instant of ["2025-03-09T06:30:00Z", "2025-03-09T07:30:00Z"]) {
-      const { base, get } = operations(false, { userTimeZone: "US/Eastern" });
-      const cached = createCachedServiceNowOperations(
-        base,
-        `https://dst-${instant}.service-now.com|fp`,
-        { ttlMs: 60_000 },
-        SESSION_USER
-      );
-      vi.useFakeTimers();
-      try {
-        vi.setSystemTime(Date.parse(instant));
-        await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
-        vi.setSystemTime(Date.parse(instant) + 30_000);
-        await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
-      } finally {
-        vi.useRealTimers();
-      }
-      const [, params] = probeCalls(get)[0] as [string, Record<string, string>];
-      probeQueries.push(params.sysparm_query!);
+    expect(getWithMeta).toHaveBeenCalledTimes(2);
+    for (const [, params] of get.mock.calls) {
+      expect(params?.sysparm_query).toBe("ORDERBYDESCsys_updated_on");
     }
-
-    // 06:30Z is 01:30 EST (UTC-5); 07:30Z is 03:30 EDT (UTC-4).
-    expect(probeQueries[0]).toBe("sys_updated_on>2025-03-09 01:30:00");
-    expect(probeQueries[1]).toBe("sys_updated_on>2025-03-09 03:30:00");
   });
 
-  it("falls back to the instance default when the user timezone is empty", async () => {
-    // `time_zone` is not required and is frequently empty. Empty means
-    // "inherit the system default" -- never UTC.
-    const { base, get } = operations(false, {
-      userTimeZone: "",
-      systemTimeZone: "Australia/Sydney",
+  it("reads the watermark before the rows, so an update between them is not lost", async () => {
+    const { base, getWithMeta, table } = operations();
+    getWithMeta.mockImplementationOnce(async () => {
+      // A write lands after the watermark read and before the rows are read.
+      table.newest = { sys_id: "row-1", sys_updated_on: "2025-01-15 12:00:09" };
+      return result({ result: [{ sys_id: "first" }] });
     });
     const cached = createCachedServiceNowOperations(
       base,
-      "https://inherit.service-now.com|fp",
-      { ttlMs: 60_000 },
-      SESSION_USER
+      "https://order.service-now.com|fp",
+      { ttlMs: 60_000 }
     );
 
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(Date.parse("2025-06-15T00:00:00Z"));
-      await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
-      vi.setSystemTime(Date.parse("2025-06-15T00:00:30Z"));
-      await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
-    } finally {
-      vi.useRealTimers();
-    }
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
 
-    const [, params] = probeCalls(get)[0] as [string, Record<string, string>];
-    // Sydney is UTC+10 in June (no DST in the southern winter).
-    expect(params.sysparm_query).toBe("sys_updated_on>2025-06-15 10:00:00");
+    // Read after the rows, the stored watermark would already include the
+    // write and the second call would be a hit. The cost here is one refresh.
+    expect(getWithMeta).toHaveBeenCalledTimes(2);
   });
 
   it.each([
-    ["sys_user is unreadable", { userLookupThrows: true }],
-    ["both the field and the property are empty", { userTimeZone: "" }],
-    ["the resolved name is not a real zone", { userTimeZone: "Not/AZone" }],
-  ])("disables caching entirely when %s", async (_label, options) => {
-    const warn = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-    try {
-      const { base, getWithMeta } = operations(false, options);
-      const cached = createCachedServiceNowOperations(
-        base,
-        `https://unresolved-${_label}.service-now.com|fp`,
-        { ttlMs: 60_000 },
-        SESSION_USER
-      );
+    ["the watermark read fails", { watermarkThrows: true }],
+    ["the table reads back empty", { newest: undefined }],
+    ["sys_updated_on is not readable", { newest: { sys_id: "row-1", sys_updated_on: "" } }],
+    ["sys_updated_on is a display value", { newest: { sys_id: "row-1", sys_updated_on: "15/01/2025 07:00:00" } }],
+    ["the row has no sys_id", { newest: { sys_updated_on: "2025-01-15 12:00:00" } }],
+  ])("serves fresh rows and keeps nothing when %s", async (_label, state) => {
+    const { base, getWithMeta, table } = operations();
+    Object.assign(table, state);
+    const cached = createCachedServiceNowOperations(
+      base,
+      `https://unusable-${_label}.service-now.com|fp`,
+      { ttlMs: 60_000 }
+    );
 
-      await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
-      await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+    const first = await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
 
-      // Fails toward not caching rather than assuming UTC and serving stale
-      // metadata that only misbehaves for narrowly granted profiles.
-      expect(getWithMeta).toHaveBeenCalledTimes(2);
-      const warned = warn.mock.calls.map(([line]) => String(line)).join("");
-      expect(warned).toContain("metadata caching is disabled");
-      expect(warned).toContain(SESSION_USER);
-      expect(warned).not.toContain("fp");
-    } finally {
-      warn.mockRestore();
-    }
+    // A watermark that cannot change would compare equal forever.
+    expect(first.data).toEqual({ result: [{ sys_id: "/api/now/table/sys_dictionary:sys_id" }] });
+    expect(getWithMeta).toHaveBeenCalledTimes(2);
   });
 
-  it("disables caching when the profile has no configured user name", async () => {
-    const warn = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-    try {
-      const { base, getWithMeta } = operations(false, { userTimeZone: "US/Eastern" });
-      const cached = createCachedServiceNowOperations(
-        base,
-        "https://nouser.service-now.com|fp",
-        { ttlMs: 60_000 },
-        ""
-      );
+  it("refetches rather than serving when the watermark read fails on a hit", async () => {
+    const { base, getWithMeta, table } = operations();
+    const cached = createCachedServiceNowOperations(
+      base,
+      "https://hitfail.service-now.com|fp",
+      { ttlMs: 60_000 }
+    );
 
-      await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
-      await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
+    table.watermarkThrows = true;
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
 
-      expect(getWithMeta).toHaveBeenCalledTimes(2);
-      expect(warn.mock.calls.map(([line]) => String(line)).join("")).toContain(
-        "no configured user name"
-      );
-    } finally {
-      warn.mockRestore();
-    }
+    expect(getWithMeta).toHaveBeenCalledTimes(2);
   });
 
-  it("never shares a resolved timezone between identities on one instance", async () => {
-    // The HIGH-4 bug again, one layer up: two accounts on one instance can be
-    // in different timezones, and sharing a resolution corrupts both windows.
-    const instance = "https://tzshared.service-now.com";
-    const eastern = operations(false, { userTimeZone: "US/Eastern" });
-    const sydney = operations(false, { userTimeZone: "Australia/Sydney" });
+  it("drops the old entry on a forced refresh even when the new one cannot be kept", async () => {
+    // force_recache is how a caller surfaces a delete before expiry. The
+    // watermark would still match the old entry, so leaving it in place would
+    // serve the deleted row again on the next call.
+    const { base, getWithMeta, table } = operations();
+    const cached = createCachedServiceNowOperations(
+      base,
+      "https://forced.service-now.com|fp",
+      { ttlMs: 60_000 }
+    );
+    const selector = { sysparm_fields: "sys_id" };
 
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(Date.parse("2025-01-15T12:00:00Z"));
-      for (const [ops, fingerprint] of [
-        [eastern, "fingerprint-eastern"],
-        [sydney, "fingerprint-sydney"],
-      ] as const) {
-        const cached = createCachedServiceNowOperations(
-          ops.base,
-          `${instance}|${fingerprint}`,
-          { ttlMs: 60_000 },
-          SESSION_USER
-        );
-        await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
-        vi.setSystemTime(Date.parse("2025-01-15T12:00:30Z"));
-        await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
-        vi.setSystemTime(Date.parse("2025-01-15T12:00:00Z"));
-      }
-    } finally {
-      vi.useRealTimers();
-    }
+    await cached.getWithMeta("/api/now/table/sys_dictionary", selector);
+    table.watermarkThrows = true;
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { ...selector, [FORCE_RECACHE_PARAM]: "true" });
+    table.watermarkThrows = false;
+    await cached.getWithMeta("/api/now/table/sys_dictionary", selector);
 
-    const easternQuery = (probeCalls(eastern.get)[0] as [string, Record<string, string>])[1];
-    const sydneyQuery = (probeCalls(sydney.get)[0] as [string, Record<string, string>])[1];
-    expect(easternQuery.sysparm_query).toBe("sys_updated_on>2025-01-15 07:00:00");
-    expect(sydneyQuery.sysparm_query).toBe("sys_updated_on>2025-01-15 23:00:00");
+    expect(getWithMeta).toHaveBeenCalledTimes(3);
   });
 
-  it("does not extend expiresAt when a freshness probe succeeds", async () => {
-    // Deletions are only surfaced by expiry, so a repeatedly probed entry must
-    // still expire on schedule. If a clean probe slid expiresAt forward, a hot
-    // entry would be retained indefinitely and a delete would never surface.
-    const { base, getWithMeta } = operations(false, { userTimeZone: "UTC" });
+  it("re-caches after a forced refresh", async () => {
+    const { base, getWithMeta } = operations();
+    const cached = createCachedServiceNowOperations(
+      base,
+      "https://recache.service-now.com|fp",
+      { ttlMs: 60_000 }
+    );
+    const selector = { sysparm_fields: "sys_id" };
+
+    await cached.getWithMeta("/api/now/table/sys_dictionary", selector);
+    await cached.getWithMeta("/api/now/table/sys_dictionary", { ...selector, [FORCE_RECACHE_PARAM]: "true" });
+    await cached.getWithMeta("/api/now/table/sys_dictionary", selector);
+
+    expect(getWithMeta).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not extend expiresAt when the watermark matches", async () => {
+    // Most deletions are only surfaced by expiry, so a repeatedly validated
+    // entry must still expire on schedule. If a matching watermark slid
+    // expiresAt forward, a hot entry would be retained indefinitely and a
+    // delete would never surface.
+    const { base, getWithMeta } = operations();
     const cached = createCachedServiceNowOperations(
       base,
       "https://expiry.service-now.com|fp",
-      { ttlMs: 10_000 },
-      SESSION_USER
+      { ttlMs: 10_000 }
     );
     const selector = { sysparm_fields: "sys_id" };
 
@@ -503,14 +495,14 @@ describe("metadata cache", () => {
     try {
       vi.setSystemTime(Date.parse("2025-01-01T00:00:00Z"));
       await cached.getWithMeta("/api/now/table/sys_dictionary", selector);
-      // Probe repeatedly, well inside the TTL, each time served from cache.
+      // Validate repeatedly, well inside the TTL, each time served from cache.
       for (const offset of [2_000, 4_000, 6_000, 8_000]) {
         vi.setSystemTime(Date.parse("2025-01-01T00:00:00Z") + offset);
         await cached.getWithMeta("/api/now/table/sys_dictionary", selector);
       }
       expect(getWithMeta).toHaveBeenCalledTimes(1);
 
-      // Past the original expiry, the entry is gone despite the clean probes.
+      // Past the original expiry, the entry is gone despite the matches.
       vi.setSystemTime(Date.parse("2025-01-01T00:00:00Z") + 10_001);
       await cached.getWithMeta("/api/now/table/sys_dictionary", selector);
       expect(getWithMeta).toHaveBeenCalledTimes(2);

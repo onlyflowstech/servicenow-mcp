@@ -290,17 +290,12 @@ SN_METADATA_CACHE_TTL_MS=86400000
 SN_METADATA_CACHE_TABLES=sys_glide_object,sys_dictionary,sys_db_object,sys_app,sys_plugins,sys_metadata*,sys_flow*
 ```
 
-Metadata caching additionally requires a resolvable ServiceNow session
-timezone: the freshness probe compares `sys_updated_on`, which the instance
-evaluates in the session user's timezone. The zone is read from
-`sys_user.time_zone` for the authenticating account, falling back to the
-`glide.sys.default.tz` property, so the profile needs read access to `sys_user`
-and `sys_properties` for the lookup to succeed. When it cannot be resolved the
-cache disables itself for that identity rather than assuming UTC — an assumed
-zone would serve silently stale metadata for the length of the offset. OAuth
-client_credentials and API-key profiles carry no username and therefore cannot
-cache metadata at all. Deletions to a cached table become visible within one
-TTL, since the probe detects updates rather than deletes.
+Metadata caching works in every auth mode, including the client_credentials
+profile above. Its freshness check reads the cached table's newest row by
+`sys_updated_on`, as the instance stores it, so it needs no timezone, no
+username, and no read access beyond the cached table. Deletions to a cached
+table become visible within one TTL, since a delete moves that watermark only
+when it removes the newest row.
 
 Journal content is readable on request. `comments` and `work_notes` on
 `incident` are returned by `fields=all`, `response_format: "detailed"`, an

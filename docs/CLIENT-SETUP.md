@@ -476,30 +476,24 @@ Two consequences for callers:
   the sensitive pattern is excluded from the resolved set rather than requested
   and scrubbed on arrival, so the value does not cross the wire at all.
 
-### Metadata caching prerequisites
+### Metadata caching
 
-Caching is per instance *and* credential identity, and it requires a resolvable
-session timezone: the freshness probe compares `sys_updated_on`, which
-ServiceNow evaluates in the session user's timezone rather than UTC. Resolving
-it needs the authenticating account's `user_name` to read `sys_user.time_zone`,
-falling back to the `glide.sys.default.tz` property. The profile therefore needs
-read access to `sys_user` and `sys_properties` for the lookup to work.
+Caching is per instance *and* credential identity, and it works the same in
+every auth mode, including OAuth client_credentials and API key. Freshness is
+checked against a watermark the instance reports: the table's newest row by
+`sys_updated_on`, read as its stored UTC value. No timezone, username, or
+`sys_user` / `sys_properties` read is involved, so the profile needs read
+access to the cached table and nothing else. If the watermark cannot be read,
+the call goes upstream and nothing is cached for it.
 
-When the zone cannot be resolved, **caching is disabled for that identity**
-rather than falling back to a UTC assumption — a wrong assumption would serve
-silently stale metadata for the length of the offset. Because OAuth
-client_credentials and API-key profiles carry no username, metadata caching is
-disabled for them entirely. Basic auth and the OAuth password grant are
-unaffected.
-
-The practical cost is small and worth stating: the cache only ever saved payload
-bytes, never round trips, since a hit still performs one freshness probe. The
-loss on an affected profile is bandwidth on `sys_dictionary` reads, not latency.
+The practical saving is payload bytes, never round trips: a hit still performs
+one watermark read, and a miss performs one extra.
 
 Deletions to a cached metadata table become visible within one TTL — 24 hours by
-default. The probe detects updates, not deletes, so a deleted row stays served
-until its entry expires. Lower the TTL or pass `force_recache: true` when a
-deletion must be reflected sooner.
+default. The watermark moves on inserts and updates, but a delete moves it only
+when it removes the newest row, so a deleted row can stay served until its
+entry expires. Lower the TTL or pass `force_recache: true` when a deletion must
+be reflected sooner.
 
 Incident `comments` and `work_notes` are append-only. Generic `sn_update`
 rejects them before credentials/client construction. After separate human

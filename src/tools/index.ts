@@ -614,10 +614,7 @@ function registerStandardTool(
             // per-user ACLs, and a cache hit bypasses the upstream read, so
             // two identities on one instance must never share a partition.
             `${context.profile.instance}|${credentialFingerprint(config)}`,
-            config.metadataCache,
-            // Needed to resolve the session timezone the freshness probe
-            // compares in; without it the cache disables itself.
-            config.user
+            config.metadataCache
           ),
           ...(tool.definition.name === "sn_atf_run" || tool.definition.name === "sn_atf_results" ? { atfResults: atfResultStore(binding.name, config, JSON.stringify(context.effectivePolicy)) } : {}),
           settings: Object.freeze({
