@@ -39,6 +39,7 @@ export type FieldPolicyFailureReason =
   | "non_writable_field"
   | "sensitive_field"
   | "unsupported_field_path"
+  | "explicit_field_required"
   | "traversal_limit_exceeded"
   | "invalid_argument_shape";
 
@@ -123,6 +124,14 @@ const TABLE_ENTRY_KEYS = Object.freeze(["defaults", "readable", "writable"] as c
 const LIST_ENTRY_KEYS = Object.freeze(["table", "fields"] as const);
 const FIELD_NAME_RULE =
   "letters, digits, and underscores, starting with a letter, at most 80 characters";
+/**
+ * Fields that change what a record is rather than what it says:
+ * sys_class_name moves it to another class (table), and sys_domain moves it
+ * to another domain. A writable wildcard, including the open built-in
+ * default, never covers them. They are writable only where a profile lists
+ * them in `writable`.
+ */
+const EXPLICIT_WRITE_FIELDS: ReadonlySet<string> = new Set(["sys_class_name", "sys_domain"]);
 
 const INCIDENT_DEFAULTS = [
   "sys_id",
@@ -817,6 +826,14 @@ export function fieldPolicyDenialMessage(error: FieldPolicyError): string {
         : "Access denied by policy: the requested table has no field policy entry.";
     case "sensitive_field":
       return "Access denied by policy: a requested field is denied by name as sensitive and cannot be granted by configuration.";
+    case "explicit_field_required":
+      // Only sys_class_name or sys_domain reach this case; both are fixed
+      // names that passed FIELD_NAME.
+      return table && field
+        ? `Write denied by policy: field "${field}" on "${table}" changes the record's ` +
+            "class or domain, so a writable wildcard never covers it. List it explicitly " +
+            `in fieldPolicy.${table}.writable to allow this write.`
+        : "Write denied by policy: a class or domain field must be listed explicitly in the writable set.";
     case "unsupported_field_path":
       // The key itself is not echoed: as a whole it did not pass FIELD_NAME.
       return (
@@ -949,6 +966,11 @@ export function validateWritableFields(
     }
     if (isSensitiveFieldName(field)) {
       throw new FieldPolicyError("sensitive_field", { table: policy.table });
+    }
+    // policy.writable holds only explicitly listed names; it is empty when
+    // the writable set is a wildcard.
+    if (EXPLICIT_WRITE_FIELDS.has(field) && !policy.writable.includes(field)) {
+      throw new FieldPolicyError("explicit_field_required", { table: policy.table, field });
     }
     if (!fieldSetAllows(policy.writable, policy.allowAnyWritable, field)) {
       throw new FieldPolicyError("non_writable_field", { table: policy.table, field });

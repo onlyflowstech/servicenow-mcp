@@ -1348,3 +1348,123 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
     });
   });
 });
+
+describe("sys_class_name and sys_domain must be listed explicitly", () => {
+  const STRUCTURAL = ["sys_class_name", "sys_domain"] as const;
+
+  function denial(action: () => unknown): FieldPolicyError | undefined {
+    try {
+      action();
+      return undefined;
+    } catch (error) {
+      if (error instanceof FieldPolicyError) return error;
+      throw error;
+    }
+  }
+
+  it.each<[string, FieldPolicyConfigurationInput | undefined]>([
+    ["the built-in fallback (no field policy)", undefined],
+    ['fieldPolicy writable "*"', { fieldPolicy: { incident: { writable: "*" }, u_custom: { writable: "*" } } }],
+    ['fieldPolicy writable ["*"]', { fieldPolicy: { incident: { writable: ["*"] }, u_custom: { writable: ["*"] } } }],
+    ['a "*" entry writable "*"', { fieldPolicy: { "*": { writable: "*" } } }],
+    [
+      'writableTableFields "*"',
+      {
+        writableTableFields: [
+          { table: "incident", fields: "*" },
+          { table: "u_custom", fields: ["*"] },
+        ],
+      },
+    ],
+  ])("are not covered by %s", (_label, configuration) => {
+    runWithFieldPolicyConfiguration(configuration, () => {
+      for (const table of ["incident", "u_custom", "change_request", "sys_user"]) {
+        for (const field of STRUCTURAL) {
+          const error = denial(() =>
+            validateWritableFields(table, { [field]: "SECRET-CANARY-VALUE" })
+          );
+          expect(error?.reason, `${table}.${field}`).toBe("explicit_field_required");
+          expect(error?.table).toBe(table);
+          expect(error?.field).toBe(field);
+          const message = fieldPolicyDenialMessage(error!);
+          expect(message).toBe(
+            `Write denied by policy: field "${field}" on "${table}" changes the record's ` +
+              "class or domain, so a writable wildcard never covers it. List it explicitly " +
+              `in fieldPolicy.${table}.writable to allow this write.`
+          );
+          expect(message).not.toContain("SECRET-CANARY-VALUE");
+        }
+        // Other system fields stay under the wildcard.
+        expect(validateWritableFields(table, { sys_created_by: "x" })).toEqual({
+          sys_created_by: "x",
+        });
+      }
+    });
+  });
+
+  it("matches the names case-insensitively", () => {
+    expect(denial(() => validateWritableFields("incident", { SYS_DOMAIN: "x" }))?.reason).toBe(
+      "explicit_field_required"
+    );
+    expect(
+      denial(() => validateWritableFields("incident", { " Sys_Class_Name ": "x" }))?.reason
+    ).toBe("explicit_field_required");
+  });
+
+  it("prefers the specific reason when a narrowed list omits them", () => {
+    withFieldPolicy({ incident: { writable: ["state"] } }, () => {
+      expect(
+        denial(() => validateWritableFields("incident", { sys_domain: "x" }))?.reason
+      ).toBe("explicit_field_required");
+      expect(
+        denial(() => validateWritableFields("incident", { short_description: "x" }))?.reason
+      ).toBe("non_writable_field");
+    });
+  });
+
+  it("allows them where a profile lists them", () => {
+    withFieldPolicy(
+      { incident: { writable: ["state", "sys_class_name", "sys_domain"] } },
+      () => {
+        expect(
+          validateWritableFields("incident", {
+            state: "2",
+            sys_class_name: "incident",
+            sys_domain: "global",
+          })
+        ).toEqual({ state: "2", sys_class_name: "incident", sys_domain: "global" });
+      }
+    );
+    runWithFieldPolicyConfiguration(
+      { writableTableFields: [{ table: "u_custom", fields: ["sys_class_name"] }] },
+      () => {
+        expect(validateWritableFields("u_custom", { sys_class_name: "u_other" })).toEqual({
+          sys_class_name: "u_other",
+        });
+        expect(
+          denial(() => validateWritableFields("u_custom", { sys_domain: "x" }))?.reason
+        ).toBe("explicit_field_required");
+      }
+    );
+    // Listed on the "*" entry, they apply wherever that entry applies.
+    withFieldPolicy({ "*": { writable: ["sys_domain"] } }, () => {
+      expect(validateWritableFields("u_custom", { sys_domain: "global" })).toEqual({
+        sys_domain: "global",
+      });
+      expect(validateWritableFields("incident", { sys_domain: "global" })).toEqual({
+        sys_domain: "global",
+      });
+    });
+  });
+
+  it("leaves reads of both fields unaffected", () => {
+    expect(
+      resolveReadableFields("incident", { fields: "sys_class_name,sys_domain" })
+    ).toEqual(["sys_class_name", "sys_domain"]);
+    withFieldPolicy({ u_custom: { writable: "*" } }, () => {
+      expect(
+        resolveReadableFields("u_custom", { fields: "sys_class_name,sys_domain" })
+      ).toEqual(["sys_class_name", "sys_domain"]);
+    });
+  });
+});

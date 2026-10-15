@@ -623,3 +623,52 @@ describe('a profile "*" entry through sn_update (A3)', () => {
     });
   });
 });
+
+describe("sys_class_name and sys_domain through sn_update", () => {
+  it.each<[string, string, FieldPolicyConfigurationInput]>([
+    ["incident", "sys_domain", {}],
+    ["incident", "sys_class_name", {}],
+    ["u_audit", "sys_class_name", { fieldPolicy: { u_audit: { writable: "*" } } }],
+    ["u_audit", "sys_domain", { fieldPolicy: { u_audit: { writable: ["*"] } } }],
+  ])("denies %s.%s under a writable wildcard", async (table, field, fieldPolicy) => {
+    const connected = await harness(fieldPolicy, []);
+    const result = await connected.call("sn_update", {
+      table,
+      sys_id: SYS_ID,
+      fields: { [field]: "zqxcanary-value" },
+    });
+
+    expect(result.isError).toBe(true);
+    const text = responseText(result);
+    expect(text).toContain(`field "${field}" on "${table}"`);
+    expect(text).toContain(`List it explicitly in fieldPolicy.${table}.writable`);
+    expect(text).not.toContain("zqxcanary");
+    expect(connected.managerCalls).toEqual({ config: 0, client: 0 });
+    expect(connected.audits.at(-1)).toMatchObject({
+      tool: "sn_update",
+      outcome: "policy_rejected",
+      reason: "field_access_denied",
+    });
+  });
+
+  it("writes them where the profile lists them", async () => {
+    const connected = await harness(
+      { fieldPolicy: { u_audit: { writable: ["u_note", "sys_class_name", "sys_domain"] } } },
+      [{ operation: "patch", response: { result: { sys_id: SYS_ID } } }]
+    );
+    const result = await connected.call("sn_update", {
+      table: "u_audit",
+      sys_id: SYS_ID,
+      fields: { sys_class_name: "u_audit_archive", sys_domain: "global" },
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(connected.fixture.calls).toEqual([
+      {
+        operation: "patch",
+        path: `/api/now/table/u_audit/${SYS_ID}`,
+        body: { sys_class_name: "u_audit_archive", sys_domain: "global" },
+      },
+    ]);
+  });
+});
