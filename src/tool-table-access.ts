@@ -23,6 +23,7 @@ import {
   preparedReadableFields,
   resolveReadableFields,
   snapshotPlainDataArguments,
+  validateWritableFields,
   withFieldPolicyArgumentValues,
 } from "./field-policy.js";
 import {
@@ -160,6 +161,13 @@ export function resolveToolTableAccess(
       case "sn_incident_add_work_note": {
         rejectRawEncodedWrite(args.query);
         const prepared = prepareIncidentJournalArguments(args);
+        // The same field policy that decides sn_update {comments|work_notes}
+        // decides the dedicated tool, so a writable set narrowed to exclude a
+        // journal field denies both routes to it.
+        validateWritableFields("incident", {
+          [tool === "sn_incident_add_comment" ? "comments" : "work_notes"]:
+            prepared.content,
+        });
         return resolution(
           withFieldPolicyArgumentValues(args, prepared),
           [write("incident")]

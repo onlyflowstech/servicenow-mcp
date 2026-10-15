@@ -307,6 +307,83 @@ describe("generic journal writes through sn_create and sn_update", () => {
   });
 });
 
+describe("Security finding B-2: dedicated journal tools follow the field policy", () => {
+  it("denies the journal tool whose field the writable set excludes", async () => {
+    const connected = await harness({
+      fieldPolicy: {
+        fieldPolicy: {
+          incident: { writable: ["state", "assigned_to", "work_notes"] },
+        },
+      },
+    });
+
+    const comment = await callTool(connected, "sn_incident_add_comment", {
+      sys_id: SYS_ID,
+      content: "comment-canary",
+    });
+    expect(comment.isError).toBe(true);
+    const text = responseText(comment);
+    expect(text).toContain('field "comments" is not writable on "incident"');
+    expect(text).toContain("fieldPolicy.incident.writable");
+    expect(text).not.toContain("comment-canary");
+    expect(connected.records.at(-1)).toMatchObject({
+      tool: "sn_incident_add_comment",
+      outcome: "policy_rejected",
+      reason: "field_access_denied",
+    });
+    expect(connected.getConfig).not.toHaveBeenCalled();
+    expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
+
+    const workNote = await callTool(connected, "sn_incident_add_work_note", {
+      sys_id: SYS_ID,
+      content: "Internal note",
+    });
+    expect(workNote.isError).toBeUndefined();
+    expect(connected.serviceNowClient.patch).toHaveBeenCalledWith(
+      `/api/now/table/incident/${SYS_ID}`,
+      { work_notes: "Internal note" }
+    );
+
+    // Both routes to the same field agree.
+    const genericComment = await callTool(connected, "sn_update", {
+      table: "incident",
+      sys_id: SYS_ID,
+      fields: { comments: "comment-canary" },
+    });
+    expect(genericComment.isError).toBe(true);
+    expect(connected.records.at(-1)).toMatchObject({
+      tool: "sn_update",
+      reason: "field_access_denied",
+    });
+    const genericWorkNote = await callTool(connected, "sn_update", {
+      table: "incident",
+      sys_id: SYS_ID,
+      fields: { work_notes: "Internal note" },
+    });
+    expect(genericWorkNote.isError).toBeUndefined();
+    expect(connected.serviceNowClient.patch).toHaveBeenCalledTimes(2);
+  });
+
+  it("allows both journal tools when no field policy narrows incident", async () => {
+    const connected = await harness();
+    for (const [tool, field] of [
+      ["sn_incident_add_comment", "comments"],
+      ["sn_incident_add_work_note", "work_notes"],
+    ] as const) {
+      const result = await callTool(connected, tool, {
+        sys_id: SYS_ID,
+        content: `${field} entry`,
+      });
+      expect(result.isError).toBeUndefined();
+      expect(connected.serviceNowClient.patch).toHaveBeenLastCalledWith(
+        `/api/now/table/incident/${SYS_ID}`,
+        { [field]: `${field} entry` }
+      );
+    }
+    expect(connected.serviceNowClient.patch).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("sn_batch value policy", () => {
   it("sends work_notes exactly once per record across chunks, never replayed", async () => {
     const connected = await harness({ matched: 60 });
