@@ -216,7 +216,7 @@ describe("SNSDK-54 reference tool behavior matrix", () => {
         title: "Update record",
         readOnlyHint: false,
         destructiveHint: false,
-        idempotentHint: true,
+        idempotentHint: false,
         openWorldHint: true,
       },
       sn_incident_add_comment: {

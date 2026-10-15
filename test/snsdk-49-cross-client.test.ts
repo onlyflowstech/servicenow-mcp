@@ -281,7 +281,7 @@ describe.each(clients)("SNSDK-49 %s incident writes", (_label, createClient) => 
         annotations: {
           readOnlyHint: false,
           destructiveHint: false,
-          idempotentHint: true,
+          idempotentHint: false,
           openWorldHint: true,
         },
       });

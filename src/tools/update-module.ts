@@ -45,7 +45,9 @@ export const definition = Object.freeze({
     title: "Update record",
     readOnlyHint: false,
     destructiveHint: false,
-    idempotentHint: true,
+    // A journal field (comments, work_notes) appends an entry on every call,
+    // so repeating the same update is not free of additional effect.
+    idempotentHint: false,
     openWorldHint: true,
   }),
 } satisfies ToolDefinition);

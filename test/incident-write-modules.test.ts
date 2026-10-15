@@ -97,7 +97,8 @@ describe("SNSDK-49 canonical incident write modules", () => {
         title: "Update record",
         readOnlyHint: false,
         destructiveHint: false,
-        idempotentHint: true,
+        // Journal fields append on every call (security review finding 1).
+        idempotentHint: false,
         openWorldHint: true,
       },
     });
