@@ -591,7 +591,8 @@ function batchResult(tally: MutationTally): BatchExecutionResult {
   }
   if (tally.stoppedOn === "server_errors") {
     notes.push(
-      "Every record in one batch returned a server error, so nothing more was sent."
+      "Every serviced record in one batch returned a server error, so nothing " +
+        "more was sent."
     );
   } else if (tally.stoppedOn === "unconfirmed_limit") {
     notes.push(

@@ -1254,8 +1254,39 @@ describe("Security finding 6: a sub-request server error is unconfirmed", () => 
     const data = responseData(result);
     expect(data).toMatchObject({ matched: 120, processed: 0, failed: 70 });
     expect(data.message).toContain("did not confirm the outcome for 50 record(s)");
-    expect(data.message).toContain("Every record in one batch returned a server error");
+    expect(data.message).toContain(
+      "Every serviced record in one batch returned a server error, so nothing more was sent."
+    );
     expect(data.message).toContain("remaining 70 record(s) were not sent");
+    expect(connected.serviceNowClient.post).toHaveBeenCalledTimes(1);
+  });
+
+  it("says every serviced record when the rest of the batch was unserviced", async () => {
+    // One sub-request errors and ServiceNow leaves the other 49 unserviced:
+    // the stop applies, and the message must not claim every record errored.
+    const connected = await harness({ matched: 60 });
+    connected.serviceNowClient.post.mockImplementation(
+      async (_path: string, body: unknown) => {
+        const [first, ...rest] = (body as RestBatchPayload).rest_requests;
+        return {
+          serviced_requests: [{ id: first!.id, status_code: 500 }],
+          unserviced_requests: rest.map(({ id }) => id),
+        };
+      }
+    );
+    const result = await callTool(
+      connected,
+      "sn_batch",
+      batchArguments({ comments: "Customer update" })
+    );
+
+    const data = responseData(result);
+    expect(data).toMatchObject({ matched: 60, processed: 0, failed: 59 });
+    expect(data.message).toContain("did not confirm the outcome for 1 record(s)");
+    expect(data.message).toContain(
+      "Every serviced record in one batch returned a server error, so nothing more was sent."
+    );
+    expect(data.message).not.toContain("Every record in one batch");
     expect(connected.serviceNowClient.post).toHaveBeenCalledTimes(1);
   });
 
