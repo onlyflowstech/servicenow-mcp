@@ -1440,13 +1440,13 @@ describe("Security finding 8: field policy narrows every journal route", () => {
 });
 
 /**
- * sys_class_name and sys_domain must be listed by name in the table's
- * writable set; no wildcard covers them. The value policy accepts both as
- * generic incident fields, so these tests pin that the field policy runs
- * first on sn_create and sn_batch as well as sn_update (whose wildcard
- * denial is in write-response-projection.test.ts).
+ * sys_class_name, sys_domain, sys_class_path and sys_domain_path must be
+ * listed by name in the table's writable set; no wildcard covers them. The
+ * value policy accepts them as generic incident fields, so these tests pin
+ * that the field policy runs first on sn_create and sn_batch as well as
+ * sn_update (whose wildcard denial is in write-response-projection.test.ts).
  */
-describe("sys_class_name and sys_domain through sn_create and sn_batch", () => {
+describe("sys_class_name, sys_domain and their paths through sn_create and sn_batch", () => {
   const CANARY = "zqxcanary-value";
 
   // [table, field as sent, canonical field, field policy (a wildcard form)]
@@ -1463,6 +1463,8 @@ describe("sys_class_name and sys_domain through sn_create and sn_batch", () => {
       "sys_class_name",
       { writableTableFields: [{ table: "u_custom", fields: "*" }] },
     ],
+    ["incident", "sys_domain_path", "sys_domain_path", undefined],
+    ["u_custom", "SYS_CLASS_PATH", "sys_class_path", { fieldPolicy: { "*": { writable: "*" } } }],
   ];
 
   function expectExplicitFieldDenial(
@@ -1490,7 +1492,7 @@ describe("sys_class_name and sys_domain through sn_create and sn_batch", () => {
   }
 
   it.each(WILDCARD_CASES)(
-    "denies sn_create %s.%s under a writable wildcard",
+    "denies sn_create %s.%s (as %s) under the wildcard policy %j",
     async (table, sent, canonical, fieldPolicy) => {
       const connected = await harness(fieldPolicy === undefined ? {} : { fieldPolicy });
       const result = await callTool(connected, "sn_create", {
@@ -1508,7 +1510,7 @@ describe("sys_class_name and sys_domain through sn_create and sn_batch", () => {
       [...row, false],
     ])
   )(
-    "denies sn_batch %s.%s under a writable wildcard (confirm %s)",
+    "denies sn_batch %s.%s (as %s) under the wildcard policy %j, confirm %s",
     async (table, sent, canonical, fieldPolicy, confirm) => {
       const connected = await harness(fieldPolicy === undefined ? {} : { fieldPolicy });
       const result = await callTool(connected, "sn_batch", {
@@ -1584,6 +1586,22 @@ describe("sys_class_name and sys_domain through sn_create and sn_batch", () => {
       });
     }
     expect(connected.serviceNowClient.patch).not.toHaveBeenCalled();
+  });
+
+  it("lets sn_batch write the path fields where the profile lists them", async () => {
+    const connected = await harness({
+      fieldPolicy: { fieldPolicy: { incident: { writable: ["sys_domain_path", "sys_class_path"] } } },
+      matched: 1,
+    });
+    const result = await callTool(
+      connected,
+      "sn_batch",
+      batchArguments({ " SYS_DOMAIN_PATH ": "/", sys_class_path: "/!!/!2" })
+    );
+
+    expect(result.isError).toBeUndefined();
+    const [request] = batchPayloads(connected)[0]!.rest_requests;
+    expect(decodedBody(request!)).toEqual({ sys_domain_path: "/", sys_class_path: "/!!/!2" });
   });
 
   it('lets sn_batch write them on a custom table through a "*" entry that lists them', async () => {

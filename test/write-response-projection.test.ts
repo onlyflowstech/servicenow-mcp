@@ -630,6 +630,8 @@ describe("sys_class_name and sys_domain through sn_update", () => {
     ["incident", "sys_class_name", {}],
     ["u_audit", "sys_class_name", { fieldPolicy: { u_audit: { writable: "*" } } }],
     ["u_audit", "sys_domain", { fieldPolicy: { u_audit: { writable: ["*"] } } }],
+    ["incident", "sys_domain_path", {}],
+    ["u_audit", "sys_class_path", { fieldPolicy: { "*": { writable: "*" } } }],
   ])("denies %s.%s under a writable wildcard", async (table, field, fieldPolicy) => {
     const connected = await harness(fieldPolicy, []);
     const result = await connected.call("sn_update", {
@@ -668,6 +670,27 @@ describe("sys_class_name and sys_domain through sn_update", () => {
         operation: "patch",
         path: `/api/now/table/u_audit/${SYS_ID}`,
         body: { sys_class_name: "u_audit_archive", sys_domain: "global" },
+      },
+    ]);
+  });
+
+  it("writes the path fields where the profile lists them", async () => {
+    const connected = await harness(
+      { fieldPolicy: { u_audit: { writable: ["sys_class_path", "sys_domain_path"] } } },
+      [{ operation: "patch", response: { result: { sys_id: SYS_ID } } }]
+    );
+    const result = await connected.call("sn_update", {
+      table: "u_audit",
+      sys_id: SYS_ID,
+      fields: { sys_class_path: "/!!/!2", sys_domain_path: "/" },
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(connected.fixture.calls).toEqual([
+      {
+        operation: "patch",
+        path: `/api/now/table/u_audit/${SYS_ID}`,
+        body: { sys_class_path: "/!!/!2", sys_domain_path: "/" },
       },
     ]);
   });

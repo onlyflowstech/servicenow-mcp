@@ -127,11 +127,19 @@ const FIELD_NAME_RULE =
 /**
  * Fields that change what a record is rather than what it says:
  * sys_class_name moves it to another class (table), and sys_domain moves it
- * to another domain. A writable wildcard, including the open built-in
- * default, never covers them. They are writable only where a profile lists
- * them in `writable`.
+ * to another domain. sys_class_path and sys_domain_path encode the same
+ * class and domain (domain visibility matches on sys_domain_path), so a
+ * direct write to either could move the record without touching the other
+ * two. A writable wildcard, including the open built-in default, never
+ * covers any of them. They are writable only where a profile lists them in
+ * `writable`.
  */
-const EXPLICIT_WRITE_FIELDS: ReadonlySet<string> = new Set(["sys_class_name", "sys_domain"]);
+const EXPLICIT_WRITE_FIELDS: ReadonlySet<string> = new Set([
+  "sys_class_name",
+  "sys_class_path",
+  "sys_domain",
+  "sys_domain_path",
+]);
 
 const INCIDENT_DEFAULTS = [
   "sys_id",
@@ -875,8 +883,8 @@ export function fieldPolicyDenialMessage(error: FieldPolicyError): string {
     case "sensitive_field":
       return "Access denied by policy: a requested field is denied by name as sensitive and cannot be granted by configuration.";
     case "explicit_field_required":
-      // Only sys_class_name or sys_domain reach this case; both are fixed
-      // names that passed FIELD_NAME.
+      // Only the EXPLICIT_WRITE_FIELDS names reach this case; each is a fixed
+      // name that passed FIELD_NAME.
       return table && field
         ? `Write denied by policy: field "${field}" on "${table}" changes the record's ` +
             "class or domain, so a writable wildcard never covers it. List it explicitly " +

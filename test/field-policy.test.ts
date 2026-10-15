@@ -1372,8 +1372,13 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
   });
 });
 
-describe("sys_class_name and sys_domain must be listed explicitly", () => {
-  const STRUCTURAL = ["sys_class_name", "sys_domain"] as const;
+describe("sys_class_name, sys_domain and their path fields must be listed explicitly", () => {
+  const STRUCTURAL = [
+    "sys_class_name",
+    "sys_domain",
+    "sys_class_path",
+    "sys_domain_path",
+  ] as const;
 
   function denial(action: () => unknown): FieldPolicyError | undefined {
     try {
@@ -1480,14 +1485,63 @@ describe("sys_class_name and sys_domain must be listed explicitly", () => {
     });
   });
 
-  it("leaves reads of both fields unaffected", () => {
-    expect(
-      resolveReadableFields("incident", { fields: "sys_class_name,sys_domain" })
-    ).toEqual(["sys_class_name", "sys_domain"]);
-    withFieldPolicy({ u_custom: { writable: "*" } }, () => {
+  it("treats sys_class_path and sys_domain_path exactly like the other two", () => {
+    for (const field of ["SYS_DOMAIN_PATH", " Sys_Class_Path "]) {
       expect(
-        resolveReadableFields("u_custom", { fields: "sys_class_name,sys_domain" })
-      ).toEqual(["sys_class_name", "sys_domain"]);
+        denial(() => validateWritableFields("incident", { [field]: "x" }))?.reason,
+        field
+      ).toBe("explicit_field_required");
+    }
+    // The specific reason wins over a narrowed list that omits them.
+    withFieldPolicy({ incident: { writable: ["state", "sys_domain"] } }, () => {
+      for (const field of ["sys_domain_path", "sys_class_path"]) {
+        expect(
+          denial(() => validateWritableFields("incident", { [field]: "x" }))?.reason,
+          field
+        ).toBe("explicit_field_required");
+      }
+    });
+    // Listing sys_domain does not list its path, and the reverse.
+    withFieldPolicy({ u_custom: { writable: ["sys_domain_path"] } }, () => {
+      expect(validateWritableFields("u_custom", { sys_domain_path: "/!!!/" })).toEqual({
+        sys_domain_path: "/!!!/",
+      });
+      expect(
+        denial(() => validateWritableFields("u_custom", { sys_domain: "x" }))?.reason
+      ).toBe("explicit_field_required");
+    });
+    runWithFieldPolicyConfiguration(
+      { writableTableFields: [{ table: "incident", fields: ["sys_class_path"] }] },
+      () => {
+        expect(validateWritableFields("incident", { " SYS_CLASS_PATH ": "/!!!/" })).toEqual({
+          sys_class_path: "/!!!/",
+        });
+      }
+    );
+    // On the "*" entry they apply to non-system tables only; a system table
+    // must name them.
+    withFieldPolicy({ "*": { writable: ["sys_domain_path"] } }, () => {
+      expect(validateWritableFields("incident", { sys_domain_path: "/!!!/" })).toEqual({
+        sys_domain_path: "/!!!/",
+      });
+      expect(
+        denial(() => validateWritableFields("sys_user", { sys_domain_path: "x" }))?.reason
+      ).toBe("explicit_field_required");
+    });
+    // A dotted form is still a field path, not one of these fields.
+    expect(
+      denial(() => validateWritableFields("incident", { "sys_domain_path.name": "x" }))?.reason
+    ).toBe("unsupported_field_path");
+  });
+
+  it("leaves reads of all four fields unaffected", () => {
+    const fields = "sys_class_name,sys_domain,sys_class_path,sys_domain_path";
+    expect(resolveReadableFields("incident", { fields })).toEqual(fields.split(","));
+    withFieldPolicy({ u_custom: { writable: "*" } }, () => {
+      expect(resolveReadableFields("u_custom", { fields })).toEqual(fields.split(","));
+    });
+    withFieldPolicy({ incident: { readable: "*", writable: ["state"] } }, () => {
+      expect(resolveReadableFields("incident", { fields })).toEqual(fields.split(","));
     });
   });
 });
