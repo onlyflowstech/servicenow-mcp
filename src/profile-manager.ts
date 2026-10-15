@@ -30,6 +30,10 @@ import {
   type AtfConfig,
   type AtfConfigInput,
 } from "./atf-config.js";
+import {
+  FieldPolicyConfigurationError,
+  validateFieldPolicyConfiguration,
+} from "./field-policy.js";
 import { tableAccessPolicyInputFromEnvironment, type TableAccessPolicyInput } from "./table-policy.js";
 import { metadataCacheConfigFromEnvironment, type MetadataCacheConfigInput } from "./metadata-cache.js";
 import { ServiceNowClient } from "./client.js";
@@ -82,11 +86,14 @@ export interface Profile {
   schemaCacheTtlMs?: number;
   /** Per-profile table access rules. Missing rules intentionally deny all tables. */
   tableAccess?: TableAccessPolicyInput;
-  /** Per-profile legacy field policy object, matching SN_FIELD_POLICY_DEFINITIONS. */
+  /**
+   * Per-profile field policy: { table | "*": { defaults, readable, writable } }.
+   * Validated at load.
+   */
   fieldPolicy?: unknown;
-  /** Per-profile readable fields: [{ table, fields }]. Missing readable fields means all fields are readable. */
+  /** Per-profile readable fields: [{ table, fields }]. Missing readable fields means all fields are readable. Validated at load. */
   readableTableFields?: unknown;
-  /** Per-profile writable fields: [{ table, fields }]. Missing writable fields means all fields are writable. */
+  /** Per-profile writable fields: [{ table, fields }]. Missing writable fields means all fields are writable. Validated at load. */
   writableTableFields?: unknown;
   /** Per-instance metadata cache configuration (default TTL 24h). */
   metadataCache?: MetadataCacheConfigInput;
@@ -467,8 +474,11 @@ export class ProfileManager {
     } catch (err) {
       // An ATF configuration message is authored in atf-config.ts and names
       // only the offending key, never its value, so it is safe to surface.
+      // So is a field-policy message: field-policy.ts names only the key path
+      // and identifiers that passed validation, never a rejected value.
       const reason =
-        err instanceof AtfConfigurationError
+        err instanceof AtfConfigurationError ||
+        err instanceof FieldPolicyConfigurationError
           ? `Profile configuration is invalid: ${err.message}`
           : err instanceof Error && err.message.includes("legacy plaintext")
             ? "Legacy plaintext profile credentials are rejected; replace them through the profile administration CLI"
@@ -724,8 +734,19 @@ function validateLoadedProfiles(value: object): Record<string, Profile> {
         throw new Error("Profile configuration contains an invalid credential source");
       }
     }
+    let canonical: Profile;
+    try {
+      canonical = canonicalizeProfile(profile);
+    } catch (error) {
+      // Name the profile: one config file holds several. The name has
+      // already passed validateProfileName.
+      if (error instanceof FieldPolicyConfigurationError) {
+        throw new FieldPolicyConfigurationError(`profile "${name}": ${error.message}`);
+      }
+      throw error;
+    }
     Object.defineProperty(profiles, name, {
-      value: canonicalizeProfile(profile),
+      value: canonical,
       writable: true,
       enumerable: true,
       configurable: true,
@@ -754,7 +775,20 @@ function canonicalizeProfile(profile: Profile): Profile {
       }
     }
   }
-  return immutableProfileSnapshot(canonical);
+  const snapshot = immutableProfileSnapshot(canonical);
+  // Validated on the frozen JSON copy, so a malformed field policy fails here
+  // with its table and key named, instead of denying every call on the
+  // profile at request time.
+  validateFieldPolicyConfiguration({
+    ...(snapshot.fieldPolicy === undefined ? {} : { fieldPolicy: snapshot.fieldPolicy }),
+    ...(snapshot.readableTableFields === undefined
+      ? {}
+      : { readableTableFields: snapshot.readableTableFields }),
+    ...(snapshot.writableTableFields === undefined
+      ? {}
+      : { writableTableFields: snapshot.writableTableFields }),
+  });
+  return snapshot;
 }
 
 function immutableProfileSnapshot(profile: Profile): Profile {

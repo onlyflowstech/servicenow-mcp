@@ -95,6 +95,8 @@ const ALL_FIELDS_SELECTION = Object.freeze([FIELD_POLICY_WILDCARD]) as readonly 
  * defaults the operator did not state. An unstated default must stay finite:
  * "may read any field" is not "return every field on every query". */
 const GENERIC_DEFAULT_FIELDS = Object.freeze(["sys_id"]) as readonly string[];
+const FIELD_NAME_RULE =
+  "letters, digits, and underscores, starting with a letter, at most 80 characters";
 
 const INCIDENT_DEFAULTS = [
   "sys_id",
@@ -1216,8 +1218,13 @@ function inheritedDefaults(
   return permitted.length > 0 ? permitted : configuredReadable;
 }
 
+/**
+ * @param root Configuration key the definitions came from. Given only while a
+ * configuration is validated at load, so a contradiction names its table.
+ */
 function buildFieldPolicyMap(
-  definitions: Readonly<Record<string, TableFieldPolicyDefinition>>
+  definitions: Readonly<Record<string, TableFieldPolicyDefinition>>,
+  root?: string
 ): ReadonlyMap<string, TableFieldPolicy> {
   return new Map<string, TableFieldPolicy>(
     Object.entries(definitions).map(([tableCandidate, definition]) => {
@@ -1242,7 +1249,10 @@ function buildFieldPolicyMap(
             // Branded so a contradictory operator policy is classified as a
             // policy denial instead of escaping the request path as a raw
             // TypeError.
-            throw new FieldPolicyError("invalid_argument_shape");
+            rejectConfiguration(
+              root === undefined ? undefined : { key: `${root}.${table}.defaults` },
+              `lists "${field}", which ${root}.${table}.readable does not allow.`
+            );
           }
         }
       }
@@ -1282,10 +1292,127 @@ function readConfiguredFieldPolicyDefinitions():
   return normalizeConfiguredFieldPolicy(parsed);
 }
 
+/**
+ * A malformed field-policy configuration, raised when a profile is loaded.
+ *
+ * The message names the key path to fix, and with it the table. It never
+ * repeats a configured value that failed validation; a table or field name
+ * appears only once it has passed FIELD_NAME.
+ */
+export class FieldPolicyConfigurationError extends Error {
+  public override readonly name = "FieldPolicyConfigurationError";
+}
+
+/** Labels for the three configuration keys, as the operator wrote them. */
+interface ConfigurationLabels {
+  readonly fieldPolicy: string;
+  readonly readableTableFields: string;
+  readonly writableTableFields: string;
+}
+
+const PROFILE_CONFIGURATION_LABELS: ConfigurationLabels = Object.freeze({
+  fieldPolicy: "fieldPolicy",
+  readableTableFields: "readableTableFields",
+  writableTableFields: "writableTableFields",
+});
+
+/**
+ * Reject a malformed profile field policy at load instead of on every request.
+ *
+ * The request path normalizes the same configuration on each call and fails
+ * closed, so a malformed entry used to deny every call on the profile, reads
+ * included, with an opaque reason. This runs the same normalizers with a key
+ * path attached and throws FieldPolicyConfigurationError naming the table and
+ * key. A configuration that passes cannot fail normalization on a request.
+ *
+ * Each stated key is checked on its own, including a `fieldPolicy` that the
+ * request path does not apply because the profile also states a table list.
+ */
+export function validateFieldPolicyConfiguration(
+  input: FieldPolicyConfigurationInput
+): void {
+  validateConfiguration(input, PROFILE_CONFIGURATION_LABELS);
+}
+
+function validateConfiguration(
+  input: unknown,
+  labels: ConfigurationLabels
+): void {
+  if (!isPlainRecordCandidate(input)) {
+    throw new FieldPolicyConfigurationError(
+      "Field policy configuration must be an object."
+    );
+  }
+  const record = definedOwnProperties(input as Record<string, unknown>);
+  try {
+    if (Object.hasOwn(record, "fieldPolicy")) {
+      buildFieldPolicyMap(
+        mergeFieldPolicyDefinitions(
+          FIELD_POLICY_BASE,
+          fieldPolicyDefinitions(record.fieldPolicy, labels.fieldPolicy)
+        ),
+        labels.fieldPolicy
+      );
+    }
+    const listed: Record<string, MutableTableFieldPolicyDefinition> = {};
+    applyTableFieldList(listed, record.readableTableFields, "readable", labels.readableTableFields);
+    applyTableFieldList(listed, record.writableTableFields, "writable", labels.writableTableFields);
+    buildFieldPolicyMap(mergeFieldPolicyDefinitions(FIELD_POLICY_BASE, listed));
+    // Finally the exact configuration the request path will build.
+    const effective = normalizeConfiguredFieldPolicy(record);
+    if (effective) {
+      buildFieldPolicyMap(
+        mergeFieldPolicyDefinitions(FIELD_POLICY_BASE, effective.definitions)
+      );
+    }
+  } catch (error) {
+    if (error instanceof FieldPolicyConfigurationError) throw error;
+    if (isFieldPolicyError(error)) {
+      throw new FieldPolicyConfigurationError(
+        `Field policy configuration is invalid (${error.reason}).`
+      );
+    }
+    throw error;
+  }
+}
+
+/**
+ * Where in an operator's configuration a normalizer is reading. Present only
+ * while a configuration is validated at load, so the operator is told which
+ * table and key to fix. Absent on the request path, where a malformed policy
+ * stays a branded denial that carries no configuration content.
+ */
+interface ConfigurationLocation {
+  /** Key path as the operator wrote it, such as `fieldPolicy.incident.writable`. */
+  readonly key: string;
+  /** Table of a list entry whose key path does not already name it. */
+  readonly table?: string;
+}
+
+function configurationLocation(
+  key: string | undefined,
+  table?: string
+): ConfigurationLocation | undefined {
+  if (key === undefined) return undefined;
+  return table === undefined ? { key } : { key, table };
+}
+
+function rejectConfiguration(
+  location: ConfigurationLocation | undefined,
+  problem: string,
+  entry = ""
+): never {
+  if (location === undefined) throw new FieldPolicyError("invalid_argument_shape");
+  const table = location.table === undefined ? "" : ` (table "${location.table}")`;
+  throw new FieldPolicyConfigurationError(
+    `${location.key}${entry}${table} ${problem}`
+  );
+}
+
 function normalizeConfiguredFieldPolicy(
   parsed: unknown
 ): FieldPolicyConfiguration | undefined {
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed) || nodeUtilTypes.isProxy(parsed)) {
+  if (!isPlainRecordCandidate(parsed)) {
     throw new FieldPolicyError("invalid_argument_shape");
   }
   const outerRecord = definedOwnProperties(parsed as Record<string, unknown>);
@@ -1302,31 +1429,63 @@ function normalizeConfiguredFieldPolicy(
     return Object.freeze({ definitions });
   }
   if (policySource === undefined) return undefined;
-  if (typeof policySource !== "object" || policySource === null || Array.isArray(policySource) || nodeUtilTypes.isProxy(policySource)) {
-    throw new FieldPolicyError("invalid_argument_shape");
+  return Object.freeze({ definitions: fieldPolicyDefinitions(policySource) });
+}
+
+/**
+ * Normalize a `fieldPolicy` table map.
+ *
+ * @param root Configuration key the map came from; given only at load.
+ */
+function fieldPolicyDefinitions(
+  source: unknown,
+  root?: string
+): Record<string, MutableTableFieldPolicyDefinition> {
+  if (!isPlainRecordCandidate(source)) {
+    rejectConfiguration(
+      configurationLocation(root),
+      "must be an object that maps table names to { defaults, readable, writable }."
+    );
   }
-  const record = policySource as Record<string, unknown>;
+  const record = source as Record<string, unknown>;
   const definitions: Record<string, MutableTableFieldPolicyDefinition> = {};
-  for (const key of Object.keys(record)) {
-    const table = normalizePolicyTableName(key);
+  const keys = Object.keys(record);
+  for (let position = 0; position < keys.length; position += 1) {
+    const key = keys[position]!;
+    const table = normalizePolicyTableName(
+      key,
+      configurationLocation(root === undefined ? undefined : `${root} key ${position + 1}`)
+    );
+    const path = root === undefined ? undefined : `${root}.${table}`;
     const value = record[key];
-    if (typeof value !== "object" || value === null || Array.isArray(value) || nodeUtilTypes.isProxy(value)) {
-      throw new FieldPolicyError("invalid_argument_shape");
+    if (!isPlainRecordCandidate(value)) {
+      rejectConfiguration(
+        configurationLocation(path),
+        "must be an object with defaults, readable, or writable."
+      );
     }
     const candidate = definedOwnProperties(value as Record<string, unknown>);
     const definition: Record<string, FieldPolicySet> = {};
-    if (Object.hasOwn(candidate, "defaults")) {
-      definition.defaults = normalizePolicyFieldSet(candidate.defaults as FieldPolicySet);
-    }
-    if (Object.hasOwn(candidate, "readable")) {
-      definition.readable = normalizePolicyFieldSet(candidate.readable as FieldPolicySet);
-    }
-    if (Object.hasOwn(candidate, "writable")) {
-      definition.writable = normalizePolicyFieldSet(candidate.writable as FieldPolicySet);
+    for (const kind of ["defaults", "readable", "writable"] as const) {
+      if (Object.hasOwn(candidate, kind)) {
+        definition[kind] = normalizePolicyFieldSet(
+          candidate[kind] as FieldPolicySet,
+          configurationLocation(path === undefined ? undefined : `${path}.${kind}`)
+        );
+      }
     }
     definitions[table] = Object.freeze(definition) as MutableTableFieldPolicyDefinition;
   }
-  return Object.freeze({ definitions });
+  return definitions;
+}
+
+function isPlainRecordCandidate(candidate: unknown): boolean {
+  return (
+    typeof candidate === "object" &&
+    candidate !== null &&
+    !Array.isArray(candidate) &&
+    !nodeUtilTypes.isProxy(candidate)
+  );
 }
 
 /**
@@ -1348,17 +1507,27 @@ function definedOwnProperties(
   return defined;
 }
 
+/**
+ * @param root Configuration key the list came from; given only at load.
+ */
 function applyTableFieldList(
   definitions: Record<string, MutableTableFieldPolicyDefinition>,
   candidate: unknown,
-  kind: "readable" | "writable"
+  kind: "readable" | "writable",
+  root?: string
 ): void {
   if (candidate === undefined) return;
   if (!Array.isArray(candidate) || nodeUtilTypes.isProxy(candidate)) {
-    throw new FieldPolicyError("invalid_argument_shape");
+    rejectConfiguration(
+      configurationLocation(root),
+      "must be a list of { table, fields } entries."
+    );
   }
-  for (const entry of candidate) {
-    const normalized = normalizeTableFieldListDefinition(entry);
+  for (let index = 0; index < candidate.length; index += 1) {
+    const normalized = normalizeTableFieldListDefinition(
+      candidate[index],
+      root === undefined ? undefined : `${root}[${index}]`
+    );
     const previous = definitions[normalized.table] ?? {};
     definitions[normalized.table] = Object.freeze({
       ...previous,
@@ -1368,14 +1537,24 @@ function applyTableFieldList(
 }
 
 function normalizeTableFieldListDefinition(
-  candidate: unknown
+  candidate: unknown,
+  path?: string
 ): TableFieldListDefinition {
-  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate) || nodeUtilTypes.isProxy(candidate)) {
-    throw new FieldPolicyError("invalid_argument_shape");
+  if (!isPlainRecordCandidate(candidate)) {
+    rejectConfiguration(
+      configurationLocation(path),
+      "must be an object with table and fields."
+    );
   }
   const record = candidate as Record<string, unknown>;
-  const table = normalizePolicyTableName(record.table);
-  const fields = normalizePolicyFieldSet(record.fields as FieldPolicySet);
+  const table = normalizePolicyTableName(
+    record.table,
+    configurationLocation(path === undefined ? undefined : `${path}.table`)
+  );
+  const fields = normalizePolicyFieldSet(
+    record.fields as FieldPolicySet,
+    configurationLocation(path === undefined ? undefined : `${path}.fields`, table)
+  );
   return Object.freeze({ table, fields });
 }
 
@@ -1394,9 +1573,20 @@ function requireNonEmptySelection(selection: FieldSelection): FieldSelection {
 }
 
 
-function normalizePolicyTableName(candidate: unknown): string {
+function normalizePolicyTableName(
+  candidate: unknown,
+  location?: ConfigurationLocation
+): string {
   if (candidate === FIELD_POLICY_WILDCARD) return FIELD_POLICY_WILDCARD;
-  return normalizeTableName(candidate);
+  try {
+    return normalizeTableName(candidate);
+  } catch (error) {
+    if (location === undefined) throw error;
+    rejectConfiguration(
+      location,
+      `is not a valid table name. Use a table name (${FIELD_NAME_RULE}) or "*".`
+    );
+  }
 }
 
 function normalizeTableName(candidate: unknown): string {
@@ -1428,23 +1618,57 @@ function normalizeResponseFormat(candidate: unknown): ResponseFormat {
 }
 
 function normalizePolicyFieldSet(
-  candidates: FieldPolicySet
+  candidates: FieldPolicySet,
+  location?: ConfigurationLocation
 ): readonly string[] | "*" {
-  if (candidates === FIELD_POLICY_WILDCARD) return FIELD_POLICY_WILDCARD;
-  return normalizePolicyFields(candidates);
+  if (candidates === FIELD_POLICY_WILDCARD || isWildcardFieldList(candidates)) {
+    return FIELD_POLICY_WILDCARD;
+  }
+  return normalizePolicyFields(candidates, location);
+}
+
+/**
+ * `["*"]` is how `tableAccess.writeTables` spells "everything", so an operator
+ * writes it here too. It means exactly what the string `"*"` means.
+ */
+function isWildcardFieldList(candidate: unknown): boolean {
+  return (
+    Array.isArray(candidate) &&
+    !nodeUtilTypes.isProxy(candidate) &&
+    candidate.length === 1 &&
+    candidate[0] === FIELD_POLICY_WILDCARD
+  );
 }
 
 function normalizePolicyFields(
-  candidates: readonly string[]
+  candidates: readonly string[],
+  location?: ConfigurationLocation
 ): readonly string[] {
   // Operator policy is normalized on the request path, so a malformed set
   // must surface as a branded policy denial rather than a raw TypeError.
   if (!Array.isArray(candidates) || nodeUtilTypes.isProxy(candidates)) {
-    throw new FieldPolicyError("invalid_argument_shape");
+    rejectConfiguration(location, 'must be "*" or a list of field names.');
   }
-  const fields = candidates.map((field) => normalizeFieldName(field));
-  if (new Set(fields).size !== fields.length) {
-    throw new FieldPolicyError("invalid_argument_shape");
+  const fields: string[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < candidates.length; index += 1) {
+    let field: string;
+    try {
+      field = normalizeFieldName(candidates[index]);
+    } catch (error) {
+      if (location === undefined) throw error;
+      rejectConfiguration(
+        location,
+        `is not a field name. List exact field names (${FIELD_NAME_RULE}), or use "*" ` +
+          'on its own for every field; patterns such as "u_*" are not supported.',
+        `[${index}]`
+      );
+    }
+    if (seen.has(field)) {
+      rejectConfiguration(location, `repeats the field "${field}".`, `[${index}]`);
+    }
+    seen.add(field);
+    fields.push(field);
   }
   return Object.freeze(fields);
 }

@@ -120,6 +120,24 @@ describe("explicit named SN_* environment profile", () => {
     });
   });
 
+  it("rejects a malformed field policy at load and names the profile, table, and key", () => {
+    writeConfigFile({
+      version: 2,
+      profiles: {
+        audit: {
+          instance: "https://audit.service-now.com",
+          username: "admin",
+          credential: "env:SN_PASSWORD",
+          fieldPolicy: { u_audit: { writable: ["u_*"] } },
+        },
+      },
+    });
+
+    expect(() => new ProfileManager()).toThrow(
+      /^Profile configuration is invalid: profile "audit": fieldPolicy\.u_audit\.writable\[0\] is not a field name/u
+    );
+  });
+
   it("maps basic-auth SN_* values only under SN_PROFILE_NAME", () => {
     process.env.SN_PROFILE_NAME = "legacy-env";
     process.env.SN_INSTANCE = "https://legacy.service-now.com";
