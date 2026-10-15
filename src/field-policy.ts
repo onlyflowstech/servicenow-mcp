@@ -38,6 +38,7 @@ export type FieldPolicyFailureReason =
   | "invalid_write_payload"
   | "non_writable_field"
   | "sensitive_field"
+  | "unsupported_field_path"
   | "traversal_limit_exceeded"
   | "invalid_argument_shape";
 
@@ -770,6 +771,14 @@ export function fieldPolicyDenialMessage(error: FieldPolicyError): string {
         : "Access denied by policy: the requested table has no field policy entry.";
     case "sensitive_field":
       return "Access denied by policy: a requested field is denied by name as sensitive and cannot be granted by configuration.";
+    case "unsupported_field_path":
+      // The key itself is not echoed: as a whole it did not pass FIELD_NAME.
+      return (
+        `Write denied by policy: write keys${table ? ` on "${table}"` : ""} must be plain field names. ` +
+        "Dot-walked names (such as caller_id.email) and catalog variables (variables.*) " +
+        "cannot be written through this tool. To change a dot-walked value, update the " +
+        "referenced record itself."
+      );
     default:
       return `Access denied by policy (${error.reason}).`;
   }
@@ -888,7 +897,7 @@ export function validateWritableFields(
     if (!("value" in descriptor)) {
       throw new FieldPolicyError("invalid_write_payload");
     }
-    const field = normalizeFieldName(candidate);
+    const field = normalizeWriteFieldName(candidate, policy.table);
     if (Object.hasOwn(output, field)) {
       throw new FieldPolicyError("invalid_write_payload");
     }
@@ -1683,6 +1692,34 @@ function normalizeFieldName(candidate: unknown): string {
     throw new FieldPolicyError("invalid_field_selection");
   }
   return normalized;
+}
+
+/** Longest dotted write key inspected for a specific denial message. */
+const MAX_FIELD_PATH_LENGTH = 1_024;
+
+/**
+ * Normalize one write key. A dotted key whose every segment is a field name,
+ * such as the dot-walk caller_id.email or variables.requested_for, is still
+ * denied: Table API write support for those names is unverified. It gets its
+ * own reason so the denial says why instead of reading as a malformed name.
+ */
+function normalizeWriteFieldName(candidate: unknown, table: string): string {
+  try {
+    return normalizeFieldName(candidate);
+  } catch (error) {
+    if (isFieldPath(candidate)) {
+      throw new FieldPolicyError("unsupported_field_path", { table });
+    }
+    throw error;
+  }
+}
+
+function isFieldPath(candidate: unknown): boolean {
+  if (typeof candidate !== "string" || candidate.length > MAX_FIELD_PATH_LENGTH) {
+    return false;
+  }
+  const segments = candidate.trim().toLowerCase().split(".");
+  return segments.length > 1 && segments.every((segment) => FIELD_NAME.test(segment));
 }
 
 function normalizeResponseFormat(candidate: unknown): ResponseFormat {

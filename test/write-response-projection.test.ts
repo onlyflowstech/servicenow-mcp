@@ -10,10 +10,12 @@ import type {
 } from "../src/execution-context.js";
 import {
   FieldPolicyError,
+  fieldPolicyDenialMessage,
   prepareWriteFieldArguments,
   resolveReadableFields,
   resolveWriteResponseFields,
   runWithFieldPolicyConfiguration,
+  validateWritableFields,
   type FieldPolicyConfigurationInput,
 } from "../src/field-policy.js";
 import type { Profile, ProfileManager } from "../src/profile-manager.js";
@@ -434,6 +436,73 @@ describe("the written record keeps its identity (#11)", () => {
           )
         ).toEqual({ sys_id: SYS_ID });
       }
+    );
+  });
+});
+
+describe("dot-walked and variables.* write keys (#12)", () => {
+  it.each([
+    ["incident", "caller_id.email"],
+    ["sc_req_item", "variables.requested_for"],
+  ])("explains the denial of %s write key %s", async (table, key) => {
+    const connected = await harness({}, []);
+
+    const result = await connected.call("sn_update", {
+      table,
+      sys_id: SYS_ID,
+      fields: { [key]: "x" },
+    });
+
+    expect(result.isError).toBe(true);
+    const text = responseText(result);
+    expect(text).toContain("denied by policy");
+    expect(text).toContain("Dot-walked names");
+    expect(text).toContain("variables.*");
+    expect(text).toContain(`"${table}"`);
+    expect(text).not.toContain("invalid_field_selection");
+    expect(connected.managerCalls).toEqual({ config: 0, client: 0 });
+    expect(connected.audits.at(-1)).toMatchObject({
+      tool: "sn_update",
+      outcome: "policy_rejected",
+      reason: "field_access_denied",
+    });
+  });
+
+  it("gives the specific reason only to dotted field paths", () => {
+    const reasonOf = (fields: Record<string, unknown>) => {
+      try {
+        validateWritableFields("incident", fields);
+      } catch (error) {
+        if (error instanceof FieldPolicyError) return error;
+      }
+      throw new Error("Expected a field policy rejection");
+    };
+
+    for (const key of [
+      "caller_id.email",
+      "u_ref.u_canary_one",
+      "Variables.U_Canary_Two",
+      "u_a.u_b.u_canary_three",
+    ]) {
+      const error = reasonOf({ [key]: "x" });
+      expect(error.reason, key).toBe("unsupported_field_path");
+      expect(error.table).toBe("incident");
+      // The key did not pass FIELD_NAME as a whole, so it is not echoed.
+      expect(error.field).toBeUndefined();
+      expect(fieldPolicyDenialMessage(error).toLowerCase()).not.toContain("canary");
+    }
+    for (const key of ["bad-field", "caller_id.", ".email", "a..b", "u_*", "x".repeat(2_000)]) {
+      expect(reasonOf({ [key]: "x" }).reason, key.slice(0, 20)).toBe(
+        "invalid_field_selection"
+      );
+    }
+  });
+
+  it("leaves reads of dotted names unchanged", () => {
+    expect(() =>
+      resolveReadableFields("incident", { fields: "caller_id.email" })
+    ).toThrow(
+      expect.objectContaining({ reason: "invalid_field_selection" })
     );
   });
 });
