@@ -17,6 +17,11 @@ import {
   type ProfileEncryptionKeyProvider,
 } from "../src/profile-credentials.js";
 import { ProfileManager } from "../src/profile-manager.js";
+import {
+  authorizeTableAccess,
+  createTableAccessPolicy,
+  type TableAccessPolicy,
+} from "../src/table-policy.js";
 import { createToolError } from "../src/tool-error.js";
 import {
   classifyVerificationFailure,
@@ -603,6 +608,113 @@ describe("setup grant", () => {
     );
   });
 
+  describe("incident journal tools", () => {
+    const JOURNAL_TOOLS = ["sn_incident_add_comment", "sn_incident_add_work_note"];
+
+    async function grant(argv: readonly string[]): Promise<void> {
+      await runSetupCli({
+        home,
+        argv: ["grant", "--profile", "dev", ...argv],
+        profileManager: manager,
+        writeStdout: () => undefined,
+      });
+    }
+
+    function toolsOn(table: string): readonly string[] | undefined {
+      return new ProfileManager({ configFilePath: profileConfigPath(home) })
+        .getProfile("dev")
+        .tableAccess?.targets?.find((target) => target.table === table)?.tools;
+    }
+
+    /** Load the persisted rules with the loader the server uses at request time. */
+    function persistedPolicy(): TableAccessPolicy {
+      const persisted = new ProfileManager({
+        configFilePath: profileConfigPath(home),
+      }).getProfile("dev");
+      return createTableAccessPolicy(persisted.tableAccess!);
+    }
+
+    it("adds both journal tools to a default incident write grant, and the policy loads", async () => {
+      await grant(["--write", "incident"]);
+
+      expect(toolsOn("incident")).toEqual([
+        "sn_create",
+        "sn_incident_add_comment",
+        "sn_incident_add_work_note",
+        "sn_update",
+      ]);
+      const policy = persistedPolicy();
+      for (const tool of JOURNAL_TOOLS) {
+        expect(
+          authorizeTableAccess(policy, { operation: "write", table: "incident" }, tool)
+        ).toBe("incident");
+      }
+      // Destructive tools are still never granted implicitly.
+      expect(() =>
+        authorizeTableAccess(policy, { operation: "write", table: "incident" }, "sn_delete")
+      ).toThrow(/denied by policy/u);
+    });
+
+    it("adds neither journal tool to a write grant on another table, or a read-only incident grant", async () => {
+      await grant(["--read", "incident", "--write", "change_request"]);
+
+      expect(toolsOn("change_request")).toEqual(["sn_create", "sn_update"]);
+      for (const tool of JOURNAL_TOOLS) {
+        expect(toolsOn("incident")).not.toContain(tool);
+      }
+    });
+
+    it("honours an explicit --tools list without adding the journal tools", async () => {
+      await grant(["--write", "incident", "--tools", "sn_update"]);
+
+      expect(toolsOn("incident")).toEqual(["sn_update"]);
+      const policy = persistedPolicy();
+      for (const tool of JOURNAL_TOOLS) {
+        expect(() =>
+          authorizeTableAccess(policy, { operation: "write", table: "incident" }, tool)
+        ).toThrow(/denied by policy/u);
+      }
+    });
+
+    it("keeps the existing tools when re-granting, and adds the journal tools to an older target", async () => {
+      // A target written before the journal tools were a default, carrying a
+      // tool the operator once named explicitly.
+      await grant(["--write", "incident", "--tools", "sn_create,sn_delete,sn_update"]);
+      expect(toolsOn("incident")).toEqual(["sn_create", "sn_delete", "sn_update"]);
+
+      await grant(["--write", "incident"]);
+
+      expect(toolsOn("incident")).toEqual([
+        "sn_create",
+        "sn_delete",
+        "sn_incident_add_comment",
+        "sn_incident_add_work_note",
+        "sn_update",
+      ]);
+      persistedPolicy();
+    });
+
+    it("keeps the journal tools when a later grant names --tools", async () => {
+      await grant(["--write", "incident"]);
+      await grant(["--write", "incident", "--tools", "sn_batch"]);
+
+      expect(toolsOn("incident")).toEqual([
+        "sn_batch",
+        "sn_create",
+        "sn_incident_add_comment",
+        "sn_incident_add_work_note",
+        "sn_update",
+      ]);
+      persistedPolicy();
+    });
+
+    it("names the journal tools in the grant help", async () => {
+      await expect(grant(["--help"])).rejects.toMatchObject({
+        help: expect.stringContaining(JOURNAL_TOOLS.join(",")),
+      });
+    });
+  });
+
   it("refuses a wildcard grant", async () => {
     await expect(
       runSetupCli({
@@ -1060,6 +1172,8 @@ describe("setup wizard", () => {
     const incident = profile.tableAccess?.targets?.find((t) => t.table === "incident");
     expect(incident?.closureComplete).toBe(true);
     expect(incident?.tools).toContain("sn_update");
+    expect(incident?.tools).toContain("sn_incident_add_comment");
+    expect(incident?.tools).toContain("sn_incident_add_work_note");
     expect(incident?.tools).not.toContain("sn_delete");
 
     expect(out).toContain("Setup complete.");

@@ -282,6 +282,17 @@ const DEFAULT_WRITE_TOOLS: readonly string[] = Object.freeze([
   "sn_update",
 ]);
 
+/**
+ * Added to the `incident` target by a write grant when `--tools` is not given.
+ * These tools append to comments and work_notes and are authorized as incident
+ * writes, so an incident target that omitted them would deny them on a profile
+ * that can otherwise write incident.
+ */
+const INCIDENT_JOURNAL_TOOLS: readonly string[] = Object.freeze([
+  "sn_incident_add_comment",
+  "sn_incident_add_work_note",
+]);
+
 export async function runSetupCli(
   dependencies: SetupCliDependencies = {}
 ): Promise<void> {
@@ -1662,6 +1673,9 @@ function mergeTargets(
       }
       if (writeTables.has(table)) {
         for (const tool of DEFAULT_WRITE_TOOLS) tools.add(tool);
+        if (table === "incident") {
+          for (const tool of INCIDENT_JOURNAL_TOOLS) tools.add(tool);
+        }
       }
     }
     const related = new Set([
@@ -2648,7 +2662,9 @@ function renderGrantHelp(): string {
     "                          Does not enable execution or script-step authoring",
     `  --tools LIST            Tools permitted on these targets`,
     `                          (default read: ${DEFAULT_READ_TOOLS.join(",")};`,
-    `                           default write adds: ${DEFAULT_WRITE_TOOLS.join(",")})`,
+    `                           default write adds: ${DEFAULT_WRITE_TOOLS.join(",")};`,
+    `                           default write on incident also adds:`,
+    `                           ${INCIDENT_JOURNAL_TOOLS.join(",")})`,
     "  --related TABLE=LIST    Backing/ancestor/descendant tables the target reaches;",
     "                          repeatable, and required whenever a table extends another",
     "  --replace               Discard existing rules instead of adding to them",
