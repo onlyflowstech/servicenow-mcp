@@ -674,6 +674,10 @@ const POLICY_DEFINITIONS = {
  *
  * The "*" entry makes every other table resolvable with the same posture, so
  * a granted custom table needs no field-policy entry to be usable.
+ *
+ * A profile's own "*" entry reaches further: it also covers the ITSM tables
+ * (ITSM_TABLES), key by key, wherever the table's own entry is silent. The
+ * remaining built-in tables are system tables; a "*" entry never covers them.
  */
 const FIELD_POLICY_BASE: Readonly<Record<string, TableFieldPolicyDefinition>> =
   Object.freeze({
@@ -695,6 +699,31 @@ const FIELD_POLICY_BASE: Readonly<Record<string, TableFieldPolicyDefinition>> =
   });
 
 const BUILT_IN_TABLE_FIELD_POLICIES = buildFieldPolicyMap(FIELD_POLICY_BASE);
+
+/**
+ * Built-in tables whose field policy belongs to the profile. For these,
+ * `readable` and `writable` resolve from the profile's own table entry, then
+ * the profile's "*" entry, then the built-in "*" (open). Their built-in
+ * `defaults` stay as a read-projection convenience, clamped to the effective
+ * readable set.
+ *
+ * Every other built-in table is a system table (scripts, users and groups,
+ * ATF, application and dictionary metadata, syslog). It keeps its own
+ * built-in entry and is narrowed only by naming it.
+ */
+const ITSM_TABLES: ReadonlySet<string> = new Set([
+  "incident",
+  "change_request",
+  "problem",
+  "sc_request",
+  "sc_req_item",
+  "sc_task",
+  "task",
+  "cmdb_ci",
+  "cmdb_ci_server",
+  "cmdb_ci_computer",
+  "kb_knowledge",
+]);
 
 const GENERIC_RECORD_TABLES = new Set([
   "incident",
@@ -1226,18 +1255,35 @@ function mergeFieldPolicyDefinitions(
   configured: Readonly<Record<string, MutableTableFieldPolicyDefinition>>
 ): Record<string, TableFieldPolicyDefinition> {
   const merged: Record<string, TableFieldPolicyDefinition> = { ...base };
-  for (const [table, definition] of Object.entries(configured)) {
+  // A profile's "*" entry also covers the ITSM tables it does not name, so
+  // they are merged even without an entry of their own.
+  const profileWildcard = Object.hasOwn(configured, FIELD_POLICY_WILDCARD)
+    ? configured[FIELD_POLICY_WILDCARD]
+    : undefined;
+  const tables = new Set(Object.keys(configured));
+  if (profileWildcard !== undefined) {
+    for (const table of ITSM_TABLES) tables.add(table);
+  }
+  for (const table of tables) {
+    const definition: MutableTableFieldPolicyDefinition = Object.hasOwn(configured, table)
+      ? configured[table]!
+      : {};
     const existing = merged[table];
+    // ITSM tables resolve each set from their own entry, then the profile's
+    // "*" entry, then the base. System tables never take the "*" entry.
+    const fallback = ITSM_TABLES.has(table) ? profileWildcard : undefined;
+    const readable = definition.readable ?? fallback?.readable;
     merged[table] = {
-      defaults:
-        definition.defaults ??
-        inheritedDefaults(existing?.defaults, definition.readable),
+      // Built-in defaults are clamped to the effective readable set, so a
+      // narrowed "*" never leaves a default the table may not read. sys_id
+      // leads every built-in list and stays whenever it is readable.
+      defaults: definition.defaults ?? inheritedDefaults(existing?.defaults, readable),
       // An entry that states only `defaults` reads exactly those fields.
-      readable: definition.readable ?? existing?.readable ?? definition.defaults,
+      readable: readable ?? existing?.readable ?? definition.defaults,
       // Omission no longer denies. An operator who states nothing about
       // writes has not asked for a restriction, and tableAccess already
       // decided whether this table is reachable at all.
-      writable: definition.writable ?? existing?.writable,
+      writable: definition.writable ?? fallback?.writable ?? existing?.writable,
     };
   }
   return merged;

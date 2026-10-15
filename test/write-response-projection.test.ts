@@ -567,3 +567,59 @@ describe("dot-walked and variables.* write keys (#12)", () => {
     );
   });
 });
+
+describe('a profile "*" entry through sn_update (A3)', () => {
+  it("denies an incident write granted by tableAccess unless incident is named", async () => {
+    // The harness grants incident writes in tableAccess.writeTables.
+    const denied = await harness({ fieldPolicy: { "*": { writable: [] } } }, []);
+    const result = await denied.call("sn_update", {
+      table: "incident",
+      sys_id: SYS_ID,
+      fields: { state: "2" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(responseText(result)).toContain("fieldPolicy.incident.writable");
+    expect(denied.managerCalls).toEqual({ config: 0, client: 0 });
+    expect(denied.audits.at(-1)).toMatchObject({
+      tool: "sn_update",
+      outcome: "policy_rejected",
+      reason: "field_access_denied",
+    });
+
+    const named = await harness(
+      { fieldPolicy: { "*": { writable: [] }, incident: { writable: "*" } } },
+      [{ operation: "patch", response: { result: { sys_id: SYS_ID, state: "2" } } }]
+    );
+    const allowed = await named.call("sn_update", {
+      table: "incident",
+      sys_id: SYS_ID,
+      fields: { state: "2" },
+    });
+
+    expect(allowed.isError).not.toBe(true);
+    expect(named.fixture.calls).toEqual([
+      { operation: "patch", path: `/api/now/table/incident/${SYS_ID}`, body: { state: "2" } },
+    ]);
+  });
+
+  it("still applies incident's typed value checks once incident is named", async () => {
+    const connected = await harness(
+      { fieldPolicy: { "*": { writable: [] }, incident: { writable: "*" } } },
+      []
+    );
+    const result = await connected.call("sn_update", {
+      table: "incident",
+      sys_id: SYS_ID,
+      fields: { caller_id: "not-a-sys-id" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(connected.managerCalls).toEqual({ config: 0, client: 0 });
+    expect(connected.audits.at(-1)).toMatchObject({
+      tool: "sn_update",
+      outcome: "policy_rejected",
+      reason: "write_value_denied",
+    });
+  });
+});

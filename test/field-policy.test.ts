@@ -20,10 +20,15 @@ import {
   resolveReadableFields,
   runWithFieldPolicyConfiguration,
   snapshotPlainDataArguments,
+  validateFieldPolicyConfiguration,
   validateWritableFields,
   type FieldPolicyConfigurationInput,
 } from "../src/field-policy.js";
 import { resolveToolTableAccess } from "../src/tool-table-access.js";
+import {
+  WriteValuePolicyError,
+  prepareWriteFieldValues,
+} from "../src/write-value-policy.js";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -1147,5 +1152,199 @@ describe("field-policy denials explain themselves to an operator", () => {
     expect(JSON.stringify({ ...error, message: error.message })).not.toContain(
       "SECRET-CANARY-VALUE"
     );
+  });
+});
+
+describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)', () => {
+  const ITSM_TABLES = [
+    "incident",
+    "change_request",
+    "problem",
+    "sc_request",
+    "sc_req_item",
+    "sc_task",
+    "task",
+    "cmdb_ci",
+    "cmdb_ci_server",
+    "cmdb_ci_computer",
+    "kb_knowledge",
+  ] as const;
+  const SYSTEM_TABLES = [
+    "sys_script",
+    "sys_script_include",
+    "sys_ui_script",
+    "sys_script_client",
+    "sys_ws_operation",
+    "sys_user",
+    "sys_user_group",
+    "sys_user_grmember",
+    "sys_atf_test",
+    "sys_atf_test_suite",
+    "sys_atf_test_suite_test",
+    "sys_atf_test_result",
+    "sys_atf_step",
+    "sys_atf_test_suite_result",
+    "sys_atf_test_result_step",
+    "sys_atf_agent",
+    "sys_variable_value",
+    "sys_db_object",
+    "sys_app",
+    "sys_store_app",
+    "v_plugin",
+    "syslog",
+    "sys_element_mapping",
+  ] as const;
+
+  function reason(action: () => unknown): string {
+    try {
+      action();
+      return "allowed";
+    } catch (error) {
+      if (error instanceof FieldPolicyError) return error.reason;
+      throw error;
+    }
+  }
+
+  /** What every built-in table resolves to with no field policy at all. */
+  const builtIn = new Map(
+    [...ITSM_TABLES, ...SYSTEM_TABLES].map((table) => [
+      table,
+      {
+        defaults: resolveReadableFields(table),
+        all: resolveReadableFields(table, { fields: "all" }),
+      },
+    ])
+  );
+
+  it("splits the 34 built-in tables into 11 ITSM and 23 system tables", () => {
+    expect(new Set([...ITSM_TABLES, ...SYSTEM_TABLES]).size).toBe(34);
+    for (const [table, resolved] of builtIn) {
+      expect(resolved.all, table).toEqual(["*"]);
+    }
+    // Each has its own built-in default projection, not the generic
+    // ["sys_id"] an unmapped table gets.
+    for (const table of ITSM_TABLES) {
+      expect(builtIn.get(table)!.defaults.length, table).toBeGreaterThan(1);
+    }
+  });
+
+  it('denies ITSM writes under "*" writable [] unless the table is named', () => {
+    withFieldPolicy({ "*": { writable: [] } }, () => {
+      for (const table of ITSM_TABLES) {
+        expect(reason(() => validateWritableFields(table, { state: "2" })), table).toBe(
+          "non_writable_field"
+        );
+      }
+      // Reads are untouched: the "*" entry stated nothing about readable.
+      expect(resolveReadableFields("incident", { fields: "all" })).toEqual(["*"]);
+      expect(resolveReadableFields("incident")).toEqual(builtIn.get("incident")!.defaults);
+    });
+  });
+
+  it("restores a named ITSM table's writes, key by key", () => {
+    withFieldPolicy({ "*": { writable: [] }, incident: { writable: "*" } }, () => {
+      expect(validateWritableFields("incident", { state: "2" })).toEqual({ state: "2" });
+      expect(reason(() => validateWritableFields("problem", { state: "2" }))).toBe(
+        "non_writable_field"
+      );
+    });
+    withFieldPolicy({ "*": { writable: [] }, incident: { writable: ["state"] } }, () => {
+      expect(validateWritableFields("incident", { state: "2" })).toEqual({ state: "2" });
+      expect(
+        reason(() => validateWritableFields("incident", { short_description: "x" }))
+      ).toBe("non_writable_field");
+    });
+    // Naming the table for reads only leaves its writes to the "*" entry.
+    withFieldPolicy(
+      { "*": { writable: [] }, incident: { readable: ["sys_id", "number"] } },
+      () => {
+        expect(reason(() => validateWritableFields("incident", { state: "2" }))).toBe(
+          "non_writable_field"
+        );
+        expect(resolveReadableFields("incident")).toEqual(["sys_id", "number"]);
+      }
+    );
+  });
+
+  it('clamps ITSM default projections to a narrowed "*" readable set without error', () => {
+    const readable = ["sys_id", "number", "state", "u_custom"];
+    const narrowed = { "*": { readable } };
+    expect(() => validateFieldPolicyConfiguration({ fieldPolicy: narrowed })).not.toThrow();
+    withFieldPolicy(narrowed, () => {
+      expect(resolveReadableFields("incident")).toEqual(["sys_id", "number", "state"]);
+      for (const table of ITSM_TABLES) {
+        const defaults = resolveReadableFields(table);
+        expect(defaults[0], table).toBe("sys_id");
+        expect(defaults.every((field) => readable.includes(field)), table).toBe(true);
+        expect(reason(() => resolveReadableFields(table, { fields: "caller_id" })), table)
+          .toBe("unreadable_field");
+      }
+    });
+    // sys_id alone survives a "*" readable that shares nothing else.
+    withFieldPolicy({ "*": { readable: ["sys_id", "u_custom"] } }, () => {
+      expect(resolveReadableFields("change_request")).toEqual(["sys_id"]);
+    });
+  });
+
+  it('leaves ITSM tables unchanged with no field policy, or one without a "*" entry', () => {
+    const check = () => {
+      for (const table of ITSM_TABLES) {
+        expect(resolveReadableFields(table), table).toEqual(builtIn.get(table)!.defaults);
+        expect(resolveReadableFields(table, { fields: "all" }), table).toEqual(["*"]);
+        expect(validateWritableFields(table, { u_anything: "x" }), table).toEqual({
+          u_anything: "x",
+        });
+      }
+    };
+    check();
+    withFieldPolicy({ u_custom: { writable: [] } }, check);
+    expect(SAFE_DEFAULT_FIELDS.incident).toEqual(builtIn.get("incident")!.defaults);
+  });
+
+  it('leaves every system table untouched by a "*" entry', () => {
+    withFieldPolicy(
+      { "*": { defaults: ["sys_id"], readable: ["sys_id"], writable: [] } },
+      () => {
+        for (const table of SYSTEM_TABLES) {
+          expect(validateWritableFields(table, { u_anything: "x" }), table).toEqual({
+            u_anything: "x",
+          });
+          expect(resolveReadableFields(table, { fields: "all" }), table).toEqual(["*"]);
+          expect(resolveReadableFields(table), table).toEqual(builtIn.get(table)!.defaults);
+        }
+        // A table with no built-in entry still takes the "*" entry whole.
+        expect(reason(() => validateWritableFields("u_custom", { u_x: "1" }))).toBe(
+          "non_writable_field"
+        );
+        expect(resolveReadableFields("u_custom", { fields: "all" })).toEqual(["sys_id"]);
+      }
+    );
+    // A system table is narrowed only by naming it.
+    withFieldPolicy({ "*": { writable: [] }, sys_script: { writable: [] } }, () => {
+      expect(reason(() => validateWritableFields("sys_script", { script: "x" }))).toBe(
+        "non_writable_field"
+      );
+      expect(validateWritableFields("sys_script_include", { script: "x" })).toEqual({
+        script: "x",
+      });
+    });
+  });
+
+  it("leaves incident's typed value checks to write-value-policy", () => {
+    withFieldPolicy({ "*": { writable: [] }, incident: { writable: "*" } }, () => {
+      // Field policy admits the names; the value policy still checks values.
+      expect(validateWritableFields("incident", { caller_id: "not-a-sys-id" })).toEqual({
+        caller_id: "not-a-sys-id",
+      });
+      expect(() =>
+        prepareWriteFieldValues("update", "incident", { caller_id: "not-a-sys-id" })
+      ).toThrow(WriteValuePolicyError);
+      expect(() =>
+        prepareWriteFieldValues("update", "incident", { category: "x^ORactive=true" })
+      ).toThrow(WriteValuePolicyError);
+      expect(
+        prepareWriteFieldValues("update", "incident", { caller_id: "a".repeat(32) })
+      ).toEqual({ caller_id: "a".repeat(32) });
+    });
   });
 });
