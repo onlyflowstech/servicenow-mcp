@@ -302,35 +302,6 @@ client_credentials and API-key profiles carry no username and therefore cannot
 cache metadata at all. Deletions to a cached table become visible within one
 TTL, since the probe detects updates rather than deletes.
 
-Journal content is readable on request. `comments` and `work_notes` on
-`incident` are returned by `fields=all`, `response_format: "detailed"`, an
-explicit `fields=comments`, and `sn_schema`; the default projection still
-excludes them. Journal content on production instances routinely contains
-customer PII, so a profile granted `incident` reads can retrieve
-customer-visible commentary whenever the caller asks for it. Treat that as part
-of the data classification when granting incident reads, and narrow it through
-the field policy rather than relying on the default projection, which the
-caller can override. Field names matching the sensitive-name pattern are
-excluded from an unrestricted selection before the request is built, so those
-values are never requested rather than being requested and scrubbed on arrival.
-
-Journal content is writable under the same field policy. A profile granted
-writes to a task table can append `comments` and `work_notes` through
-`sn_create`, `sn_update` and `sn_batch`, not only through the dedicated
-incident tools. `comments` is customer-visible and usually triggers customer
-notifications, so decide separately whether an agent may post it. To grant
-updates without customer-visible comments, set `fieldPolicy.<table>.writable`
-to an explicit list that leaves `comments` out; on `incident` that also denies
-`sn_incident_add_comment`. A journal write appends one entry and cannot
-rewrite or remove earlier ones. Each entry is bounded to 8,000 characters and
-16,384 UTF-8 bytes without control characters. `sn_batch` never re-sends a
-batch request that may have reached the instance; a record whose outcome
-ServiceNow did not confirm is reported, not retried. Single-record `PATCH`
-calls, including the dedicated tools and the `sn_batch` serial fallback, keep
-the HTTP client's bounded retry on 502, 503, 504 and connection errors, so a
-gateway failure after the instance applied a journal write can still append
-that entry twice.
-
 `sys_properties` is deliberately absent from that list. Rows in it are
 ACL-restricted per user and routinely hold integration secrets in the `value`
 column, and a cache hit is served without re-contacting ServiceNow, so the
@@ -359,6 +330,106 @@ canonical runtime secret:
   }
 }
 ```
+
+## Journal content
+
+`comments` (customer-visible) and `work_notes` (internal) are the journal
+fields on `incident` and the other task tables. A Table API write to one
+appends an entry; it cannot rewrite or remove earlier entries.
+
+### Reading journals
+
+Journal content is readable on request. `comments` and `work_notes` on
+`incident` are returned by `fields=all`, `response_format: "detailed"`, an
+explicit `fields=comments`, and `sn_schema`; the default projection still
+excludes them. Journal content on production instances routinely contains
+customer PII, so a profile granted `incident` reads can retrieve
+customer-visible commentary whenever the caller asks for it. Treat that as part
+of the data classification when granting incident reads, and narrow it through
+the field policy rather than relying on the default projection, which the
+caller can override. Field names matching the sensitive-name pattern are
+excluded from an unrestricted selection before the request is built, so those
+values are never requested rather than being requested and scrubbed on arrival.
+
+### Writing journals
+
+A profile granted writes on a table can append `comments` and `work_notes`
+there through `sn_create`, `sn_update` and `sn_batch`, and on `incident`
+through `sn_incident_add_comment` and `sn_incident_add_work_note`. Field
+policy decides for every one of these routes, and with no field policy every
+write-granted table accepts both fields. Each entry is 1-8,000 characters and
+at most 16,384 UTF-8 bytes, without control or format characters other than
+newline, carriage return and tab.
+
+Decide separately whether an agent may post customer-visible comments:
+
+- **Notifications.** On many instances a new comment notifies the record's
+  caller and watch list. A bulk `sn_batch` update of `comments` posts one
+  comment per matched record, up to 10,000 in one call, and each can send a
+  notification.
+- **An outbound email channel.** `watch_list` accepts free-form email
+  addresses, and comment notifications commonly go to the watch list. An
+  agent that may write both `watch_list` and `comments` can therefore send
+  record content to an address of its choosing. Withhold one of the two
+  fields, or restrict outbound email recipients on the instance.
+- **Rendered markup.** Where the instance property
+  `glide.ui.security.allow_codetag` is enabled, text inside `[code]` tags in a
+  journal entry can render as HTML. The server does not strip these tags.
+  Disable the property, or withhold the field, if agents should not post
+  markup.
+
+**Opting out.** To withhold journal writes, set `writable` to an explicit
+list that leaves out `comments`, and `work_notes` if needed. A profile with no
+field policy can write every field, so there is nothing to leave a field out
+of until you write a list:
+
+```json
+{
+  "fieldPolicy": {
+    "*": {
+      "writable": ["short_description", "description", "state", "assigned_to", "assignment_group", "work_notes"]
+    }
+  }
+}
+```
+
+A `"*"` entry reaches the ITSM tables, including `incident` and `task`, and
+every table without a built-in entry; state the list per table instead where
+tables need different sets. Field policy is evaluated against the table a call
+names, so narrow write-granted parent tables such as `task` too, or do not
+grant writes on them. On `incident` the same list also denies the matching
+dedicated tool. Leaving the dedicated tools off a target, or passing
+`--tools` to `servicenow-mcp-setup grant`, controls only those two tools; it
+does not withhold journals from `sn_create`, `sn_update` or `sn_batch`. See
+the [field policy reference](../README.md#field-policy).
+
+### Duplicate entries
+
+The server never re-sends a journal write that may have reached the instance:
+
+- The HTTP client does not retry a `PATCH` or `PUT` that sets `comments` or
+  `work_notes` after a 502, 503, 504 or connection error, because the first
+  attempt may already have appended the entry. It reports the failure
+  instead. It still retries after a 429 and refreshes credentials once after
+  a 401, because neither request was processed. A `POST`, which `sn_create`
+  sends, is never re-sent after a server or connection error.
+- `sn_batch` never re-sends a batch request that may have reached the
+  instance, reports a record whose outcome ServiceNow did not confirm instead
+  of retrying it, and stops its serial fallback at the first such record.
+
+This covers `sn_create`, `sn_update`, the dedicated tools and both `sn_batch`
+paths. A repeated call still appends again: `sn_create`, `sn_update`,
+`sn_batch` and the dedicated tools are all annotated as not idempotent, and
+running the same journal-only `sn_batch` again appends another entry to every
+record it matches.
+
+**Limitation: journal fields are recognised by name.** Only `comments` and
+`work_notes` get this handling. A custom journal field (`u_*`), or a built-in
+journal-type field under another name, is not detected: it gets the generic
+value bounds (100,000 characters) instead of the journal bounds, and the
+client's ordinary retry on 502, 503, 504 and connection errors, so a gateway
+failure after the instance applied such a write can append the entry twice.
+Where a duplicate would matter, withhold such fields with field policy.
 
 ## Denied exposure patterns
 
