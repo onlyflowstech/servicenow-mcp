@@ -292,11 +292,26 @@ SN_METADATA_CACHE_TABLES=sys_glide_object,sys_dictionary,sys_db_object,sys_app,s
 
 Metadata caching works in every auth mode, including the client_credentials
 profile above. Its freshness check reads the cached table's row count and newest
-row by `sys_updated_on`, as the instance stores it, so it needs no timezone, no
-username, and no read access beyond the cached table. Cached entries are
+row by `sys_updated_on`, as the instance stores it, so it needs no timezone and
+no username. The only access it needs is the ServiceNow read permission of the
+user the credential runs as, on the cached table itself. It needs no
+`tableAccess` grant, so do not widen `readTables` for it. Cached entries are
 partitioned by instance and credential identity; `sn_schema` results are also
 partitioned by profile and effective policy, so a narrower profile never sees a
 wider one's schema.
+
+The partition is the credential, not the ServiceNow user it runs as. A cache
+hit re-reads only the table's watermark, so the run-as user's permissions on
+the cached rows are not evaluated again until the entry is refetched. Revoking
+read on a whole table shows on the next call, because the watermark read is
+refused. Tightening row- or field-level access does not move the watermark, so
+rows cached before the change are served for up to one TTL: 24 hours for
+metadata, 5 minutes for `sn_schema`. A metadata entry keeps the TTL of the
+profile that stored it, so another profile on the same credential with a
+shorter TTL can be served it for the longer one. After re-mapping a
+client_credentials application or API key to another user, or tightening that
+user's roles or ACLs, restart the server, rotate the secret, or pass
+`force_recache: true`.
 
 Journal content is readable on request. `comments` and `work_notes` on
 `incident` are returned by `fields=all`, `response_format: "detailed"`, an
@@ -312,8 +327,8 @@ values are never requested rather than being requested and scrubbed on arrival.
 
 `sys_properties` is deliberately absent from that list. Rows in it are
 ACL-restricted per user and routinely hold integration secrets in the `value`
-column, and a cache hit is served without re-contacting ServiceNow, so the
-caller's ACLs are not evaluated on the hit. Do not add it, and review any
+column, and a cache hit re-reads only the table's watermark, so the caller's
+ACLs on the cached rows are not evaluated on the hit. Do not add it, and review any
 table you do add against the same two questions: are its rows ACL-restricted
 per user, and would a stale or cross-identity answer be a disclosure?
 

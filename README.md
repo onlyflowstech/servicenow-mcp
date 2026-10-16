@@ -758,13 +758,14 @@ the newest row. Both sides of the comparison come from the instance, so the
 session timezone, the date format, and clock skew between this host and the
 instance play no part, and no user lookup is needed. Basic, OAuth (password or
 client_credentials), and API-key profiles all cache the same way. The only
-access it needs is read on the cached table itself.
+access it needs is the ServiceNow read permission of the user the credential
+runs as, on the cached table itself; no `tableAccess` change is needed.
 
 **The honest tradeoff:** the cache only ever saved payload bytes, never round
 trips — a cache hit still costs one watermark read, and a miss costs one extra.
 A tool call reads each table's watermark once, however many times it reads the
-table (a hierarchy walk reads `sys_db_object` once per hop), until the call
-writes. An empty table caches like any other.
+table, until the call writes. A hierarchy walk reads `sys_db_object` once for
+the whole chain. An empty table caches like any other.
 
 If a table's watermark cannot be used, its reads go straight upstream, without
 a watermark request, for a while: 15 minutes when the cause persists (an
