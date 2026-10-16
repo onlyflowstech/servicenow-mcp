@@ -128,6 +128,17 @@ describe("bounded all-fields projection", () => {
     );
   });
 
+  it("falls back to the defaults for a table name that would widen nameIN", async () => {
+    // "incident,sys_user" spliced into nameIN would read sys_user's
+    // dictionary too. The walk rejects it, and no dictionary read is sent.
+    const { operations, get } = client({ columns: ["u_column"] });
+
+    const bounded = await boundedAllFields(operations, "incident,sys_user", ["sys_id", "number"]);
+
+    expect(bounded).toEqual({ fields: ["sys_id", "number"], capped: true });
+    expect(get).not.toHaveBeenCalled();
+  });
+
   it("never names a sensitive column in the request", async () => {
     // Under a wildcard selection the value was scrubbed after arriving. Naming
     // it in sysparm_fields would pull it over the wire deliberately.

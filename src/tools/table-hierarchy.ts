@@ -29,8 +29,13 @@ const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
  *
  * At most `maxDepth` tables are returned, `table` included, and the walk stops
  * at the first ancestor that is empty, not a table name, or already in the
- * chain, so a cyclic super_class graph cannot repeat. A `table` that is not a
- * table name is returned alone without a request. A failed read throws.
+ * chain, so a cyclic super_class graph cannot repeat. A failed read throws.
+ *
+ * A `table` that is not a table name is rejected before any request. Callers
+ * splice the chain into a `nameIN` list, where a comma in it would add a table
+ * ("incident,sys_user"), and an empty chain would be an empty list, which
+ * ServiceNow may read as no filter at all. The dispatcher already rejects such
+ * names; this keeps direct callers fail-closed too.
  */
 export async function resolveTableHierarchy(
   client: ServiceNowOperations,
@@ -39,7 +44,7 @@ export async function resolveTableHierarchy(
   forceRecache: boolean
 ): Promise<readonly string[]> {
   const root = normalizeTableName(table);
-  if (root === undefined) return Object.freeze([table]);
+  if (root === undefined) throw new TypeError("table hierarchy requires a valid table name");
   const ancestorFields = Array.from(
     { length: Math.max(0, maxDepth - 1) },
     (_, index) => `${"super_class.".repeat(index + 1)}name`

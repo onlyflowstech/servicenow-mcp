@@ -116,12 +116,16 @@ describe("table hierarchy by name", () => {
     expect(await resolveTableHierarchy(operations, "u_missing", 12, false)).toEqual(["u_missing"]);
   });
 
-  it("returns an invalid table name alone without a request", async () => {
-    const { get, operations } = sysDbObject(CMDB_CHAIN);
+  it.each(["incident,sys_user", "incident^NQsys_user", "not a table", ""])(
+    "rejects the invalid table name %j before any request",
+    async (table) => {
+      // Callers splice the chain into nameIN: a comma would add sys_user.
+      const { get, operations } = sysDbObject(CMDB_CHAIN);
 
-    expect(await resolveTableHierarchy(operations, "not a table", 12, false)).toEqual(["not a table"]);
-    expect(get).not.toHaveBeenCalled();
-  });
+      await expect(resolveTableHierarchy(operations, table, 12, false)).rejects.toThrow(TypeError);
+      expect(get).not.toHaveBeenCalled();
+    }
+  );
 
   it("passes force_recache through to the metadata cache", async () => {
     const { get, operations } = sysDbObject(CMDB_CHAIN);
