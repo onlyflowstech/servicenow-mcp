@@ -33,6 +33,8 @@ interface UpstreamCall {
   readonly path: string;
   readonly kind: "token" | "watermark" | "read";
   readonly scheme: string;
+  /** sysparm_fields of a read, when it had one. */
+  readonly fields?: string;
 }
 
 interface InstanceState {
@@ -42,11 +44,47 @@ interface InstanceState {
   watermarkStatuses: number[];
 }
 
+function column(name: string, element: string, index: number) {
+  return {
+    sys_id: index.toString(16).padStart(32, "0"),
+    name,
+    element,
+    column_label: element,
+    internal_type: "string",
+    max_length: "40",
+    mandatory: "false",
+    reference: "",
+  };
+}
+
 const DICTIONARY_ROWS = [
   { sys_id: "a".repeat(32), name: "incident", element: "number", column_label: "Number", internal_type: "string", max_length: "40", mandatory: "false", reference: "" },
   { sys_id: "b".repeat(32), name: "incident", element: "short_description", column_label: "Short description", internal_type: "string", max_length: "160", mandatory: "true", reference: "" },
   { sys_id: "c".repeat(32), name: "incident", element: "caller_id", column_label: "Caller", internal_type: "reference", max_length: "32", mandatory: "false", reference: "sys_user" },
+  ...[
+    ["cmdb_ci_linux_server", "kernel_release"],
+    ["cmdb_ci_server", "classification"],
+    ["cmdb_ci_computer", "cpu_count"],
+    ["cmdb_ci_hardware", "serial_number"],
+    ["cmdb_ci", "name"],
+    ["cmdb_ci", "ip_address"],
+    ["cmdb", "sys_class_name"],
+  ].map(([table, element], index) => column(table!, element!, 0x100 + index)),
 ];
+
+/** Ancestors by table name, nearest first. Labels differ from names. */
+const CHAINS: Readonly<Record<string, readonly { name: string; label: string }[]>> = {
+  incident: [{ name: "task", label: "Task" }],
+  task: [],
+  cmdb_ci_linux_server: [
+    { name: "cmdb_ci_server", label: "Server" },
+    { name: "cmdb_ci_computer", label: "Computer" },
+    { name: "cmdb_ci_hardware", label: "Hardware" },
+    { name: "cmdb_ci", label: "Configuration Item" },
+    { name: "cmdb", label: "Base Configuration Item" },
+  ],
+};
+const CMDB_COLUMNS = ["classification", "cpu_count", "ip_address", "kernel_release", "name", "serial_number", "sys_class_name"];
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -86,7 +124,15 @@ function stubInstances() {
     const isWatermark =
       params.get("sysparm_query") === WATERMARK_QUERY &&
       params.get("sysparm_fields") === "sys_id,sys_updated_on";
-    calls.push({ host: url.host, method, path: url.pathname, kind: isWatermark ? "watermark" : "read", scheme });
+    const fields = params.get("sysparm_fields") ?? undefined;
+    calls.push({
+      host: url.host,
+      method,
+      path: url.pathname,
+      kind: isWatermark ? "watermark" : "read",
+      scheme,
+      ...(isWatermark || fields === undefined ? {} : { fields }),
+    });
 
     if (isWatermark) {
       const status = instance.watermarkStatuses.shift() ?? 200;
@@ -97,19 +143,32 @@ function stubInstances() {
       });
     }
     if (url.pathname === "/api/now/table/sys_db_object") {
-      // incident -> task, by label as the walk reads super_class today.
-      const name = /^name=([a-z_]+)/u.exec(params.get("sysparm_query") ?? "")?.[1];
-      const parent = name === "incident" ? "Task" : "";
-      return json(200, { result: name ? [{ name, super_class: parent }] : [] });
+      // Answers the dot-walked super_class(.super_class)*.name fields by name.
+      // super_class itself is the label, which the walk must not follow.
+      const name = /^name=([a-z_]+)/u.exec(params.get("sysparm_query") ?? "")?.[1] ?? "";
+      const ancestors = CHAINS[name];
+      if (ancestors === undefined) return json(200, { result: [] });
+      const row: Record<string, string> = { name, super_class: ancestors[0]?.label ?? "" };
+      for (const field of (fields ?? "").split(",")) {
+        const depth = field.split("super_class.").length - 1;
+        if (depth > 0) row[field] = ancestors[depth - 1]?.name ?? "";
+      }
+      return json(200, { result: [row] });
     }
     if (url.pathname === "/api/now/table/sys_documentation" || url.pathname === "/api/now/table/sys_choice") {
       return json(200, { result: [] });
     }
     if (url.pathname === "/api/now/table/sys_dictionary") {
       const query = params.get("sysparm_query") ?? "";
+      const tables = /^name(?:=|IN)([^^]+)/u.exec(query)?.[1]?.split(",");
       const allowed = /\^elementIN([^^]+)/u.exec(query)?.[1]?.split(",");
-      const rows = DICTIONARY_ROWS.filter((row) => !allowed || allowed.includes(row.element));
+      const rows = DICTIONARY_ROWS.filter((row) =>
+        (!tables || tables.includes(row.name)) && (!allowed || allowed.includes(row.element))
+      );
       return json(200, { result: rows }, { "x-total-count": String(rows.length) });
+    }
+    if (url.pathname === "/api/now/table/cmdb_ci_linux_server") {
+      return json(200, { result: [] }, { "x-total-count": "0" });
     }
     return json(404, { error: { message: "not stubbed" } });
   });
@@ -144,10 +203,11 @@ function target(table: string, tools: readonly string[]) {
 }
 
 const GRANTS = Object.freeze({
-  readTables: ["incident", "sys_dictionary", "sys_db_object", "sys_documentation", "sys_choice"],
+  readTables: ["incident", "cmdb_ci_linux_server", "sys_dictionary", "sys_db_object", "sys_documentation", "sys_choice"],
   writeTables: [],
   targets: [
     target("incident", ["sn_schema"]),
+    target("cmdb_ci_linux_server", ["sn_query", "sn_schema"]),
     target("sys_dictionary", ["sn_query", "sn_schema"]),
     target("sys_db_object", ["sn_schema"]),
     target("sys_documentation", ["sn_schema"]),
@@ -345,22 +405,64 @@ describe("sn_schema cache end to end", () => {
     return (result.structuredContent as { data: { fields: string[] } }).data.fields;
   }
 
-  it("reads each table's watermark once in a call that walks the hierarchy", async () => {
+  it("returns fields from all six levels of a CMDB chain, one watermark per table", async () => {
     const upstream = stubInstances();
     vi.stubGlobal("fetch", upstream.fetchStub);
     const client = await connect({ basic: PROFILES.basic });
 
-    const result = await client.callTool({
+    const fields = await fieldNames(client, "basic", { table: "cmdb_ci_linux_server", fields_only: true });
+    // fields_only reads the table's own dictionary only; the full schema walks.
+    expect(fields).toEqual(["kernel_release"]);
+    const full = await client.callTool({
       name: "sn_schema",
-      arguments: { profile: "basic", table: "incident" },
+      arguments: { profile: "basic", table: "cmdb_ci_linux_server", limit: 100 },
     });
 
-    expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
-    const hierarchyReads = upstream.calls.filter((call) => call.path === "/api/now/table/sys_db_object");
-    // Two hops (incident, task), one sys_db_object watermark.
-    expect(hierarchyReads.map((call) => call.kind)).toEqual(["watermark", "read", "read"]);
-    const watermarks = upstream.calls.filter((call) => call.kind === "watermark").map((call) => call.path);
+    expect(full.isError, JSON.stringify(full.content)).toBeFalsy();
+    const rows = (full.structuredContent as { data: { fields: { field: string; inherited_from?: string }[] } }).data.fields;
+    expect(rows.map((row) => row.field)).toEqual(CMDB_COLUMNS);
+    expect(rows.find((row) => row.field === "sys_class_name")?.inherited_from).toBe("cmdb");
+    // The walk is one sys_db_object read; the call read each table's watermark once.
+    const fullCall = upstream.calls.slice(upstream.calls.findIndex((call) => call.path === "/api/now/table/sys_db_object") - 1);
+    expect(fullCall.filter((call) => call.path === "/api/now/table/sys_db_object").map((call) => call.kind))
+      .toEqual(["watermark", "read"]);
+    const watermarks = fullCall.filter((call) => call.kind === "watermark").map((call) => call.path);
     expect(watermarks).toEqual(["/api/now/table/sys_db_object", "/api/now/table/sys_dictionary"]);
+  });
+
+  it("requests inherited columns for fields:all only as far as the profile's policy allows", async () => {
+    const upstream = stubInstances();
+    vi.stubGlobal("fetch", upstream.fetchStub);
+    const client = await connect({
+      wide: { ...PROFILES.basic },
+      narrow: {
+        ...PROFILES.basic,
+        readableTableFields: [{ table: "cmdb_ci_linux_server", fields: ["sys_id", "name"] }],
+      },
+    });
+    const queryFields = async (profile: string) => {
+      const start = upstream.calls.length;
+      const result = await client.callTool({
+        name: "sn_query",
+        arguments: { profile, table: "cmdb_ci_linux_server", fields: "all", limit: 1 },
+      });
+      expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
+      const calls = upstream.calls.slice(start);
+      const read = calls.find((call) => call.path === "/api/now/table/cmdb_ci_linux_server");
+      return {
+        fields: read?.fields?.split(",").sort() ?? [],
+        walked: calls.some((call) => call.path === "/api/now/table/sys_db_object"),
+      };
+    };
+
+    const wide = await queryFields("wide");
+    expect(wide.walked).toBe(true);
+    // Every level contributes: the table's own column and each ancestor's.
+    for (const field of CMDB_COLUMNS) expect(wide.fields).toContain(field);
+
+    const narrow = await queryFields("narrow");
+    expect(narrow.walked).toBe(false);
+    expect(narrow.fields).toEqual(["name", "sys_id"]);
   });
 
   it("hits across tool calls, so a repeat costs no upstream request", async () => {

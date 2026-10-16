@@ -32,6 +32,7 @@ import {
   envelopeCompatibilityResult,
   productionToolOutputSchemas,
 } from "./result-envelope.js";
+import { resolveTableHierarchy } from "./table-hierarchy.js";
 import {
   defineServiceNowToolModule,
   withRequiredProfile,
@@ -261,7 +262,9 @@ async function loadSchemaMetadata(
     }
   }
 
-  const hierarchy = enrich ? await resolveTableHierarchy(client, table, forceRecache) : Object.freeze([table]);
+  const hierarchy = enrich
+    ? await resolveTableHierarchy(client, table, MAX_SCHEMA_HIERARCHY_DEPTH, forceRecache)
+    : Object.freeze([table]);
   const rows = enrich
     ? await fetchDictionaryRows(client, hierarchy, readableFields, forceRecache)
     : await fetchLocalDictionaryRows(client, table, readableFields, forceRecache);
@@ -290,37 +293,6 @@ async function loadSchemaMetadata(
   }
   return snapshot;
 }
-
-async function resolveTableHierarchy(
-  client: ServiceNowOperations,
-  table: string,
-  forceRecache: boolean
-): Promise<readonly string[]> {
-  const hierarchy: string[] = [];
-  const seen = new Set<string>();
-  let current: string | undefined = table;
-  for (let depth = 0; current && depth < MAX_SCHEMA_HIERARCHY_DEPTH; depth += 1) {
-    const normalized = normalizeTableName(current);
-    if (!normalized || seen.has(normalized)) break;
-    seen.add(normalized);
-    hierarchy.push(normalized);
-    const response = await client.get<{ result?: unknown[] }>(
-      "/api/now/table/sys_db_object",
-      {
-        sysparm_query: `name=${escapeQueryValue(normalized)}`,
-        sysparm_fields: "name,super_class",
-        sysparm_limit: "1",
-        sysparm_display_value: "true",
-        sysparm_exclude_reference_link: "true",
-        ...(forceRecache ? { [FORCE_RECACHE_PARAM]: "true" } : {}),
-      }
-    );
-    const row = Array.isArray(response?.result) ? response.result[0] : undefined;
-    current = extractSuperClassName(row);
-  }
-  return hierarchy.length > 0 ? Object.freeze(hierarchy) : Object.freeze([table]);
-}
-
 
 async function fetchLocalDictionaryRows(
   client: ServiceNowOperations,
@@ -498,23 +470,6 @@ async function fetchChoices(
     out.set(element, list);
   }
   return new Map([...out.entries()].map(([key, value]) => [key, Object.freeze(value)]));
-}
-
-function normalizeTableName(candidate: unknown): string | undefined {
-  if (typeof candidate !== "string") return undefined;
-  const trimmed = candidate.trim().toLowerCase();
-  return /^[a-z][a-z0-9_]{0,79}$/u.test(trimmed) ? trimmed : undefined;
-}
-
-function extractSuperClassName(row: unknown): string | undefined {
-  if (typeof row !== "object" || row === null || Array.isArray(row)) return undefined;
-  const value = (row as Record<string, unknown>).super_class;
-  if (typeof value === "string") return normalizeTableName(value);
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    const record = value as Record<string, unknown>;
-    return normalizeTableName(record.display_value ?? record.value);
-  }
-  return undefined;
 }
 
 /** Overlay the authoritative local-page continuation on the shared envelope. */

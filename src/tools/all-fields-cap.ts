@@ -22,6 +22,7 @@ import type { ServiceNowOperations } from "../client.js";
 import { isSensitiveFieldName } from "../field-policy.js";
 import { FORCE_RECACHE_PARAM } from "../metadata-cache.js";
 import { escapeQueryValue } from "../utils.js";
+import { resolveTableHierarchy } from "./table-hierarchy.js";
 
 /** Upper bound on columns requested for an unrestricted selection. */
 export const MAX_ALL_FIELDS = 100;
@@ -94,7 +95,8 @@ async function dictionaryColumns(
   table: string,
   forceRecache: boolean
 ): Promise<readonly string[]> {
-  const hierarchy = await tableHierarchy(client, table, forceRecache);
+  // An extended table contributes its inherited columns.
+  const hierarchy = await resolveTableHierarchy(client, table, MAX_HIERARCHY_DEPTH, forceRecache);
   const response = await client.get<{ result?: unknown[] }>(
     "/api/now/table/sys_dictionary",
     {
@@ -123,48 +125,6 @@ async function dictionaryColumns(
     }
   }
   return [...columns];
-}
-
-/** Walk super_class so an extended table contributes its inherited columns. */
-async function tableHierarchy(
-  client: ServiceNowOperations,
-  table: string,
-  forceRecache: boolean
-): Promise<readonly string[]> {
-  const hierarchy: string[] = [];
-  const seen = new Set<string>();
-  let current: string | undefined = table;
-  for (let depth = 0; current && depth < MAX_HIERARCHY_DEPTH; depth += 1) {
-    const normalized = current.trim().toLowerCase();
-    if (!ELEMENT_NAME.test(normalized) || seen.has(normalized)) break;
-    seen.add(normalized);
-    hierarchy.push(normalized);
-    const response = await client.get<{ result?: unknown[] }>(
-      "/api/now/table/sys_db_object",
-      {
-        sysparm_query: `name=${escapeQueryValue(normalized)}`,
-        sysparm_fields: "name,super_class",
-        sysparm_limit: "1",
-        sysparm_display_value: "true",
-        sysparm_exclude_reference_link: "true",
-        ...(forceRecache ? { [FORCE_RECACHE_PARAM]: "true" } : {}),
-      }
-    );
-    const row = Array.isArray(response?.result) ? response.result[0] : undefined;
-    current = superClassName(row);
-  }
-  return hierarchy.length > 0 ? hierarchy : [table];
-}
-
-function superClassName(row: unknown): string | undefined {
-  if (typeof row !== "object" || row === null) return undefined;
-  const value = (row as Record<string, unknown>).super_class;
-  if (typeof value === "string") return value.trim() === "" ? undefined : value;
-  if (typeof value === "object" && value !== null) {
-    const display = (value as Record<string, unknown>).display_value;
-    if (typeof display === "string" && display.trim() !== "") return display;
-  }
-  return undefined;
 }
 
 /** Caller-visible notice explaining a capped projection. */
