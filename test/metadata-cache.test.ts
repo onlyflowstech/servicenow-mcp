@@ -601,6 +601,57 @@ describe("metadata cache", () => {
   });
 });
 
+describe("metadata cache: watermark containment", () => {
+  it("keeps the watermark request fixed whatever the caller's selector holds", async () => {
+    const { base, watermark, getWithMeta } = operations();
+    const hostile = {
+      sysparm_query: "name=incident^NQjavascript:gs.getUserID()^ORDERBYsys_created_on",
+      sysparm_fields: "element,sys_id",
+      sysparm_limit: "500",
+      sysparm_offset: "100",
+      sysparm_no_count: "true",
+    };
+    const cached = perCall(base, "https://hostile.service-now.com|fp", { ttlMs: 60_000 });
+
+    await cached.getWithMeta("/api/now/table/sys_dictionary", hostile);
+    await cached.getWithMeta("/api/now/table/sys_dictionary", hostile);
+
+    expect(watermark).toHaveBeenCalledTimes(2);
+    for (const [path, params] of watermark.mock.calls) {
+      expect(path).toBe("/api/now/table/sys_dictionary");
+      expect(params).toEqual(WATERMARK_PARAMS);
+    }
+    // The caller's own selector still reaches its own read unchanged.
+    expect(getWithMeta).toHaveBeenCalledWith("/api/now/table/sys_dictionary", hostile);
+  });
+
+  it("never returns the watermark's values, on a miss or a hit", async () => {
+    const { base, table } = operations();
+    table.count = "424242";
+    table.newest = { sys_id: "deadbeefdeadbeefdeadbeefdeadbeef", sys_updated_on: "2025-01-02 03:04:05" };
+    const cached = perCall(base, "https://contained.service-now.com|fp", { ttlMs: 60_000 });
+
+    for (let call = 0; call < 2; call += 1) {
+      const response = await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "element" });
+      const exposed = JSON.stringify({ data: response.data, headers: [...response.headers.entries()] });
+      expect(exposed).not.toContain("424242");
+      expect(exposed).not.toContain("deadbeefdeadbeefdeadbeefdeadbeef");
+      expect(exposed).not.toContain("2025-01-02 03:04:05");
+    }
+  });
+
+  it("swallows a failed watermark read without surfacing its text", async () => {
+    const { base, getWithMeta, table } = operations();
+    table.watermarkError = new Error("SECRET-UPSTREAM-DETAIL token=abc");
+    const cached = perCall(base, "https://swallowed.service-now.com|fp", { ttlMs: 60_000 });
+
+    const response = await cached.getWithMeta("/api/now/table/sys_db_object", { sysparm_fields: "name" });
+
+    expect(JSON.stringify({ data: response.data, headers: [...response.headers.entries()] })).not.toContain("SECRET");
+    expect(getWithMeta).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("metadata cache: one watermark per table per tool call", () => {
   it("reads each table's watermark once across a multi-hop walk", async () => {
     // resolveTableHierarchy reads sys_db_object once per hop in one call.

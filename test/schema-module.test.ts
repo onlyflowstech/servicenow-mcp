@@ -751,6 +751,25 @@ describe("sn_schema cross-call cache", () => {
     expect(wideNames).not.toEqual(narrowNames);
   });
 
+  it("misses between two bindings that differ only in credential identity", async () => {
+    // Same profile, instance and policy; a rotated secret is a new identity,
+    // and ServiceNow applies ACLs per identity.
+    const before = fakeOperations([dictionaryRows[1]]);
+    const after = fakeOperations(dictionaryRows);
+    const shared = { profile: "rotating", policy: { id: "restricted-table-policy:rotating" } };
+    const oldSecret = bindingFor({ ...shared, credentialIdentity: "fingerprint-old-secret" });
+    const newSecret = bindingFor({ ...shared, credentialIdentity: "fingerprint-new-secret" });
+    expect(newSecret.scope).not.toBe(oldSecret.scope);
+
+    const first = await fieldNames(before.operations, oldSecret);
+    const second = await fieldNames(after.operations, newSecret);
+
+    expect(before.get).toHaveBeenCalledTimes(1);
+    expect(after.get).toHaveBeenCalledTimes(1);
+    expect(first).toEqual(["number"]);
+    expect(second).not.toEqual(first);
+  });
+
   it("separates a policy change within one profile and one identity", () => {
     const base = { profile: "p", instance: "https://i.service-now.com", credentialIdentity: "c", ttlMs: 1_000 };
     const before = schemaCacheBinding({ ...base, policy: { tableAccess: { readTables: ["incident"] } } })!;
@@ -835,6 +854,26 @@ describe("sn_schema cross-call cache", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("rejects a table name that would widen the hierarchy nameIN list", async () => {
+    // The legacy source-level handler has no dispatcher in front of it. Field
+    // policy rejects the name before the walk runs, and the walk rejects it
+    // too; either way no dictionary read can name sys_user.
+    const fake = fakeOperations();
+
+    await expect(
+      handler(
+        { table: "incident,sys_user", fields_only: false, limit: 50, offset: 0, force_recache: false } as Parameters<typeof handler>[0],
+        fake.operations,
+        services(fake.operations).settings,
+        {} as Parameters<typeof handler>[3]
+      )
+    ).rejects.toThrow();
+    const dictionaryQueries = fake.get.mock.calls
+      .filter(([path]) => path === "/api/now/table/sys_dictionary")
+      .map(([, params]) => (params as Record<string, string> | undefined)?.sysparm_query ?? "");
+    expect(dictionaryQueries.some((query) => query.includes("sys_user"))).toBe(false);
   });
 
   it("does not cache across calls without a binding", async () => {

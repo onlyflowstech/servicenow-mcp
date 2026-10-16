@@ -478,6 +478,24 @@ describe("sn_schema cache end to end", () => {
     expect(upstream.calls.length).toBe(before);
   });
 
+  it("misses after the profile's secret is rotated", async () => {
+    // Same profile, instance and policy. The new secret is a new credential
+    // identity, which ServiceNow may map to a different run-as user.
+    const upstream = stubInstances();
+    vi.stubGlobal("fetch", upstream.fetchStub);
+    const client = await connect({ basic: PROFILES.basic });
+    const dictionaryReads = () =>
+      upstream.calls.filter((call) => call.path === "/api/now/table/sys_dictionary" && call.kind === "read").length;
+
+    await fieldNames(client, "basic");
+    await fieldNames(client, "basic");
+    expect(dictionaryReads()).toBe(1);
+
+    vi.stubEnv("E2E_BASIC_PASSWORD", `rotated-${credentialSeq}`);
+    await fieldNames(client, "basic");
+    expect(dictionaryReads()).toBe(2);
+  });
+
   it("never shares an entry between two profiles whose field policies differ", async () => {
     // Same instance and the same account: only the readable fields differ.
     const shared = {
