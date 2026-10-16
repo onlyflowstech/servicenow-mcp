@@ -303,15 +303,18 @@ wider one's schema.
 The partition is the credential, not the ServiceNow user it runs as. A cache
 hit re-reads only the table's watermark, so the run-as user's permissions on
 the cached rows are not evaluated again until the entry is refetched. Revoking
-read on a whole table shows on the next call, because the watermark read is
-refused. Tightening row- or field-level access does not move the watermark, so
-rows cached before the change are served for up to one TTL: 24 hours for
-metadata, 5 minutes for `sn_schema`. A metadata entry keeps the TTL of the
-profile that stored it, so another profile on the same credential with a
-shorter TTL can be served it for the longer one. After re-mapping a
-client_credentials application or API key to another user, or tightening that
-user's roles or ACLs, restart the server, rotate the secret, or pass
-`force_recache: true`.
+read on a whole table shows on the next metadata read, because the watermark
+read is refused; an `sn_schema` result already cached is still served until it
+expires (5 minutes by default, up to 1 hour). Tightening row- or field-level
+access does not move the watermark, so rows cached before the change are served
+for up to one TTL: by default 24 hours for metadata (configurable up to 7 days)
+and 5 minutes for `sn_schema`. A metadata entry keeps the TTL of the profile
+that stored it, so another profile on the same credential with a shorter TTL
+can be served it for the longer one. After re-mapping a client_credentials
+application or API key to another user, or tightening that user's roles or
+ACLs, restart the server or rotate the secret. `force_recache: true` is not a
+substitute: it refreshes only the read it is passed on, not the credential's
+whole cache.
 
 Journal content is readable on request. `comments` and `work_notes` on
 `incident` are returned by `fields=all`, `response_format: "detailed"`, an
