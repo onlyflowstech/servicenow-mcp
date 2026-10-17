@@ -800,10 +800,13 @@ are not revalidated in that window; `force_recache: true` refreshes them, and
 
 ### Unrestricted field selection (`fields=all`, `response_format=detailed`)
 
-Both resolve to a wildcard selection. They previously dropped `sysparm_fields`
-entirely, so ServiceNow returned every column and a wide table could breach the
-1 MiB cumulative upstream cap and **fail the call outright**. They are now
-bounded to at most **100 columns**.
+Both resolve to the profile's readable set for the table. Where the field
+policy narrows that set, they request exactly the listed fields and read no
+dictionary rows; the rest of this section applies when the readable set is
+every field. That wildcard selection used to drop `sysparm_fields` entirely,
+so ServiceNow returned every column and a wide table could breach the 1 MiB
+cumulative upstream cap and **fail the call outright**. It is now bounded to at
+most **100 columns**.
 
 The cap bounds the *upstream request*, not the response — truncating after
 receipt would not help, because the bytes have already crossed the wire and
@@ -822,7 +825,8 @@ Two behavior changes worth stating plainly, because they change what a caller
 gets back:
 
 - **Journal fields are now returned.** `comments` and `work_notes` are included
-  in the resolved set for `fields=all` and `detailed`. See
+  in the resolved set for `fields=all` and `detailed` wherever the profile can
+  read them. See
   [Journal content and field selection](#journal-content-and-field-selection).
 - **Sensitive-looking field names are excluded from the resolved set entirely.**
   A name matching the sensitive-field pattern is never *requested*, rather than
@@ -1110,6 +1114,14 @@ table that stores journal entries directly, such as `sys_journal_field`: if a
 profile may write it, per-table narrowing on `incident` does not reach a
 write addressed to it, so either leave it out of the write grant or narrow
 with a `"*"` entry, which reaches it.
+
+**Schema metadata.** `sn_schema` describes the fields the profile can read on
+the table it names. It needs `tableAccess` read on `sys_dictionary`,
+`sys_db_object`, `sys_documentation` and `sys_choice`, but a field policy on
+those metadata tables does not trim the labels, types, choices and help it
+returns for the readable fields. The exception is `inherited_from`, the
+ancestor table a field comes from: it appears only where the profile can read
+`super_class` on `sys_db_object`.
 
 **Role and group-membership tables.** Nothing built in blocks
 `sys_user_role`, `sys_user_has_role`, `sys_group_has_role` or

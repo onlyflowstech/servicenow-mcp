@@ -484,8 +484,10 @@ otherwise surfaces only as a generic policy denial at call time.
 
 ### Unrestricted field selection
 
-`fields=all` and `response_format: "detailed"` resolve to a wildcard selection
-and are bounded to at most **100 columns**, resolved from `sys_dictionary`
+`fields=all` and `response_format: "detailed"` resolve to the profile's readable
+set for the table. Where the field policy narrows that set, they request exactly
+the listed fields and read no dictionary rows. Where it is every field, they
+are bounded to at most **100 columns**, resolved from `sys_dictionary`
 including fields inherited through `super_class`. Ordering is the table's
 default projection first in declared order, then the remainder alphabetically.
 `sn_query` reports truncation in its `hint` field; `sn_get` will carry the same
@@ -495,10 +497,10 @@ failed the call outright.
 
 Two consequences for callers:
 
-- **Journal fields are returned.** `comments` and `work_notes` are in the
-  resolved set for `fields=all` and `detailed`, as they are for an explicit
-  `fields=comments` and for `sn_schema`. The default projection still excludes
-  them. Journal content on real instances routinely contains customer PII, so
+- **Journal fields are returned** wherever the profile can read them.
+  `comments` and `work_notes` are in the resolved set for `fields=all` and
+  `detailed`, as they are for an explicit `fields=comments` and for
+  `sn_schema`. The default projection still excludes them. Journal content on real instances routinely contains customer PII, so
   asking for all fields on `incident` returns customer-visible commentary.
 - **Sensitive-looking names are never requested.** A field whose name matches
   the sensitive pattern is excluded from the resolved set rather than requested

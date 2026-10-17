@@ -305,10 +305,13 @@ hit re-reads only the table's watermark, so the run-as user's permissions on
 the cached rows are not evaluated again until the entry is refetched. Revoking
 read on a whole table shows on the next metadata read, because the watermark
 read is refused; an `sn_schema` result already cached is still served until it
-expires (5 minutes by default, up to 1 hour). Tightening row- or field-level
-access does not move the watermark, so rows cached before the change are served
-for up to one TTL: by default 24 hours for metadata (configurable up to 7 days)
-and 5 minutes for `sn_schema`. A metadata entry keeps the TTL of the profile
+expires (5 minutes by default, up to 1 hour). Tightening ServiceNow row- or
+field-level ACLs does not move the watermark, so rows cached before the change
+are served for up to one TTL: by default 24 hours for metadata (configurable up
+to 7 days) and 5 minutes for `sn_schema`. This concerns the instance's ACLs
+only. A profile's `tableAccess` and `fieldPolicy` are applied on every call,
+cached or not, so profiles that share a credential share cached rows but never
+each other's permissions. A metadata entry keeps the TTL of the profile
 that stored it, so another profile on the same credential with a shorter TTL
 can be served it for the longer one. After re-mapping a client_credentials
 application or API key to another user, or tightening that user's roles or
