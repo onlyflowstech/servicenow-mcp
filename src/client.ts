@@ -695,6 +695,11 @@ class ServiceNowRequestCancelledError extends Error {
   }
 }
 
+/** True when a request failed because its caller cancelled it. */
+export function isServiceNowRequestCancellation(error: unknown): boolean {
+  return error instanceof ServiceNowRequestCancelledError;
+}
+
 function currentRequestSignal(): AbortSignal | undefined {
   return REQUEST_SCOPE.getStore()?.signal;
 }

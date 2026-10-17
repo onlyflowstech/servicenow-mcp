@@ -50,10 +50,9 @@ earlier 2.0 pre-release did move to HTTP — if you configured against that, see
 - **Append-only incident journal tools.** `sn_incident_add_comment` and
   `sn_incident_add_work_note`.
 - **Metadata caching.** Per-instance-and-identity caching of dictionary and
-  schema reads, off by default for tables you do not name. It requires a
-  resolvable session timezone, so it is **disabled for OAuth
-  client_credentials and API-key profiles**, which carry no username — see
-  [Metadata caching prerequisites](CLIENT-SETUP.md#metadata-caching-prerequisites).
+  schema reads, off by default for tables you do not name. It works in every
+  auth mode, including OAuth client_credentials and API key — see
+  [Metadata caching](CLIENT-SETUP.md#metadata-caching).
 - **Bounded unrestricted field selection.** `fields=all` and
   `response_format: "detailed"` are capped at 100 columns instead of dropping
   `sysparm_fields` and risking a failed call on a wide table.

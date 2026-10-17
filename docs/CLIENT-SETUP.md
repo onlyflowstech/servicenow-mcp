@@ -504,30 +504,32 @@ Two consequences for callers:
   the sensitive pattern is excluded from the resolved set rather than requested
   and scrubbed on arrival, so the value does not cross the wire at all.
 
-### Metadata caching prerequisites
+### Metadata caching
 
-Caching is per instance *and* credential identity, and it requires a resolvable
-session timezone: the freshness probe compares `sys_updated_on`, which
-ServiceNow evaluates in the session user's timezone rather than UTC. Resolving
-it needs the authenticating account's `user_name` to read `sys_user.time_zone`,
-falling back to the `glide.sys.default.tz` property. The profile therefore needs
-read access to `sys_user` and `sys_properties` for the lookup to work.
+Caching is per instance *and* credential identity, and it works the same in
+every auth mode, including OAuth client_credentials and API key. Freshness is
+checked against a watermark the instance reports: the table's row count and its
+newest row by `sys_updated_on`, read as its stored UTC value. No timezone,
+username, or `sys_user` / `sys_properties` read is involved. The only access it
+needs is the ServiceNow read permission of the user the credential runs as, on
+the cached table; no `tableAccess` change is needed. If a table's watermark
+cannot be used, its reads go straight upstream for a while: 15 minutes for a
+lasting cause such as a 403 or an incomplete watermark, 30 seconds for a 429,
+5xx, or network failure.
 
-When the zone cannot be resolved, **caching is disabled for that identity**
-rather than falling back to a UTC assumption — a wrong assumption would serve
-silently stale metadata for the length of the offset. Because OAuth
-client_credentials and API-key profiles carry no username, metadata caching is
-disabled for them entirely. Basic auth and the OAuth password grant are
-unaffected.
+The practical saving is payload bytes, never round trips: a hit still performs
+one watermark read, and a miss performs one extra. Within one tool call each
+table's watermark is read once.
 
-The practical cost is small and worth stating: the cache only ever saved payload
-bytes, never round trips, since a hit still performs one freshness probe. The
-loss on an affected profile is bandwidth on `sys_dictionary` reads, not latency.
+Inserts, updates, and deletes all move the watermark. An update in the same
+second as the stored watermark, to a row other than the newest, and a write that
+skips the system fields (`autoSysFields(false)`) can go unseen for up to one
+TTL — 24 hours by default. Lower the TTL or pass `force_recache: true` when a
+change must be reflected sooner.
 
-Deletions to a cached metadata table become visible within one TTL — 24 hours by
-default. The probe detects updates, not deletes, so a deleted row stays served
-until its entry expires. Lower the TTL or pass `force_recache: true` when a
-deletion must be reflected sooner.
+`sn_schema` keeps its assembled result for 5 minutes per profile, credential
+identity, and effective policy, without revalidating it. `force_recache: true`
+refreshes it.
 
 Incident `comments` and `work_notes` are append-only journal fields. Both
 `sn_update` and the dedicated incident tools can write them, and the

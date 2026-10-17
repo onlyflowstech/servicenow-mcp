@@ -87,6 +87,7 @@ import * as profile from "./profile.js";
 import * as query from "./query.js";
 import * as relationships from "./relationships.js";
 import * as schema from "./schema.js";
+import { schemaCacheBinding } from "./schema-module.js";
 import * as syslog from "./syslog.js";
 import * as update from "./update.js";
 import { finalizeEnvelopeResult } from "./result-envelope.js";
@@ -97,6 +98,7 @@ import {
   snapshotIssuedToolSchema,
   snapshotToolModuleCatalog,
   type ContextOnlyToolModuleContract,
+  type SchemaCacheBinding,
   type ServiceNowToolHandlerServices,
   type ServiceNowToolModuleContract,
   type ToolModuleContract,
@@ -115,6 +117,7 @@ export {
 export type {
   ContextOnlyToolHandlerServices,
   RequiredToolAnnotations,
+  SchemaCacheBinding,
   ServiceNowToolHandlerServices,
   ServiceNowToolSettings,
   ToolDefinition,
@@ -614,12 +617,14 @@ function registerStandardTool(
             // per-user ACLs, and a cache hit bypasses the upstream read, so
             // two identities on one instance must never share a partition.
             `${context.profile.instance}|${credentialFingerprint(config)}`,
-            config.metadataCache,
-            // Needed to resolve the session timezone the freshness probe
-            // compares in; without it the cache disables itself.
-            config.user
+            config.metadataCache
           ),
           ...(tool.definition.name === "sn_atf_run" || tool.definition.name === "sn_atf_results" ? { atfResults: atfResultStore(binding.name, config, JSON.stringify(context.effectivePolicy)) } : {}),
+          // Partitioned like the metadata cache, plus the profile and its
+          // effective policy: the policy decides which fields a schema shows.
+          ...(tool.definition.name === "sn_schema"
+            ? schemaCacheServices(context, config)
+            : {}),
           settings: Object.freeze({
             instance: context.profile.instance,
             displayValue: config.displayValue,
@@ -1245,6 +1250,21 @@ function correlatedToolError(
   correlationId: string
 ): CallToolResult {
   return err(`${formatToolError(error)}\nCorrelation ID: ${correlationId}.`);
+}
+
+/** The sn_schema cache partition for one call, when the cache is on. */
+function schemaCacheServices(
+  context: ExecutionContext,
+  config: ServiceNowConfig
+): { readonly schemaCache?: SchemaCacheBinding } {
+  const schemaCache = schemaCacheBinding({
+    profile: context.profile.name,
+    instance: context.profile.instance,
+    credentialIdentity: credentialFingerprint(config),
+    policy: context.effectivePolicy,
+    ttlMs: config.schemaCacheTtlMs,
+  });
+  return schemaCache === undefined ? {} : { schemaCache };
 }
 
 /** Preserve handler output and centrally attach the canonical profile envelope. */

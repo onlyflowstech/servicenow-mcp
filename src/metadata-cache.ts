@@ -5,40 +5,52 @@
  * selector. The scope must discriminate credential identity as well as
  * instance: ServiceNow evaluates ACLs per user, and a cache hit skips the
  * upstream read entirely, so a scope shared between identities would serve
- * one caller's authorized rows to another. A cache hit performs a lightweight
- * sys_updated_on probe before reuse; changed rows force a refresh. Callers can
- * force refresh by passing the internal sysparm_force_recache=true parameter,
- * which is stripped before upstream I/O.
+ * one caller's authorized rows to another. Callers can force refresh by
+ * passing the internal sysparm_force_recache=true parameter, which is stripped
+ * before upstream I/O.
  *
- * The freshness probe compares sys_updated_on, which ServiceNow evaluates in
- * the session user's timezone, so the probe timestamp is formatted in that
- * timezone rather than UTC. The zone is resolved per identity from
- * sys_user.time_zone, falling back to the glide.sys.default.tz property; when
- * it cannot be resolved, caching is disabled for that identity rather than
- * assuming UTC and serving silently stale metadata.
+ * Freshness is a server watermark: the table's row count (X-Total-Count) and
+ * its newest row by sys_updated_on, read back as the stored UTC value. Each
+ * entry keeps the watermark read just before its rows were fetched, and a
+ * cache hit is served only while a new watermark read still matches it. Both
+ * sides of the comparison come from the instance, so the session timezone,
+ * date format, DST and clock skew between this host and the instance play no
+ * part, and no user lookup is needed: caching behaves the same in every auth
+ * mode.
  *
- * Deletions are not detected by the probe, which sees updates only. A row
- * deleted upstream stays visible for at most one TTL: a successful probe
- * refreshes recency for eviction but never extends expiresAt, so the entry
- * still expires on schedule and forces a genuine refetch.
+ * An insert or an update makes its row the newest, and an insert or a delete
+ * changes the count, so every write moves the watermark -- at one-second
+ * resolution. An update within the stored watermark's own second, to a row
+ * other than the newest, can still go unseen; so can a write that skips the
+ * system fields. Such a row stays stale for at most one TTL: a matching
+ * watermark refreshes recency for eviction but never extends expiresAt, so the
+ * entry still expires on schedule and forces a genuine refetch.
+ *
+ * Two memos keep the watermark from costing more than it saves. Within one
+ * tool call each table's watermark is read once, however many reads of the
+ * table the call makes. Across calls, a table whose watermark proved unusable
+ * is read straight through, without a watermark, for a while: long for causes
+ * that persist (an incomplete or future-dated watermark, a 4xx), short for
+ * transient ones (429, 5xx, timeouts, network).
  *
  * @module metadata-cache
  */
 
-import type {
-  RequestResult,
-  ServiceNowOperations,
+import {
+  isServiceNowRequestCancellation,
+  type RequestResult,
+  type ServiceNowOperations,
 } from "./client.js";
 import { parsePositiveIntegerEnv } from "./config.js";
-import { escapeQueryValue } from "./utils.js";
+import { trustedToolErrorDescriptor } from "./tool-error.js";
 
 export const DEFAULT_METADATA_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 /**
  * Tables cached by default.
  *
- * The bar for inclusion is a large payload relative to the freshness probe,
+ * The bar for inclusion is a large payload relative to the watermark read,
  * not merely "this table changes rarely" -- a cache hit still costs one
- * upstream round trip (see hasChangedSince), so the saving is payload bytes,
+ * upstream round trip (see tableWatermark), so the saving is payload bytes,
  * never request count. sys_properties is deliberately absent: its rows are
  * ACL-restricted per user and routinely hold integration secrets in `value`,
  * and the only reads of it here are three single-value build-info lookups
@@ -67,16 +79,46 @@ export interface MetadataCacheConfig {
 
 type Jsonish = Awaited<ReturnType<Response["json"]>>;
 
+/**
+ * A table's row count and newest row, as the instance reports them. An empty
+ * table has count 0 and blank row fields.
+ */
+interface Watermark {
+  readonly count: number;
+  readonly sysId: string;
+  readonly updatedOn: string;
+}
+
+/**
+ * Why a watermark cannot be used, which decides how long the table's reads go
+ * straight through. A cancelled read says nothing about the table.
+ */
+type UnusableReason = "structural" | "transient" | "cancelled";
+
+type WatermarkRead =
+  | { readonly usable: true; readonly watermark: Watermark }
+  | { readonly usable: false; readonly reason: UnusableReason };
+
 interface CacheEntry {
   readonly expiresAt: number;
-  readonly lastSyncedAt: number;
+  /** Read before `data` was fetched, never after -- see cachedGetWithMeta. */
+  readonly watermark: Watermark;
   readonly data: Jsonish | null;
   readonly status: number;
   readonly headers: readonly [string, string][];
 }
 
-const SCOPED_CACHES = new Map<string, Map<string, CacheEntry>>();
+interface ScopeState {
+  readonly entries: Map<string, CacheEntry>;
+  /** Table -> epoch ms until which its reads pass through without a watermark. */
+  readonly uncacheable: Map<string, number>;
+}
+
+const SCOPED_CACHES = new Map<string, ScopeState>();
 const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
+/** sys_updated_on as returned with sysparm_display_value=false (UTC). */
+const STORED_DATE_TIME = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/u;
+const ROW_COUNT = /^(?:0|[1-9]\d{0,15})$/u;
 export const FORCE_RECACHE_PARAM = "sysparm_force_recache";
 const MAX_CACHE_TABLE_PATTERNS = 128;
 const MAX_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -85,23 +127,10 @@ const MAX_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  * so both are capped and evicted in least-recently-used order. */
 export const MAX_METADATA_CACHE_SCOPES = 64;
 export const MAX_METADATA_CACHE_ENTRIES_PER_SCOPE = 512;
-
-/**
- * Resolved ServiceNow session timezone per cache scope.
- *
- * A timezone NAME is cached, never a numeric offset: an offset is wrong for
- * half the year, and a cached one silently reintroduces the skew at every DST
- * transition -- the longer the TTL, the longer it stays wrong. The offset is
- * computed from the name for the specific instant being compared.
- *
- * Keyed by the same scope as the metadata cache, so it discriminates instance
- * AND credential identity: two profiles on one instance can authenticate as
- * accounts in different timezones, and sharing a resolution between them would
- * corrupt the freshness window for both.
- */
-const SCOPED_TIME_ZONES = new Map<string, Promise<string | undefined>>();
-const TIME_ZONE_WARNED_SCOPES = new Set<string>();
-const DEFAULT_TIME_ZONE_PROPERTY = "glide.sys.default.tz";
+/** How long a table goes uncached after its watermark proved unusable; never
+ * longer than the cache TTL. */
+export const STRUCTURAL_UNCACHEABLE_MS = 15 * 60 * 1000;
+export const TRANSIENT_UNCACHEABLE_MS = 30 * 1000;
 
 interface MetadataCacheEnvironment {
   readonly SN_METADATA_CACHE_TTL_MS?: string;
@@ -135,65 +164,58 @@ export function createMetadataCacheConfig(
 /**
  * @param scope Cache partition key. Must identify the ServiceNow instance
  *   *and* the credential identity reading from it -- see the module docstring.
- * @param sessionUserName ServiceNow user_name this scope authenticates as.
- *   Required to resolve the session timezone; without it the freshness probe
- *   cannot be made correct, so caching is disabled for the scope.
  */
 export function createCachedServiceNowOperations(
   operations: ServiceNowOperations,
   scope: string,
-  config: MetadataCacheConfigInput | undefined,
-  sessionUserName?: string
+  config: MetadataCacheConfigInput | undefined
 ): ServiceNowOperations {
   if (config === undefined && process.env.NODE_ENV === "test") {
     return operations;
   }
   const cacheConfig = createMetadataCacheConfig(config);
-  const scopedCache = cacheForScope(scope);
+  const state = stateForScope(scope);
+  // One watermark per table for this wrapper's lifetime, which is one tool
+  // call: the dispatcher builds a wrapper per call. A hierarchy walk then
+  // reads sys_db_object's watermark once, not once per hop. Any write the call
+  // makes clears it, so the call's later reads see its own writes. No memo
+  // spans calls: that would add staleness across calls for almost no time.
+  const watermarks = new Map<string, Promise<WatermarkRead>>();
+  const clearingWatermarks = <A extends unknown[], R>(write: (...args: A) => Promise<R>) =>
+    async (...args: A): Promise<R> => {
+      try {
+        return await write(...args);
+      } finally {
+        watermarks.clear();
+      }
+    };
   const cached = Object.create(null) as ServiceNowOperations;
   Object.defineProperties(cached, {
     get: {
       value: async <T = Jsonish>(path: string, params?: Record<string, string>) =>
-        (
-          await cachedGetWithMeta<T>(
-            operations,
-            scopedCache,
-            cacheConfig,
-            path,
-            params,
-            { scope, sessionUserName }
-          )
-        ).data,
+        (await cachedGetWithMeta<T>(operations, state, watermarks, cacheConfig, path, params)).data,
     },
     getWithMeta: {
       value: <T = Jsonish>(path: string, params?: Record<string, string>) =>
-        cachedGetWithMeta<T>(operations, scopedCache, cacheConfig, path, params, {
-          scope,
-          sessionUserName,
-        }),
+        cachedGetWithMeta<T>(operations, state, watermarks, cacheConfig, path, params),
     },
-    post: { value: operations.post.bind(operations) },
-    patch: { value: operations.patch.bind(operations) },
-    delete: { value: operations.delete.bind(operations) },
-    postBinary: { value: operations.postBinary.bind(operations) },
+    post: { value: clearingWatermarks(operations.post.bind(operations)) },
+    patch: { value: clearingWatermarks(operations.patch.bind(operations)) },
+    delete: { value: clearingWatermarks(operations.delete.bind(operations)) },
+    postBinary: { value: clearingWatermarks(operations.postBinary.bind(operations)) },
     getRaw: { value: operations.getRaw.bind(operations) },
-    ...(operations.saveAtfStepInputs ? { saveAtfStepInputs: { value: operations.saveAtfStepInputs.bind(operations) } } : {}),
+    ...(operations.saveAtfStepInputs ? { saveAtfStepInputs: { value: clearingWatermarks(operations.saveAtfStepInputs.bind(operations)) } } : {}),
   });
   return Object.freeze(cached);
 }
 
-interface CacheIdentity {
-  readonly scope: string;
-  readonly sessionUserName: string | undefined;
-}
-
 async function cachedGetWithMeta<T>(
   operations: ServiceNowOperations,
-  cache: Map<string, CacheEntry>,
+  state: ScopeState,
+  watermarks: Map<string, Promise<WatermarkRead>>,
   config: MetadataCacheConfig,
   path: string,
-  params: Record<string, string> | undefined,
-  identity: CacheIdentity
+  params: Record<string, string> | undefined
 ): Promise<RequestResult<T>> {
   // Strip the internal flag before any upstream call, including the
   // passthrough: sysparm_force_recache is this module's own parameter and must
@@ -204,44 +226,61 @@ async function cachedGetWithMeta<T>(
     return operations.getWithMeta<T>(path, cleanParams);
   }
 
-  // The freshness probe compares sys_updated_on in the session user's
-  // timezone. Without knowing that timezone the probe is wrong by the offset,
-  // so caching is disabled for this identity rather than assuming UTC.
-  const timeZone = await sessionTimeZone(operations, identity);
-  if (timeZone === undefined) {
-    return operations.getWithMeta<T>(path, cleanParams);
-  }
-
-  const key = cacheKey(path, cleanParams);
   const now = Date.now();
-  const existing = cache.get(key);
-  if (existing && existing.expiresAt <= now) cache.delete(key);
-  if (!forceRecache && existing && existing.expiresAt > now) {
-    const changed = await hasChangedSince(
-      operations,
-      match,
-      existing.lastSyncedAt,
-      timeZone
-    );
-    if (!changed) {
-      // Re-insert to mark the entry most recently used for eviction order.
-      cache.delete(key);
-      cache.set(key, existing);
-      return cloneCachedResult<T>(existing);
+  const uncacheableUntil = state.uncacheable.get(match);
+  if (uncacheableUntil !== undefined) {
+    if (!forceRecache && uncacheableUntil > now) {
+      return operations.getWithMeta<T>(path, cleanParams);
     }
+    // Expired, or the caller asked for a refresh: try the watermark again.
+    state.uncacheable.delete(match);
+    watermarks.delete(match);
   }
 
-  const lastSyncedAt = Date.now();
+  const cache = state.entries;
+  const key = cacheKey(path, cleanParams);
+  const existing = cache.get(key);
+
+  // Read on a miss too, and always before the rows. An update landing between
+  // the two reads is then in the rows but not the watermark, which costs one
+  // extra refresh; read the other way round it would be in the watermark but
+  // not the rows, and the next comparison would serve it stale until expiry.
+  // A watermark memoized earlier in the call was also read before these rows.
+  const read = await callWatermark(operations, watermarks, match);
+  if (!read.usable) markUncacheable(state, match, read.reason, config.ttlMs);
+  const watermark = read.usable ? read.watermark : undefined;
+  if (
+    !forceRecache &&
+    existing !== undefined &&
+    existing.expiresAt > now &&
+    watermark !== undefined &&
+    sameWatermark(existing.watermark, watermark)
+  ) {
+    // Re-insert to mark the entry most recently used for eviction order.
+    cache.delete(key);
+    cache.set(key, existing);
+    return cloneCachedResult<T>(existing);
+  }
+
+  // A forced refresh must never leave behind the rows it was asked to replace:
+  // it is how a caller surfaces a write the watermark missed. Any other
+  // refetch leaves the entry until it is replaced -- if these rows cannot be
+  // kept, the old ones are still correct against any later watermark read that
+  // matches theirs, so they serve again once the table is cacheable again.
+  if (forceRecache) cache.delete(key);
   const fresh = await operations.getWithMeta<T>(path, cleanParams);
   // Only a materialized 200 body is reusable. A 204 carries no rows, and a
   // failed read throws before reaching here, so nothing negative is cached.
-  if (fresh.status !== 200 || fresh.data === null) return fresh;
+  // Rows without a watermark could never be revalidated, so they are not kept.
+  if (fresh.status !== 200 || fresh.data === null || watermark === undefined) {
+    return fresh;
+  }
   cache.delete(key);
   cache.set(
     key,
     Object.freeze({
-      expiresAt: lastSyncedAt + config.ttlMs,
-      lastSyncedAt,
+      expiresAt: now + config.ttlMs,
+      watermark,
       data: cloneJson(fresh.data),
       status: fresh.status,
       headers: Object.freeze([...fresh.headers.entries()]),
@@ -249,6 +288,32 @@ async function cachedGetWithMeta<T>(
   );
   evictOldest(cache, MAX_METADATA_CACHE_ENTRIES_PER_SCOPE);
   return fresh;
+}
+
+function callWatermark(
+  operations: ServiceNowOperations,
+  watermarks: Map<string, Promise<WatermarkRead>>,
+  table: string
+): Promise<WatermarkRead> {
+  let pending = watermarks.get(table);
+  if (pending === undefined) {
+    pending = tableWatermark(operations, table);
+    watermarks.set(table, pending);
+  }
+  return pending;
+}
+
+function markUncacheable(
+  state: ScopeState,
+  table: string,
+  reason: UnusableReason,
+  ttlMs: number
+): void {
+  if (reason === "cancelled") return;
+  const period = reason === "structural" ? STRUCTURAL_UNCACHEABLE_MS : TRANSIENT_UNCACHEABLE_MS;
+  state.uncacheable.delete(table);
+  state.uncacheable.set(table, Date.now() + Math.min(period, ttlMs));
+  evictOldest(state.uncacheable, MAX_METADATA_CACHE_ENTRIES_PER_SCOPE);
 }
 
 /** Drop least-recently-used entries until the map is within `limit`. */
@@ -260,29 +325,104 @@ function evictOldest(entries: Map<string, unknown>, limit: number): void {
   }
 }
 
-async function hasChangedSince(
+/**
+ * The table's row count and newest row by sys_updated_on, read back as stored.
+ *
+ * The order is evaluated on the instance and the values are compared as opaque
+ * strings, so no date literal is ever built on this side. The count is the
+ * X-Total-Count header of the same request, which carries the table's total
+ * only while sysparm_no_count is left unset (with it set, the header still
+ * comes back but holds the page size).
+ *
+ * A count of 0 with no rows is a valid watermark for an empty table: the
+ * header counts rows before row ACLs filter them (a table whose newest row is
+ * ACL-hidden reads back a positive count and no row), so any insert moves it.
+ *
+ * The watermark is unusable, structurally, when:
+ * - the response is not a 200, or the count or a row field is missing or
+ *   malformed (an unreadable sys_updated_on would compare equal forever);
+ * - the count is positive but no row came back, which is what a row ACL that
+ *   filters after the limit produces when it hides the newest row;
+ * - the newest row is dated after the instance's own clock (the response Date
+ *   header). Such a row stays the newest however many others are updated, so
+ *   only the count would move, and in-place updates would go unseen.
+ * A thrown read is classified by readFailureReason.
+ */
+async function tableWatermark(
   operations: ServiceNowOperations,
-  table: string,
-  lastSyncedAt: number,
-  timeZone: string
-): Promise<boolean> {
+  table: string
+): Promise<WatermarkRead> {
+  const structural = { usable: false, reason: "structural" } as const;
   try {
-    const response = await operations.get<{ result?: unknown[] }>(
+    const response = await operations.getWithMeta<{ result?: unknown[] }>(
       `/api/now/table/${table}`,
       {
-        sysparm_query: `sys_updated_on>${serviceNowDateTime(lastSyncedAt, timeZone)}`,
+        sysparm_query: "ORDERBYDESCsys_updated_on",
         sysparm_fields: "sys_id,sys_updated_on",
         sysparm_limit: "1",
-        sysparm_no_count: "true",
         sysparm_display_value: "false",
         sysparm_exclude_reference_link: "true",
       }
     );
-    return Array.isArray(response?.result) && response.result.length > 0;
-  } catch {
-    // A failed probe must not serve stale metadata indefinitely.
-    return true;
+    const count = response.headers.get("x-total-count") ?? "";
+    if (response.status !== 200 || !ROW_COUNT.test(count)) return structural;
+    const rows = response.data?.result;
+    if (!Array.isArray(rows)) return structural;
+    if (rows.length === 0) {
+      return count === "0"
+        ? { usable: true, watermark: Object.freeze({ count: 0, sysId: "", updatedOn: "" }) }
+        : structural;
+    }
+    const row: unknown = rows[0];
+    if (typeof row !== "object" || row === null) return structural;
+    const { sys_id: sysId, sys_updated_on: updatedOn } = row as Record<string, unknown>;
+    if (typeof sysId !== "string" || sysId === "") return structural;
+    if (typeof updatedOn !== "string") return structural;
+    const stored = STORED_DATE_TIME.exec(updatedOn);
+    const updatedAt = stored ? Date.parse(`${stored[1]}T${stored[2]}Z`) : Number.NaN;
+    const serverNow = Date.parse(response.headers.get("date") ?? "");
+    if (!Number.isFinite(updatedAt) || !Number.isFinite(serverNow)) return structural;
+    if (updatedAt > serverNow) return structural;
+    return { usable: true, watermark: Object.freeze({ count: Number(count), sysId, updatedOn }) };
+  } catch (error) {
+    // A failed read must not serve stale metadata.
+    return { usable: false, reason: readFailureReason(error) };
   }
+}
+
+/**
+ * A 403, 404, 409 or other fixed rejection of this request shape will repeat,
+ * so it is structural. A 401 (a token refresh can fix it), 429, 5xx, timeout,
+ * network or unrecognized failure is transient.
+ */
+function readFailureReason(error: unknown): UnusableReason {
+  if (isServiceNowRequestCancellation(error)) return "cancelled";
+  const descriptor = trustedToolErrorDescriptor(error);
+  switch (descriptor?.category) {
+    case "authorization":
+    case "not_found":
+    case "conflict":
+      return "structural";
+    case "upstream":
+      // The client marks a 5xx GET retryable and any other status do_not_retry.
+      return descriptor.retry === "do_not_retry" ? "structural" : "transient";
+    default:
+      return "transient";
+  }
+}
+
+/**
+ * Every field counts. The count catches inserts and deletes; the sys_id also
+ * catches the newest row being replaced as newest within the same second. A
+ * tie at the top that the instance orders differently between reads only
+ * costs an extra refresh.
+ */
+function sameWatermark(left: Watermark, right: Watermark): boolean {
+  return (
+    left.count === right.count &&
+    left.sysId === right.sysId &&
+    left.updatedOn === right.updatedOn
+  );
 }
 
 function metadataTableFromPath(path: string): string | undefined {
@@ -312,14 +452,14 @@ function stripForceRecache(params: Record<string, string> | undefined): {
   };
 }
 
-function cacheForScope(scope: string): Map<string, CacheEntry> {
+function stateForScope(scope: string): ScopeState {
   const existing = SCOPED_CACHES.get(scope);
   if (existing) {
     SCOPED_CACHES.delete(scope);
     SCOPED_CACHES.set(scope, existing);
     return existing;
   }
-  const next = new Map<string, CacheEntry>();
+  const next: ScopeState = Object.freeze({ entries: new Map(), uncacheable: new Map() });
   SCOPED_CACHES.set(scope, next);
   evictOldest(SCOPED_CACHES, MAX_METADATA_CACHE_SCOPES);
   return next;
@@ -343,145 +483,6 @@ function cloneCachedResult<T>(entry: CacheEntry): RequestResult<T> {
 function cloneJson<T>(value: T): T {
   if (value === null || value === undefined) return value;
   return JSON.parse(JSON.stringify(value)) as T;
-}
-
-/**
- * Format an instant as ServiceNow's `YYYY-MM-DD HH:mm:ss` in the given zone.
- *
- * The offset is derived from the zone NAME for this specific instant, so a
- * timestamp on either side of a DST transition resolves to the offset actually
- * in force then. This is why the name is what gets cached.
- */
-function serviceNowDateTime(epochMs: number, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).formatToParts(new Date(epochMs));
-  const field = (type: Intl.DateTimeFormatPartTypes): string =>
-    parts.find((part) => part.type === type)?.value ?? "00";
-  return (
-    `${field("year")}-${field("month")}-${field("day")} ` +
-    `${field("hour")}:${field("minute")}:${field("second")}`
-  );
-}
-
-/** True when Intl recognizes the name, so a bad value never silently formats. */
-function isUsableTimeZone(candidate: unknown): candidate is string {
-  if (typeof candidate !== "string" || candidate.trim() === "") return false;
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: candidate.trim() });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Resolve, and memoize per scope, the timezone the session user's
- * `sys_updated_on` comparisons are evaluated in.
- *
- * Chain: the user's own `sys_user.time_zone`, then the instance default in
- * `glide.sys.default.tz`, then unresolved. `time_zone` is not a required field
- * and is frequently empty; an empty value means "inherit the system default"
- * and must never be read as UTC, which is the very error this fixes.
- */
-async function sessionTimeZone(
-  operations: ServiceNowOperations,
-  identity: CacheIdentity
-): Promise<string | undefined> {
-  const existing = SCOPED_TIME_ZONES.get(identity.scope);
-  if (existing) {
-    SCOPED_TIME_ZONES.delete(identity.scope);
-    SCOPED_TIME_ZONES.set(identity.scope, existing);
-    return existing;
-  }
-  const pending = resolveSessionTimeZone(operations, identity);
-  SCOPED_TIME_ZONES.set(identity.scope, pending);
-  evictOldest(SCOPED_TIME_ZONES, MAX_METADATA_CACHE_SCOPES);
-  return pending;
-}
-
-async function resolveSessionTimeZone(
-  operations: ServiceNowOperations,
-  identity: CacheIdentity
-): Promise<string | undefined> {
-  const resolved =
-    (await userTimeZone(operations, identity.sessionUserName)) ??
-    (await instanceDefaultTimeZone(operations));
-  if (resolved === undefined) warnTimeZoneUnresolved(identity);
-  return resolved;
-}
-
-async function userTimeZone(
-  operations: ServiceNowOperations,
-  sessionUserName: string | undefined
-): Promise<string | undefined> {
-  if (typeof sessionUserName !== "string" || sessionUserName.trim() === "") {
-    return undefined;
-  }
-  return firstUsableValue(operations, "/api/now/table/sys_user", {
-    sysparm_query: `user_name=${escapeQueryValue(sessionUserName.trim())}`,
-    sysparm_fields: "time_zone",
-    sysparm_limit: "1",
-  }, "time_zone");
-}
-
-async function instanceDefaultTimeZone(
-  operations: ServiceNowOperations
-): Promise<string | undefined> {
-  return firstUsableValue(operations, "/api/now/table/sys_properties", {
-    sysparm_query: `name=${DEFAULT_TIME_ZONE_PROPERTY}`,
-    sysparm_fields: "value",
-    sysparm_limit: "1",
-  }, "value");
-}
-
-async function firstUsableValue(
-  operations: ServiceNowOperations,
-  path: string,
-  params: Record<string, string>,
-  field: string
-): Promise<string | undefined> {
-  try {
-    const response = await operations.get<{ result?: unknown[] }>(path, {
-      ...params,
-      sysparm_display_value: "false",
-      sysparm_exclude_reference_link: "true",
-    });
-    const row = Array.isArray(response?.result) ? response.result[0] : undefined;
-    if (typeof row !== "object" || row === null) return undefined;
-    const value = (row as Record<string, unknown>)[field];
-    return isUsableTimeZone(value) ? value.trim() : undefined;
-  } catch {
-    // An unreadable lookup is indistinguishable from an empty one here, and
-    // both mean the same thing: the probe cannot be made correct.
-    return undefined;
-  }
-}
-
-/**
- * Report the degradation once per scope. Names the account, never the scope
- * key -- that carries the credential fingerprint.
- */
-function warnTimeZoneUnresolved(identity: CacheIdentity): void {
-  if (TIME_ZONE_WARNED_SCOPES.has(identity.scope)) return;
-  TIME_ZONE_WARNED_SCOPES.add(identity.scope);
-  const account =
-    typeof identity.sessionUserName === "string" && identity.sessionUserName.trim() !== ""
-      ? `account "${identity.sessionUserName.trim()}"`
-      : "an account with no configured user name";
-  process.stderr.write(
-    `[servicenow-mcp] WARNING: metadata caching is disabled for ${account}: the ` +
-      `ServiceNow session timezone could not be resolved. Grant read access to ` +
-      `sys_user (time_zone) and sys_properties (${DEFAULT_TIME_ZONE_PROPERTY}), or ` +
-      `set the account's timezone, to re-enable it.\n`
-  );
 }
 
 function validateTtlMs(value: unknown): number {

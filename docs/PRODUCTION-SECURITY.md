@@ -290,22 +290,36 @@ SN_METADATA_CACHE_TTL_MS=86400000
 SN_METADATA_CACHE_TABLES=sys_glide_object,sys_dictionary,sys_db_object,sys_app,sys_plugins,sys_metadata*,sys_flow*
 ```
 
-Metadata caching additionally requires a resolvable ServiceNow session
-timezone: the freshness probe compares `sys_updated_on`, which the instance
-evaluates in the session user's timezone. The zone is read from
-`sys_user.time_zone` for the authenticating account, falling back to the
-`glide.sys.default.tz` property, so the profile needs read access to `sys_user`
-and `sys_properties` for the lookup to succeed. When it cannot be resolved the
-cache disables itself for that identity rather than assuming UTC — an assumed
-zone would serve silently stale metadata for the length of the offset. OAuth
-client_credentials and API-key profiles carry no username and therefore cannot
-cache metadata at all. Deletions to a cached table become visible within one
-TTL, since the probe detects updates rather than deletes.
+Metadata caching works in every auth mode, including the client_credentials
+profile above. Its freshness check reads the cached table's row count and newest
+row by `sys_updated_on`, as the instance stores it, so it needs no timezone and
+no username. The only access it needs is the ServiceNow read permission of the
+user the credential runs as, on the cached table itself. It needs no
+`tableAccess` grant, so do not widen `readTables` for it. Cached entries are
+partitioned by instance and credential identity; `sn_schema` results are also
+partitioned by profile and effective policy, so a narrower profile never sees a
+wider one's schema.
+
+The partition is the credential, not the ServiceNow user it runs as. A cache
+hit re-reads only the table's watermark, so the run-as user's permissions on
+the cached rows are not evaluated again until the entry is refetched. Revoking
+read on a whole table shows on the next metadata read, because the watermark
+read is refused; an `sn_schema` result already cached is still served until it
+expires (5 minutes by default, up to 1 hour). Tightening row- or field-level
+access does not move the watermark, so rows cached before the change are served
+for up to one TTL: by default 24 hours for metadata (configurable up to 7 days)
+and 5 minutes for `sn_schema`. A metadata entry keeps the TTL of the profile
+that stored it, so another profile on the same credential with a shorter TTL
+can be served it for the longer one. After re-mapping a client_credentials
+application or API key to another user, or tightening that user's roles or
+ACLs, restart the server or rotate the secret. `force_recache: true` is not a
+substitute: it refreshes only the read it is passed on, not the credential's
+whole cache.
 
 `sys_properties` is deliberately absent from that list. Rows in it are
 ACL-restricted per user and routinely hold integration secrets in the `value`
-column, and a cache hit is served without re-contacting ServiceNow, so the
-caller's ACLs are not evaluated on the hit. Do not add it, and review any
+column, and a cache hit re-reads only the table's watermark, so the caller's
+ACLs on the cached rows are not evaluated on the hit. Do not add it, and review any
 table you do add against the same two questions: are its rows ACL-restricted
 per user, and would a stale or cross-identity answer be a disclosure?
 

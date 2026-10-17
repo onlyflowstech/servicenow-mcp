@@ -106,7 +106,7 @@ describe("stdio-only package contract", () => {
     );
     expect(packageJson.scripts?.prebuild).toBe("node scripts/clean-dist.mjs");
     expect(packageJson.engines?.node).toBe(">=20");
-    expect(packageJson.dependencies?.["@modelcontextprotocol/sdk"]).toBe("1.30.0");
+    expect(packageJson.dependencies?.["@modelcontextprotocol/sdk"]).toBe("1.31.0");
     expect(packageJson.dependencies?.["@hono/node-server"]).toBe("2.0.12");
     expect(packageJson.overrides?.["@hono/node-server"]).toBe("2.0.12");
     expect(packageJson.files).toContain("docs/V2-MIGRATION.md");
