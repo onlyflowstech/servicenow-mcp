@@ -42,6 +42,8 @@ interface InstanceState {
   count: number;
   /** Status for the next watermark reads, consumed one per read. */
   watermarkStatuses: number[];
+  /** Status for the next PATCH requests, consumed one per request. */
+  patchStatuses: number[];
 }
 
 function column(name: string, element: string, index: number) {
@@ -70,6 +72,19 @@ const DICTIONARY_ROWS = [
     ["cmdb_ci", "ip_address"],
     ["cmdb", "sys_class_name"],
   ].map(([table, element], index) => column(table!, element!, 0x100 + index)),
+  // A custom table and a system table, each with a sensitive column. u_x also
+  // carries the four fields a write must list explicitly; reads are open.
+  ...[
+    ["u_x", "u_note"],
+    ["u_x", "sys_class_name"],
+    ["u_x", "sys_class_path"],
+    ["u_x", "sys_domain"],
+    ["u_x", "sys_domain_path"],
+    ["u_x", "password"],
+    ["sys_user", "user_name"],
+    ["sys_user", "email"],
+    ["sys_user", "password"],
+  ].map(([table, element], index) => column(table!, element!, 0x200 + index)),
 ];
 
 /** Ancestors by table name, nearest first. Labels differ from names. */
@@ -85,6 +100,10 @@ const CHAINS: Readonly<Record<string, readonly { name: string; label: string }[]
   ],
 };
 const CMDB_COLUMNS = ["classification", "cpu_count", "ip_address", "kernel_release", "name", "serial_number", "sys_class_name"];
+/** Record tables the stub answers with an empty list. */
+const DATA_TABLE_PATHS = new Set(
+  ["cmdb_ci_linux_server", "incident", "u_x", "sys_user"].map((table) => `/api/now/table/${table}`)
+);
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -104,6 +123,7 @@ function stubInstances() {
         newest: { sys_id: "d".repeat(32), sys_updated_on: "2025-01-15 12:00:00" },
         count: 162_737,
         watermarkStatuses: [],
+        patchStatuses: [],
       };
       states.set(host, current);
     }
@@ -142,6 +162,11 @@ function stubInstances() {
         date: "Wed, 15 Jan 2025 13:00:00 GMT",
       });
     }
+    if (method === "PATCH") {
+      const status = instance.patchStatuses.shift() ?? 200;
+      if (status !== 200) return json(status, { error: { message: "upstream" } });
+      return json(200, { result: { sys_id: url.pathname.split("/").at(-1) } });
+    }
     if (url.pathname === "/api/now/table/sys_db_object") {
       // Answers the dot-walked super_class(.super_class)*.name fields by name.
       // super_class itself is the label, which the walk must not follow.
@@ -167,7 +192,7 @@ function stubInstances() {
       );
       return json(200, { result: rows }, { "x-total-count": String(rows.length) });
     }
-    if (url.pathname === "/api/now/table/cmdb_ci_linux_server") {
+    if (DATA_TABLE_PATHS.has(url.pathname)) {
       return json(200, { result: [] }, { "x-total-count": "0" });
     }
     return json(404, { error: { message: "not stubbed" } });
@@ -533,5 +558,172 @@ describe("sn_schema cache end to end", () => {
     expect(wide).toEqual(["caller_id", "number", "short_description"]);
     expect(narrow).toEqual(["number"]);
     expect(wideAgain).toEqual(wide);
+  });
+});
+
+/**
+ * The field-write branch's field policy through this branch's caches: a
+ * profile "*" entry covers ITSM and custom tables but not the 23 system tables
+ * (A3), the four explicit-listing fields stay readable, sensitive names never
+ * appear, and journal writes are not re-sent through the cached wrapper.
+ * Profiles load through ProfileManager, so the policy is validated, frozen and
+ * served from the load-time policy-map cache, as in production.
+ */
+describe("field policy through the metadata and schema caches", () => {
+  const FIELD_POLICY_GRANTS = Object.freeze({
+    readTables: ["incident", "u_x", "sys_user", "sys_dictionary", "sys_db_object", "sys_documentation", "sys_choice"],
+    writeTables: ["incident"],
+    targets: [
+      target("incident", ["sn_query", "sn_schema", "sn_update"]),
+      target("u_x", ["sn_query", "sn_schema"]),
+      target("sys_user", ["sn_query", "sn_schema"]),
+      target("sys_dictionary", ["sn_query", "sn_schema"]),
+      target("sys_db_object", ["sn_query", "sn_schema"]),
+      target("sys_documentation", ["sn_schema"]),
+      target("sys_choice", ["sn_schema"]),
+    ],
+  });
+  // Same instance and account for both profiles: only the field policy differs.
+  const SHARED = Object.freeze({
+    instance: "https://e2e-field-policy.service-now.com",
+    authType: "basic",
+    username: "integration.user",
+    credential: "env:E2E_BASIC_PASSWORD",
+    tableAccess: FIELD_POLICY_GRANTS,
+    metadataCache: METADATA_CACHE,
+    schemaCacheTtlMs: SCHEMA_CACHE_TTL_MS,
+  });
+  const STAR_READABLE = ["sys_id", "number", "u_note"];
+  const PROFILES_BY_POLICY = {
+    wide: SHARED,
+    star: { ...SHARED, fieldPolicy: { "*": { readable: STAR_READABLE } } },
+  };
+  const host = new URL(SHARED.instance).host;
+
+  async function schemaFields(
+    client: Client,
+    upstream: ReturnType<typeof stubInstances>,
+    profile: string,
+    table: string
+  ) {
+    const start = upstream.calls.length;
+    const result = await client.callTool({
+      name: "sn_schema",
+      arguments: { profile, table, fields_only: true },
+    });
+    expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
+    return {
+      fields: (result.structuredContent as { data: { fields: string[] } }).data.fields,
+      upstream: upstream.calls.length - start,
+    };
+  }
+
+  it('narrows sn_schema by a "*" entry on ITSM and custom tables, never on a system table, with one entry per profile', async () => {
+    const upstream = stubInstances();
+    vi.stubGlobal("fetch", upstream.fetchStub);
+    const client = await connect(PROFILES_BY_POLICY);
+    const expected: Record<string, Record<string, string[]>> = {
+      wide: {
+        incident: ["caller_id", "number", "short_description"],
+        // Explicit listing is a write rule; reads stay open. password never shows.
+        u_x: ["sys_class_name", "sys_class_path", "sys_domain", "sys_domain_path", "u_note"],
+        sys_user: ["email", "user_name"],
+      },
+      star: {
+        incident: ["number"],
+        u_x: ["u_note"],
+        // A system table: the "*" entry never covers it.
+        sys_user: ["email", "user_name"],
+      },
+    };
+
+    for (const profile of ["wide", "star"]) {
+      for (const table of ["incident", "u_x", "sys_user"]) {
+        const first = await schemaFields(client, upstream, profile, table);
+        expect(first.fields, `${profile} ${table}`).toEqual(expected[profile]![table]);
+        // Its own schema entry: the first call goes upstream, even where the
+        // other profile already cached an identical-looking result.
+        expect(first.upstream, `${profile} ${table}`).toBeGreaterThan(0);
+        const repeat = await schemaFields(client, upstream, profile, table);
+        expect(repeat).toEqual({ fields: first.fields, upstream: 0 });
+      }
+    }
+    expect(upstream.calls.every((call) => call.host === host || call.kind === "token")).toBe(true);
+  });
+
+  it('walks fields:"all" only where the readable set is a wildcard, and never requests a sensitive name', async () => {
+    const upstream = stubInstances();
+    vi.stubGlobal("fetch", upstream.fetchStub);
+    const client = await connect(PROFILES_BY_POLICY);
+    const queryAll = async (profile: string, table: string) => {
+      const start = upstream.calls.length;
+      const result = await client.callTool({
+        name: "sn_query",
+        arguments: { profile, table, fields: "all", limit: 1 },
+      });
+      expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
+      const calls = upstream.calls.slice(start);
+      const read = calls.find((call) => call.path === `/api/now/table/${table}`);
+      return {
+        fields: read?.fields?.split(",").sort() ?? [],
+        walked: calls.some((call) => call.path === "/api/now/table/sys_db_object"),
+      };
+    };
+
+    const wideCustom = await queryAll("wide", "u_x");
+    expect(wideCustom.walked).toBe(true);
+    for (const field of ["sys_class_name", "sys_class_path", "sys_domain", "sys_domain_path", "u_note"]) {
+      expect(wideCustom.fields).toContain(field);
+    }
+    expect(wideCustom.fields).not.toContain("password");
+
+    // The "*" entry narrows the custom table and incident: no walk, exactly
+    // the readable set.
+    for (const table of ["u_x", "incident"]) {
+      const narrowed = await queryAll("star", table);
+      expect(narrowed.walked, table).toBe(false);
+      expect(narrowed.fields, table).toEqual([...STAR_READABLE].sort());
+    }
+
+    // sys_user is a system table, so the "*" entry leaves it open: it walks,
+    // over the dictionary rows the wide profile's call already cached, and
+    // still drops password.
+    const starSystem = await queryAll("star", "sys_user");
+    expect(starSystem.walked).toBe(true);
+    expect(starSystem.fields).toEqual(expect.arrayContaining(["email", "user_name"]));
+    expect(starSystem.fields).not.toContain("password");
+  });
+
+  it("sends a journal PATCH once through the cached wrapper, while a watermark GET still retries", async () => {
+    const upstream = stubInstances();
+    vi.stubGlobal("fetch", upstream.fetchStub);
+    const client = await connect({ wide: SHARED });
+    const sysId = "f".repeat(32);
+
+    // A 502 after a journal PATCH may follow an applied entry: never re-sent.
+    upstream.state(host).patchStatuses.push(502, 502);
+    const journal = await client.callTool({
+      name: "sn_update",
+      arguments: { profile: "wide", table: "incident", sys_id: sysId, fields: { comments: "Customer update" } },
+    });
+    expect(journal.isError).toBe(true);
+    expect(upstream.calls.filter((call) => call.method === "PATCH")).toHaveLength(1);
+
+    // A watermark GET is idempotent: the client still retries its 502, and
+    // the read then caches as usual.
+    const query = async () => {
+      const result = await client.callTool({
+        name: "sn_query",
+        arguments: { profile: "wide", table: "sys_dictionary", fields: "element,name", limit: 5 },
+      });
+      expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
+    };
+    upstream.state(host).watermarkStatuses.push(502);
+    let start = upstream.calls.length;
+    await query();
+    expect(upstream.calls.slice(start).map((call) => call.kind)).toEqual(["watermark", "watermark", "read"]);
+    start = upstream.calls.length;
+    await query();
+    expect(upstream.calls.slice(start).map((call) => call.kind)).toEqual(["watermark"]);
   });
 });
