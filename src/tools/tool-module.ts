@@ -186,11 +186,23 @@ interface CommonToolHandlerServices {
   readonly logger: ToolModuleLogger;
 }
 
+/**
+ * Cross-call partition for sn_schema results. The coordinator derives `scope`
+ * as a digest of profile, instance, credential identity and effective policy,
+ * so no credential material crosses into the handler and two profiles,
+ * identities or policies never share an entry.
+ */
+export interface SchemaCacheBinding {
+  readonly scope: string;
+  readonly ttlMs: number;
+}
+
 /** Services for modules permitted to call profile-resolved ServiceNow operations. */
 export interface ServiceNowToolHandlerServices
   extends CommonToolHandlerServices {
   readonly serviceNow: ServiceNowOperations;
   readonly atfResults?: AtfResultStore;
+  readonly schemaCache?: SchemaCacheBinding;
   readonly settings: ServiceNowToolSettings;
 }
 
