@@ -782,6 +782,34 @@ describe("sn_schema cross-call cache", () => {
     expect(before.scope).toMatch(/^[A-Za-z0-9_-]{43}$/u);
   });
 
+  it("separates field policies within one profile and identity, whatever their object shape", () => {
+    // The effective policy carries the profile's field-policy keys as loaded:
+    // deep-frozen snapshots, and a null-prototype map from the environment
+    // variable. Any difference in content, even a writable-only one, is a
+    // different partition; the same content in another shape is the same one.
+    const base = { profile: "p", instance: "https://i.service-now.com", credentialIdentity: "c", ttlMs: 1_000 };
+    const scope = (fieldPolicy: unknown) =>
+      schemaCacheBinding({ ...base, policy: { id: "restricted-table-policy:p", revision: "v1", fieldPolicy } })!.scope;
+    const deepFrozen = <T>(value: T): T => {
+      if (typeof value === "object" && value !== null) {
+        for (const nested of Object.values(value)) deepFrozen(nested);
+        Object.freeze(value);
+      }
+      return value;
+    };
+    const starReadable = { "*": { readable: ["sys_id", "number"] } };
+    const nullPrototype = Object.assign(Object.create(null) as Record<string, unknown>, starReadable);
+
+    const scopes = [
+      scope({}),
+      scope(deepFrozen({ fieldPolicy: structuredClone(starReadable) })),
+      scope(deepFrozen({ fieldPolicy: { "*": { writable: [] } } })),
+      scope(deepFrozen({ readableTableFields: [{ table: "incident", fields: ["number"] }] })),
+    ];
+    expect(new Set(scopes).size).toBe(scopes.length);
+    expect(scope({ fieldPolicy: nullPrototype })).toBe(scopes[1]);
+  });
+
   it("expires after the binding TTL and refreshes on force_recache", async () => {
     const fake = fakeOperations();
     const binding = bindingFor({ ttlMs: 1_000 });
