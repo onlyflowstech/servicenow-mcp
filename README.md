@@ -789,7 +789,9 @@ asks again at once.
 watermark, to a row other than the newest, and a write that skips the system
 fields (`autoSysFields(false)`) leave it unchanged. Such a change shows within
 one TTL — up to 24 hours at the default. Lower `SN_METADATA_CACHE_TTL_MS` or
-pass `force_recache: true` to see it sooner.
+pass `force_recache: true` to see it sooner. `sn_batch` is not exposed to these
+gaps: it looks up the records it will update or delete on the instance on every
+run, never in the cache, even on a cached table.
 
 **`sn_schema` results** are also kept for 5 minutes per profile, credential
 identity, and effective policy, so a repeat call costs no request at all. They

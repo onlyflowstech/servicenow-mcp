@@ -5,6 +5,7 @@ import {
   type ServiceNowOperations,
 } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
+import { uncachedOperations } from "../metadata-cache.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
 import {
   ENCODED_QUERY_MIGRATION_MESSAGE,
@@ -114,8 +115,12 @@ export async function handler(
 
     const limit = Math.min(args.limit, 10000);
 
-    // Step 1: Query matching records (sys_id only)
-    const resp = await client.get(`/api/now/table/${args.table}`, {
+    // Step 1: Query matching records (sys_id only). These are the records the
+    // run will change, so they come from the instance on every run, never
+    // from the metadata cache: a cached answer can be stale within the
+    // watermark's gaps, and would update or delete records that no longer
+    // match.
+    const resp = await uncachedOperations(client).get(`/api/now/table/${args.table}`, {
       sysparm_fields: "sys_id",
       sysparm_limit: String(limit),
       sysparm_query: structuredPlan.encodedQuery,

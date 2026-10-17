@@ -161,6 +161,25 @@ export function createMetadataCacheConfig(
   });
 }
 
+/** The operations each cached wrapper reads through. */
+const UNCACHED_OPERATIONS = new WeakMap<ServiceNowOperations, ServiceNowOperations>();
+
+/**
+ * The operations underneath a cached wrapper, or `operations` itself when it
+ * is not one.
+ *
+ * Use it for a read whose answer decides a write, such as the records a bulk
+ * update or delete targets. A cache hit can be stale within the watermark's
+ * documented gaps, which a read can tolerate but a write target cannot. The
+ * read costs one request, with no watermark, and leaves the cache untouched.
+ * The internal force-recache parameter is no substitute: it costs a watermark
+ * read as well, stores a single-use entry, and reaches ServiceNow unstripped
+ * when no wrapper is in place.
+ */
+export function uncachedOperations(operations: ServiceNowOperations): ServiceNowOperations {
+  return UNCACHED_OPERATIONS.get(operations) ?? operations;
+}
+
 /**
  * @param scope Cache partition key. Must identify the ServiceNow instance
  *   *and* the credential identity reading from it -- see the module docstring.
@@ -206,7 +225,9 @@ export function createCachedServiceNowOperations(
     getRaw: { value: operations.getRaw.bind(operations) },
     ...(operations.saveAtfStepInputs ? { saveAtfStepInputs: { value: clearingWatermarks(operations.saveAtfStepInputs.bind(operations)) } } : {}),
   });
-  return Object.freeze(cached);
+  Object.freeze(cached);
+  UNCACHED_OPERATIONS.set(cached, operations);
+  return cached;
 }
 
 async function cachedGetWithMeta<T>(
