@@ -571,10 +571,11 @@ describe("sn_schema cache end to end", () => {
  */
 describe("field policy through the metadata and schema caches", () => {
   const FIELD_POLICY_GRANTS = Object.freeze({
-    readTables: ["incident", "u_x", "sys_user", "sys_dictionary", "sys_db_object", "sys_documentation", "sys_choice"],
+    readTables: ["incident", "u_x", "sys_user", "cmdb_ci_linux_server", "sys_dictionary", "sys_db_object", "sys_documentation", "sys_choice"],
     writeTables: ["incident"],
     targets: [
       target("incident", ["sn_query", "sn_schema", "sn_update"]),
+      target("cmdb_ci_linux_server", ["sn_schema"]),
       target("u_x", ["sn_query", "sn_schema"]),
       target("sys_user", ["sn_query", "sn_schema"]),
       target("sys_dictionary", ["sn_query", "sn_schema"]),
@@ -692,6 +693,37 @@ describe("field policy through the metadata and schema caches", () => {
     expect(starSystem.walked).toBe(true);
     expect(starSystem.fields).toEqual(expect.arrayContaining(["email", "user_name"]));
     expect(starSystem.fields).not.toContain("password");
+  });
+
+  it("shows inherited_from only where the profile can read sys_db_object.super_class", async () => {
+    const upstream = stubInstances();
+    vi.stubGlobal("fetch", upstream.fetchStub);
+    const client = await connect({
+      wide: SHARED,
+      // A "*" entry never reaches sys_db_object, one of the 23 system tables.
+      star: { ...SHARED, fieldPolicy: { "*": { readable: ["sys_id", ...CMDB_COLUMNS] } } },
+      parentsHidden: { ...SHARED, fieldPolicy: { sys_db_object: { readable: ["sys_id", "name"] } } },
+    });
+    const schemaRows = async (profile: string) => {
+      const result = await client.callTool({
+        name: "sn_schema",
+        arguments: { profile, table: "cmdb_ci_linux_server", limit: 100 },
+      });
+      expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
+      return (result.structuredContent as { data: { fields: { field: string; inherited_from?: string }[] } })
+        .data.fields;
+    };
+
+    for (const profile of ["wide", "star"]) {
+      const rows = await schemaRows(profile);
+      expect(rows.map((row) => row.field), profile).toEqual(CMDB_COLUMNS);
+      expect(rows.find((row) => row.field === "sys_class_name")?.inherited_from, profile).toBe("cmdb");
+    }
+    // The same fields, which the profile may read on the target table, but
+    // not the ancestor names it may not read on sys_db_object.
+    const hidden = await schemaRows("parentsHidden");
+    expect(hidden.map((row) => row.field)).toEqual(CMDB_COLUMNS);
+    expect(hidden.filter((row) => "inherited_from" in row)).toEqual([]);
   });
 
   it("sends a journal PATCH once through the cached wrapper, while a watermark GET still retries", async () => {
