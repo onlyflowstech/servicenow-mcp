@@ -28,7 +28,7 @@ RUN npm run build \
     && chmod 0700 /runtime-root/home/servicenow-mcp /runtime-root/home/servicenow-mcp/.servicenow-mcp \
     && find /runtime-root -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
 
-FROM gcr.io/distroless/nodejs22-debian13:nonroot@sha256:5e9868cc8ef163e86378ff90de23ca031f5bb8b2023d4f3288a5e740698919d4 AS runtime
+FROM gcr.io/distroless/nodejs22-debian13:nonroot@sha256:ec2313763dd43931543bd03830466e0c409ce73a487e8d46f10db72d3b816c1c AS runtime
 
 ARG VERSION
 ARG REVISION=local
@@ -42,7 +42,7 @@ LABEL org.opencontainers.image.title="ServiceNow MCP" \
       org.opencontainers.image.source="https://github.com/onlyflowstech/servicenow-mcp" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.base.name="gcr.io/distroless/nodejs22-debian13:nonroot" \
-      org.opencontainers.image.base.digest="sha256:5e9868cc8ef163e86378ff90de23ca031f5bb8b2023d4f3288a5e740698919d4"
+      org.opencontainers.image.base.digest="sha256:ec2313763dd43931543bd03830466e0c409ce73a487e8d46f10db72d3b816c1c"
 
 ENV NODE_ENV=production \
     MCP_HOST=0.0.0.0 \
