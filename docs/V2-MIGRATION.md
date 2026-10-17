@@ -553,6 +553,8 @@ from starting.
 | [Class and domain fields must be listed](#class-and-domain-fields) | anything writes `sys_class_name`, `sys_class_path`, `sys_domain` or `sys_domain_path` | List each field in the table's `writable` |
 | [`readable: []` no longer blocks writes](#readable--and-writable-) | a profile uses `readable: []` to hide a table | Add `writable: []`, or leave the table out of `tableAccess` |
 | [Setup grant defaults](#setup-grant-defaults) | you run `servicenow-mcp-setup grant` | Review the incident target after `--write incident` |
+| [Metadata caching no longer reads `sys_user` or `sys_properties`](#metadata-caching-in-every-auth-mode) | you granted reads on `sys_user` or `sys_properties` only so the metadata cache could resolve a time zone | Remove those grants; `sys_properties` can hold integration secrets |
+| [OAuth client_credentials and API-key profiles start caching](#metadata-caching-in-every-auth-mode) | a profile uses OAuth `client_credentials` or an API key | After re-mapping its credential to another ServiceNow user, or tightening that user's roles or ACLs, restart the server or rotate the secret |
 
 The [field policy reference](../README.md#field-policy) describes the
 settings these changes refer to.
@@ -827,3 +829,28 @@ the readable set.
 
 See [Granting table access](CLIENT-SETUP.md#granting-table-access) for the
 opt-outs.
+
+### Metadata caching in every auth mode
+
+Through 2.2.0-dev.6, the metadata cache needed the session time zone. It read
+`sys_user.time_zone` for the profile's username, falling back to the
+`glide.sys.default.tz` property in `sys_properties`, and it turned itself off
+for OAuth `client_credentials` and API-key profiles, which have no username.
+It now checks freshness against the cached table's own row count and newest
+row, so it reads neither table and works the same in every auth mode.
+
+- **Remove grants made only for the old cache.** If you granted read access
+  to `sys_user` or `sys_properties` only for this lookup, whether in
+  `tableAccess.readTables`, in `SN_ALLOWED_READ_TABLES`, or as a role on the
+  integration user, remove it. `sys_properties` rows routinely hold
+  integration secrets.
+- **Client-credentials and API-key profiles start caching.** Cache entries are
+  partitioned by credential, not by the ServiceNow user it runs as, and a hit
+  re-reads only the table's watermark. After you re-map the OAuth application
+  or API key to another user, or tighten that user's roles or ACLs, restart
+  the server or rotate the secret; until then, rows cached earlier can be
+  served for up to one TTL. A profile's `tableAccess` and `fieldPolicy` still
+  apply on every call.
+
+See [Metadata caching](CLIENT-SETUP.md#metadata-caching) for how the
+watermark works and what it can miss.

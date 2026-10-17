@@ -147,6 +147,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `unsupported_field_path`. Such keys were already denied.
 - A write-value denial names the field and table it rejected, never the
   value.
+- **Metadata caching works in every auth mode.** Freshness is checked against
+  a server watermark: the cached table's row count (`X-Total-Count`) and its
+  newest row by `sys_updated_on`, as the instance stores it. No time-zone,
+  `sys_user` or `sys_properties` lookup is made, so OAuth `client_credentials`
+  and API-key profiles, where the cache used to turn itself off, now cache
+  like Basic and OAuth password profiles. A tool call reads each table's
+  watermark once, however many times it reads the table. A table whose
+  watermark cannot be used is read straight through for up to 15 minutes, or
+  30 seconds after a transient failure. Empty tables cache. See
+  [Upgrading](docs/V2-MIGRATION.md#metadata-caching-in-every-auth-mode).
+- `sn_schema` results are reused across tool calls for 5 minutes, partitioned
+  by profile, credential identity and effective policy. `schemaCacheTtlMs` /
+  `SN_SCHEMA_CACHE_TTL_MS` (up to 1 hour) is honoured, and
+  `force_recache: true` refreshes a result. The cache never hit before.
 
 ### Security
 
@@ -175,6 +189,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names a record twice, and `matched` counts it once. The serial
   fallback stops at a 401 instead of retrying every remaining record with
   credentials ServiceNow has rejected.
+- **Read grants made for the old metadata cache can go.** The cache no longer
+  reads `sys_user` or `sys_properties`. Remove any read grant on either table,
+  in `tableAccess`, `SN_ALLOWED_READ_TABLES` or on the instance, that was
+  added only for it; `sys_properties` rows can hold integration secrets.
+- **Cache entries are partitioned by credential, not by the ServiceNow user
+  it runs as.** A cache hit re-reads only the table's watermark, so tightening
+  that user's ServiceNow row- or field-level ACLs is not seen until the entry
+  is refetched: up to 24 hours for metadata and 5 minutes for `sn_schema`.
+  After re-mapping a client_credentials application or API key to another
+  user, or restricting that user, restart the server or rotate the secret;
+  `force_recache: true` refreshes only the read it is passed on. A profile's
+  `tableAccess` and `fieldPolicy` apply on every call, cached or not.
+- `sn_batch` looks up the records it will update or delete on the instance on
+  every run, never in the metadata cache. On a cached table (`sys_flow*` and
+  `sys_metadata*` by default), a repeat run could be served an earlier run's
+  matches, and so update or delete records that no longer matched its filter.
+- `sn_schema` returns `inherited_from` only where the profile can read
+  `super_class` on `sys_db_object`.
+- **Dependency and base-image advisories.** `@modelcontextprotocol/sdk` is
+  1.31.0 (GHSA-6qxp-vccf-f47h, in the SDK's client-side OAuth flow, which
+  this server does not use). `proxy-addr` 2.0.8 (GHSA-jqcg-44mw-7w3h,
+  critical), `fast-uri` 3.1.8, `hono` 4.13.13 and `ip-address` 10.7.4 close
+  the remaining production advisories. The container's runtime base,
+  `gcr.io/distroless/nodejs22-debian13:nonroot`, is pinned to a digest that
+  carries `libssl3t64` 3.5.7-1~deb13u3 (CVE-2026-84782) and Node 22.23.3. The
+  developer-only inspector toolchain, which is not shipped, takes the same
+  fixes plus `undici` and `source-map-js`.
 
 ### Fixed
 
@@ -206,6 +247,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set that left it out made a successful create read as an upstream failure,
   which invited a retry and a duplicate record. Every other field, `number`
   included, still follows the readable set.
+- The metadata cache's freshness probe formatted its cutoff in the session
+  time zone, although ServiceNow reads query date literals as UTC, so on an
+  account east of UTC an updated record could be served stale for up to the
+  TTL. The watermark compares values the instance stores, so the session time
+  zone plays no part.
+- Deletes in a cached metadata table are detected, through the row count. A
+  table whose newest row is dated after the instance's clock is not cached,
+  because that row would stay the newest however many others changed.
+- `sn_schema` and `fields: "all"` follow a table's parents by name. They
+  followed the parent's label, so any hierarchy whose labels differ from table
+  names lost its inherited fields; `alm_hardware`, for example, lost nearly
+  all of them. The whole chain is read in one request.
 
 ## [2.2.0-dev.6] — 2026-09-16
 
