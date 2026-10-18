@@ -70,6 +70,7 @@ import {
   type TableAccessPolicyInput,
   type TableAccessTargetInput,
 } from "./table-policy.js";
+import { resolveTableHierarchy } from "./tools/table-hierarchy.js";
 
 export interface SetupCliDependencies {
   readonly env?: NodeJS.ProcessEnv;
@@ -100,7 +101,7 @@ export interface SetupCliDependencies {
   readonly verifyCredential?: (
     config: ServiceNowConfig
   ) => Promise<CredentialVerification>;
-  /** Injected for tests; defaults to reading sys_db_object.super_class. */
+  /** Injected for tests; defaults to reading sys_db_object.super_class.name. */
   readonly resolveParentTable?: (
     config: ServiceNowConfig,
     table: string
@@ -808,9 +809,10 @@ async function askTableAccess(
   const write = await askTableSelection(prompter, "WRITES", "");
 
   const related = new Map<string, readonly string[]>();
+  const resolveParent = dependencies.resolveParentTable ?? parentTableReader();
   for (const table of new Set([...read, ...write])) {
     if (table === TABLE_ALLOWLIST_WILDCARD) continue;
-    const parent = await lookupParentTable(config, table, dependencies);
+    const parent = await lookupParentTable(resolveParent, config, table);
     if (parent === undefined || parent === table) continue;
     prompter.note(`\n  ${table} extends ${parent}.`);
     const include = await prompter.confirm(
@@ -898,46 +900,49 @@ async function askCustomTableList(
  * failure, because the self-only closure the wizard writes is valid on its own.
  */
 async function lookupParentTable(
+  resolve: ParentTableResolver,
   config: ServiceNowConfig,
-  table: string,
-  dependencies: SetupCliDependencies
+  table: string
 ): Promise<string | undefined> {
-  const resolve = dependencies.resolveParentTable ?? defaultParentTable;
   try {
-    return await resolve(config, table);
+    const parent = await resolve(config, table);
+    // Only a table name is ever offered, whichever resolver produced it: the
+    // answer goes into the allowlist and the target's closure as written.
+    return typeof parent === "string" && TABLE_NAME.test(parent) ? parent : undefined;
   } catch {
     return undefined;
   }
 }
 
-async function defaultParentTable(
-  config: ServiceNowConfig,
-  table: string
-): Promise<string | undefined> {
-  if (!TABLE_NAME.test(table)) return undefined;
-  const client = new ServiceNowClient(config, { maxRetries: 0 });
-  const response = await client.get<{ result?: unknown[] }>(
-    "/api/now/table/sys_db_object",
-    {
-      sysparm_query: `name=${table}`,
-      sysparm_fields: "name,super_class",
-      sysparm_limit: "1",
-      sysparm_display_value: "true",
-      sysparm_exclude_reference_link: "true",
+type ParentTableResolver = NonNullable<SetupCliDependencies["resolveParentTable"]>;
+
+/** The table itself and its immediate parent: the wizard offers only that one. */
+const PARENT_LOOKUP_DEPTH = 2;
+
+/**
+ * The default resolver: the parent's name from sys_db_object, through the same
+ * walk sn_schema uses. super_class's display value is the parent's label, not
+ * its name, so following it offered "server" for cmdb_ci_linux_server and
+ * nothing at all for a label with a space, such as "Configuration Item".
+ *
+ * It keeps one client per configuration, so an OAuth profile fetches one token
+ * for the run's lookups rather than one per table.
+ */
+function parentTableReader(): ParentTableResolver {
+  let cached: { readonly config: ServiceNowConfig; readonly client: ServiceNowClient } | undefined;
+  return async (config, table) => {
+    if (!TABLE_NAME.test(table)) return undefined;
+    if (cached?.config !== config) {
+      cached = { config, client: new ServiceNowClient(config, { maxRetries: 0 }) };
     }
-  );
-  const row = Array.isArray(response?.result) ? response.result[0] : undefined;
-  if (typeof row !== "object" || row === null) return undefined;
-  const value = (row as Record<string, unknown>).super_class;
-  const parent =
-    typeof value === "string"
-      ? value
-      : typeof value === "object" && value !== null
-        ? (value as Record<string, unknown>).display_value
-        : undefined;
-  if (typeof parent !== "string") return undefined;
-  const normalized = parent.trim().toLowerCase();
-  return TABLE_NAME.test(normalized) ? normalized : undefined;
+    const [, parent] = await resolveTableHierarchy(
+      cached.client,
+      table,
+      PARENT_LOOKUP_DEPTH,
+      false
+    );
+    return parent;
+  };
 }
 
 async function registerClientsInteractively(

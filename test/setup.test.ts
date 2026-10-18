@@ -1552,6 +1552,243 @@ describe("setup wizard", () => {
       new ProfileManager({ configFilePath: profileConfigPath(home) }).listProfiles()
     ).toEqual([]);
   });
+
+  describe("parent tables, resolved by name", () => {
+    /**
+     * A stand-in sys_db_object. A table's super_class stores its parent; the
+     * reference's display value is the parent's label, which differs from the
+     * name across most of the CMDB and is what the wizard used to follow.
+     */
+    const TABLES: Readonly<Record<string, { readonly label: string; readonly parent?: string }>> = {
+      cmdb: { label: "Base Configuration Item" },
+      cmdb_ci: { label: "Configuration Item", parent: "cmdb" },
+      cmdb_ci_hardware: { label: "Hardware", parent: "cmdb_ci" },
+      cmdb_ci_computer: { label: "Computer", parent: "cmdb_ci_hardware" },
+      cmdb_ci_server: { label: "Server", parent: "cmdb_ci_computer" },
+      cmdb_ci_linux_server: { label: "Linux Server", parent: "cmdb_ci_server" },
+      task: { label: "Task" },
+      incident: { label: "Incident", parent: "task" },
+      x_cycle: { label: "Cycle", parent: "x_cycle" },
+      // A stored name no table can have, as a tampered or broken row would carry.
+      x_bad_parent: { label: "Bad Parent", parent: "incident,sys_user" },
+    };
+
+    function ancestor(table: string, hops: number): string | undefined {
+      let current: string | undefined = table;
+      for (let hop = 0; hop < hops && current !== undefined; hop += 1) {
+        current = TABLES[current]?.parent;
+      }
+      return current;
+    }
+
+    function json(body: unknown, status = 200): Response {
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    /**
+     * Serve sys_db_object reads and OAuth tokens, recording both. With
+     * `ignoreFieldList`, every row carries the whole ancestor chain whatever
+     * sysparm_fields asked for, so the walk's own depth limit is what holds.
+     */
+    function stubInstance(options: { readonly ignoreFieldList?: boolean } = {}) {
+      const reads: URLSearchParams[] = [];
+      let tokens = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: string | URL | Request) => {
+          const url = new URL(input instanceof Request ? input.url : String(input));
+          if (url.pathname === "/oauth_token.do") {
+            tokens += 1;
+            return json({ access_token: "wizard-token", token_type: "Bearer", expires_in: 1800 });
+          }
+          if (url.pathname !== "/api/now/table/sys_db_object") return json({}, 404);
+          reads.push(url.searchParams);
+          const name = /^name=(.*)$/u.exec(url.searchParams.get("sysparm_query") ?? "")?.[1] ?? "";
+          if (name === "x_broken") return json({ error: { message: "boom" } }, 500);
+          if (TABLES[name] === undefined) return json({ result: [] });
+          const displayValues = url.searchParams.get("sysparm_display_value") === "true";
+          const fields = options.ignoreFieldList
+            ? ["name", "super_class", ...[1, 2, 3, 4, 5, 6].map((hops) => `${"super_class.".repeat(hops)}name`)]
+            : (url.searchParams.get("sysparm_fields") ?? "").split(",");
+          const row: Record<string, string> = {};
+          for (const field of fields) {
+            if (field === "name") row.name = name;
+            else if (field === "super_class") {
+              const parent = TABLES[name]?.parent;
+              row.super_class =
+                parent === undefined ? "" : displayValues ? (TABLES[parent]?.label ?? "") : "0".repeat(32);
+            } else {
+              const hops = field.split(".").length - 1;
+              row[field] = ancestor(name, hops) ?? "";
+            }
+          }
+          return json({ result: [row] });
+        })
+      );
+      return { reads, tokens: () => tokens };
+    }
+
+    const DEFAULT_RESOLVER: Partial<SetupCliDependencies> = { resolveParentTable: undefined };
+
+    function wizardReading(tables: string, ...confirms: string[]): string[] {
+      return [
+        "dev",
+        "dev00001.service-now.com",
+        "basic",
+        "encrypted",
+        "integration.user",
+        CUSTOM,
+        tables,
+        NONE,
+        ...confirms,
+      ];
+    }
+
+    function savedProfile() {
+      return new ProfileManager({ configFilePath: profileConfigPath(home) }).getProfile("dev");
+    }
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("proposes a CMDB parent by its name, where the label differs", async () => {
+      const instance = stubInstance();
+      const { prompter } = await runWizard(
+        wizardReading("cmdb_ci_linux_server,cmdb_ci_hardware", "y", "y"),
+        DEFAULT_RESOLVER
+      );
+
+      const notes = prompter.notes.join("\n");
+      expect(notes).toContain("cmdb_ci_linux_server extends cmdb_ci_server.");
+      // "Configuration Item" has a space, so following the label offered nothing.
+      expect(notes).toContain("cmdb_ci_hardware extends cmdb_ci.");
+      expect(prompter.remaining()).toBe(0);
+      expect(savedProfile().tableAccess?.readTables).toEqual([
+        "cmdb_ci",
+        "cmdb_ci_hardware",
+        "cmdb_ci_linux_server",
+        "cmdb_ci_server",
+      ]);
+
+      // One read per table, of stored values, asking for one ancestor only.
+      expect(instance.reads).toHaveLength(2);
+      for (const params of instance.reads) {
+        expect(params.get("sysparm_display_value")).toBe("false");
+        expect(params.get("sysparm_fields")).toBe("name,super_class.name");
+        expect(params.get("sysparm_limit")).toBe("1");
+      }
+      expect(instance.reads.map((params) => params.get("sysparm_query"))).toEqual([
+        "name=cmdb_ci_linux_server",
+        "name=cmdb_ci_hardware",
+      ]);
+    });
+
+    it("still proposes task for incident", async () => {
+      stubInstance();
+      const { prompter } = await runWizard(wizardReading("incident", "y"), DEFAULT_RESOLVER);
+      expect(prompter.notes.join("\n")).toContain("incident extends task.");
+      expect(savedProfile().tableAccess?.readTables).toEqual(["incident", "task"]);
+    });
+
+    it("proposes nothing for a root, unknown, unreadable, or invalid parent", async () => {
+      const instance = stubInstance();
+      // No confirm is scripted: a single backing-table question would exhaust it.
+      const { prompter } = await runWizard(
+        wizardReading("task,x_unknown,x_broken,x_bad_parent"),
+        DEFAULT_RESOLVER
+      );
+      expect(prompter.notes.join("\n")).not.toContain(" extends ");
+      expect(instance.reads).toHaveLength(4);
+      const profile = savedProfile();
+      expect(profile.tableAccess?.readTables).toEqual(["task", "x_bad_parent", "x_broken", "x_unknown"]);
+      for (const target of profile.tableAccess?.targets ?? []) {
+        expect(target.relatedTables).toEqual([target.table]);
+      }
+    });
+
+    it.each(["Configuration Item", "incident,sys_user"])(
+      "offers no injected parent that is not a table name: %s",
+      async (parent) => {
+        const { prompter } = await runWizard(wizardReading("change_request"), {
+          resolveParentTable: async () => parent,
+        });
+        expect(prompter.notes.join("\n")).not.toContain(" extends ");
+        expect(savedProfile().tableAccess?.readTables).toEqual(["change_request"]);
+      }
+    );
+
+    it("stops at a table that names itself as its parent", async () => {
+      stubInstance();
+      const { prompter } = await runWizard(wizardReading("x_cycle"), DEFAULT_RESOLVER);
+      expect(prompter.notes.join("\n")).not.toContain(" extends ");
+      expect(savedProfile().tableAccess?.readTables).toEqual(["x_cycle"]);
+    });
+
+    it("proposes only the immediate parent when the row carries the whole chain", async () => {
+      stubInstance({ ignoreFieldList: true });
+      const { prompter } = await runWizard(
+        wizardReading("cmdb_ci_linux_server", "y"),
+        DEFAULT_RESOLVER
+      );
+      expect(prompter.notes.filter((note) => note.includes(" extends "))).toEqual([
+        "\n  cmdb_ci_linux_server extends cmdb_ci_server.",
+      ]);
+      expect(savedProfile().tableAccess?.readTables).toEqual([
+        "cmdb_ci_linux_server",
+        "cmdb_ci_server",
+      ]);
+    });
+
+    it("writes a grant the server's policy loader accepts, with the parent unaddressable", async () => {
+      stubInstance();
+      await runWizard(wizardReading("cmdb_ci_linux_server", "y"), DEFAULT_RESOLVER);
+
+      const tableAccess = savedProfile().tableAccess!;
+      expect(tableAccess.targets).toEqual([
+        expect.objectContaining({
+          table: "cmdb_ci_linux_server",
+          closureComplete: true,
+          relatedTables: ["cmdb_ci_linux_server", "cmdb_ci_server"],
+        }),
+      ]);
+      // The loader the server uses at request time.
+      const policy = createTableAccessPolicy(tableAccess);
+      expect(
+        authorizeTableAccess(policy, { operation: "read", table: "cmdb_ci_linux_server" }, "sn_query")
+      ).toBe("cmdb_ci_linux_server");
+      expect(() =>
+        authorizeTableAccess(policy, { operation: "read", table: "cmdb_ci_server" }, "sn_query")
+      ).toThrow(/denied by policy/u);
+    });
+
+    it("fetches one OAuth token for every parent lookup in a run", async () => {
+      const instance = stubInstance();
+      await runWizard(
+        [
+          "dev",
+          "dev00001.service-now.com",
+          "oauth",
+          "client_credentials",
+          "encrypted",
+          "abc123-client-id",
+          CUSTOM,
+          "incident,cmdb_ci_linux_server,cmdb_ci_hardware",
+          NONE,
+          "n",
+          "n",
+          "n",
+        ],
+        DEFAULT_RESOLVER,
+        ["oauth-client-secret"]
+      );
+      expect(instance.reads).toHaveLength(3);
+      expect(instance.tokens()).toBe(1);
+    });
+  });
 });
 
 describe("setup wizard opt-out", () => {
