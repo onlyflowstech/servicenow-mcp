@@ -266,12 +266,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cmdb_ci`. It also fetches one OAuth token for its parent lookups rather
   than one per table.
 - The `relatedTables` documentation, the `grant` output and `--related` help
-  say what the loader does: it checks that each declared related table has the
-  target's operation permission, the list grants no access, and a self-only
-  list is enough to read inherited fields. They described it as the complete
-  set of tables an operation can reach, and the help called `--related`
-  required for any table that extends another. A target without
-  `closureComplete: true` is now rejected with an error that names the field.
+  say what the loader and `grant` do. The loader checks that each declared
+  related table has the target's operation permission, so `grant --related`
+  adds the table to that operation's allowlist. That makes it addressable only
+  through a target of its own, or a `*` allowlist, and a target the table has
+  or later gets can then use that operation on it. A self-only list is enough
+  to read inherited fields, and a view or alias should declare every table it
+  reads. They described the list as the complete set of tables an operation
+  can reach, and the help called `--related` required for any table that
+  extends another. A target without `closureComplete: true` is now rejected
+  with an error that names the field.
 
 ## [2.2.0-dev.6] — 2026-09-16
 
