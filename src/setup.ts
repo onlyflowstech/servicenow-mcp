@@ -1607,11 +1607,12 @@ function runGrant(
   out(
     `Granted table access on profile ${options.profile}.\n\n` +
       `${indent(JSON.stringify(tableAccess, null, 2))}\n\n` +
-      `Each target asserts closureComplete: true, meaning relatedTables lists every\n` +
-      `backing, ancestor, and descendant table the operation can reach. Pass\n` +
-      `--related "<table>=<t1>,<t2>" when a table extends or views another one;\n` +
-      `related tables join the allowlist but get no target, so a caller cannot\n` +
-      `address them directly.\n` +
+      `relatedTables is a declaration the loader checks: each related table must\n` +
+      `be allowed for the same operation as its target. It grants no access, and\n` +
+      `a related table with no target of its own cannot be addressed directly.\n` +
+      `Inherited fields are read through the table itself, so a self-only list is\n` +
+      `enough. Pass --related "<table>=<t1>,<t2>" to declare a parent or a view's\n` +
+      `backing table.\n` +
       `Restart the MCP client for the change to take effect: it reads the\n` +
       `profile when it launches the server.\n`
   );
@@ -1629,10 +1630,9 @@ function buildTableAccess(
   const writeTables = new Set([...(existing.writeTables ?? []), ...options.write]);
   const targets = mergeTargets(existing.targets, options);
 
-  // A target asserts that relatedTables is its complete reachable closure, and
-  // the policy loader requires every one of those tables to carry the same
-  // operation permission. They stay out of `targets`, so they are reachable
-  // through the target but never directly addressable by a caller.
+  // The policy loader requires every table a target declares in relatedTables
+  // to carry the target's operation permission. They stay out of `targets`,
+  // so they are never directly addressable by a caller.
   for (const target of targets) {
     if (readTables.has(target.table)) {
       for (const related of target.relatedTables) readTables.add(related);
@@ -2672,8 +2672,8 @@ function renderGrantHelp(): string {
     `                           default write adds: ${DEFAULT_WRITE_TOOLS.join(",")};`,
     `                           default write on incident also adds:`,
     `                           ${INCIDENT_JOURNAL_TOOLS.join(",")})`,
-    "  --related TABLE=LIST    Backing/ancestor/descendant tables the target reaches;",
-    "                          repeatable, and required whenever a table extends another",
+    "  --related TABLE=LIST    Parent or backing tables to declare for a target;",
+    "                          repeatable. Optional for a table that extends another",
     "  --replace               Discard existing rules instead of adding to them",
     "  --dry-run               Print the resulting rules without writing them",
     "  --json                  Machine-readable output",

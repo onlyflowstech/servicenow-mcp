@@ -429,13 +429,18 @@ are independent: a table listed for reads is not writable, and a table listed
 for writes is not implicitly readable. Every caller-addressable name must also
 have a trusted entry in `SN_TABLE_ACCESS_TARGETS` unless the relevant operation
 uses `*`. Target entries still narrow permitted tools when present, and identify whether the table is canonical,
-an alias, a view, or an extension and listing every backing/ancestor table it
-can reach, including descendant tables reachable through base-table access.
-Each entry must explicitly set `closureComplete: true`, and each related table
-needs the same operation permission. A related permission does not make that
-table caller-addressable unless it also has its own target entry. Omit the
-target—and therefore deny direct access—when the metadata closure cannot be
-proven complete.
+an alias, a view, or an extension. Each entry must set the literal
+`closureComplete: true` and list in `relatedTables` the table itself plus any
+backing or parent tables the operator declares; an alias, view, or extension
+must name at least one backing table. The loader checks that list for
+consistency: each related table needs the same operation permission as the
+target. It does not derive the list from the instance, and the list grants no
+access. A related table is not caller-addressable unless it also has its own
+target entry. Inherited fields are read through the child table's own
+endpoint, so a self-only list, or the immediate parent, is enough. A grant on
+a base table reaches the records of the tables that extend it whether or not
+they are listed, so grant a base table only when those records should be
+reachable.
 
 Table allowlists are paired with a separate field-policy gate. Field policy
 narrows what a granted table exposes; it never denies the table itself. Each
