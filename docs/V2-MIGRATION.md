@@ -433,9 +433,11 @@ an alias, a view, or an extension. Each entry must set the literal
 `closureComplete: true` and list in `relatedTables` the table itself plus any
 backing or parent tables the operator declares; an alias, view, or extension
 must name at least one backing table. The loader checks that list for
-consistency: each related table needs the same operation permission as the
-target. It does not derive the list from the instance, and the list grants no
-access. A related table is not caller-addressable unless it also has its own
+consistency: each related table needs every operation permission the target
+has. `servicenow-mcp-setup grant --related` keeps that true by adding each
+related table to the allowlist of every operation its target has, including
+one a later grant adds. The loader does not derive the list from the
+instance, and the list grants no access. A related table is not caller-addressable unless it also has its own
 target entry or that operation's allowlist is `*`. Inherited fields are read
 through the child table's own endpoint, so a self-only list, or the immediate
 parent, is enough. A grant on a base table reaches the records of the tables

@@ -355,17 +355,19 @@ command argument, dotenv file, or command history.
 Each `targets` entry must set the literal `closureComplete: true`, and its
 `relatedTables` must include the target table itself. `relatedTables` is a
 declaration that the loader checks for consistency: every related table must
-be in the same operation's allowlist as the target, or the profile is
+be in the allowlist of each operation the target is in, or the profile is
 rejected. The loader does not derive it from the instance. ServiceNow returns
 inherited fields through the child table's own endpoint, so a self-only list
 such as `["incident"]` is enough to read them. Declaring the immediate parent,
 as `servicenow-mcp-setup` offers, is optional:
 `servicenow-mcp-setup grant --profile dev --read change_request --related change_request=task`.
-That adds `task` to the read allowlist, because the loader requires it. On its
-own this makes `task` addressable by no tool, because it has no target of its
-own, unless the read allowlist is `*`. If `task` has, or later gets, a target
-of its own, that target's tools can then read it, so declare a table only
-where every tool on its own target may use the same operation.
+That adds `task` to the read allowlist, because the loader requires it, and a
+later grant that gives `change_request` another operation adds `task` to that
+operation's allowlist too. On its own this makes `task` addressable by no tool,
+because it has no target of its own, unless such an allowlist is `*`. If
+`task` has, or later gets, a target of its own, that target's tools can then
+use those operations on it, so declare a table only where every tool on its
+own target may use every operation the declaring target has or will have.
 A grant on a base table such as `task` reaches the records of the tables that
 extend it, such as `incident`, whatever `relatedTables` lists, so grant a base
 table only when those records should be reachable through it. Likewise, a

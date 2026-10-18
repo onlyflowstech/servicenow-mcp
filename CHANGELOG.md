@@ -267,10 +267,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than one per table.
 - The `relatedTables` documentation, the `grant` output and `--related` help
   say what the loader and `grant` do. The loader checks that each declared
-  related table has the target's operation permission, so `grant --related`
-  adds the table to that operation's allowlist. That makes it addressable only
+  related table has every operation permission its target has, so
+  `grant --related` adds the table to the allowlist of each of those
+  operations, including one a later grant adds. That makes it addressable only
   through a target of its own, or a `*` allowlist, and a target the table has
-  or later gets can then use that operation on it. A self-only list is enough
+  or later gets can then use those operations on it. A self-only list is enough
   to read inherited fields, and a view or alias should declare every table it
   reads. They described the list as the complete set of tables an operation
   can reach, and the help called `--related` required for any table that

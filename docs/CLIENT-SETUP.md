@@ -162,11 +162,12 @@ servicenow-mcp-setup grant --profile dev --read incident,problem --write inciden
 # Narrow the tools permitted on a target.
 servicenow-mcp-setup grant --profile dev --read cmdb_ci --tools sn_query,sn_relationships
 
-# Optionally declare the table a target extends. --related adds it to the same
-# operation's allowlist with no target, so on its own no tool can address it;
-# if it has, or later gets, a target of its own, that target's tools can then
-# use the operation on it. Inherited fields are read through change_request
-# itself, so the grant works without --related too.
+# Optionally declare the table a target extends. --related adds it, with no
+# target, to the allowlist of every operation change_request has, including one
+# a later grant adds. On its own no tool can then address it, unless such an
+# allowlist is "*"; if it has, or later gets, a target of its own, that
+# target's tools can use those operations on it. Inherited fields are read
+# through change_request itself, so the grant works without --related too.
 servicenow-mcp-setup grant --profile dev --read change_request --related change_request=task
 
 # Inspect the result without writing it.
