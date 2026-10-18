@@ -196,7 +196,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Cache entries are partitioned by credential, not by the ServiceNow user
   it runs as.** A cache hit re-reads only the table's watermark, so tightening
   that user's ServiceNow row- or field-level ACLs is not seen until the entry
-  is refetched: up to 24 hours for metadata and 5 minutes for `sn_schema`.
+  is refetched: by default up to 24 hours for metadata (configurable to 7
+  days) and 5 minutes for `sn_schema` (up to 1 hour).
   After re-mapping a client_credentials application or API key to another
   user, or restricting that user, restart the server or rotate the secret;
   `force_recache: true` refreshes only the read it is passed on. A profile's
