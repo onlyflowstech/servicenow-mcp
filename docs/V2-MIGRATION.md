@@ -436,11 +436,14 @@ must name at least one backing table. The loader checks that list for
 consistency: each related table needs the same operation permission as the
 target. It does not derive the list from the instance, and the list grants no
 access. A related table is not caller-addressable unless it also has its own
-target entry. Inherited fields are read through the child table's own
-endpoint, so a self-only list, or the immediate parent, is enough. A grant on
-a base table reaches the records of the tables that extend it whether or not
-they are listed, so grant a base table only when those records should be
-reachable.
+target entry or that operation's allowlist is `*`. Inherited fields are read
+through the child table's own endpoint, so a self-only list, or the immediate
+parent, is enough. A grant on a base table reaches the records of the tables
+that extend it whether or not they are listed, so grant a base table only when
+those records should be reachable. Likewise, a view or alias returns data from
+every table it reads, whatever `relatedTables` lists: declare each of those
+tables, so the loader requires each to carry the same permission, and grant
+the view only when all of that data should be reachable.
 
 Table allowlists are paired with a separate field-policy gate. Field policy
 narrows what a granted table exposes; it never denies the table itself. Each

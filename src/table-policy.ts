@@ -46,9 +46,9 @@ export interface TableAccessTargetInput {
    * The requested table plus any backing or parent tables the operator
    * declares. The loader requires each one to carry the target's operation
    * permission; the list grants no access, and a related table is not
-   * caller-addressable unless it has its own target entry. Inherited fields
-   * are read through the target's own endpoint, so a canonical target may list
-   * itself alone.
+   * caller-addressable unless it has its own target entry or the operation's
+   * allowlist is "*". Inherited fields are read through the target's own
+   * endpoint, so a canonical target may list itself alone.
    */
   readonly relatedTables: readonly string[];
 }

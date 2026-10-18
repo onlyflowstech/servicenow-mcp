@@ -356,15 +356,23 @@ Each `targets` entry must set the literal `closureComplete: true`, and its
 `relatedTables` must include the target table itself. `relatedTables` is a
 declaration that the loader checks for consistency: every related table must
 be in the same operation's allowlist as the target, or the profile is
-rejected. The loader does not derive it from the instance. It grants no
-access either: a related table with no target of its own cannot be addressed
-directly. ServiceNow returns inherited fields through the child table's own
-endpoint, so a self-only list such as `["incident"]` is enough to read them.
-Declaring the immediate parent, as `servicenow-mcp-setup` offers, is optional:
+rejected. The loader does not derive it from the instance. ServiceNow returns
+inherited fields through the child table's own endpoint, so a self-only list
+such as `["incident"]` is enough to read them. Declaring the immediate parent,
+as `servicenow-mcp-setup` offers, is optional:
 `servicenow-mcp-setup grant --profile dev --read change_request --related change_request=task`.
+That adds `task` to the read allowlist, because the loader requires it. On its
+own this makes `task` addressable by no tool, because it has no target of its
+own, unless the read allowlist is `*`. If `task` has, or later gets, a target
+of its own, that target's tools can then read it, so declare a table only
+where every tool on its own target may use the same operation.
 A grant on a base table such as `task` reaches the records of the tables that
 extend it, such as `incident`, whatever `relatedTables` lists, so grant a base
-table only when those records should be reachable through it.
+table only when those records should be reachable through it. Likewise, a
+view or alias returns data from every table it reads, whatever
+`relatedTables` lists: declare each of those tables, so the loader requires
+each to carry the same permission, and grant the view only when all of that
+data should be reachable.
 
 ### Credential Options
 
@@ -914,7 +922,7 @@ and must be valid ServiceNow identifiers.
 |----------|----------|---------|-------------|
 | `SN_ALLOWED_READ_TABLES` | ❌ | deny all | Tables permitted for read operations on the explicit `SN_PROFILE_NAME` environment profile only. Use `*` to allow every readable table. |
 | `SN_ALLOWED_WRITE_TABLES` | ❌ | deny all | Tables permitted for create, update, incident journal append, delete, upload, and confirmed batch operations on the explicit `SN_PROFILE_NAME` environment profile only. Use `*` to allow every writable table. Write permission never implies read permission. |
-| `SN_TABLE_ACCESS_TARGETS` | Required for exact allowlisted caller-addressable tables; optional with `*` | `[]` | Trusted JSON classification with `table`, exact permitted `tools`, `kind` (`canonical`, `alias`, `view`, or `extension`), literal `closureComplete: true`, and `relatedTables`: the target itself plus any backing or parent tables the operator declares. The loader checks that every related table has the target's operation permission; it does not derive the list from the instance, and the list grants no access. A self-only list is valid for a `canonical` target; `alias`, `view` and `extension` targets must name at least one backing table. With `*`, omitted target entries use the wildcard operation grant; explicit target entries can still narrow tools and check their related tables. |
+| `SN_TABLE_ACCESS_TARGETS` | Required for exact allowlisted caller-addressable tables; optional with `*` | `[]` | Trusted JSON classification with `table`, exact permitted `tools`, `kind` (`canonical`, `alias`, `view`, or `extension`), literal `closureComplete: true`, and `relatedTables`: the target itself plus any backing or parent tables the operator declares. The loader checks that every related table has the target's operation permission; it does not derive the list from the instance, and the list grants no access. A self-only list is valid for a `canonical` target; `alias`, `view` and `extension` targets must name at least one backing table, and a view or alias should declare every table it reads, because it returns data from each of them whatever the list says. With `*`, omitted target entries use the wildcard operation grant; explicit target entries can still narrow tools and check their related tables. |
 | `SN_FIELD_POLICY_DEFINITIONS` | ❌ | no narrowing | Field policy for the explicit `SN_PROFILE_NAME` environment profile only, like the `SN_ALLOWED_*` variables. **If `~/.servicenow-mcp/config.json` exists, setting this variable stops startup**; give those profiles their own `fieldPolicy` instead. The value is trusted JSON, at most 65,536 characters: either a table map keyed by table name or `*`, the same shape as a profile's `fieldPolicy`, or an object holding the profile keys (`fieldPolicy`, or `readableTableFields` / `writableTableFields`), not both. Each field set is a list of exact field names or `"*"`; `["*"]` means `"*"` in that exact form only, and patterns such as `"u_*"` are rejected. A malformed value stops startup with the key named. Sensitive field names are always denied. See [Field policy](#field-policy). |
 | `SN_ENCODED_QUERY_READ_POLICY` | ❌ | deny all | Trusted JSON object containing bounded `rules` for an exact `sn_query`/table pair. Each rule requires `maxLength`, `maxTerms`, readable `fields`, supported `operators`, `maxLimit`, `maxOffset`, and `maxResponseBytes`. No rule can authorize a write or another tool. |
 
@@ -926,7 +934,10 @@ permission does not make a table directly caller-addressable without its own
 target entry. The related tables are a declaration, not a list derived from
 the instance: a grant on a base table reaches the records of the tables that
 extend it whether or not they are listed, so grant a base table only when
-those records should be reachable. Field policy narrows what a granted table exposes; it does not deny a table the
+those records should be reachable. Likewise, a view or alias returns data from
+every table it reads, whatever `relatedTables` lists: declare each of those
+tables, so the loader requires each to carry the same permission, and grant
+the view only when all of that data should be reachable. Field policy narrows what a granted table exposes; it does not deny a table the
 operator granted. Sensitive-looking field names remain excluded regardless. Build the
 target catalog from approved ServiceNow metadata and treat it as trusted
 startup configuration. File-backed profile example:

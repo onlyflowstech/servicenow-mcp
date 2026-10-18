@@ -1608,8 +1608,11 @@ function runGrant(
     `Granted table access on profile ${options.profile}.\n\n` +
       `${indent(JSON.stringify(tableAccess, null, 2))}\n\n` +
       `relatedTables is a declaration the loader checks: each related table must\n` +
-      `be allowed for the same operation as its target. It grants no access, and\n` +
-      `a related table with no target of its own cannot be addressed directly.\n` +
+      `be allowed for the same operation as its target, so --related adds it to\n` +
+      `that operation's allowlist. On its own that makes the table addressable by\n` +
+      `no tool, because it has no target, unless that allowlist is "*". If the\n` +
+      `table has, or later gets, a target of its own, that target's tools can\n` +
+      `then use the operation on it.\n` +
       `Inherited fields are read through the table itself, so a self-only list is\n` +
       `enough. Pass --related "<table>=<t1>,<t2>" to declare a parent or a view's\n` +
       `backing table.\n` +
