@@ -5,6 +5,262 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+> **Read this before upgrading.** This release can stop a working install from
+> starting, and it changes what some profiles may write:
+>
+> - The server refuses to start while `SN_FIELD_POLICY_DEFINITIONS` is set and
+>   `~/.servicenow-mcp/config.json` exists.
+> - A malformed or ambiguous field policy in `config.json` now stops the whole
+>   file from loading. The server, `servicenow-mcp-setup` and
+>   `servicenow-mcp-profile` all refuse it until you fix it by hand.
+> - `sn_create`, `sn_update` and `sn_batch` can append `comments` and
+>   `work_notes` on every table a profile may write. Leaving the dedicated
+>   journal tools off a target no longer withholds journals.
+> - `sn_create` and `sn_update` writes to `incident` are no longer limited to
+>   14 typed fields: every field the profile's field policy allows, such as
+>   `watch_list`, can now be written.
+> - `["*"]` in a field set now means every field. A profile that used it, and
+>   so failed every call, becomes fully open.
+>
+> [Upgrading to the next release](docs/V2-MIGRATION.md#upgrading-to-the-next-release)
+> lists every case with its remedy.
+
+### Breaking
+
+- **`SN_FIELD_POLICY_DEFINITIONS` configures only the `SN_PROFILE_NAME`
+  environment profile.** Through 2.2.0-dev.6 it also narrowed every
+  `config.json` profile that stated no field policy of its own. Ignoring it
+  there would silently widen those profiles, so while the variable is set to
+  a non-blank value and a config file supplies the profiles, the server
+  refuses to start with: `SN_FIELD_POLICY_DEFINITIONS is set, but profiles are
+  loaded from the config file; it now applies only to the SN_PROFILE_NAME
+  environment profile. Move the policy into each profile's fieldPolicy, or
+  unset the variable.` The setup and profile CLIs refuse the same way when
+  the variable is set in their environment. On the environment profile the
+  variable is now read once, at startup, and a malformed value stops startup
+  instead of denying every request.
+- **Field policy is validated when profiles load.** A malformed `fieldPolicy`,
+  `readableTableFields` or `writableTableFields` used to deny every call on its
+  profile, and some mistakes loaded and narrowed nothing. Each of these now
+  stops startup, with the profile, key path and table named and no configured
+  value repeated:
+  - a pattern such as `"u_*"`, a name that is not a field name, or `"*"` mixed
+    with field names;
+  - the same field listed twice in one set;
+  - `defaults` outside `readable`, including `defaults: "*"` beside a narrowed
+    `readable`;
+  - `fieldPolicy` stated together with `readableTableFields` or
+    `writableTableFields` (the request path used to drop `fieldPolicy`
+    silently);
+  - an unknown key in a table entry or a `{ table, fields }` entry, such as
+    the typo `writeable` or a comment key such as `_comment`;
+  - two `fieldPolicy` table keys that differ only in case, or one table listed
+    twice in the same list;
+  - in `SN_FIELD_POLICY_DEFINITIONS`, table keys mixed with the profile keys,
+    or a value that is not a JSON object.
+
+  One bad profile stops the whole file from loading, and the CLIs refuse the
+  file too, so edit `~/.servicenow-mcp/config.json` by hand.
+- **A profile's `"*"` field-policy entry reaches the ITSM tables and every
+  custom table.** On `incident`, `change_request`, `problem`, `sc_request`,
+  `sc_req_item`, `sc_task`, `task`, `cmdb_ci`, `cmdb_ci_server`,
+  `cmdb_ci_computer` and `kb_knowledge`, and on every table without a built-in
+  entry, named in the profile or not, `readable` and `writable` now resolve
+  from the table's own entry, then the `"*"` entry, then the open default.
+  `{"*": {"writable": []}}` used to leave those ITSM tables, and any custom
+  table the profile named without stating `writable`, writable; it now denies
+  writes to them. To keep a key open on one table, state it on that table,
+  such as `"u_x": {"writable": "*"}`. The 23 built-in system tables (scripts,
+  users and groups, ATF, application and dictionary metadata, `syslog`) still
+  never take the `"*"` entry; narrow one by naming it.
+- **`sys_class_name`, `sys_class_path`, `sys_domain` and `sys_domain_path` are
+  written only where a profile lists them.** They move a record to another
+  class or domain, so no writable wildcard covers them, including the open
+  default of a profile with no field policy. List each one by name in the
+  table's `writable`; listing `sys_domain` does not list `sys_domain_path`.
+  The denial reason is the new `explicit_field_required`.
+- **The dedicated journal tools follow field policy.**
+  `sn_incident_add_comment` and `sn_incident_add_work_note` are denied when the
+  incident's effective `writable` set leaves out `comments` or `work_notes`,
+  the same way `sn_update` is. A profile that already narrows
+  `fieldPolicy.incident.writable`, or a `"*"` entry's `writable`, without those
+  fields loses the matching tool.
+
+### Added
+
+- **Journal fields through the generic write tools, on every table.**
+  `sn_create`, `sn_update` and `sn_batch` accept `comments` and `work_notes` on
+  every table granted for writes. This reverses the 2.0 rule that rejected
+  both names on every table ahead of field policy, which no configuration
+  could lift and which left tables other than `incident` with no journal
+  route. Each entry gets the bounds of the dedicated tools (1-8,000
+  characters, 16,384 UTF-8 bytes, no control or format characters other than
+  newline, carriage return and tab), and field policy decides permission. The
+  dedicated tools remain.
+- `sn_batch` results carry a `message` when records were not confirmed or not
+  sent, saying how many and why the run stopped.
+- The README documents per-profile field policy: `fieldPolicy`, the
+  `readableTableFields` / `writableTableFields` lists, the `"*"` entry, and the
+  fields that need explicit listing.
+
+### Changed
+
+- **`sn_batch` never re-sends a batch request that may have reached the
+  instance.**
+  Confirmed updates and deletes go through the ServiceNow REST Batch API, up
+  to 50 records per request and fewer when values are large, so a request
+  body stays under 4 MiB unless one record's fields alone exceed about 3 MiB
+  of JSON; such a record is sent one per request. Each request gets its own
+  1 MiB response budget.
+  - Serial Table API calls replace the batch only when the instance refuses
+    it outright (401, 403 or 404), and only for the records not yet sent.
+  - A rate limit (429) stops the run with the `Retry-After` hint instead.
+  - A record whose sub-request returns a server error (5xx or 408) is
+    unconfirmed: it is reported, never retried, and the run continues. The
+    run stops, reporting the rest as not sent, when a batch request fails or
+    its response cannot be read or matched to the records sent, when every
+    serviced record in one batch returns a server error, or when more than 10
+    records in the run are unconfirmed.
+  - The serial fallback stops at the first outcome it cannot confirm, at a
+    429, and at a 401. It follows the HTTP client's retry rules: a journal
+    write is never re-sent, and an ordinary (non-journal) `PATCH` is retried
+    up to twice after a 502, 503, 504 or connection error.
+  - Unconfirmed records count as neither processed nor failed. Records not
+    sent count as failed.
+- `servicenow-mcp-setup grant --write incident` also binds
+  `sn_incident_add_comment` and `sn_incident_add_work_note` to the incident
+  target. Comments are customer-visible and can notify the caller. An
+  explicit `--tools` list withholds them; on a profile that already has them,
+  use `--replace` with `--tools`. Re-run the grant to add them to an existing
+  profile; existing profiles are not changed on upgrade.
+- `sn_update` advertises `idempotentHint: false`, because a journal field
+  appends an entry on every call.
+- `["*"]` in a field set means `"*"`, in that exact form only. It used to fail
+  every call on the profile.
+- `readable: []` no longer blocks writes as a side effect. Writes to such a
+  table return only `sys_id`; reads stay denied. Add `writable: []` to block
+  writes.
+- A dot-walked or `variables.*` write key, such as `caller_id.email`, is
+  denied with a message saying why, under the new reason
+  `unsupported_field_path`. Such keys were already denied.
+- A write-value denial names the field and table it rejected, never the
+  value.
+- **Metadata caching works in every auth mode.** Freshness is checked against
+  a server watermark: the cached table's row count (`X-Total-Count`) and its
+  newest row by `sys_updated_on`, as the instance stores it. No time-zone,
+  `sys_user` or `sys_properties` lookup is made, so OAuth `client_credentials`
+  and API-key profiles, where the cache used to turn itself off, now cache
+  like Basic and OAuth password profiles. A tool call reads each table's
+  watermark once, however many times it reads the table. A table whose
+  watermark cannot be used is read straight through for up to 15 minutes, or
+  30 seconds after a transient failure. Empty tables cache. See
+  [Upgrading](docs/V2-MIGRATION.md#metadata-caching-in-every-auth-mode).
+- `sn_schema` results are reused across tool calls for 5 minutes, partitioned
+  by profile, credential identity and effective policy. `schemaCacheTtlMs` /
+  `SN_SCHEMA_CACHE_TTL_MS` (up to 1 hour) is honoured, and
+  `force_recache: true` refreshes a result. The cache never hit before.
+
+### Security
+
+- **Omitting the journal tools no longer withholds journals.** A profile that
+  grants `sn_create`, `sn_update` or `sn_batch` on a table can now append
+  `comments` and `work_notes` there, including a profile whose incident target
+  leaves out the dedicated journal tools. `sn_batch` can post one
+  customer-visible comment per matched record, and each can trigger a
+  notification. To withhold comments, set `fieldPolicy.<table>.writable` to
+  an explicit list without `comments`; the default is every field. Narrow
+  parent tables such as `task` the same way, because field policy is
+  evaluated against the table each call names.
+- **Journal writes are never re-sent.** The HTTP client no longer retries a
+  `PATCH` or `PUT` that sets `comments` or `work_notes` after a 502, 503, 504
+  or connection error, because the first attempt may already have appended
+  the entry. It still retries a 429 and refreshes once after a 401, since
+  neither was processed. This covers `sn_update`, the dedicated tools and the
+  `sn_batch` serial fallback. Detection is by field name; see
+  [Production security boundaries](docs/PRODUCTION-SECURITY.md#journal-content).
+- `servicenow-mcp-setup grant` applies its default tools only to the tables,
+  and the operations, named in that command. A read-only re-grant could add
+  `sn_create` and `sn_update` to a target narrowed with `--tools`, and a
+  re-grant could make a table that was reachable only as another target's
+  related table directly writable or readable.
+- `sn_batch` targets each matched record once per run, even when the lookup
+  names a record twice, and `matched` counts it once. The serial
+  fallback stops at a 401 instead of retrying every remaining record with
+  credentials ServiceNow has rejected.
+- **Read grants made for the old metadata cache can go.** The cache no longer
+  reads `sys_user` or `sys_properties`. Remove any read grant on either table,
+  in `tableAccess`, `SN_ALLOWED_READ_TABLES` or on the instance, that was
+  added only for it; `sys_properties` rows can hold integration secrets.
+- **Cache entries are partitioned by credential, not by the ServiceNow user
+  it runs as.** A cache hit re-reads only the table's watermark, so tightening
+  that user's ServiceNow row- or field-level ACLs is not seen until the entry
+  is refetched: by default up to 24 hours for metadata (configurable to 7
+  days) and 5 minutes for `sn_schema` (up to 1 hour).
+  After re-mapping a client_credentials application or API key to another
+  user, or restricting that user, restart the server or rotate the secret;
+  `force_recache: true` refreshes only the read it is passed on. A profile's
+  `tableAccess` and `fieldPolicy` apply on every call, cached or not.
+- `sn_batch` looks up the records it will update or delete on the instance on
+  every run, never in the metadata cache. On a cached table (`sys_flow*` and
+  `sys_metadata*` by default), a repeat run could be served an earlier run's
+  matches, and so update or delete records that no longer matched its filter.
+- `sn_schema` returns `inherited_from` only where the profile can read
+  `super_class` on `sys_db_object`.
+- **Dependency and base-image advisories.** `@modelcontextprotocol/sdk` is
+  1.31.0 (GHSA-6qxp-vccf-f47h, in the SDK's client-side OAuth flow, which
+  this server does not use). `proxy-addr` 2.0.8 (GHSA-jqcg-44mw-7w3h,
+  critical), `fast-uri` 3.1.8, `hono` 4.13.13 and `ip-address` 10.7.4 close
+  the remaining production advisories. The container's runtime base,
+  `gcr.io/distroless/nodejs22-debian13:nonroot`, is pinned to a digest that
+  carries `libssl3t64` 3.5.7-1~deb13u3 (CVE-2026-84782) and Node 22.23.3. The
+  developer-only inspector toolchain, which is not shipped, takes the same
+  fixes plus `undici` and `source-map-js`.
+
+### Fixed
+
+- `incident` fields outside the 14 with typed checks are writable. Task fields
+  such as `cmdb_ci`, `business_service`, `watch_list` and `hold_reason`, and
+  every `u_`/`x_` custom field, were rejected whatever the field policy said.
+  They now get the generic value bounds; the 14 fields keep their typed
+  checks, and the sensitive-name blocklist is unchanged.
+- Incident `description`, `close_notes`, choice fields and the reference
+  fields `caller_id`, `assignment_group` and `assigned_to` can be cleared with
+  `""` or `null`. `short_description` stays required.
+- Generic writes accept `null` (clears the field), finite decimals such as
+  `12.5`, arrays of comma-free scalars for list fields such as `watch_list`,
+  and the `{value, display_value, link}` read shape, which is written as its
+  `value`. Unsafe integers and exponent forms are still rejected.
+- `sn_batch` applies the same value policy as `sn_update`, before any
+  credential or client is used, and sends the canonical values. It used to
+  send the caller's values unchecked.
+- `sn_batch` uses the documented REST Batch API shape: per-request headers,
+  base64 bodies, and `serviced_requests`/`unserviced_requests` in the
+  response. The old request and parser did not match it, so a batch the
+  instance had already applied was replayed one record at a time.
+- A rate-limited `sn_batch` (429) no longer falls back to one request per
+  record, each retried against the same limit, and a batch request stays
+  under 4 MiB unless one record's fields alone exceed about 3 MiB of JSON;
+  such a record is sent one per request. Fifty records with large values
+  used to make a request of tens of megabytes.
+- Write responses always include the written record's `sys_id`. A readable
+  set that left it out made a successful create read as an upstream failure,
+  which invited a retry and a duplicate record. Every other field, `number`
+  included, still follows the readable set.
+- The metadata cache's freshness probe formatted its cutoff in the session
+  time zone, although ServiceNow reads query date literals as UTC, so on an
+  account east of UTC an updated record could be served stale for up to the
+  TTL. The watermark compares values the instance stores, so the session time
+  zone plays no part.
+- Deletes in a cached metadata table are detected, through the row count. A
+  table whose newest row is dated after the instance's clock is not cached,
+  because that row would stay the newest however many others changed.
+- `sn_schema` and `fields: "all"` follow a table's parents by name. They
+  followed the parent's label, so any hierarchy whose labels differ from table
+  names lost its inherited fields; `alm_hardware`, for example, lost nearly
+  all of them. The whole chain is read in one request.
+
 ## [2.2.0-dev.6] — 2026-09-16
 
 ### Fixed

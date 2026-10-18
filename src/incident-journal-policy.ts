@@ -1,6 +1,14 @@
-/** Shared append-only incident journal validation and migration policy. */
+/**
+ * Shared journal content bounds and the dedicated incident journal tools'
+ * argument policy.
+ *
+ * The content schema bounds every journal write: the dedicated incident
+ * tools, and `comments`/`work_notes` written through the generic write tools
+ * on any table (see write-value-policy.ts). Generic journal writes are no
+ * longer rejected by name; the configured field policy decides whether a
+ * profile may write them.
+ */
 
-import { types as nodeUtilTypes } from "node:util";
 import { z } from "zod";
 
 import { serviceNowSysIdSchema } from "./servicenow-identifiers.js";
@@ -9,6 +17,21 @@ export const INCIDENT_JOURNAL_MAX_CHARACTERS = 8_000;
 export const INCIDENT_JOURNAL_MAX_UTF8_BYTES = 16_384;
 
 export type IncidentJournalField = "comments" | "work_notes";
+
+/** Journal fields share these names on incident and every other task table. */
+const JOURNAL_FIELD_NAMES: ReadonlySet<string> = new Set<IncidentJournalField>([
+  "comments",
+  "work_notes",
+]);
+
+/**
+ * True for a canonical journal field name. A write to one appends an entry,
+ * so the value policy bounds it as journal text and the HTTP client never
+ * re-sends it after the request may have reached the instance.
+ */
+export function isJournalFieldName(field: string): boolean {
+  return JOURNAL_FIELD_NAMES.has(field);
+}
 
 const JOURNAL_TOOLS: Readonly<Record<IncidentJournalField, string>> =
   Object.freeze({
@@ -65,6 +88,11 @@ export const incidentJournalContentSchema = z
   );
 
 export class IncidentJournalPolicyError extends Error {
+  /**
+   * `generic_journal_update` is no longer issued: generic journal writes are
+   * decided by field policy. The reason stays in the type so the dispatcher's
+   * existing classification branches keep compiling.
+   */
   readonly reason: "generic_journal_update" | "invalid_journal_content";
   readonly field?: IncidentJournalField;
 
@@ -91,7 +119,11 @@ export function isIncidentJournalPolicyError(
   );
 }
 
-/** Safe fixed guidance; caller-controlled journal text is never interpolated. */
+/**
+ * Safe fixed guidance; caller-controlled journal text is never interpolated.
+ * Only the dispatcher's `generic_journal_update` branch uses it, and nothing
+ * issues that reason any more.
+ */
 export function incidentJournalMigrationMessage(
   field: IncidentJournalField,
   tool?: string
@@ -107,25 +139,6 @@ export function incidentJournalMigrationMessage(
       ? `Create the record first, then use ${JOURNAL_TOOLS[field]} with the new sys_id and content.`
       : `Use ${JOURNAL_TOOLS[field]} with sys_id and content.`;
   return `${rejected} ${remedy}`;
-}
-
-/** Reject journal keys in generic writes without reading any payload values. */
-export function rejectGenericIncidentJournalFields(payload: unknown): void {
-  if (
-    typeof payload !== "object" ||
-    payload === null ||
-    Array.isArray(payload) ||
-    nodeUtilTypes.isProxy(payload)
-  ) {
-    return;
-  }
-  for (const candidate of Reflect.ownKeys(payload)) {
-    if (typeof candidate !== "string") continue;
-    const field = candidate.trim().toLowerCase();
-    if (field === "comments" || field === "work_notes") {
-      throw new IncidentJournalPolicyError("generic_journal_update", field);
-    }
-  }
 }
 
 /** Defense-in-depth normalization for the fixed incident journal modules. */

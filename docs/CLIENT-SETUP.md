@@ -151,7 +151,9 @@ rules. For a **file-backed profile** — anything created with
 `servicenow-mcp-profile` — those rules live in the profile itself, and
 `SN_ALLOWED_READ_TABLES` / `SN_ALLOWED_WRITE_TABLES` / `SN_TABLE_ACCESS_TARGETS`
 in the environment **do not apply**. This is the single most common reason a
-freshly installed server answers every call with a policy denial.
+freshly installed server answers every call with a policy denial. Field
+policy also lives on the profile (`fieldPolicy`); with a profile file
+present, a set `SN_FIELD_POLICY_DEFINITIONS` stops the server from starting.
 
 ```sh
 # Reads on two tables, writes on one.
@@ -171,10 +173,36 @@ servicenow-mcp-setup grant --profile dev --read incident --dry-run
 
 Grants are additive; `--replace` discards the existing rules instead. Every
 grant is validated with the same loader the server uses at request time, so a
-rejected policy fails at the CLI rather than at the first tool call. Default
-tools are `sn_query,sn_get,sn_aggregate,sn_schema` for a read grant and those
-plus `sn_create,sn_update` for a write grant — `sn_delete`, `sn_batch`, and
-`sn_atf` are never granted implicitly and must be named with `--tools`.
+rejected policy fails at the CLI rather than at the first tool call.
+
+Without `--tools`, each table named with `--read` gets
+`sn_query,sn_get,sn_aggregate,sn_schema`, and each table named with `--write`
+gets `sn_create,sn_update`. A write grant on `incident` also binds
+`sn_incident_add_comment` and `sn_incident_add_work_note`. Comments are
+customer-visible, so a comment the agent appends can notify the incident's
+caller. Defaults apply only to the tables named in that command, never to
+tables the profile already allows or reaches as related tables. A re-grant adds
+the defaults to the tools already on an existing target, so re-running
+`--write incident` on a target you narrowed earlier restores `sn_create` and
+both journal tools. That includes a re-grant made only to add `--related`,
+such as `--write incident --related incident=task`: repeat `--tools` with the
+target's current list to keep it narrow. To withhold the journal tools, pass
+an explicit `--tools` list, such as `--tools sn_create,sn_update`. A grant
+never removes a tool, so on a profile that already has them, use `--replace`
+with `--tools`; `--replace` discards every rule on the profile, so grant its
+other tables again afterwards. `sn_delete`, `sn_batch`, and `sn_atf` are never
+granted implicitly and must be named with `--tools`.
+
+A grant decides which tools reach a table; the profile's field policy still
+decides which fields they may write. The journal tools follow it like
+`sn_update` does: if the incident's effective `writable` list, from
+`fieldPolicy.incident.writable` or from a `"*"` entry's `writable`, leaves
+out `comments`, `sn_incident_add_comment` is denied even though the grant
+binds it, and likewise `sn_incident_add_work_note` without `work_notes`.
+Withholding the journal tools does not withhold journals: `sn_create`,
+`sn_update` and `sn_batch` write `comments` and `work_notes` wherever field
+policy allows them. See the
+[field policy reference](../README.md#field-policy).
 
 `grant` refuses `*` and rejects anything that is not a valid table name. It
 does **not** refuse any particular table: `tableAccess` is the sole table-level
@@ -456,8 +484,10 @@ otherwise surfaces only as a generic policy denial at call time.
 
 ### Unrestricted field selection
 
-`fields=all` and `response_format: "detailed"` resolve to a wildcard selection
-and are bounded to at most **100 columns**, resolved from `sys_dictionary`
+`fields=all` and `response_format: "detailed"` resolve to the profile's readable
+set for the table. Where the field policy narrows that set, they request exactly
+the listed fields and read no dictionary rows. Where it is every field, they
+are bounded to at most **100 columns**, resolved from `sys_dictionary`
 including fields inherited through `super_class`. Ordering is the table's
 default projection first in declared order, then the remainder alphabetically.
 `sn_query` reports truncation in its `hint` field; `sn_get` will carry the same
@@ -467,10 +497,10 @@ failed the call outright.
 
 Two consequences for callers:
 
-- **Journal fields are returned.** `comments` and `work_notes` are in the
-  resolved set for `fields=all` and `detailed`, as they are for an explicit
-  `fields=comments` and for `sn_schema`. The default projection still excludes
-  them. Journal content on real instances routinely contains customer PII, so
+- **Journal fields are returned** wherever the profile can read them.
+  `comments` and `work_notes` are in the resolved set for `fields=all` and
+  `detailed`, as they are for an explicit `fields=comments` and for
+  `sn_schema`. The default projection still excludes them. Journal content on real instances routinely contains customer PII, so
   asking for all fields on `incident` returns customer-visible commentary.
 - **Sensitive-looking names are never requested.** A field whose name matches
   the sensitive pattern is excluded from the resolved set rather than requested
@@ -503,9 +533,12 @@ change must be reflected sooner.
 identity, and effective policy, without revalidating it. `force_recache: true`
 refreshes it.
 
-Incident `comments` and `work_notes` are append-only. Generic `sn_update`
-rejects them before credentials/client construction. After separate human
-authorization on a disposable non-production incident, use a dedicated tool:
+Incident `comments` and `work_notes` are append-only journal fields. Both
+`sn_update` and the dedicated incident tools can write them, and the
+profile's field policy decides for both routes. For a controlled validation
+write, after separate human authorization on a disposable non-production
+incident, use a dedicated tool, which can only append one entry to one
+incident:
 
 ```ts
 const writeResult = await client.callTool({
@@ -518,8 +551,9 @@ const writeResult = await client.callTool({
 });
 ```
 
-The staging policy must grant write access to `incident` and list
-`sn_incident_add_comment` on its exact target. A repeated call appends again;
+The staging policy must grant write access to `incident`, list
+`sn_incident_add_comment` on its exact target, and leave `comments` writable
+in its field policy. A repeated call appends again;
 the operation is intentionally non-idempotent. Do not substitute a generic
 journal update, production record, unrestricted query, batch, ATF execution,
 or script.

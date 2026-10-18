@@ -10,6 +10,7 @@ import {
   prepareWriteFieldValues,
 } from "../src/write-value-policy.js";
 import { FieldPolicyError } from "../src/field-policy.js";
+import { INCIDENT_JOURNAL_MAX_CHARACTERS } from "../src/incident-journal-policy.js";
 
 const SYS_ID = "ABCDEF0123456789ABCDEF0123456789";
 
@@ -128,23 +129,47 @@ describe("SNSDK-49 bounded write-value policy", () => {
     }
   });
 
-  it("rejects empty, control, hostile choice, reference, and non-string values", () => {
+  it("rejects blank, control, hostile choice, reference, and non-string values", () => {
     for (const fields of [
-      { description: "" },
+      { description: "   " },
+      { short_description: "" },
+      { short_description: null },
       { close_notes: "line\u0000secret" },
       { short_description: "line\nsecond" },
       { category: "x^ORactive=true" },
       { category: "javascript:gs.getUserID()" },
+      { category: "  " },
       { caller_id: "not-a-sys-id" },
-      { assignment_group: null },
-      { assigned_to: { value: SYS_ID } },
+      { caller_id: { value: "not-a-sys-id", display_value: "Beth Anglin" } },
+      // {value} is unwrapped first, then the typed check still applies.
+      { category: { value: "x^ORactive=true", display_value: "Software" } },
+      { caller_id: { value: "x^ORactive=true" } },
+      { assigned_to: { value: SYS_ID, unexpected: "x" } },
+      { assigned_to: [SYS_ID] },
+      { impact: null },
       { contact_type: false },
       { description: "\ud800" },
     ]) {
       expect(() =>
         prepareWriteFieldValues("update", "incident", fields)
-      ).toThrow();
+      ).toThrow(WriteValuePolicyError);
     }
+  });
+
+  it("clears incident text, choice, and reference fields with an empty value", () => {
+    // null clears a field, and the {value} read shape writes its value. Both
+    // then pass the field's own typed check.
+    expect(
+      prepareWriteFieldValues("update", "incident", {
+        assignment_group: null,
+        assigned_to: { value: SYS_ID, display_value: "Beth Anglin", link: "x" },
+        category: { value: "software", display_value: "Software" },
+      })
+    ).toEqual({
+      assignment_group: "",
+      assigned_to: SYS_ID.toLowerCase(),
+      category: "software",
+    });
   });
 
   it("rejects accessors, Proxies, constructor, and __proto__ keys without traps", () => {
@@ -273,20 +298,23 @@ describe("write-value denial classification", () => {
         active: true,
         order: 100,
         description: "",
+        sys_policy: null,
+        u_weight: 1.5,
       })
     ).toEqual({
       script: "var X = Class.create();\n\tX.prototype = {};",
       active: "true",
       order: "100",
       description: "",
+      sys_policy: "",
+      u_weight: "1.5",
     });
 
     for (const fields of [
       { script: "x".repeat(GENERIC_WRITE_VALUE_MAX_CHARACTERS + 1) },
       { script: "line\u0000hidden" },
       { script: "\ud800" },
-      { script: null },
-      { order: 1.5 },
+      { order: 2 ** 53 },
     ]) {
       expect(() =>
         prepareWriteFieldValues("update", "sys_script_include", fields)
@@ -299,5 +327,208 @@ describe("write-value denial classification", () => {
         script: { toString: () => "hostile" },
       })
     ).toThrow(FieldPolicyError);
+  });
+});
+
+describe("journal fields and generic value shapes", () => {
+  const JOURNAL_TABLES = ["incident", "change_request", "u_custom"] as const;
+
+  function valueDenial(operation: () => unknown): WriteValuePolicyError {
+    try {
+      operation();
+    } catch (error) {
+      expect(isWriteValuePolicyError(error)).toBe(true);
+      return error as WriteValuePolicyError;
+    }
+    throw new Error("Expected a write-value denial");
+  }
+
+  it.each(JOURNAL_TABLES)(
+    "accepts comments and work_notes on %s as canonical strings",
+    (table) => {
+      expect(
+        prepareWriteFieldValues("update", table, {
+          comments: "Customer called back.",
+          work_notes: "Line one\r\n\tline two",
+        })
+      ).toEqual({
+        comments: "Customer called back.",
+        work_notes: "Line one\r\n\tline two",
+      });
+      // Names are case-folded by the field policy before this runs.
+      expect(
+        prepareWriteFieldValues("update", table, { " Work_Notes ": "x" })
+      ).toEqual({ work_notes: "x" });
+    }
+  );
+
+  it.each(JOURNAL_TABLES)(
+    "applies the journal bounds to journal fields on %s",
+    (table) => {
+      expect(
+        prepareWriteFieldValues("update", table, {
+          comments: "a".repeat(INCIDENT_JOURNAL_MAX_CHARACTERS),
+        }).comments
+      ).toHaveLength(INCIDENT_JOURNAL_MAX_CHARACTERS);
+      for (const [field, value] of [
+        ["comments", "a".repeat(INCIDENT_JOURNAL_MAX_CHARACTERS + 1)],
+        ["work_notes", "journal-canary\u0000hidden"],
+        ["comments", " \r\n\t "],
+        ["work_notes", ""],
+        ["comments", null],
+        ["work_notes", 42],
+        ["comments", ["a", "b"]],
+        ["work_notes", { value: "journal-canary" }],
+      ] as const) {
+        const denial = valueDenial(() =>
+          prepareWriteFieldValues("update", table, { [field]: value })
+        );
+        expect(denial.reason).toBe("invalid_value");
+        expect(denial.table).toBe(table);
+        expect(denial.field).toBe(field);
+        const message = writeValueDenialMessage(denial, "sn_update");
+        expect(message).toContain(`"${field}"`);
+        expect(message).not.toContain("journal-canary");
+      }
+    }
+  );
+
+  it("accepts incident fields outside the typed map with generic bounds", () => {
+    expect(
+      prepareWriteFieldValues("update", "incident", {
+        cmdb_ci: SYS_ID,
+        u_custom: "v",
+        x_acme_f: "v",
+        watch_list: "a,b",
+        active: true,
+        hold_reason: "1",
+        business_service: { value: SYS_ID, display_value: "Email" },
+        parent_incident: null,
+      })
+    ).toEqual({
+      cmdb_ci: SYS_ID,
+      u_custom: "v",
+      x_acme_f: "v",
+      watch_list: "a,b",
+      active: "true",
+      hold_reason: "1",
+      business_service: SYS_ID,
+      parent_incident: "",
+    });
+    // An unknown field still carries generic bounds.
+    expect(() =>
+      prepareWriteFieldValues("update", "incident", { u_custom: "x\u0000y" })
+    ).toThrow(WriteValuePolicyError);
+  });
+
+  it("keeps the typed checks on the known incident fields", () => {
+    for (const fields of [
+      { caller_id: "not-a-sys-id" },
+      { category: "x^ORactive=true" },
+      { urgency: 4 },
+    ]) {
+      const denial = valueDenial(() =>
+        prepareWriteFieldValues("update", "incident", fields)
+      );
+      expect(denial.reason).toBe("invalid_value");
+      expect(denial.field).toBe(Object.keys(fields)[0]);
+    }
+  });
+
+  it("clears incident long text, choice, and reference fields with an empty string", () => {
+    expect(
+      prepareWriteFieldValues("update", "incident", {
+        description: "",
+        close_notes: "",
+        assigned_to: "",
+        assignment_group: "",
+        category: "",
+      })
+    ).toEqual({
+      description: "",
+      close_notes: "",
+      assigned_to: "",
+      assignment_group: "",
+      category: "",
+    });
+    expect(
+      prepareWriteFieldValues("create", "incident", {
+        short_description: "Printer jam",
+        description: "",
+        assigned_to: "",
+      })
+    ).toEqual({ short_description: "Printer jam", description: "", assigned_to: "" });
+    // short_description stays required on create and cannot be blanked.
+    expect(
+      valueDenial(() =>
+        prepareWriteFieldValues("create", "incident", { description: "" })
+      ).reason
+    ).toBe("missing_short_description");
+    expect(
+      valueDenial(() =>
+        prepareWriteFieldValues("update", "incident", { short_description: "" })
+      ).reason
+    ).toBe("invalid_value");
+  });
+
+  it("canonicalizes null, decimals, lists, and {value} objects", () => {
+    expect(
+      prepareWriteFieldValues("update", "change_request", {
+        u_amount: 12.5,
+        u_negative: -0.25,
+        u_flag: null,
+        watch_list: [SYS_ID, SYS_ID],
+        u_mixed_list: ["a", 1, true],
+        u_empty_list: [],
+        u_ref: { value: SYS_ID, display_value: "X" },
+        u_ref_link: { value: SYS_ID, display_value: "X", link: "https://x" },
+      })
+    ).toEqual({
+      u_amount: "12.5",
+      u_negative: "-0.25",
+      u_flag: "",
+      watch_list: `${SYS_ID},${SYS_ID}`,
+      u_mixed_list: "a,1,true",
+      u_empty_list: "",
+      u_ref: SYS_ID,
+      u_ref_link: SYS_ID,
+    });
+  });
+
+  it("rejects list elements with commas, unsafe integers, and exponent forms", () => {
+    for (const fields of [
+      { watch_list: ["a,b", "c"] },
+      { watch_list: ["a", ""] },
+      { watch_list: ["a", null] },
+      { watch_list: [["a"]] },
+      { watch_list: [{ value: "a" }] },
+      { watch_list: ["ok", "x\u0000y"] },
+      { u_big: 2 ** 53 },
+      { u_huge: 1e21 },
+      { u_tiny: 1e-7 },
+      { u_ref: { display_value: "X" } },
+      { u_ref: { value: SYS_ID, extra: "x" } },
+      { u_ref: { value: 42 } },
+      { u_ref: { value: SYS_ID, display_value: null } },
+    ]) {
+      const denial = valueDenial(() =>
+        prepareWriteFieldValues("update", "change_request", fields)
+      );
+      expect(denial.reason).toBe("invalid_value");
+      expect(denial.field).toBe(Object.keys(fields)[0]);
+    }
+  });
+
+  it("names the field without echoing the value or naming dedicated tools", () => {
+    const denial = valueDenial(() =>
+      prepareWriteFieldValues("update", "change_request", {
+        u_note: "value-canary\u0000",
+      })
+    );
+    const message = writeValueDenialMessage(denial, "sn_update");
+    expect(message).toContain('"u_note"');
+    expect(message).toContain('"change_request"');
+    expect(message).not.toContain("value-canary");
+    expect(message).not.toMatch(/sn_incident_add_comment|sn_incident_add_work_note/u);
   });
 });

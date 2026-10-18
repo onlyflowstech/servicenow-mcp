@@ -204,6 +204,7 @@ async function executeSchema(
       });
     const page = results.slice(args.offset, args.offset + args.limit);
     const hasMore = args.offset + page.length < results.length;
+    const showInheritance = canReadTableParents();
 
     if (args.fields_only) {
       return schemaEnvelopeResult(
@@ -224,7 +225,9 @@ async function executeSchema(
         reference: record.reference || null,
         ...(record.help !== undefined ? { help: record.help } : {}),
         ...(Array.isArray(record.choices) ? { choices: record.choices } : {}),
-        ...(record.inherited_from !== undefined ? { inherited_from: record.inherited_from } : {}),
+        ...(showInheritance && record.inherited_from !== undefined
+          ? { inherited_from: record.inherited_from }
+          : {}),
       })),
       hasMore
     );
@@ -233,6 +236,20 @@ async function executeSchema(
   }
 }
 
+
+/**
+ * `inherited_from` names an ancestor table, which is what
+ * `sys_db_object.super_class` holds. Show it only to a caller whose field
+ * policy can read that field; any other outcome hides it.
+ */
+function canReadTableParents(): boolean {
+  try {
+    resolveReadableFields("sys_db_object", { fields: "super_class" });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function loadSchemaMetadata(
   client: ServiceNowOperations,

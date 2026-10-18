@@ -23,6 +23,7 @@ import {
   preparedReadableFields,
   resolveReadableFields,
   snapshotPlainDataArguments,
+  validateWritableFields,
   withFieldPolicyArgumentValues,
 } from "./field-policy.js";
 import {
@@ -37,8 +38,11 @@ import { compileStructuredQuery, StructuredQueryError } from "./structured-query
 import {
   isIncidentJournalPolicyError,
   prepareIncidentJournalArguments,
-  rejectGenericIncidentJournalFields,
 } from "./incident-journal-policy.js";
+import {
+  isWriteValuePolicyError,
+  prepareWriteFieldValues,
+} from "./write-value-policy.js";
 
 export interface ToolTableAccessResolution {
   readonly args: Record<string, unknown>;
@@ -147,7 +151,6 @@ export function resolveToolTableAccess(
       }
       case "sn_update": {
         rejectRawEncodedWrite(args.query);
-        rejectGenericIncidentJournalFields(args.fields);
         const table = requiredTable(args.table);
         if (!Object.hasOwn(args, "fields")) {
           return resolution(withFieldPolicyArgumentValues(args, { table }), [write(table)]);
@@ -158,6 +161,13 @@ export function resolveToolTableAccess(
       case "sn_incident_add_work_note": {
         rejectRawEncodedWrite(args.query);
         const prepared = prepareIncidentJournalArguments(args);
+        // The same field policy that decides sn_update {comments|work_notes}
+        // decides the dedicated tool, so a writable set narrowed to exclude a
+        // journal field denies both routes to it.
+        validateWritableFields("incident", {
+          [tool === "sn_incident_add_comment" ? "comments" : "work_notes"]:
+            prepared.content,
+        });
         return resolution(
           withFieldPolicyArgumentValues(args, prepared),
           [write("incident")]
@@ -217,7 +227,10 @@ export function resolveToolTableAccess(
       error instanceof TablePolicyError ||
       isFieldPolicyError(error) ||
       isEncodedQueryPolicyError(error) ||
-      isIncidentJournalPolicyError(error)
+      isIncidentJournalPolicyError(error) ||
+      // A value denial is fixed in no table key, so it must keep its own
+      // classification instead of becoming a table denial.
+      isWriteValuePolicyError(error)
     ) {
       throw error;
     }
@@ -494,6 +507,10 @@ function batchResolution(
   });
   if (args.action === "update") {
     prepared = prepareWriteFieldArguments(prepared, table);
+    // The same value policy as sn_update, before any credential or client
+    // work, so the handler receives the canonical strings it sends upstream.
+    const fields = prepareWriteFieldValues("update", table, prepared.fields);
+    prepared = withFieldPolicyArgumentValues(prepared, { fields });
   }
   return resolution(
     prepared,

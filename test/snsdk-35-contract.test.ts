@@ -172,13 +172,9 @@ describe("SNSDK-35 registered append-only incident journals", () => {
     });
   });
 
-  it.each([
-    ["comments", "sn_incident_add_comment"],
-    ["work_notes", "sn_incident_add_work_note"],
-  ] as const)(
-    "rejects generic %s updates with safe exact migration guidance before secrets",
-    async (field, dedicatedTool) => {
-      const canary = `${field}-migration-canary`;
+  it.each(["comments", "work_notes"] as const)(
+    "appends a generic %s update through sn_update under the field policy",
+    async (field) => {
       const connected = await harness({ authorizeJournals: true });
       const result = await connected.client.callTool({
         name: "sn_update",
@@ -186,12 +182,40 @@ describe("SNSDK-35 registered append-only incident journals", () => {
           profile: PROFILE,
           table: "incident",
           sys_id: SYS_ID,
-          fields: { [field]: canary },
+          fields: { [field]: `${field} entry` },
+        },
+      });
+
+      expect(result.isError).toBeUndefined();
+      expect(connected.patch).toHaveBeenCalledTimes(1);
+      expect(connected.patch).toHaveBeenCalledWith(
+        `/api/now/table/incident/${SYS_ID}`,
+        { [field]: `${field} entry` }
+      );
+      expect(connected.records).not.toContainEqual(
+        expect.objectContaining({ reason: "journal_update_denied" })
+      );
+    }
+  );
+
+  it.each(["comments", "work_notes"] as const)(
+    "rejects generic %s content outside the journal bounds before secrets",
+    async (field) => {
+      const canary = `${field}-bounds-canary`;
+      const connected = await harness({ authorizeJournals: true });
+      const result = await connected.client.callTool({
+        name: "sn_update",
+        arguments: {
+          profile: PROFILE,
+          table: "incident",
+          sys_id: SYS_ID,
+          fields: { [field]: `${canary}\u0000` },
         },
       });
 
       expect(result.isError).toBe(true);
-      expect(JSON.stringify(result)).toContain(dedicatedTool);
+      const [first] = result.content as Array<{ type: string; text?: string }>;
+      expect(first?.text).toContain(`rejected a field value for "${field}"`);
       expect(JSON.stringify(result)).not.toContain(canary);
       expect(connected.getConfig).not.toHaveBeenCalled();
       expect(connected.getClient).not.toHaveBeenCalled();
@@ -200,7 +224,7 @@ describe("SNSDK-35 registered append-only incident journals", () => {
         tool: "sn_update",
         profile: PROFILE,
         outcome: "policy_rejected",
-        reason: "journal_update_denied",
+        reason: "write_value_denied",
       });
     }
   );

@@ -37,6 +37,7 @@ const ENV_KEYS = [
   "SN_ALLOWED_INSTANCE_HOSTS",
   "SN_METADATA_CACHE_TTL_MS",
   "SN_METADATA_CACHE_TABLES",
+  "SN_FIELD_POLICY_DEFINITIONS",
   "SN_PROFILE_ENCRYPTION_KEY",
   "UNSET_PROFILE_SECRET",
   // Test-only variables referenced by sn_profile add round-trip tests
@@ -118,6 +119,70 @@ describe("explicit named SN_* environment profile", () => {
       ttlMs: 86400000,
       tables: ["sys_dictionary", "sys_metadata*"],
     });
+  });
+
+  it("maps SN_FIELD_POLICY_DEFINITIONS onto the environment profile only", () => {
+    const policy = { incident: { writable: ["state"] } };
+    process.env.SN_FIELD_POLICY_DEFINITIONS = JSON.stringify(policy);
+    process.env.SN_PROFILE_NAME = "field-env";
+    process.env.SN_INSTANCE = "https://field-env.service-now.com";
+
+    const environment = new ProfileManager().getProfile("field-env");
+    expect(environment.fieldPolicy).toEqual(policy);
+    expect(Object.isFrozen(environment.fieldPolicy)).toBe(true);
+    expect(environment.readableTableFields).toBeUndefined();
+    expect(environment.writableTableFields).toBeUndefined();
+
+  });
+
+  it("refuses to start when SN_FIELD_POLICY_DEFINITIONS is set beside a config file", () => {
+    // A config file replaces the environment profile, so the variable could
+    // no longer narrow anything. Up to 2.1.0 it narrowed these profiles.
+    process.env.SN_FIELD_POLICY_DEFINITIONS = JSON.stringify({
+      u_secret_table: { writable: [] },
+    });
+    writeConfigFile({
+      version: 2,
+      profiles: {
+        file: {
+          instance: "https://file.service-now.com",
+          username: "admin",
+          credential: "env:SN_PASSWORD",
+        },
+      },
+    });
+
+    let message = "";
+    try {
+      new ProfileManager();
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(
+      /^SN_FIELD_POLICY_DEFINITIONS is set, but profiles are loaded from the config file; .*Move the policy into each profile's fieldPolicy, or unset the variable\.$/u
+    );
+    expect(message).not.toContain("u_secret_table");
+
+    delete process.env.SN_FIELD_POLICY_DEFINITIONS;
+    expect(new ProfileManager().getProfile("file").fieldPolicy).toBeUndefined();
+  });
+
+  it("rejects a malformed field policy at load and names the profile, table, and key", () => {
+    writeConfigFile({
+      version: 2,
+      profiles: {
+        audit: {
+          instance: "https://audit.service-now.com",
+          username: "admin",
+          credential: "env:SN_PASSWORD",
+          fieldPolicy: { u_audit: { writable: ["u_*"] } },
+        },
+      },
+    });
+
+    expect(() => new ProfileManager()).toThrow(
+      /^Profile configuration is invalid: profile "audit": fieldPolicy\.u_audit\.writable\[0\] is not a field name/u
+    );
   });
 
   it("maps basic-auth SN_* values only under SN_PROFILE_NAME", () => {

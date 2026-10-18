@@ -1,17 +1,26 @@
 /**
  * Bounded, code-owned value policy for generic creates and updates.
  *
- * Which tables may be written is decided entirely by the configured
- * `tableAccess` and field policies -- this module never gates on table
- * identity. It only bounds the *values* a write may carry, so a grant the
- * operator issued is the grant that takes effect. The `incident` table keeps
- * a strict typed value map because its ordinary fields are a known, closed
- * set; every other table gets generic bounds.
+ * Which tables and fields may be written is decided entirely by the
+ * configured `tableAccess` and field policies -- this module never gates on
+ * table or field identity. It only bounds the *values* a write may carry, so
+ * a grant the operator issued is the grant that takes effect.
+ *
+ * - Journal fields (`comments`, `work_notes`) get the journal bounds on every
+ *   table. A Table API write to a journal field appends an entry; it cannot
+ *   rewrite earlier entries.
+ * - On `incident`, the fields with a known type keep typed checks. Every other
+ *   incident field gets the generic bounds.
+ * - Every other table gets the generic bounds.
  */
 
 import { Buffer } from "node:buffer";
 
 import { validateWritableFields } from "./field-policy.js";
+import {
+  incidentJournalContentSchema,
+  isJournalFieldName,
+} from "./incident-journal-policy.js";
 import { normalizeServiceNowSysId } from "./servicenow-identifiers.js";
 import { normalizeTableName } from "./table-policy.js";
 
@@ -46,6 +55,10 @@ export type WriteValuePolicyFailureReason =
 export const GENERIC_WRITE_VALUE_MAX_CHARACTERS = 100_000;
 export const GENERIC_WRITE_VALUE_MAX_UTF8_BYTES = 400_000;
 
+/**
+ * Typed checks for the incident fields whose type is known. This is not an
+ * allowlist: an incident field outside the map gets the generic bounds.
+ */
 const FIELD_KINDS: Readonly<Record<string, FieldKind>> = Object.freeze({
   short_description: "short_text",
   description: "long_text",
@@ -63,6 +76,13 @@ const FIELD_KINDS: Readonly<Record<string, FieldKind>> = Object.freeze({
   contact_type: "choice",
 });
 
+/** The read shape of a field when display values are requested ("all"). */
+const VALUE_OBJECT_KEYS: ReadonlySet<string> = new Set([
+  "value",
+  "display_value",
+  "link",
+]);
+
 const UNSAFE_SINGLE_LINE = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 const UNSAFE_MULTILINE =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
@@ -72,19 +92,30 @@ const STATE_TOKEN = /^-?[0-9]{1,4}$/u;
 
 const ISSUED_WRITE_VALUE_POLICY_ERRORS = new WeakSet<object>();
 
-/** Normalized table identifiers are the only value ever placed in a message. */
-const SAFE_TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
+/**
+ * Normalized table and field identifiers are the only values ever placed in a
+ * message. A field value never is.
+ */
+const SAFE_IDENTIFIER = /^[a-z][a-z0-9_]{0,79}$/u;
 
 export class WriteValuePolicyError extends Error {
   readonly reason: WriteValuePolicyFailureReason;
   readonly table?: string;
+  readonly field?: string;
 
-  constructor(reason: WriteValuePolicyFailureReason, table?: string) {
+  constructor(
+    reason: WriteValuePolicyFailureReason,
+    table?: string,
+    field?: string
+  ) {
     super("Write denied by the bounded value policy");
     this.name = "WriteValuePolicyError";
     this.reason = reason;
-    if (typeof table === "string" && SAFE_TABLE_NAME.test(table)) {
+    if (typeof table === "string" && SAFE_IDENTIFIER.test(table)) {
       this.table = table;
+    }
+    if (typeof field === "string" && SAFE_IDENTIFIER.test(field)) {
+      this.field = field;
     }
     ISSUED_WRITE_VALUE_POLICY_ERRORS.add(this);
     Object.freeze(this);
@@ -105,8 +136,8 @@ export function isWriteValuePolicyError(
  * Safe fixed guidance per failure reason. A bounded-value denial is not a
  * table-access denial: it is not fixed in tableAccess.writeTables, so
  * reporting it as a table denial points the operator at a key that cannot
- * change the outcome. Only the already-normalized table identifier is ever
- * interpolated.
+ * change the outcome. Only already-normalized table and field identifiers
+ * are ever interpolated.
  */
 export function writeValueDenialMessage(
   error: WriteValuePolicyError,
@@ -130,12 +161,18 @@ export function writeValueDenialMessage(
       );
     case "invalid_value":
       return (
-        `Write denied by policy: ${subject} rejected a field value. The field is ` +
-        `not writable under the configured field policy for this table, or its ` +
-        `value is outside the bounds this code policy enforces. On the incident ` +
-        `table only the approved ordinary fields are accepted, and journal fields ` +
-        `require the dedicated sn_incident_add_comment and sn_incident_add_work_note ` +
-        `tools.`
+        `Write denied by policy: ${subject} rejected a field value` +
+        (error.field === undefined
+          ? ". "
+          : ` for "${error.field}"` +
+            (error.table === undefined ? ". " : ` on "${error.table}". `)) +
+        `The configured field policy allows the field; the value is outside the ` +
+        `bounds this code policy enforces. A value must be a string, a finite ` +
+        `number, a boolean, null or "" to clear the field, an array of ` +
+        `comma-free scalars, or a {value} object, with no control characters. ` +
+        `Journal fields (comments, work_notes) take 1-8000 characters of ` +
+        `non-blank text. On incident, reference fields take a 32-character ` +
+        `sys_id and choice values cannot contain ^, = or ,.`
       );
     case "invalid_mode":
       return `Write denied by policy: ${subject} requested an unsupported write mode.`;
@@ -161,9 +198,11 @@ export function normalizeWriteTable(candidate: unknown): string {
  * Validate keys through the shared field policy, then validate and
  * canonicalize every value.
  *
- * The table itself is never gated here: whether a table may be written is the
- * configured table policy's decision, evaluated by the dispatcher. Incident
- * keeps its typed value map; every other granted table gets generic bounds.
+ * Neither the table nor the field is gated here: whether either may be
+ * written is the configured table and field policies' decision, evaluated
+ * before this runs. Journal fields get the journal bounds on every table,
+ * incident fields with a known type keep their typed checks, and every other
+ * field gets the generic bounds.
  */
 export function prepareWriteFieldValues(
   mode: WriteMode,
@@ -176,84 +215,168 @@ export function prepareWriteFieldValues(
   const table = normalizeWriteTable(tableCandidate);
   const approved = validateWritableFields(table, fieldsCandidate);
 
-  if (table !== "incident") {
-    const generic: Record<string, string> = {};
-    for (const [field, value] of Object.entries(approved)) {
-      defineValue(generic, field, genericValue(value));
-    }
-    return Object.freeze(generic);
-  }
-
-  if (mode === "create" && !Object.hasOwn(approved, "short_description")) {
+  if (
+    table === "incident" &&
+    mode === "create" &&
+    !Object.hasOwn(approved, "short_description")
+  ) {
     throw new WriteValuePolicyError("missing_short_description", table);
   }
 
   const output: Record<string, string> = {};
   for (const [field, value] of Object.entries(approved)) {
-    if (!Object.hasOwn(FIELD_KINDS, field)) {
-      throw new WriteValuePolicyError("invalid_value", table);
-    }
-    defineValue(output, field, canonicalValue(FIELD_KINDS[field]!, value));
+    defineValue(output, field, fieldValue(table, field, value));
   }
   return Object.freeze(output);
 }
 
+function fieldValue(table: string, field: string, value: unknown): string {
+  if (isJournalFieldName(field)) return journalValue(table, field, value);
+  if (table === "incident" && Object.hasOwn(FIELD_KINDS, field)) {
+    return canonicalValue(FIELD_KINDS[field]!, field, value);
+  }
+  return genericValue(table, field, value);
+}
+
 /**
- * Bounded canonicalization for a table with no typed value map. Field
- * *selection* is already the field policy's decision; this only ensures the
- * value is a plain bounded scalar that cannot smuggle control characters or
- * an unbounded payload upstream. An empty string is allowed so a granted
- * field can be cleared.
+ * A journal value is one entry to append. It gets the same bounds as the
+ * dedicated incident journal tools, on every table.
  */
-function genericValue(value: unknown): string {
+function journalValue(table: string, field: string, value: unknown): string {
+  const parsed = incidentJournalContentSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new WriteValuePolicyError("invalid_value", table, field);
+  }
+  return parsed.data;
+}
+
+/**
+ * Bounded canonicalization for a field with no typed check. Field
+ * *selection* is already the field policy's decision; this only ensures the
+ * value has a shape the Table API accepts as a field value and cannot smuggle
+ * control characters or an unbounded payload upstream.
+ *
+ * - `null` and `""` clear the field.
+ * - A number must be a safe integer or a finite decimal without an exponent.
+ * - An array is a list value (glide_list): its scalar elements are joined
+ *   with commas, so no element may itself contain a comma.
+ * - A `{value, display_value?, link?}` object, the read shape when display
+ *   values are requested, is written as its `value`.
+ */
+function genericValue(table: string, field: string, value: unknown): string {
   try {
-    if (typeof value === "boolean") return String(value);
-    if (typeof value === "number") {
-      if (!Number.isSafeInteger(value)) throw new Error("invalid numeric primitive");
-      return String(value);
-    }
-    if (typeof value !== "string") throw new Error("value must be a scalar");
-    if (!isWellFormedUnicode(value)) throw new Error("value is not Unicode");
-    if (UNSAFE_MULTILINE.test(value)) {
-      throw new Error("value contains an unsafe control character");
-    }
-    if ([...value].length > GENERIC_WRITE_VALUE_MAX_CHARACTERS) {
-      throw new Error("value exceeds the character limit");
-    }
-    if (Buffer.byteLength(value, "utf8") > GENERIC_WRITE_VALUE_MAX_UTF8_BYTES) {
-      throw new Error("value exceeds the byte limit");
-    }
-    return value;
+    if (value === null) return "";
+    if (Array.isArray(value)) return genericList(value);
+    return genericScalar(unwrapValueObject(value));
   } catch {
-    throw new WriteValuePolicyError("invalid_value");
+    throw new WriteValuePolicyError("invalid_value", table, field);
   }
 }
 
-function canonicalValue(kind: FieldKind, value: unknown): string {
+function genericScalar(value: unknown): string {
+  if (typeof value === "boolean") return String(value);
+  if (typeof value === "number") return canonicalNumber(value);
+  if (typeof value !== "string") throw new Error("value must be a scalar");
+  return boundedGenericText(value);
+}
+
+function genericList(values: readonly unknown[]): string {
+  const tokens = values.map((element) => {
+    if (
+      typeof element !== "string" &&
+      typeof element !== "number" &&
+      typeof element !== "boolean"
+    ) {
+      throw new Error("list element must be a scalar");
+    }
+    const token = genericScalar(element);
+    if (token.trim().length === 0 || token.includes(",")) {
+      throw new Error("list element must be non-blank and comma-free");
+    }
+    return token;
+  });
+  return boundedGenericText(tokens.join(","));
+}
+
+function canonicalNumber(value: number): string {
+  if (Number.isInteger(value)) {
+    if (!Number.isSafeInteger(value)) throw new Error("unsafe integer");
+    return String(value);
+  }
+  if (!Number.isFinite(value)) throw new Error("number must be finite");
+  const token = String(value);
+  // String() switches to exponent form for very large or very small numbers,
+  // and ServiceNow does not read that form as a decimal.
+  if (/e/iu.test(token)) throw new Error("number has no plain decimal form");
+  return token;
+}
+
+function boundedGenericText(value: string): string {
+  if (!isWellFormedUnicode(value)) throw new Error("value is not Unicode");
+  if (UNSAFE_MULTILINE.test(value)) {
+    throw new Error("value contains an unsafe control character");
+  }
+  if ([...value].length > GENERIC_WRITE_VALUE_MAX_CHARACTERS) {
+    throw new Error("value exceeds the character limit");
+  }
+  if (Buffer.byteLength(value, "utf8") > GENERIC_WRITE_VALUE_MAX_UTF8_BYTES) {
+    throw new Error("value exceeds the byte limit");
+  }
+  return value;
+}
+
+/**
+ * Unwrap `{value, display_value?, link?}` to its `value`. Any other object is
+ * rejected, and every member must be a string. Non-objects pass through.
+ */
+function unwrapValueObject(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value;
+  }
+  const record = value as Readonly<Record<string, unknown>>;
+  const keys = Object.keys(record);
+  if (
+    !Object.hasOwn(record, "value") ||
+    keys.some((key) => !VALUE_OBJECT_KEYS.has(key)) ||
+    keys.some((key) => typeof record[key] !== "string")
+  ) {
+    throw new Error("unsupported object value");
+  }
+  return record.value;
+}
+
+function canonicalValue(kind: FieldKind, field: string, value: unknown): string {
   try {
+    // null clears a field, and the {value} read shape writes its value. The
+    // kind's own check then decides whether that value is acceptable.
+    const candidate = value === null ? "" : unwrapValueObject(value);
     switch (kind) {
       case "short_text":
-        return boundedText(value, {
+        // short_description stays required: it can never be cleared.
+        return boundedText(candidate, {
           maximumCharacters: INCIDENT_SHORT_DESCRIPTION_MAX_CHARACTERS,
           maximumBytes: INCIDENT_SHORT_DESCRIPTION_MAX_UTF8_BYTES,
           multiline: false,
           trim: true,
+          allowEmpty: false,
         });
       case "long_text":
-        return boundedText(value, {
+        return boundedText(candidate, {
           maximumCharacters: INCIDENT_LONG_TEXT_MAX_CHARACTERS,
           maximumBytes: INCIDENT_LONG_TEXT_MAX_UTF8_BYTES,
           multiline: true,
           trim: false,
+          allowEmpty: true,
         });
       case "reference":
-        return normalizeServiceNowSysId(value);
+        // "" clears the reference; any other value must be a sys_id.
+        return candidate === "" ? "" : normalizeServiceNowSysId(candidate);
       case "impact_urgency":
-        return boundedInteger(value, 1, 3);
+        return boundedInteger(candidate, 1, 3);
       case "priority":
-        return boundedInteger(value, 1, 5);
+        return boundedInteger(candidate, 1, 5);
       case "state": {
-        const token = primitiveString(value);
+        const token = primitiveString(candidate);
         if (!STATE_TOKEN.test(token)) throw new Error("invalid state token");
         const numeric = Number(token);
         if (!Number.isSafeInteger(numeric) || numeric < -9_999 || numeric > 9_999) {
@@ -262,11 +385,12 @@ function canonicalValue(kind: FieldKind, value: unknown): string {
         return String(numeric);
       }
       case "choice": {
-        const choice = boundedText(value, {
+        const choice = boundedText(candidate, {
           maximumCharacters: INCIDENT_CHOICE_MAX_CHARACTERS,
           maximumBytes: INCIDENT_CHOICE_MAX_UTF8_BYTES,
           multiline: false,
           trim: true,
+          allowEmpty: true,
         });
         if (
           UNSAFE_CHOICE_METACHARACTER.test(choice) ||
@@ -278,7 +402,7 @@ function canonicalValue(kind: FieldKind, value: unknown): string {
       }
     }
   } catch {
-    throw new WriteValuePolicyError("invalid_value", "incident");
+    throw new WriteValuePolicyError("invalid_value", "incident", field);
   }
 }
 
@@ -312,9 +436,12 @@ function boundedText(
     maximumBytes: number;
     multiline: boolean;
     trim: boolean;
+    /** Accept exactly "" so the field can be cleared. Whitespace stays blank. */
+    allowEmpty: boolean;
   }>
 ): string {
   if (typeof value !== "string") throw new Error("value must be a string");
+  if (options.allowEmpty && value === "") return "";
   const canonical = options.trim ? value.trim() : value;
   if (canonical.trim().length === 0) throw new Error("value must not be blank");
   if (!isWellFormedUnicode(canonical)) throw new Error("value is not Unicode");

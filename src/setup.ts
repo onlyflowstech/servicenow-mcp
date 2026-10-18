@@ -282,6 +282,17 @@ const DEFAULT_WRITE_TOOLS: readonly string[] = Object.freeze([
   "sn_update",
 ]);
 
+/**
+ * Added to the `incident` target by a write grant when `--tools` is not given.
+ * These tools append to comments and work_notes and are authorized as incident
+ * writes, so an incident target that omitted them would deny them on a profile
+ * that can otherwise write incident.
+ */
+const INCIDENT_JOURNAL_TOOLS: readonly string[] = Object.freeze([
+  "sn_incident_add_comment",
+  "sn_incident_add_work_note",
+]);
+
 export async function runSetupCli(
   dependencies: SetupCliDependencies = {}
 ): Promise<void> {
@@ -1611,7 +1622,7 @@ function buildTableAccess(
 ): TableAccessPolicyInput {
   const readTables = new Set([...(existing.readTables ?? []), ...options.read]);
   const writeTables = new Set([...(existing.writeTables ?? []), ...options.write]);
-  const targets = mergeTargets(existing.targets, options, readTables, writeTables);
+  const targets = mergeTargets(existing.targets, options);
 
   // A target asserts that relatedTables is its complete reachable closure, and
   // the policy loader requires every one of those tables to carry the same
@@ -1644,9 +1655,7 @@ function sorted(values: ReadonlySet<string>): readonly string[] {
 
 function mergeTargets(
   existing: readonly TableAccessTargetInput[] | undefined,
-  options: GrantOptions,
-  readTables: ReadonlySet<string>,
-  writeTables: ReadonlySet<string>
+  options: GrantOptions
 ): readonly TableAccessTargetInput[] {
   const byTable = new Map<string, TableAccessTargetInput>();
   for (const target of existing ?? []) byTable.set(target.table, target);
@@ -1657,11 +1666,18 @@ function mergeTargets(
     if (options.tools) {
       for (const tool of options.tools) tools.add(tool);
     } else {
-      if (readTables.has(table)) {
+      // Defaults follow what this invocation granted, not the merged
+      // allowlists. Those also hold the profile's earlier grants and the
+      // related tables of other targets, so gating on them would let a
+      // read-only grant add write tools to a target.
+      if (options.read.includes(table)) {
         for (const tool of DEFAULT_READ_TOOLS) tools.add(tool);
       }
-      if (writeTables.has(table)) {
+      if (options.write.includes(table)) {
         for (const tool of DEFAULT_WRITE_TOOLS) tools.add(tool);
+        if (table === "incident") {
+          for (const tool of INCIDENT_JOURNAL_TOOLS) tools.add(tool);
+        }
       }
     }
     const related = new Set([
@@ -2648,7 +2664,9 @@ function renderGrantHelp(): string {
     "                          Does not enable execution or script-step authoring",
     `  --tools LIST            Tools permitted on these targets`,
     `                          (default read: ${DEFAULT_READ_TOOLS.join(",")};`,
-    `                           default write adds: ${DEFAULT_WRITE_TOOLS.join(",")})`,
+    `                           default write adds: ${DEFAULT_WRITE_TOOLS.join(",")};`,
+    `                           default write on incident also adds:`,
+    `                           ${INCIDENT_JOURNAL_TOOLS.join(",")})`,
     "  --related TABLE=LIST    Backing/ancestor/descendant tables the target reaches;",
     "                          repeatable, and required whenever a table extends another",
     "  --replace               Discard existing rules instead of adding to them",

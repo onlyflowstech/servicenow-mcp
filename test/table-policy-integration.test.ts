@@ -9,7 +9,10 @@ import type {
   ToolAuditRecord,
 } from "../src/execution-context.js";
 import type { EncodedQueryAccessPolicyInput } from "../src/encoded-query-policy.js";
-import { resolveReadableFields } from "../src/field-policy.js";
+import {
+  resolveReadableFields,
+  type FieldPolicyConfigurationInput,
+} from "../src/field-policy.js";
 import type { ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import {
@@ -31,7 +34,8 @@ const openHarnesses: Array<Awaited<ReturnType<typeof createHarness>>> = [];
 
 async function createHarness(
   policyInput: TableAccessPolicyInput,
-  encodedQueryAccess?: EncodedQueryAccessPolicyInput
+  encodedQueryAccess?: EncodedQueryAccessPolicyInput,
+  fieldPolicy?: FieldPolicyConfigurationInput
 ) {
   const records: ToolAuditRecord[] = [];
   const serviceNowClient = {
@@ -86,6 +90,7 @@ async function createHarness(
         revision: "snsdk-29",
         tableAccess,
         ...(encodedQueryAccess === undefined ? {} : { encodedQueryAccess }),
+        ...(fieldPolicy === undefined ? {} : { fieldPolicy }),
       }),
     },
     auditSink: {
@@ -118,9 +123,10 @@ async function createHarness(
 
 async function harness(
   policyInput: TableAccessPolicyInput,
-  encodedQueryAccess?: EncodedQueryAccessPolicyInput
+  encodedQueryAccess?: EncodedQueryAccessPolicyInput,
+  fieldPolicy?: FieldPolicyConfigurationInput
 ) {
-  const connected = await createHarness(policyInput, encodedQueryAccess);
+  const connected = await createHarness(policyInput, encodedQueryAccess, fieldPolicy);
   openHarnesses.push(connected);
   return connected;
 }
@@ -149,14 +155,13 @@ describe("SNSDK-29 registry enforcement", () => {
     // field denial as "table access denied" points them at the wrong one.
     // Field policy only denies where an operator narrowed, so the narrowing is
     // part of the setup: this test is about how the denial is *classified*.
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({ incident: { writable: ["state"] } })
+    // It is stated on the profile: SN_FIELD_POLICY_DEFINITIONS configures only
+    // the SN_PROFILE_NAME environment profile.
+    const connected = await harness(
+      { readTables: ["incident"], writeTables: ["incident"] },
+      undefined,
+      { fieldPolicy: { incident: { writable: ["state"] } } }
     );
-    const connected = await harness({
-      readTables: ["incident"],
-      writeTables: ["incident"],
-    });
 
     const denied = await connected.client.callTool({
       name: "sn_update",
