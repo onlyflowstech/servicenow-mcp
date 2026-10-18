@@ -308,7 +308,7 @@ function normalizeTargets(
       [...new Set<string>(entry.tools.map((tool: unknown) => normalizeToolName(tool)))].sort()
     );
     if (entry.closureComplete !== true) {
-      throw new TypeError("table access target closure must be explicitly complete");
+      throw new TypeError("table access target must set closureComplete: true");
     }
     if (!Array.isArray(entry.relatedTables) || entry.relatedTables.length === 0) {
       throw new TypeError("table access target must include related tables");
