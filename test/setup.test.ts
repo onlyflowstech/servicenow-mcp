@@ -19,10 +19,13 @@ import {
 import { ProfileManager } from "../src/profile-manager.js";
 import {
   authorizeTableAccess,
+  authorizeTableAccessPlan,
   createTableAccessPolicy,
   type TableAccessPolicy,
+  type TableAccessPolicyInput,
 } from "../src/table-policy.js";
 import { createToolError } from "../src/tool-error.js";
+import { resolveToolTableAccess } from "../src/tool-table-access.js";
 import {
   classifyVerificationFailure,
   runSetupCli,
@@ -1174,7 +1177,7 @@ describe("setup wizard", () => {
     script: readonly string[],
     overrides: Partial<SetupCliDependencies> = {},
     secrets: readonly string[] = ["hunter2"]
-  ): Promise<{ prompter: ScriptedPrompter; out: string }> {
+  ): Promise<{ prompter: ScriptedPrompter; out: string; err: string }> {
     // The wizard's last step is a local check pass with nothing to confirm:
     // a client spawns the server, so there is no service to offer to start
     // and no endpoint whose reachability could make this suite depend on
@@ -1196,7 +1199,7 @@ describe("setup wizard", () => {
       writeStderr: (value) => io.err.push(value),
       ...overrides,
     });
-    return { prompter, out: io.out.join("") };
+    return { prompter, out: io.out.join(""), err: io.err.join("") };
   }
 
   const CUSTOM = "Enter a custom list";
@@ -1551,6 +1554,484 @@ describe("setup wizard", () => {
     expect(
       new ProfileManager({ configFilePath: profileConfigPath(home) }).listProfiles()
     ).toEqual([]);
+  });
+
+  describe("parent tables, resolved by name", () => {
+    /**
+     * A stand-in sys_db_object. A table's super_class stores its parent; the
+     * reference's display value is the parent's label, which differs from the
+     * name across most of the CMDB and is what the wizard used to follow.
+     */
+    const TABLES: Readonly<Record<string, { readonly label: string; readonly parent?: string }>> = {
+      cmdb: { label: "Base Configuration Item" },
+      cmdb_ci: { label: "Configuration Item", parent: "cmdb" },
+      cmdb_ci_hardware: { label: "Hardware", parent: "cmdb_ci" },
+      cmdb_ci_computer: { label: "Computer", parent: "cmdb_ci_hardware" },
+      cmdb_ci_server: { label: "Server", parent: "cmdb_ci_computer" },
+      cmdb_ci_linux_server: { label: "Linux Server", parent: "cmdb_ci_server" },
+      task: { label: "Task" },
+      incident: { label: "Incident", parent: "task" },
+      problem: { label: "Problem", parent: "task" },
+      x_cycle: { label: "Cycle", parent: "x_cycle" },
+      // A stored name no table can have, as a tampered or broken row would carry.
+      x_bad_parent: { label: "Bad Parent", parent: "incident,sys_user" },
+    };
+
+    function ancestor(table: string, hops: number): string | undefined {
+      let current: string | undefined = table;
+      for (let hop = 0; hop < hops && current !== undefined; hop += 1) {
+        current = TABLES[current]?.parent;
+      }
+      return current;
+    }
+
+    function json(body: unknown, status = 200): Response {
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    /**
+     * Serve sys_db_object reads and OAuth tokens, recording both and each
+     * read's Authorization header. With
+     * `ignoreFieldList`, every row carries the whole ancestor chain whatever
+     * sysparm_fields asked for, so the walk's own depth limit is what holds.
+     */
+    function stubInstance(options: { readonly ignoreFieldList?: boolean } = {}) {
+      const reads: URLSearchParams[] = [];
+      const authorizations: string[] = [];
+      const tokenBodies: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          const request = input instanceof Request ? input : new Request(String(input), init);
+          const url = new URL(request.url);
+          if (url.pathname === "/oauth_token.do") {
+            const body = await request.text();
+            tokenBodies.push(body);
+            // Each token names the secret it was issued for, so a read shows
+            // whose credential it carried.
+            const secret = new URLSearchParams(body).get("client_secret") ?? "none";
+            return json({
+              access_token: `tok-${secret}-${tokenBodies.length}`,
+              token_type: "Bearer",
+              expires_in: 1800,
+            });
+          }
+          if (url.pathname !== "/api/now/table/sys_db_object") return json({}, 404);
+          reads.push(url.searchParams);
+          authorizations.push(request.headers.get("authorization") ?? "");
+          const name = /^name=(.*)$/u.exec(url.searchParams.get("sysparm_query") ?? "")?.[1] ?? "";
+          if (name === "x_broken") return json({ error: { message: "boom" } }, 500);
+          if (TABLES[name] === undefined) return json({ result: [] });
+          const displayValues = url.searchParams.get("sysparm_display_value") === "true";
+          const fields = options.ignoreFieldList
+            ? ["name", "super_class", ...[1, 2, 3, 4, 5, 6].map((hops) => `${"super_class.".repeat(hops)}name`)]
+            : (url.searchParams.get("sysparm_fields") ?? "").split(",");
+          const row: Record<string, string> = {};
+          for (const field of fields) {
+            if (field === "name") row.name = name;
+            else if (field === "super_class") {
+              const parent = TABLES[name]?.parent;
+              row.super_class =
+                parent === undefined ? "" : displayValues ? (TABLES[parent]?.label ?? "") : "0".repeat(32);
+            } else {
+              const hops = field.split(".").length - 1;
+              row[field] = ancestor(name, hops) ?? "";
+            }
+          }
+          return json({ result: [row] });
+        })
+      );
+      return { reads, authorizations, tokenBodies, tokens: () => tokenBodies.length };
+    }
+
+    const DEFAULT_RESOLVER: Partial<SetupCliDependencies> = { resolveParentTable: undefined };
+
+    /** Every tool that can name a table, for checks that a table is unaddressable. */
+    const EVERY_TABLE_TOOL = [
+      "sn_query",
+      "sn_get",
+      "sn_aggregate",
+      "sn_schema",
+      "sn_create",
+      "sn_update",
+      "sn_delete",
+      "sn_batch",
+      "sn_attach",
+      "sn_relationships",
+      "sn_incident_add_comment",
+      "sn_incident_add_work_note",
+      "sn_atf_author",
+    ];
+
+    /** A basic-auth "dev" profile; `null` answers "None" for that operation. */
+    function wizardGranting(
+      reads: string | null,
+      writes: string | null,
+      ...confirms: string[]
+    ): string[] {
+      return [
+        "dev",
+        "dev00001.service-now.com",
+        "basic",
+        "encrypted",
+        "integration.user",
+        ...(reads === null ? [NONE] : [CUSTOM, reads]),
+        ...(writes === null ? [NONE] : [CUSTOM, writes]),
+        ...confirms,
+      ];
+    }
+
+    function wizardReading(tables: string, ...confirms: string[]): string[] {
+      return wizardGranting(tables, null, ...confirms);
+    }
+
+    function savedProfile() {
+      return new ProfileManager({ configFilePath: profileConfigPath(home) }).getProfile("dev");
+    }
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    });
+
+    it("proposes a CMDB parent by its name, where the label differs", async () => {
+      const instance = stubInstance();
+      const { prompter } = await runWizard(
+        wizardReading("cmdb_ci_linux_server,cmdb_ci_hardware", "y", "y"),
+        DEFAULT_RESOLVER
+      );
+
+      const notes = prompter.notes.join("\n");
+      expect(notes).toContain("cmdb_ci_linux_server extends cmdb_ci_server.");
+      // "Configuration Item" has a space, so following the label offered nothing.
+      expect(notes).toContain("cmdb_ci_hardware extends cmdb_ci.");
+      expect(prompter.remaining()).toBe(0);
+      expect(savedProfile().tableAccess?.readTables).toEqual([
+        "cmdb_ci",
+        "cmdb_ci_hardware",
+        "cmdb_ci_linux_server",
+        "cmdb_ci_server",
+      ]);
+
+      // One read per table, of stored values, asking for one ancestor only.
+      expect(instance.reads).toHaveLength(2);
+      for (const params of instance.reads) {
+        expect(params.get("sysparm_display_value")).toBe("false");
+        expect(params.get("sysparm_fields")).toBe("name,super_class.name");
+        expect(params.get("sysparm_limit")).toBe("1");
+      }
+      expect(instance.reads.map((params) => params.get("sysparm_query"))).toEqual([
+        "name=cmdb_ci_linux_server",
+        "name=cmdb_ci_hardware",
+      ]);
+    });
+
+    it("still proposes task for incident", async () => {
+      stubInstance();
+      const { prompter } = await runWizard(wizardReading("incident", "y"), DEFAULT_RESOLVER);
+      expect(prompter.notes.join("\n")).toContain("incident extends task.");
+      expect(savedProfile().tableAccess?.readTables).toEqual(["incident", "task"]);
+    });
+
+    it("proposes nothing for a root, unknown, unreadable, or invalid parent", async () => {
+      const instance = stubInstance();
+      // No confirm is scripted: a single backing-table question would exhaust it.
+      const { prompter } = await runWizard(
+        wizardReading("task,x_unknown,x_broken,x_bad_parent"),
+        DEFAULT_RESOLVER
+      );
+      expect(prompter.notes.join("\n")).not.toContain(" extends ");
+      expect(instance.reads).toHaveLength(4);
+      const profile = savedProfile();
+      expect(profile.tableAccess?.readTables).toEqual(["task", "x_bad_parent", "x_broken", "x_unknown"]);
+      for (const target of profile.tableAccess?.targets ?? []) {
+        expect(target.relatedTables).toEqual([target.table]);
+      }
+    });
+
+    it.each(["Configuration Item", "incident,sys_user"])(
+      "offers no injected parent that is not a table name: %s",
+      async (parent) => {
+        const { prompter } = await runWizard(wizardReading("change_request"), {
+          resolveParentTable: async () => parent,
+        });
+        expect(prompter.notes.join("\n")).not.toContain(" extends ");
+        expect(savedProfile().tableAccess?.readTables).toEqual(["change_request"]);
+      }
+    );
+
+    it("stops at a table that names itself as its parent", async () => {
+      stubInstance();
+      const { prompter } = await runWizard(wizardReading("x_cycle"), DEFAULT_RESOLVER);
+      expect(prompter.notes.join("\n")).not.toContain(" extends ");
+      expect(savedProfile().tableAccess?.readTables).toEqual(["x_cycle"]);
+    });
+
+    it("proposes only the immediate parent when the row carries the whole chain", async () => {
+      stubInstance({ ignoreFieldList: true });
+      const { prompter } = await runWizard(
+        wizardReading("cmdb_ci_linux_server", "y"),
+        DEFAULT_RESOLVER
+      );
+      expect(prompter.notes.filter((note) => note.includes(" extends "))).toEqual([
+        "\n  cmdb_ci_linux_server extends cmdb_ci_server.",
+      ]);
+      expect(savedProfile().tableAccess?.readTables).toEqual([
+        "cmdb_ci_linux_server",
+        "cmdb_ci_server",
+      ]);
+    });
+
+    it("writes a grant the server's policy loader accepts, with the parent unaddressable", async () => {
+      stubInstance();
+      // The child is in both READS and WRITES, so the parent joins both allowlists.
+      await runWizard(
+        wizardGranting("cmdb_ci_hardware", "cmdb_ci_hardware", "y"),
+        DEFAULT_RESOLVER
+      );
+
+      const tableAccess = savedProfile().tableAccess!;
+      expect(tableAccess.readTables).toEqual(["cmdb_ci", "cmdb_ci_hardware"]);
+      expect(tableAccess.writeTables).toEqual(["cmdb_ci", "cmdb_ci_hardware"]);
+      expect(tableAccess.targets).toEqual([
+        expect.objectContaining({
+          table: "cmdb_ci_hardware",
+          closureComplete: true,
+          relatedTables: ["cmdb_ci", "cmdb_ci_hardware"],
+        }),
+      ]);
+      // The loader the server uses at request time.
+      const policy = createTableAccessPolicy(tableAccess);
+      expect(
+        authorizeTableAccess(policy, { operation: "read", table: "cmdb_ci_hardware" }, "sn_query")
+      ).toBe("cmdb_ci_hardware");
+      for (const tool of EVERY_TABLE_TOOL) {
+        for (const operation of ["read", "write"] as const) {
+          expect(() =>
+            authorizeTableAccess(policy, { operation, table: "cmdb_ci" }, tool)
+          ).toThrow(/denied by policy/u);
+        }
+      }
+      // sn_relationships always plans a read of cmdb_ci; the parent is no way in.
+      const plan = resolveToolTableAccess("sn_relationships", { sys_id: "a".repeat(32) });
+      expect(() =>
+        authorizeTableAccessPlan(policy, plan.requests, "sn_relationships")
+      ).toThrow(/denied by policy/u);
+    });
+
+    it("writes the self-only closure when the operator declines the parent", async () => {
+      stubInstance();
+      await runWizard(wizardGranting("incident", "incident", "n"), DEFAULT_RESOLVER);
+
+      const tableAccess = savedProfile().tableAccess!;
+      expect(tableAccess).toEqual({
+        readTables: ["incident"],
+        writeTables: ["incident"],
+        targets: [
+          {
+            table: "incident",
+            kind: "canonical",
+            tools: [
+              "sn_aggregate",
+              "sn_create",
+              "sn_get",
+              "sn_incident_add_comment",
+              "sn_incident_add_work_note",
+              "sn_query",
+              "sn_schema",
+              "sn_update",
+            ],
+            closureComplete: true,
+            relatedTables: ["incident"],
+          },
+        ],
+      } satisfies TableAccessPolicyInput);
+      expect(() => createTableAccessPolicy(tableAccess)).not.toThrow();
+    });
+
+    describe("a parent selected for the other operation", () => {
+      /**
+       * Each tool's real access plan on `table`, as "tool operation:table" when
+       * the policy allows the whole plan. A plan that fails to resolve fails the
+       * test, so no tool drops out of the check unnoticed.
+       */
+      function reachable(policy: TableAccessPolicy, table: string): string[] {
+        const id = "a".repeat(32);
+        const fields = { short_description: "x" };
+        const argsFor: Readonly<Record<string, Record<string, unknown>>> = {
+          sn_query: { table },
+          sn_get: { table, sys_id: id },
+          sn_aggregate: { table, type: "COUNT" },
+          sn_schema: { table },
+          sn_create: { table, fields },
+          sn_update: { table, sys_id: id, fields },
+          sn_delete: { table, sys_id: id },
+          sn_batch: {
+            table,
+            action: "update",
+            structured_query: {
+              filter: { type: "equality", field: "active", operator: "eq", value: "true" },
+            },
+            fields,
+            confirm: true,
+          },
+          sn_attach: { action: "list", table, sys_id: id },
+        };
+        return Object.entries(argsFor).flatMap(([tool, args]) => {
+          const plan = resolveToolTableAccess(tool, args);
+          try {
+            authorizeTableAccessPlan(policy, plan.requests, tool);
+          } catch {
+            return [];
+          }
+          return plan.requests.map((request) => `${tool} ${request.operation}:${request.table}`);
+        });
+      }
+
+      it("reads the child and writes the parent: the parent stays unreadable", async () => {
+        stubInstance();
+        // incident extends task; task is granted for WRITES only.
+        await runWizard(wizardGranting("incident", "task", "y"), DEFAULT_RESOLVER);
+
+        const tableAccess = savedProfile().tableAccess!;
+        expect(tableAccess.readTables).toEqual(["incident", "task"]);
+        expect(tableAccess.writeTables).toEqual(["task"]);
+        expect(tableAccess.targets?.find((target) => target.table === "task")?.tools).toEqual([
+          "sn_create",
+          "sn_update",
+        ]);
+        const policy = createTableAccessPolicy(tableAccess);
+        expect(reachable(policy, "task")).toEqual(["sn_create write:task", "sn_update write:task"]);
+        // Not vacuous: the same read plans resolve and pass on the child.
+        expect(reachable(policy, "incident")).toEqual(
+          expect.arrayContaining([
+            "sn_query read:incident",
+            "sn_get read:incident",
+            "sn_aggregate read:incident",
+          ])
+        );
+      });
+
+      it("writes the child and reads the parent: the parent stays unwritable", async () => {
+        stubInstance();
+        await runWizard(wizardGranting("task", "incident", "y"), DEFAULT_RESOLVER);
+
+        const tableAccess = savedProfile().tableAccess!;
+        expect(tableAccess.readTables).toEqual(["task"]);
+        expect(tableAccess.writeTables).toEqual(["incident", "task"]);
+        expect(tableAccess.targets?.find((target) => target.table === "task")?.tools).toEqual([
+          "sn_aggregate",
+          "sn_get",
+          "sn_query",
+          "sn_schema",
+        ]);
+        const policy = createTableAccessPolicy(tableAccess);
+        const task = reachable(policy, "task");
+        expect(task.filter((entry) => entry.includes("write:task"))).toEqual([]);
+        expect(task).toEqual(expect.arrayContaining(["sn_query read:task"]));
+        expect(reachable(policy, "incident")).toEqual(
+          expect.arrayContaining(["sn_create write:incident", "sn_update write:incident"])
+        );
+      });
+    });
+
+    it("fetches one OAuth token for every parent lookup in a run", async () => {
+      const instance = stubInstance();
+      await runWizard(
+        [
+          "dev",
+          "dev00001.service-now.com",
+          "oauth",
+          "client_credentials",
+          "encrypted",
+          "abc123-client-id",
+          CUSTOM,
+          "incident,cmdb_ci_linux_server,cmdb_ci_hardware",
+          NONE,
+          "n",
+          "n",
+          "n",
+        ],
+        DEFAULT_RESOLVER,
+        ["oauth-client-secret"]
+      );
+      expect(instance.reads).toHaveLength(3);
+      expect(instance.tokens()).toBe(1);
+    });
+
+    describe("a client per configuration and per run", () => {
+      function oauthScript(reads: string): string[] {
+        return [
+          "dev00001.service-now.com",
+          "oauth",
+          "client_credentials",
+          "encrypted",
+          "abc123-client-id",
+          CUSTOM,
+          reads,
+          NONE,
+          "n",
+          "n",
+        ];
+      }
+
+      it("sends each OAuth run's own secret, and each read that run's token", async () => {
+        const instance = stubInstance();
+        const consoleCalls = (["log", "error", "warn", "info", "debug"] as const).map((method) =>
+          vi.spyOn(console, method).mockImplementation(() => undefined)
+        );
+
+        const first = await runWizard(["dev", ...oauthScript("incident,problem")], DEFAULT_RESOLVER, [
+          "SECRET-A",
+        ]);
+        const second = await runWizard(
+          ["profile", "staging", ...oauthScript("incident,problem")],
+          DEFAULT_RESOLVER,
+          ["SECRET-B"]
+        );
+
+        expect(
+          instance.tokenBodies.map((body) => new URLSearchParams(body).get("client_secret"))
+        ).toEqual(["SECRET-A", "SECRET-B"]);
+        expect(instance.authorizations).toEqual([
+          "Bearer tok-SECRET-A-1",
+          "Bearer tok-SECRET-A-1",
+          "Bearer tok-SECRET-B-2",
+          "Bearer tok-SECRET-B-2",
+        ]);
+        const shown = [
+          ...first.prompter.notes,
+          first.out,
+          first.err,
+          ...second.prompter.notes,
+          second.out,
+          second.err,
+          ...consoleCalls.flatMap((spy) => spy.mock.calls.flat().map(String)),
+        ].join("\n");
+        for (const secret of ["SECRET-A", "SECRET-B", "tok-SECRET"]) {
+          expect(shown).not.toContain(secret);
+        }
+      });
+
+      it("sends each basic run's own password", async () => {
+        const instance = stubInstance();
+        await runWizard(wizardReading("incident", "n"), DEFAULT_RESOLVER, ["pw-one"]);
+        await runWizard(
+          ["profile", "staging", ...wizardReading("incident", "n").slice(1)],
+          DEFAULT_RESOLVER,
+          ["pw-two"]
+        );
+
+        expect(
+          instance.authorizations.map((header) =>
+            Buffer.from(header.replace(/^Basic /u, ""), "base64").toString()
+          )
+        ).toEqual(["integration.user:pw-one", "integration.user:pw-two"]);
+      });
+    });
   });
 });
 

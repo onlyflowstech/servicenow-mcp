@@ -260,6 +260,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   followed the parent's label, so any hierarchy whose labels differ from table
   names lost its inherited fields; `alm_hardware`, for example, lost nearly
   all of them. The whole chain is read in one request.
+- `servicenow-mcp-setup` offers a table's parent by name. It followed the
+  parent's label, so it offered `server` for `cmdb_ci_linux_server`, a table
+  that does not exist, and nothing for a parent labelled with a space, such as
+  `cmdb_ci`. It also fetches one OAuth token for its parent lookups rather
+  than one per table.
+- The `relatedTables` documentation, the `grant` output and `--related` help
+  say what the loader and `grant` do. The loader checks that each declared
+  related table has every operation permission its target has, so
+  `grant --related` adds the table to the allowlist of each of those
+  operations, including one a later grant adds. That makes it addressable only
+  through a target of its own, or a `*` allowlist, and a target the table has
+  or later gets can then use those operations on it. A self-only list is enough
+  to read inherited fields, and a view or alias should declare every table it
+  reads. They described the list as the complete set of tables an operation
+  can reach, and the help called `--related` required for any table that
+  extends another. A target without `closureComplete: true` is now rejected
+  with an error that names the field.
 
 ## [2.2.0-dev.6] — 2026-09-16
 

@@ -37,12 +37,18 @@ export interface TableAccessTargetInput {
   readonly kind: TableAccessTargetKind;
   /** Exact published tools permitted to address this target. */
   readonly tools: readonly string[];
-  /** Explicit proof that relatedTables is the complete reachable closure. */
+  /**
+   * Required literal. It marks relatedTables as deliberately stated; the
+   * loader does not check the list against the instance.
+   */
   readonly closureComplete: true;
   /**
-   * Requested table plus every reachable backing, ancestor, and descendant
-   * table for the ServiceNow operation. Related permission does not make a
-   * table directly caller-addressable unless it has its own target entry.
+   * The requested table plus any backing or parent tables the operator
+   * declares. The loader requires each one to carry the target's operation
+   * permission; the list grants no access, and a related table is not
+   * caller-addressable unless it has its own target entry or the operation's
+   * allowlist is "*". Inherited fields are read through the target's own
+   * endpoint, so a canonical target may list itself alone.
    */
   readonly relatedTables: readonly string[];
 }
@@ -302,7 +308,7 @@ function normalizeTargets(
       [...new Set<string>(entry.tools.map((tool: unknown) => normalizeToolName(tool)))].sort()
     );
     if (entry.closureComplete !== true) {
-      throw new TypeError("table access target closure must be explicitly complete");
+      throw new TypeError("table access target must set closureComplete: true");
     }
     if (!Array.isArray(entry.relatedTables) || entry.relatedTables.length === 0) {
       throw new TypeError("table access target must include related tables");
