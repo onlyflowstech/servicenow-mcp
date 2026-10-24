@@ -1,0 +1,27 @@
+{
+ "_comment": "Row template for the 501-row sentinel: the test expands it to `count` rows, row i getting sys_id/ui_id from i.",
+ "flow": "f0000000000000000000000000000001",
+ "count": 501,
+ "template": {
+  "flow": {
+   "display_value": "Synthetic adversarial flow",
+   "value": "f0000000000000000000000000000001"
+  },
+  "order": {
+   "display_value": "1",
+   "value": "1"
+  },
+  "parent_ui_id": {
+   "display_value": "",
+   "value": ""
+  },
+  "comment": {
+   "display_value": "",
+   "value": ""
+  },
+  "action_type": {
+   "display_value": "Synthetic action",
+   "value": "c0000000000000000000000000000800"
+  }
+ }
+}

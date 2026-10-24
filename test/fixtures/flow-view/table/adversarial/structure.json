@@ -1,0 +1,645 @@
+{
+ "_comment": "Hand-built Table API capture with structural defects. Synthetic only; cells use display_value=all.",
+ "flow": {
+  "status": 200,
+  "rows": [
+   {
+    "sys_id": {
+     "display_value": "f0000000000000000000000000000001",
+     "value": "f0000000000000000000000000000001"
+    },
+    "name": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "Synthetic adversarial flow"
+    },
+    "type": {
+     "display_value": "Flow",
+     "value": "flow"
+    },
+    "active": {
+     "display_value": "true",
+     "value": "true"
+    },
+    "status": {
+     "display_value": "Draft",
+     "value": "draft"
+    },
+    "version": {
+     "display_value": "",
+     "value": ""
+    },
+    "description": {
+     "display_value": "",
+     "value": ""
+    },
+    "sys_scope": {
+     "display_value": "Global",
+     "value": "global"
+    },
+    "label_cache": {
+     "display_value": "{not json",
+     "value": "{not json"
+    }
+   }
+  ]
+ },
+ "sys_hub_trigger_instance": {
+  "status": 200,
+  "rows": []
+ },
+ "sys_hub_trigger_instance_v2": {
+  "status": 400,
+  "rows": []
+ },
+ "sys_hub_action_instance": {
+  "status": 200,
+  "rows": [
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000001",
+     "value": "c0000000000000000000000000000001"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "1",
+     "value": "1"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000001",
+     "value": "00000000-0000-4000-8000-000000000001"
+    },
+    "parent_ui_id": {
+     "display_value": "",
+     "value": ""
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "action_type": {
+     "display_value": "Synthetic action 1",
+     "value": "c0000000000000000000000000000801"
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000002",
+     "value": "c0000000000000000000000000000002"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "2",
+     "value": "2"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000002",
+     "value": "00000000-0000-4000-8000-000000000002"
+    },
+    "parent_ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000099",
+     "value": "00000000-0000-4000-8000-000000000099"
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "action_type": {
+     "display_value": "Synthetic action 2",
+     "value": "c0000000000000000000000000000802"
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000003",
+     "value": "c0000000000000000000000000000003"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "3",
+     "value": "3"
+    },
+    "ui_id": {
+     "display_value": "not a ui id!",
+     "value": "not a ui id!"
+    },
+    "parent_ui_id": {
+     "display_value": "",
+     "value": ""
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "action_type": {
+     "display_value": "Synthetic action 3",
+     "value": "c0000000000000000000000000000803"
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "not-a-sys-id",
+     "value": "not-a-sys-id"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "4",
+     "value": "4"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000004",
+     "value": "00000000-0000-4000-8000-000000000004"
+    },
+    "parent_ui_id": {
+     "display_value": "",
+     "value": ""
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "action_type": {
+     "display_value": "Synthetic action 4",
+     "value": "c0000000000000000000000000000804"
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000005",
+     "value": "c0000000000000000000000000000005"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "5",
+     "value": "5"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000001",
+     "value": "00000000-0000-4000-8000-000000000001"
+    },
+    "parent_ui_id": {
+     "display_value": "",
+     "value": ""
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "action_type": {
+     "display_value": "Synthetic action 5",
+     "value": "c0000000000000000000000000000805"
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000006",
+     "value": "c0000000000000000000000000000006"
+    },
+    "flow": {
+     "display_value": "c0000000000000000000000000000777",
+     "value": "c0000000000000000000000000000777"
+    },
+    "order": {
+     "display_value": "6",
+     "value": "6"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000006",
+     "value": "00000000-0000-4000-8000-000000000006"
+    },
+    "parent_ui_id": {
+     "display_value": "",
+     "value": ""
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "action_type": {
+     "display_value": "Synthetic action 6",
+     "value": "c0000000000000000000000000000806"
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000007",
+     "value": "c0000000000000000000000000000007"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "7",
+     "value": "7"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000007",
+     "value": "00000000-0000-4000-8000-000000000007"
+    },
+    "parent_ui_id": {
+     "display_value": "bad parent!",
+     "value": "bad parent!"
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "action_type": {
+     "display_value": "Synthetic action 7",
+     "value": "c0000000000000000000000000000807"
+    }
+   }
+  ]
+ },
+ "sys_hub_action_instance_v2": {
+  "status": 400,
+  "rows": []
+ },
+ "sys_hub_flow_logic": {
+  "status": 200,
+  "rows": [
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000010",
+     "value": "c0000000000000000000000000000010"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "10",
+     "value": "10"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000010",
+     "value": "00000000-0000-4000-8000-000000000010"
+    },
+    "parent_ui_id": {
+     "display_value": "",
+     "value": ""
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "logic_definition": {
+     "display_value": "Teleport to Mars",
+     "value": "c0000000000000000000000000000910"
+    },
+    "connected_to": {
+     "display_value": "",
+     "value": ""
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000011",
+     "value": "c0000000000000000000000000000011"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "11",
+     "value": "11"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000011",
+     "value": "00000000-0000-4000-8000-000000000011"
+    },
+    "parent_ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000012",
+     "value": "00000000-0000-4000-8000-000000000012"
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "logic_definition": {
+     "display_value": "If",
+     "value": "c0000000000000000000000000000911"
+    },
+    "connected_to": {
+     "display_value": "",
+     "value": ""
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000012",
+     "value": "c0000000000000000000000000000012"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "12",
+     "value": "12"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000012",
+     "value": "00000000-0000-4000-8000-000000000012"
+    },
+    "parent_ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000011",
+     "value": "00000000-0000-4000-8000-000000000011"
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "logic_definition": {
+     "display_value": "If",
+     "value": "c0000000000000000000000000000912"
+    },
+    "connected_to": {
+     "display_value": "",
+     "value": ""
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000013",
+     "value": "c0000000000000000000000000000013"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "13",
+     "value": "13"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000013",
+     "value": "00000000-0000-4000-8000-000000000013"
+    },
+    "parent_ui_id": {
+     "display_value": "",
+     "value": ""
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "logic_definition": {
+     "display_value": "Else",
+     "value": "c0000000000000000000000000000913"
+    },
+    "connected_to": {
+     "display_value": "00000000-0000-4000-8000-000000000098",
+     "value": "00000000-0000-4000-8000-000000000098"
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000014",
+     "value": "c0000000000000000000000000000014"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "14",
+     "value": "14"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000014",
+     "value": "00000000-0000-4000-8000-000000000014"
+    },
+    "parent_ui_id": {
+     "display_value": "",
+     "value": ""
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "logic_definition": {
+     "display_value": "If",
+     "value": "c0000000000000000000000000000914"
+    },
+    "connected_to": {
+     "display_value": "",
+     "value": ""
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000015",
+     "value": "c0000000000000000000000000000015"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "15",
+     "value": "15"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000015",
+     "value": "00000000-0000-4000-8000-000000000015"
+    },
+    "parent_ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000010",
+     "value": "00000000-0000-4000-8000-000000000010"
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "logic_definition": {
+     "display_value": "Else If",
+     "value": "c0000000000000000000000000000915"
+    },
+    "connected_to": {
+     "display_value": "00000000-0000-4000-8000-000000000014",
+     "value": "00000000-0000-4000-8000-000000000014"
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000016",
+     "value": "c0000000000000000000000000000016"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "16",
+     "value": "16"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000016",
+     "value": "00000000-0000-4000-8000-000000000016"
+    },
+    "parent_ui_id": {
+     "display_value": "",
+     "value": ""
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "logic_definition": {
+     "display_value": "Else",
+     "value": "c0000000000000000000000000000916"
+    },
+    "connected_to": {
+     "display_value": "00000000-0000-4000-8000-000000000001",
+     "value": "00000000-0000-4000-8000-000000000001"
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000017",
+     "value": "c0000000000000000000000000000017"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "17",
+     "value": "17"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000017",
+     "value": "00000000-0000-4000-8000-000000000017"
+    },
+    "parent_ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000014",
+     "value": "00000000-0000-4000-8000-000000000014"
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "logic_definition": {
+     "display_value": "Top Level Try",
+     "value": "c0000000000000000000000000000917"
+    },
+    "connected_to": {
+     "display_value": "",
+     "value": ""
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000018",
+     "value": "c0000000000000000000000000000018"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "18",
+     "value": "18"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000018",
+     "value": "00000000-0000-4000-8000-000000000018"
+    },
+    "parent_ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000014",
+     "value": "00000000-0000-4000-8000-000000000014"
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "logic_definition": {
+     "display_value": "End",
+     "value": "c0000000000000000000000000000918"
+    },
+    "connected_to": {
+     "display_value": "00000000-0000-4000-8000-000000000014",
+     "value": "00000000-0000-4000-8000-000000000014"
+    }
+   },
+   {
+    "sys_id": {
+     "display_value": "c0000000000000000000000000000019",
+     "value": "c0000000000000000000000000000019"
+    },
+    "flow": {
+     "display_value": "Synthetic adversarial flow",
+     "value": "f0000000000000000000000000000001"
+    },
+    "order": {
+     "display_value": "2➛19",
+     "value": "2➛19"
+    },
+    "ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000019",
+     "value": "00000000-0000-4000-8000-000000000019"
+    },
+    "parent_ui_id": {
+     "display_value": "00000000-0000-4000-8000-000000000014",
+     "value": "00000000-0000-4000-8000-000000000014"
+    },
+    "comment": {
+     "display_value": "",
+     "value": ""
+    },
+    "logic_definition": {
+     "display_value": "Catch",
+     "value": "c0000000000000000000000000000919"
+    },
+    "connected_to": {
+     "display_value": "00000000-0000-4000-8000-000000000017",
+     "value": "00000000-0000-4000-8000-000000000017"
+    }
+   }
+  ]
+ },
+ "sys_hub_flow_logic_instance_v2": {
+  "status": 400,
+  "rows": []
+ },
+ "sys_hub_sub_flow_instance": {
+  "status": 200,
+  "rows": []
+ },
+ "sys_hub_sub_flow_instance_v2": {
+  "status": 400,
+  "rows": []
+ },
+ "sys_hub_flow_variable": {
+  "status": 200,
+  "rows": []
+ },
+ "sys_hub_flow_input": {
+  "status": 200,
+  "rows": []
+ },
+ "sys_hub_flow_output": {
+  "status": 200,
+  "rows": []
+ },
+ "variable_value": {
+  "rows": []
+ }
+}
