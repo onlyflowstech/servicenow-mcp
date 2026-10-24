@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.onlyflowstech/servicenow-mcp",
+  "title": "ServiceNow MCP Server",
+  "description": "Governed ServiceNow MCP server: per-profile table and field policy, dry-run bulk changes, audit.",
+  "repository": {
+    "url": "https://github.com/onlyflowstech/servicenow-mcp",
+    "source": "github"
+  },
+  "version": "2.2.0-dev.6",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@onlyflows/servicenow-mcp",
+      "version": "2.2.0-dev.6",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

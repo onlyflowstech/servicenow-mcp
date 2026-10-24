@@ -50,6 +50,20 @@ export function validateReleaseContract(options = {}) {
     packageLock.packages?.[""]?.version === packageJson.version,
     "root lock package version differs from package version"
   );
+  const serverJson = JSON.parse(read("server.json"));
+  assert(
+    serverJson.name === packageJson.mcpName,
+    "server.json name differs from package.json mcpName"
+  );
+  assert(
+    serverJson.version === packageJson.version &&
+      serverJson.packages?.every(
+        (entry) =>
+          entry.identifier === packageJson.name &&
+          entry.version === packageJson.version
+      ),
+    "server.json version or package entries differ from package.json"
+  );
   const tag = options.tag ?? releaseTagFromEnvironment(options.environment ?? process.env);
   if (tag !== undefined) {
     assert(tag === `v${packageJson.version}`, "release tag must exactly match package version");
