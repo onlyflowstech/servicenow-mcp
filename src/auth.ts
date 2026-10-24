@@ -22,6 +22,7 @@ import { GrantType, ServiceNowConfig } from "./config.js";
 import { configuredHost, htmlResponseError, sniffPrefix } from "./html-response.js";
 import {
   boundedRetryAfterSeconds,
+  createRedirectedError,
   createToolError,
 } from "./tool-error.js";
 
@@ -243,6 +244,8 @@ export class OAuthProvider implements AuthProvider {
         },
         body: form.toString(),
         signal: tokenSignal,
+        // A 307 would re-send the client secret to the redirect target.
+        redirect: "manual",
       });
     } catch {
       if (refreshSignal.aborted) throw oauthCancellationError();
@@ -250,6 +253,11 @@ export class OAuthProvider implements AuthProvider {
         throw createToolError("timeout", "retry_if_safe_and_idempotent");
       }
       throw createToolError("upstream", "retry_if_safe_and_idempotent");
+    }
+
+    if (response.status >= 300 && response.status < 400) {
+      await cancelResponseBody(response, "OAuth redirect refused");
+      throw createRedirectedError();
     }
 
     if (!response.ok) {

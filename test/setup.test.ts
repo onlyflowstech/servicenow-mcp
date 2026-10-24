@@ -935,6 +935,77 @@ describe("setup doctor", () => {
     expect(elapsed).toBeLessThan(750); // one 400 ms wait, not two
   });
 
+  async function liveText(argv: readonly string[]): Promise<{ text: string; json: string }> {
+    const textIo = capture();
+    await runSetupCli({
+      home, argv: [...argv], env: { HOME: home }, profileManager: manager,
+      commandExists: () => true, platform: "linux",
+      writeStdout: (value) => textIo.out.push(value),
+    });
+    const jsonIo = capture();
+    await runSetupCli({
+      home, argv: [...argv, "--json"], env: { HOME: home }, profileManager: manager,
+      commandExists: () => true, platform: "linux",
+      writeStdout: (value) => jsonIo.out.push(value),
+    });
+    return { text: textIo.out.join(""), json: jsonIo.out.join("") };
+  }
+
+  it("doctor --live runs the real probe and echoes no response bytes", async () => {
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+    });
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const bodies: Array<[string, string]> = [
+      ["text/plain", "\u001b[8m\u001b[2J LEAKED-TEXT"],
+      ["application/json", "\u001b[2J LEAKED-TEXT"],
+      ["application/xml", "<?xml version='1.0'?><html>hibernating LEAKED-TEXT</html>"],
+      ["text/html", "<html><title>Sign in</title>\u001b[2J LEAKED-TEXT</html>"],
+    ];
+    for (const [type, body] of bodies) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(body, { headers: { "Content-Type": type } }))
+      );
+      const { text, json } = await liveText(["doctor", "--profile", "dev", "--live"]);
+      expect(text).toContain("live instance");
+      for (const output of [text, json]) {
+        expect(output).not.toContain("LEAKED-TEXT");
+        expect(output).not.toContain("\u001b");
+        expect(output).not.toContain("\\u001b");
+      }
+    }
+  });
+
+  it("doctor --live keeps other profiles' results when one cannot build a client", async () => {
+    manager.addProfile("a", {
+      instance: "https://deva.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+    });
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const file = profileConfigPath(home);
+    const config = JSON.parse(readFileSync(file, "utf8"));
+    config.profiles.b = {
+      instance: "https://devb.service-now.com",
+      authType: "oauth",
+      clientId: "cid",
+    };
+    writeFileSync(file, JSON.stringify(config), { mode: 0o600 });
+    manager = new ProfileManager({ configFilePath: file });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"result":[]}', { headers: { "Content-Type": "application/json" } }))
+    );
+    const { text } = await liveText(["doctor", "--live"]);
+    expect(text).toMatch(/ok\s+profile a: live instance/u);
+    expect(text).toMatch(/FAIL\s+profile b: live instance/u);
+  });
+
   it("plain doctor never probes the instance", async () => {
     manager.addProfile("dev", {
       instance: "https://dev00001.service-now.com",
@@ -2242,10 +2313,12 @@ describe("credential verification diagnosis", () => {
     expect(result.remedy).not.toMatch(/NODE_TLS_REJECT_UNAUTHORIZED|rejectUnauthorized/u);
   });
 
-  it("falls back to the raw reason when nothing matches", () => {
-    const result = diagnose(new Error("something unusual"));
+  it("never prints the raw reason when nothing matches", () => {
+    const result = diagnose(new Error("something unusual \u001b[2J"));
     expect(result.ok).toBe(false);
-    expect(result.detail).toContain("something unusual");
+    expect(result.detail).toContain("could not be reached");
+    expect(result.detail).not.toContain("something unusual");
+    expect(result.detail).not.toContain("\u001b");
     expect(result.remedy).toBeTruthy();
   });
 });

@@ -225,10 +225,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clear error instead of a generic upstream failure. The OAuth token fetch and
   every API call report "The ServiceNow instance <host> appears to be
   hibernating ... wake it at https://developer.servicenow.com" (retry later,
-  never retried automatically), or a fixed "returned an HTML page" message when
-  no hibernation text is present. No response text is ever echoed. The setup
-  wizard reports the same, and `servicenow-mcp-setup doctor --live` makes one
-  authenticated read per profile to show it.
+  never retried automatically), or a fixed "returned an HTML page" message for
+  any other HTML page. The hibernation page is recognised by its
+  `Instance Hibernating` title. A 200 body that is not valid JSON also gets a
+  fixed message. None of these repeats response text, and the setup wizard and
+  `servicenow-mcp-setup doctor --live` (one authenticated read per profile,
+  run concurrently with a 10 s timeout) no longer print raw error messages.
+- The server no longer follows HTTP redirects on API calls or the OAuth token
+  request. A cross-origin redirect used to forward an API-key header, and a 307
+  re-sent the token request body, which holds the client secret. Any 3xx now
+  fails with "The instance redirected the request to another location" and
+  does not echo the `Location`.
 - `incident` fields outside the 14 with typed checks are writable. Task fields
   such as `cmdb_ci`, `business_service`, `watch_list` and `hold_reason`, and
   every `u_`/`x_` custom field, were rejected whatever the field policy said.

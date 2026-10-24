@@ -97,7 +97,7 @@ condition as `Instance hibernating`.
 If the message instead says `The instance returned an HTML page instead of an
 API response`, the instance may be asleep, behind single sign-on, or under
 maintenance: open the instance URL in a browser to see which. The detection
-reads only the first 16 KB of the page and never repeats any of it.
+inspects only the first 16 K characters of the page and never repeats any of it.
 
 ### What the bootstrap writes
 

@@ -30,7 +30,11 @@ export type ToolErrorRetry =
  * Fixed sub-reasons within the `upstream` category for a response that is an
  * HTML page instead of an API response. No upstream text is part of either.
  */
-export type ToolErrorReason = "instance_hibernating" | "html_response";
+export type ToolErrorReason =
+  | "instance_hibernating"
+  | "html_response"
+  | "invalid_response"
+  | "redirected";
 
 export interface ToolErrorDescriptor {
   readonly category: ToolErrorCategory;
@@ -109,6 +113,30 @@ export function createHtmlResponseError(): Error {
     category: "upstream",
     reason: "html_response",
     message: HTML_RESPONSE_MESSAGE,
+    retry: "retry_after_correction",
+  });
+}
+
+/** Issue the trusted error for a success response whose body is not valid JSON. */
+export function createInvalidResponseError(): Error {
+  return issue({
+    category: "upstream",
+    reason: "invalid_response",
+    message:
+      "The instance returned a response that is not valid JSON. Check that the " +
+      "instance URL is correct and reachable in a browser.",
+    retry: "do_not_retry",
+  });
+}
+
+/** Issue the trusted error for a 3xx response; the Location is never read. */
+export function createRedirectedError(): Error {
+  return issue({
+    category: "upstream",
+    reason: "redirected",
+    message:
+      "The instance redirected the request to another location. Check that " +
+      "the profile's instance URL is the instance's canonical URL.",
     retry: "retry_after_correction",
   });
 }

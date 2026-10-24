@@ -26,6 +26,8 @@ import { AuthProvider, createAuthProvider } from "./auth.js";
 import { isJournalFieldName } from "./incident-journal-policy.js";
 import {
   boundedRetryAfterSeconds,
+  createInvalidResponseError,
+  createRedirectedError,
   createToolError,
   type ToolErrorCategory,
   type ToolErrorRetry,
@@ -374,7 +376,12 @@ export class ServiceNowClient {
       this.#host
     );
     if (htmlError !== undefined) throw htmlError;
-    return JSON.parse(text) as T;
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      // A V8 SyntaxError quotes the body; never let it escape.
+      throw createInvalidResponseError();
+    }
   }
 
   // ── Internal helpers ───────────────────────────────────────────
@@ -436,7 +443,9 @@ export class ServiceNowClient {
             headers: { ...authHeaders, ...headers },
             body,
             signal: attemptSignal,
-            ...(nativeForm ? { redirect: "manual" as const } : {}),
+            // Never follow a redirect: fetch would forward custom auth
+            // headers cross-origin, and re-send a 307 body.
+            redirect: "manual" as const,
           })
         );
       } catch {
@@ -457,6 +466,11 @@ export class ServiceNowClient {
           continue;
         }
         throw requestPolicyError("upstream", method);
+      }
+
+      if (!nativeForm && response.status >= 300 && response.status < 400) {
+        drainBody(response);
+        throw createRedirectedError();
       }
 
       // 401: give the auth provider one chance to refresh and retry.

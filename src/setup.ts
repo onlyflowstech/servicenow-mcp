@@ -694,8 +694,8 @@ function wizardConfig(
 async function verifyCredentialAgainstInstance(
   config: ServiceNowConfig
 ): Promise<CredentialVerification> {
-  const client = new ServiceNowClient(config, { maxRetries: 0 });
   try {
+    const client = new ServiceNowClient(config, { maxRetries: 0 });
     await client.get(`/api/now/table/${WIZARD_PROBE_TABLE}`, {
       sysparm_limit: "1",
       sysparm_fields: "user_name",
@@ -731,6 +731,20 @@ export function classifyVerificationFailure(
       detail: `${host} returned an HTML page instead of an API response.`,
       remedy:
         "The instance may be asleep, behind single sign-on, or under maintenance. Check that the instance URL is reachable in a browser.",
+    });
+  }
+  if (descriptor?.reason === "redirected") {
+    return Object.freeze({
+      ok: false,
+      detail: `${host} redirected the request to another location.`,
+      remedy: "Check that the profile's instance URL is the instance's canonical URL.",
+    });
+  }
+  if (descriptor?.reason === "invalid_response") {
+    return Object.freeze({
+      ok: false,
+      detail: `${host} returned a response that is not valid JSON.`,
+      remedy: "Check that the instance URL is correct and reachable in a browser.",
     });
   }
   if (descriptor?.category === "authentication") {
@@ -800,7 +814,8 @@ export function classifyVerificationFailure(
   }
   return Object.freeze({
     ok: false,
-    detail: `${host} could not be reached: ${message}`,
+    // Fixed text only: the underlying message can quote response bytes.
+    detail: `${host} could not be reached.`,
     remedy: "Check the instance URL and this machine's outbound network access.",
   });
 }
@@ -1798,13 +1813,22 @@ async function runLiveChecks(
         } catch {
           return undefined; // The credential check has already reported why.
         }
-        const result = await verify(config);
-        return {
-          name: `profile ${name}: live instance`,
-          ok: result.ok,
-          detail: result.detail,
-          ...(result.remedy === undefined ? {} : { remedy: result.remedy }),
-        };
+        try {
+          const result = await verify(config);
+          return {
+            name: `profile ${name}: live instance`,
+            ok: result.ok,
+            detail: result.detail,
+            ...(result.remedy === undefined ? {} : { remedy: result.remedy }),
+          };
+        } catch {
+          return {
+            name: `profile ${name}: live instance`,
+            ok: false,
+            detail: "could not be probed",
+            remedy: "Check the profile's instance URL and credential settings.",
+          };
+        }
       })
     );
     for (const check of results) if (check !== undefined) checks.push(check);

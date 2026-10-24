@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OAuthProvider } from "../src/auth.js";
+import { ApiKeyProvider, OAuthProvider } from "../src/auth.js";
 import { ServiceNowClient } from "../src/client.js";
 import type { ServiceNowConfig } from "../src/config.js";
 import { sniffPrefix, HTML_SNIFF_BYTES } from "../src/html-response.js";
 import {
   createInstanceHibernatingError,
   formatToolError,
+  safeToolErrorDescriptor,
   trustedToolErrorDescriptor,
 } from "../src/tool-error.js";
 
@@ -104,7 +105,10 @@ describe("hibernating instance detection", () => {
   it("uses the configured host, never a host found in the response", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => html(`<html>hibernating dev99999.service-now.com</html>`))
+      vi.fn(async () => html(
+          `<html><head><title> Instance Hibernating page </title></head>` +
+            `<body>dev99999.service-now.com</body></html>`
+        ))
     );
     const error = await caught(client().get("/api/now/table/incident"));
     expect(error.message).toContain(HOST);
@@ -203,5 +207,148 @@ describe("no retry storm", () => {
     const provider = new OAuthProvider({ instance: INSTANCE, clientId: "i", clientSecret: "s" });
     await caught(provider.getAuthHeaders());
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("tightened detection", () => {
+  it("does not call an SSO page that mentions hibernation a hibernating instance", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => html("<html><title>Sign in</title><body>hibernating soon</body></html>"))
+    );
+    const error = await caught(client().get("/api/now/table/incident"));
+    expect(trustedToolErrorDescriptor(error)?.reason).toBe("html_response");
+  });
+
+  it("requires the title near the top of the page", async () => {
+    const late = `<html><head>${" ".repeat(3000)}<title>Instance Hibernating page</title></head></html>`;
+    vi.stubGlobal("fetch", vi.fn(async () => html(late)));
+    const error = await caught(client().get("/api/now/table/incident"));
+    expect(trustedToolErrorDescriptor(error)?.reason).toBe("html_response");
+  });
+
+  it("matches the observed title with its surrounding whitespace", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => html("<html><head>\n<title> Instance Hibernating page </title>"))
+    );
+    const error = await caught(client().get("/api/now/table/incident"));
+    expect(trustedToolErrorDescriptor(error)?.reason).toBe("instance_hibernating");
+  });
+
+  it("parses JSON served as text/html without treating it as a page", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => html('{"result":[{"short_description":"hibernation"}]}'))
+    );
+    expect(await client().get("/api/now/table/incident")).toEqual({
+      result: [{ short_description: "hibernation" }],
+    });
+  });
+});
+
+describe("invalid non-HTML bodies", () => {
+  it.each([
+    ["text/plain", "\u001b[8m\u001b[2J LEAKED-TEXT"],
+    ["application/json", "not json LEAKED-TEXT"],
+    ["application/xml", "<?xml version='1.0'?><html>hibernating LEAKED-TEXT</html>"],
+  ])("maps a %s body to a fixed error with no body text", async (type, body) => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(body, type)));
+    const error = await caught(client().get("/api/now/table/incident"));
+    const descriptor = trustedToolErrorDescriptor(error)!;
+    expect(descriptor.reason).toBe("invalid_response");
+    const rendered = `${error.message}\n${formatToolError(error)}`;
+    expect(rendered).not.toContain("LEAKED-TEXT");
+    expect(rendered).not.toContain("\u001b");
+  });
+});
+
+describe("redirects are never followed", () => {
+  const REDIRECT_MESSAGE =
+    "The instance redirected the request to another location. Check that the " +
+    "profile's instance URL is the instance's canonical URL.";
+
+  function redirect(status: number): Response {
+    return new Response(null, {
+      status,
+      headers: { Location: "https://attacker.example/steal" },
+    });
+  }
+
+  it.each([302, 307])("refuses a %i on an API call and sends one request", async (status) => {
+    const fetchMock = vi.fn(async () => redirect(status));
+    vi.stubGlobal("fetch", fetchMock);
+    const error = await caught(client().post("/api/now/table/incident", { a: 1 }));
+    expect(trustedToolErrorDescriptor(error)?.message).toBe(REDIRECT_MESSAGE);
+    expect(error.message).not.toContain("attacker");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(init.redirect).toBe("manual");
+  });
+
+  it.each([302, 307])("refuses a %i on the token fetch without leaking the secret", async (status) => {
+    const fetchMock = vi.fn(async () => redirect(status));
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OAuthProvider({
+      instance: INSTANCE,
+      clientId: "id",
+      clientSecret: "SECRET-VALUE",
+    });
+    const error = await caught(provider.getAuthHeaders());
+    expect(trustedToolErrorDescriptor(error)?.message).toBe(REDIRECT_MESSAGE);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(init.redirect).toBe("manual");
+    expect(error.message).not.toContain("SECRET-VALUE");
+  });
+
+  it("makes one request with the API key when the instance redirects", async () => {
+    const fetchMock = vi.fn(async () => redirect(302));
+    vi.stubGlobal("fetch", fetchMock);
+    const c = new ServiceNowClient(CONFIG, {
+      auth: new ApiKeyProvider("API-KEY-VALUE"),
+      sleep: async () => {},
+    });
+    await caught(c.get("/api/now/table/incident"));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("write and boundary coverage", () => {
+  it.each(["patch", "put"] as const)(
+    "sends a journal %s exactly once with no sleep on a hibernation page",
+    async (verb) => {
+      const fetchMock = vi.fn(async () => html(HIBERNATING_PAGE));
+      vi.stubGlobal("fetch", fetchMock);
+      const sleep = vi.fn(async () => {});
+      const c = new ServiceNowClient(CONFIG, { baseRetryDelayMs: 1, sleep, maxRetries: 5 });
+      const error = await caught(c[verb]("/api/now/table/incident/abc", { work_notes: "note" }));
+      expect(trustedToolErrorDescriptor(error)?.reason).toBe("instance_hibernating");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+    }
+  );
+
+  it("maps a hibernation page on a binary upload", async () => {
+    const fetchMock = vi.fn(async () => html(HIBERNATING_PAGE));
+    vi.stubGlobal("fetch", fetchMock);
+    const sleep = vi.fn(async () => {});
+    const c = new ServiceNowClient(CONFIG, { baseRetryDelayMs: 1, sleep, maxRetries: 5 });
+    const error = await caught(
+      c.postBinary("/api/now/attachment/file", Buffer.from("x"), "text/plain")
+    );
+    expect(trustedToolErrorDescriptor(error)?.reason).toBe("instance_hibernating");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("renders at the tool boundary as the fixed upstream text, with no body text", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(HIBERNATING_PAGE)));
+    const error = await caught(client().get("/api/now/table/incident"));
+    // formatToolError is what the MCP callback boundary renders.
+    const text = formatToolError(error);
+    expect(text).toBe(`${HIBERNATING_MESSAGE} Error category: upstream. Retry later.`);
+    expect(safeToolErrorDescriptor(error).reason).toBe("instance_hibernating");
+    expect(text).not.toContain(LEAK);
   });
 });
