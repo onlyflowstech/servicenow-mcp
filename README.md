@@ -1,17 +1,78 @@
 # @onlyflows/servicenow-mcp
 
-<!-- Logo placeholder -->
-<!-- ![ServiceNow MCP Server](banner.png) -->
+A governed ServiceNow MCP server: it lets an AI client read and change records on your instances, within limits you set per connection.
 
-**The most comprehensive ServiceNow MCP server.** 23 tools for full CRUD, append-only incident journals, CMDB graph traversal, ATF testing, multi-instance profiles, and more.
-
-Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](https://github.com/onlyflowstech)
+<!-- DEMO GIF PLACEHOLDER: add a short screen recording here (asking a question, then a denied write and a dry-run batch). Not recorded yet. -->
 
 [![npm version](https://img.shields.io/npm/v/@onlyflows/servicenow-mcp)](https://www.npmjs.com/package/@onlyflows/servicenow-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
----
+Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](https://github.com/onlyflowstech)
 
+## Governed and safe for production
+
+The server exposes 23 tools over stdio. Every one of them runs inside controls
+that you configure and that the model cannot change:
+
+- **Per-profile table and field policy.** Each profile (a named ServiceNow
+  connection) has its own read and write table allowlists. Access is
+  deny-by-default: a profile with no rules denies every call. Field policy
+  decides which fields can be read or written; sensitive field names are
+  refused.
+- **Explicit confirmation.** `sn_delete` and `sn_batch` change nothing unless the
+  call carries `confirm: true`. This is a flag on the tool call, not a
+  separate human approval workflow; your client's own tool-approval prompt is
+  where a person approves the call.
+- **Safe batching.** `sn_batch` takes a structured filter (no raw encoded
+  queries), runs as a dry run by default, caps a run at 10,000 records, and
+  never re-sends a batch.
+- **Audit.** Every completed tool call writes one structured JSON-line event to
+  stderr, labelled with `MCP_OWNER_ID` and `MCP_CLIENT_ID`.
+- **Explicit profile on every call.** There is no default or "active"
+  instance, so a prompt about dev cannot land on prod by accident.
+- **Credentials stay out of clients.** Secrets are entered at a hidden prompt,
+  verified against the instance before anything is saved, and stored
+  encrypted in an owner-only `~/.servicenow-mcp` directory.
+- **Every change is reviewed.** Changes to this repository are reviewed for
+  performance and security before release; the [CHANGELOG](CHANGELOG.md)
+  records what each release changed.
+
+Details: [Table access policy](#table-access-policy),
+[Safety Features](#safety-features) and [docs/PRODUCTION-SECURITY.md](docs/PRODUCTION-SECURITY.md).
+
+## Works with
+
+Any MCP client that can launch a stdio server. Setup registers **Claude Code**
+and **Codex** automatically; **Claude Desktop**, **Cursor**, **VS Code** and
+**Windsurf** are configured with `servicenow-mcp-setup client --client <name>`
+(see [Connecting a client](#connecting-a-client)). Requires Node.js 20 or newer.
+
+## Quick start
+
+1. **Install:** `npm install -g @onlyflows/servicenow-mcp`
+2. **Set up a connection:** `servicenow-mcp-setup`. It asks for your instance
+   and credential, checks them against the instance, asks which tables to
+   allow, and registers Claude Code and Codex if their CLIs are installed.
+3. **Open your client and ask.** There is no server to start; the client
+   launches `servicenow-mcp` itself.
+
+The default read grant in the wizard is **just `incident`**, and writes default
+to **none**. Grant more later with `servicenow-mcp-setup grant`.
+
+## Try asking
+
+These work with the default read grant (profile named `dev`):
+
+1. "On dev, list the 10 most recent open P1 incidents."
+2. "On dev, how many open incidents are there, grouped by priority?"
+3. "On dev, which assignment groups have the most open incidents?"
+4. "On dev, which open incidents have no assignee, oldest first?"
+5. "On dev, show incident INC0010001 and summarize where it stands."
+
+Your client sends `profile: "dev"` with each call. Asking about other tables
+(for example `change_request`) is denied until you grant them.
+
+---
 
 ## Installation
 
@@ -492,36 +553,27 @@ ServiceNow upstream can return HTTP 429 with an empty body, while this server's 
 
 ---
 
-## Why This MCP Server?
+## What the tools cover
 
-Most ServiceNow MCP integrations are **read-only** and support a handful of
-tables. This service offers a broader tool catalog behind explicit,
-deny-by-default table and tool policy:
+The registered catalog has 23 tools (see [Tools Reference](#tools-reference)):
 
-| Feature | Others | @onlyflows/servicenow-mcp |
-|---------|--------|--------------------------|
-| Query records | ✅ | ✅ |
-| Create records | ❌ | ✅ |
-| Update records | ❌ | ✅ |
-| Delete records | ❌ | ✅ (with safety confirm) |
-| Bulk operations | ❌ | ✅ (dry-run by default) |
-| Aggregations (COUNT/AVG/MIN/MAX/SUM) | ❌ | ✅ |
-| Table schema introspection | ❌ | ✅ |
-| CMDB relationship traversal | ❌ | ✅ (recursive, configurable depth) |
-| Instance health monitoring | ❌ | ✅ (version, nodes, jobs, stats) |
-| Attachment management | ❌ | ✅ (list, upload, download; inline base64, no host filesystem) |
-| System log queries | ❌ | ✅ |
-| Code search across artifacts | ❌ | ✅ |
-| Table/app/plugin discovery | ❌ | ✅ |
-| ATF test execution | ❌ | ✅ suite execution with explicit profile grant |
-| Natural language interface | ❌ | 🚧 currently policy-denied pending a typed access plan |
-| Background scripts | ❌ | 🚧 on the [roadmap](#roadmap) (SNS-39) |
-| Multi-instance profiles | ❌ | ✅ (named profiles, per-call override) |
-| **Total tools** | **1–3** | **23** |
+| Area | Tools |
+|------|-------|
+| Records | `sn_query`, `sn_get`, `sn_create`, `sn_update`, `sn_delete`, `sn_batch` |
+| Incident journals (append-only) | `sn_incident_add_comment`, `sn_incident_add_work_note` |
+| Analytics and schema | `sn_aggregate`, `sn_schema`, `sn_health` |
+| CMDB and operations | `sn_relationships`, `sn_attach`, `sn_syslog`, `sn_codesearch`, `sn_discover` |
+| ATF | `sn_atf_author`, `sn_atf_run`, `sn_atf_results`, `sn_atf_readiness`, `sn_atf` |
+| Profiles | `sn_profile` |
+| Natural language | `sn_nl` (currently policy-denied pending a typed access plan) |
+
+Every tool requires a `profile`, and every tool is subject to the profile's
+table and field policy. `sn_script` (background scripts) is not registered; see
+the [Roadmap](#roadmap).
 
 ---
 
-## Quick Start
+## Manual environment setup
 
 The server speaks stdio and requires Node.js 20 or newer. The shortest path is
 the bootstrap described under [Installation](#installation):

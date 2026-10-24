@@ -12,10 +12,10 @@
 > Sections about profiles, credentials, table access, field policy, and tool
 > behavior are transport-independent and remain accurate.
 
-This is the shortest complete path from a clean install to two
-provider-neutral clients using the same ServiceNow MCP V2 service. The server
-exposes Streamable HTTP at `/mcp`; it does not expose stdio and it does not
-select a default or active ServiceNow profile.
+This is the shortest complete path from a clean install to a working
+connection. The shipped server speaks stdio only; the Streamable HTTP
+runtime that the later sections describe is dormant. In both cases the server
+does not select a default or active ServiceNow profile.
 
 ## Quickstart: zero to a working connection
 
@@ -42,10 +42,10 @@ Three properties are worth knowing:
 - **The profile and its table-access rules are written together**, so there is
   never a window in which a profile exists that denies every call.
 
-Then start the service and verify end to end:
+There is nothing to start. Each registered client spawns its own
+`servicenow-mcp` over stdio. Verify end to end with the same checks setup runs:
 
 ```sh
-set -a; source ~/.servicenow-mcp/server.env; set +a; servicenow-mcp &
 servicenow-mcp-setup doctor --profile dev
 ```
 
