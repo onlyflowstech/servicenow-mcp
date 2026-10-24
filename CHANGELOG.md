@@ -217,6 +217,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries `libssl3t64` 3.5.7-1~deb13u3 (CVE-2026-84782) and Node 22.23.3. The
   developer-only inspector toolchain, which is not shipped, takes the same
   fixes plus `undici` and `source-map-js`.
+- **zod 4.** `zod` moves from 3.25.76 to 4.6.7 (GHSA-mrhx-c7xc-m3w5,
+  CVE-2023-54404; no 3.x release is fixed), and the MCP SDK resolves the same
+  copy. Tool validation is unchanged. What clients can see changes in three
+  ways: input validation errors the SDK reports use zod 4's wording (for
+  example `Invalid input: expected string, received undefined` instead of
+  `Required`), while the server's own messages are unchanged; tool schemas
+  are served inline instead of with internal `$ref`s, so `tools/list` is about
+  18 KB larger (`sn_query` and `sn_batch` inputs about 6 KB each); and integer
+  fields in output schemas state the safe-integer range. Recursive (`z.lazy`)
+  tool schemas are refused at registration.
 
 ### Fixed
 

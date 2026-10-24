@@ -140,16 +140,25 @@ The top-level source object's prototype, bound methods, descriptors, and
 identity are not used as proof of provenance and are not retained. Only the
 normalized instances issued by these helpers may enter a module catalog.
 
-Composition also hardens the complete reachable schema graph with cycle,
-depth, node, property, and container-size bounds. Every nested Zod node gets a
-contract-owned definition; object shapes and lazy targets are materialized
-once; checks, arrays, plain objects, maps, sets, and regular expressions are
-copied into parse-stable containers; Zod parse caches are initialized; and
-schema definitions, methods, prototype behavior, and nodes are locked. Map,
-set, and regular-expression mutation methods are disabled. References to an
-older definition or collection therefore cannot change parsing or discovery.
-Field schema nodes supplied to a composition helper become immutable and must
-not be configured or reused for further schema construction afterward.
+Composition also hardens the complete reachable schema graph with depth,
+node, property, and container-size bounds. zod 4 parses through closures each
+node's constructor builds over its definition, so every nested Zod node,
+checks included, is rebuilt by its own zod constructor from a frozen,
+contract-owned copy of its definition; object shapes are materialized once;
+arrays, plain objects, maps, sets, and regular expressions are copied into
+parse-stable containers; zod's lazily derived state is computed up front; and
+definitions, internals, methods, prototype behavior, and nodes are locked.
+Map, set, and regular-expression mutation methods are disabled. References to
+the source graph, its definitions, checks, or collections therefore cannot
+change parsing or discovery; the source field schemas stay usable. Two
+exceptions: a bare refinement check (`.superRefine()` or `.check(fn)`) gets its
+behavior after construction, so it is frozen in place instead of rebuilt; and
+`z.lazy` (recursive) schemas are refused. Descriptions and other metadata live
+in zod's global registry and are copied to the rebuilt nodes.
+
+A strict tool input reports an unknown key, such as a legacy raw `query`, with
+the encoded-query migration message. zod 4's `.strict()` takes no message, so
+declare it as `z.strictObject({ ... }, ENCODED_QUERY_STRICT_OBJECT_PARAMS)`.
 
 ## Contract checklist
 
