@@ -223,6 +223,13 @@ const batchResultSchema = z
     matched: nonNegativeInteger,
     dry_run: z.boolean().optional(),
     message: z.string().optional(),
+    sample: z
+      .array(
+        z.object({ sys_id: z.string(), display: z.string().optional() }).strict()
+      )
+      .optional(),
+    fields_to_write: z.array(z.string()).optional(),
+    note: z.string().optional(),
     processed: nonNegativeInteger.optional(),
     failed: nonNegativeInteger.optional(),
   })
@@ -242,6 +249,9 @@ const profileResultSchema = z
     name: z.string(),
     instance: z.string(),
     auth_type: z.enum(["apikey", "basic", "oauth"]),
+    /** The effective policy as data, and the same card as text. */
+    policy: dynamicRecordSchema,
+    policy_card: z.string(),
   })
   .strict();
 
