@@ -72,6 +72,8 @@ export interface PolicyCard {
   truncated?: {
     tables_omitted: number;
     field_lists_narrowed: boolean;
+    /** The text card was left out because it did not fit; `policy` is complete as shown. */
+    text_omitted?: true;
     hint: string;
   };
   /** Fields for tables only a "*" grant reaches; absent when none are. */
@@ -262,7 +264,8 @@ export function renderPolicyCard(card: PolicyCard): string {
   lines.push("");
   if (body.length > 0) {
     lines.push(...pad([header, ...body]));
-    if (card.tables_more > 0) lines.push(`... and ${card.tables_more} more table(s)`);
+    const more = card.truncated?.tables_omitted ?? card.tables_more;
+    if (more > 0) lines.push(`... and ${more} more table(s)`);
     if (card.truncated) lines.push(`TRUNCATED: ${card.truncated.hint}`);
   } else {
     lines.push("No tables are granted.");
@@ -298,12 +301,19 @@ export function renderPolicyCard(card: PolicyCard): string {
   return `${lines.join("\n")}\n`;
 }
 
+
 /** Byte budgets for the sn_profile response; both sit far below the 100 KB result limit. */
 export const POLICY_DATA_BUDGET_BYTES = 40_000;
 export const POLICY_TEXT_BUDGET_BYTES = 24_000;
 const NARROWED_FIELDS = 6;
-const TRUNCATION_HINT =
-  "truncated to fit the response budget; run `servicenow-mcp-setup policy show --json` for the full detail.";
+
+function truncationHint(profile: string): string {
+  return (
+    "Truncated to fit the response budget. For a fuller view run " +
+    `\`servicenow-mcp-setup policy show --profile ${profile} --json\`; ` +
+    `it lists at most ${MAX_CARD_TABLES} tables and ${MAX_LISTED_FIELDS} field names per list.`
+  );
+}
 
 function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
@@ -321,6 +331,14 @@ function emptied(set: CardFieldSet): CardFieldSet {
   return set === "*" ? set : { fields: [], more: set.more + set.fields.length };
 }
 
+function hasLongList(card: PolicyCard): boolean {
+  return card.tables.some((row) =>
+    [row.readable, row.writable].some(
+      (set) => set !== "*" && set.fields.length > NARROWED_FIELDS
+    )
+  );
+}
+
 /**
  * Fit a card to a byte budget by data, not by count: first narrow every
  * per-table field list, then drop the lists, then drop table rows. Whatever
@@ -331,6 +349,7 @@ export function budgetPolicyCard(
   maxBytes: number = POLICY_DATA_BUDGET_BYTES
 ): PolicyCard {
   if (jsonBytes(card) <= maxBytes) return card;
+  const narrowedAny = hasLongList(card);
   let rows = card.tables.map((row) => ({
     ...row,
     readable: narrow(row.readable),
@@ -341,8 +360,8 @@ export function budgetPolicyCard(
     tables: rows,
     truncated: {
       tables_omitted: card.tables.length - rows.length + card.tables_more,
-      field_lists_narrowed: true,
-      hint: TRUNCATION_HINT,
+      field_lists_narrowed: narrowedAny,
+      hint: truncationHint(card.profile),
     },
   });
   if (jsonBytes(build()) > maxBytes) {
@@ -356,4 +375,95 @@ export function budgetPolicyCard(
     rows = rows.slice(0, Math.floor(rows.length / 2));
   }
   return build();
+}
+
+export interface PolicyCardResponse {
+  readonly card: PolicyCard;
+  /** Absent when it did not fit whole; `card.truncated.text_omitted` says so. */
+  readonly text?: string;
+}
+
+/** Budget the data and the text; every cut is marked in `card.truncated`. */
+export function fitPolicyCard(full: PolicyCard): PolicyCardResponse {
+  const card = budgetPolicyCard(full);
+  const text = renderPolicyCard(card);
+  if (Buffer.byteLength(text, "utf8") <= POLICY_TEXT_BUDGET_BYTES) return { card, text };
+  return {
+    card: {
+      ...card,
+      truncated: {
+        tables_omitted: card.truncated?.tables_omitted ?? card.tables_more,
+        field_lists_narrowed: card.truncated?.field_lists_narrowed ?? false,
+        text_omitted: true,
+        hint: truncationHint(card.profile),
+      },
+    },
+  };
+}
+
+// ── memoization ────────────────────────────────────────────────────
+
+/**
+ * A validated profile's policy cannot change while it is loaded: its parts are
+ * deep-frozen snapshots, replaced wholesale when the profile is reloaded. The
+ * built response is therefore cached on the identity of the three field-policy
+ * parts (as the field-policy cache is) plus a content key for the rest, which
+ * the dispatcher rebuilds on every call. Parts that are not deep-frozen are
+ * never cached, so an entry can never describe content that changed later.
+ */
+const ABSENT_PART: object = Object.freeze({});
+const VERIFIED_FROZEN = new WeakSet<object>();
+const MAX_ENTRIES_PER_PARTS = 8;
+type Entries = Map<string, PolicyCardResponse>;
+const CACHE = new WeakMap<object, WeakMap<object, WeakMap<object, Entries>>>();
+
+function deepFrozen(candidate: unknown, depth: number): boolean {
+  if (typeof candidate !== "object" || candidate === null) return true;
+  if (VERIFIED_FROZEN.has(candidate)) return true;
+  if (depth > 8 || !Object.isFrozen(candidate)) return false;
+  if (!Object.values(candidate).every((value) => deepFrozen(value, depth + 1))) return false;
+  VERIFIED_FROZEN.add(candidate);
+  return true;
+}
+
+function contentKey(input: PolicyCardInput): string {
+  return JSON.stringify([
+    input.profile,
+    input.instance,
+    input.authType,
+    input.grantType ?? null,
+    input.tableAccess.readTables,
+    input.tableAccess.writeTables,
+    input.tableAccess.targets,
+    input.encodedQueryAccess.rules.length,
+    input.atf.execute,
+    input.atf.allowScriptSteps,
+  ]);
+}
+
+/** The budgeted card and text for sn_profile; built once per loaded profile. */
+export function policyCardResponse(input: PolicyCardInput): PolicyCardResponse {
+  const parts = [
+    input.fieldPolicy?.fieldPolicy,
+    input.fieldPolicy?.readableTableFields,
+    input.fieldPolicy?.writableTableFields,
+  ].map((part) => (part === undefined ? ABSENT_PART : part));
+  const cacheable = parts.every(
+    (part) => typeof part === "object" && part !== null && deepFrozen(part, 0)
+  );
+  if (!cacheable) return fitPolicyCard(buildPolicyCard(input));
+  const [a, b, c] = parts as [object, object, object];
+  let second = CACHE.get(a);
+  if (!second) CACHE.set(a, (second = new WeakMap()));
+  let third = second.get(b);
+  if (!third) second.set(b, (third = new WeakMap()));
+  let entries = third.get(c);
+  if (!entries) third.set(c, (entries = new Map()));
+  const key = contentKey(input);
+  const hit = entries.get(key);
+  if (hit) return hit;
+  const built = fitPolicyCard(buildPolicyCard(input));
+  if (entries.size >= MAX_ENTRIES_PER_PARTS) entries.clear();
+  entries.set(key, built);
+  return built;
 }

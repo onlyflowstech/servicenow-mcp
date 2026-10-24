@@ -99,13 +99,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit listing, the auth type, raw encoded-query reads, ATF grants and the
   `sn_batch` limits. It is built from the policy the server enforces and never
   prints a secret, key or credential reference. It enforces nothing new.
+  `sn_profile` keeps its answer small: the structured `policy` is held to
+  40,000 bytes and the text `policy_card` to 24,000. When either is cut,
+  `policy.truncated` says what (`tables_omitted`, `field_lists_narrowed`,
+  `text_omitted`) and names `servicenow-mcp-setup policy show --profile <name>
+  --json`, so `policy_card` is optional. The card is built once per loaded
+  profile.
 - **`sn_batch` dry run shows its work.** A dry run now also returns a `sample`
   of up to 5 matched records (`sys_id` plus a `number`, `name`,
   `short_description` or `title` the profile may read), `fields_to_write` (field
   names, never values) and a `note` that `confirm` re-runs the query and can
   match different records. The sample costs one extra read of at most 5
   records, addressed by the `sys_id`s the lookup already returned; if it
-  fails, the dry run still returns the count.
+  fails or takes more than 5 seconds, the dry run still returns the count.
 - **Warning on risky grants.** `servicenow-mcp-setup grant` and the setup
   wizard print a warning when a grant gives write access on role or approval
   tables (`sys_user_has_role`, `sys_user_grmember`, `sys_group_has_role`,

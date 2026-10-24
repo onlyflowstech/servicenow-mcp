@@ -6,6 +6,10 @@
  * for the same policy, so a drift between the two fails here.
  */
 
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -22,12 +26,16 @@ import {
   type FieldPolicyConfigurationInput,
 } from "../src/field-policy.js";
 import {
+  budgetPolicyCard,
   buildPolicyCard,
+  fitPolicyCard,
+  policyCardResponse,
   renderPolicyCard,
   type CardTableRow,
   type PolicyCard,
 } from "../src/policy-card.js";
-import type { ProfileManager } from "../src/profile-manager.js";
+import { ProfileManager as RealProfileManager, type ProfileManager } from "../src/profile-manager.js";
+import { ServiceNowClient } from "../src/client.js";
 import { createMcpServer } from "../src/server.js";
 import {
   authorizeTableAccess,
@@ -335,6 +343,7 @@ async function connect(options: {
   tableAccess: TableAccessPolicyInput;
   fieldPolicy?: FieldPolicyConfigurationInput;
   get?: (path: string, params: Record<string, string>) => Promise<unknown>;
+  client?: unknown;
 }) {
   const get = vi.fn(
     options.get ??
@@ -361,7 +370,7 @@ async function connect(options: {
       displayValue: "true",
       relDepth: 3,
     })),
-    getClient: vi.fn(() => serviceNow),
+    getClient: vi.fn(() => options.client ?? serviceNow),
   } as unknown as ProfileManager;
   const executionContext: ExecutionContextDependencies = {
     requestMetadataProvider: {
@@ -461,7 +470,8 @@ describe("sn_profile policy card", () => {
     expect(result.isError).toBeFalsy();
     const data = dataOf(result);
     const policy = data.policy as PolicyCard;
-    expect(policy.truncated?.hint).toContain("policy show --json");
+    expect(policy.truncated?.hint).toContain(`policy show --profile ${PROFILE} --json`);
+    expect(policy.truncated?.hint).not.toMatch(/full detail/u);
     expect(policy.truncated?.field_lists_narrowed).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(policy))).toBeLessThanOrEqual(40_000);
     expect(JSON.stringify(result).length).toBeLessThan(100_000);
@@ -609,4 +619,229 @@ describe("sn_batch dry run shows its work", () => {
     const [row] = data.sample as Array<{ display: string }>;
     expect(row!.display.length).toBeLessThanOrEqual(121);
   });
+});
+
+// ── budget markers, memoization, deadline ───────────────────────────────────
+
+function bigShape(tables: number, fields: number, nameLength: number) {
+  const tableNames = Array.from(
+    { length: tables },
+    (_, t) => `x_big_table_${String(t).padStart(3, "0")}`
+  );
+  const names = Array.from({ length: fields }, (_, f) => {
+    const prefix = `u_${String(f).padStart(2, "0")}_`;
+    return prefix + "a".repeat(nameLength - prefix.length);
+  });
+  return {
+    tableAccess: {
+      readTables: tableNames,
+      writeTables: tableNames,
+      targets: tableNames.map((table) => target(table, ["sn_query", "sn_update"])),
+    } satisfies TableAccessPolicyInput,
+    fieldPolicy: {
+      fieldPolicy: Object.fromEntries(
+        tableNames.map((table) => [table, { readable: names, writable: names }])
+      ),
+    },
+  };
+}
+
+function cardInput(shape: ReturnType<typeof bigShape>) {
+  return {
+    profile: PROFILE,
+    instance: INSTANCE,
+    authType: "basic" as const,
+    tableAccess: createTableAccessPolicy(shape.tableAccess),
+    fieldPolicy: shape.fieldPolicy,
+    encodedQueryAccess: createEncodedQueryAccessPolicy(),
+    atf: createAtfExecutionPolicy(undefined),
+  };
+}
+
+describe("a dropped text card is always marked", () => {
+  it("17 tables x 8 fields x 80 chars: data fits, text does not, and text_omitted says so", () => {
+    const { card, text } = fitPolicyCard(buildPolicyCard(cardInput(bigShape(17, 8, 80))));
+    expect(text).toBeUndefined();
+    expect(Buffer.byteLength(JSON.stringify(card))).toBeLessThanOrEqual(40_000);
+    expect(card.truncated).toMatchObject({
+      text_omitted: true,
+      tables_omitted: 0,
+      field_lists_narrowed: false,
+    });
+    expect(card.truncated?.hint).toContain(`policy show --profile ${PROFILE} --json`);
+    expect(card.tables).toHaveLength(17);
+  });
+
+  it("when the data is also truncated, text_omitted is added to that marker", async () => {
+    const shape = bigShape(30, 80, 80);
+    const { card, text } = fitPolicyCard(buildPolicyCard(cardInput(shape)));
+    expect(text).toBeUndefined();
+    expect(card.truncated).toMatchObject({ text_omitted: true, field_lists_narrowed: true });
+
+    const { client } = await connect({
+      tableAccess: shape.tableAccess,
+      fieldPolicy: shape.fieldPolicy,
+    });
+    const data = dataOf(
+      await client.callTool({ name: "sn_profile", arguments: { profile: PROFILE } })
+    );
+    expect(data).not.toHaveProperty("policy_card");
+    expect((data.policy as PolicyCard).truncated).toMatchObject({
+      text_omitted: true,
+      field_lists_narrowed: true,
+    });
+  });
+
+  it("a text that fits is kept and the card is unmarked", () => {
+    const { card, text } = fitPolicyCard(buildPolicyCard(cardInput(bigShape(3, 4, 20))));
+    expect(card.truncated).toBeUndefined();
+    expect(text).toContain("TABLE");
+  });
+
+  it("the text counts the rows the budget dropped", () => {
+    const full = buildPolicyCard(cardInput(bigShape(100, 80, 80)));
+    const budgeted = budgetPolicyCard(full, 20_000);
+    expect(budgeted.truncated!.tables_omitted).toBeGreaterThan(0);
+    expect(renderPolicyCard(budgeted)).toContain(
+      `... and ${budgeted.truncated!.tables_omitted} more table(s)`
+    );
+  });
+});
+
+describe("the policy card is built once per loaded profile", () => {
+  it("a second call is served from memory in under 1 ms, with fresh table policies", () => {
+    const shape = bigShape(100, 40, 80);
+    const frozen = JSON.parse(JSON.stringify(shape.fieldPolicy)) as object;
+    const deepFreeze = (value: unknown): void => {
+      if (typeof value !== "object" || value === null) return;
+      Object.values(value).forEach(deepFreeze);
+      Object.freeze(value);
+    };
+    deepFreeze(frozen);
+    const input = () => ({ ...cardInput(shape), fieldPolicy: frozen });
+    const first = policyCardResponse(input());
+    const start = performance.now();
+    const second = policyCardResponse(input());
+    const elapsed = performance.now() - start;
+    expect(second).toBe(first);
+    expect(elapsed).toBeLessThan(1);
+  });
+
+  it("does not cache field policy that is not frozen", () => {
+    const shape = bigShape(2, 2, 20);
+    const first = policyCardResponse(cardInput(shape));
+    const second = policyCardResponse(cardInput(shape));
+    expect(second).not.toBe(first);
+    expect(second).toEqual(first);
+  });
+
+  it("rebuilds after the profile is reloaded with addProfile", () => {
+    const directory = mkdtempSync(join(tmpdir(), "card-memo-"));
+    const manager = new RealProfileManager({
+      configFilePath: join(directory, "config.json"),
+    });
+    const base = {
+      instance: INSTANCE,
+      authType: "basic" as const,
+      username: "u",
+      credential: "env:SN_CARD_MEMO_SECRET",
+      tableAccess: {
+        readTables: ["incident"],
+        writeTables: ["incident"],
+        targets: [target("incident", ["sn_query", "sn_update"])],
+      },
+    };
+    const build = () => {
+      const profile = manager.getProfile("p");
+      return policyCardResponse({
+        profile: "p",
+        instance: profile.instance,
+        authType: "basic",
+        tableAccess: createTableAccessPolicy(profile.tableAccess!),
+        fieldPolicy: {
+          ...(profile.fieldPolicy === undefined ? {} : { fieldPolicy: profile.fieldPolicy }),
+        },
+        encodedQueryAccess: createEncodedQueryAccessPolicy(),
+        atf: createAtfExecutionPolicy(undefined),
+      });
+    };
+    manager.addProfile("p", {
+      ...base,
+      fieldPolicy: { incident: { writable: ["short_description"] } },
+    });
+    const first = build();
+    expect(build()).toBe(first);
+
+    manager.addProfile("p", {
+      ...base,
+      fieldPolicy: { incident: { writable: ["short_description", "state"] } },
+    });
+    const reloaded = build();
+    expect(reloaded).not.toBe(first);
+    expect(reloaded.card.tables[0]!.writable).toEqual({
+      fields: ["short_description", "state"],
+      more: 0,
+    });
+  });
+});
+
+describe("sn_batch dry-run sample deadline", () => {
+  it("a hung sample read costs the preview at about 5 s, never the dry run", async () => {
+    const sysId = "a".repeat(32);
+    const aborted: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const query = new URL(String(url)).searchParams.get("sysparm_query") ?? "";
+        if (!query.startsWith("sys_idIN")) {
+          return new Response(JSON.stringify({ result: [{ sys_id: sysId }] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return await new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              aborted.push("sample");
+              reject(init.signal!.reason);
+            },
+            { once: true }
+          );
+        });
+      })
+    );
+    const { client } = await connect({
+      tableAccess: { readTables: ["*"], writeTables: ["*"], targets: [] },
+      client: new ServiceNowClient(
+        { instance: INSTANCE, user: "u", password: "p", displayValue: "true", relDepth: 3 },
+        { sleep: async () => {} }
+      ),
+    });
+    const start = performance.now();
+    const result = await client.callTool(
+      {
+        name: "sn_batch",
+        arguments: {
+          profile: PROFILE,
+          table: "incident",
+          action: "update",
+          structured_query: {
+            filter: { type: "equality", field: "active", operator: "eq", value: true },
+          },
+          fields: { state: "7" },
+        },
+      },
+      undefined,
+      { timeout: 30_000 }
+    );
+    const elapsed = performance.now() - start;
+    expect(result.isError).toBeFalsy();
+    const data = dataOf(result);
+    expect(data).toMatchObject({ matched: 1, dry_run: true });
+    expect(data).not.toHaveProperty("sample");
+    expect(aborted).toEqual(["sample"]);
+    expect(elapsed).toBeGreaterThan(4_900);
+    expect(elapsed).toBeLessThan(7_000);
+  }, 20_000);
 });
