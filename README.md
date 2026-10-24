@@ -11,31 +11,43 @@ Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](ht
 
 ## Governed and safe for production
 
-The server exposes 23 tools over stdio. Every one of them runs inside controls
-that you configure and that the model cannot change:
+The server exposes 23 tools over stdio. Every call runs inside controls that
+you configure and that no tool of this server can change:
 
 - **Per-profile table and field policy.** Each profile (a named ServiceNow
   connection) has its own read and write table allowlists. Access is
-  deny-by-default: a profile with no rules denies every call. Field policy
-  decides which fields can be read or written; sensitive field names are
-  refused.
-- **Explicit confirmation.** `sn_delete` and `sn_batch` change nothing unless the
-  call carries `confirm: true`. This is a flag on the tool call, not a
-  separate human approval workflow; your client's own tool-approval prompt is
-  where a person approves the call.
+  deny-by-default: a profile with no rules denies every ServiceNow call. Field
+  policy decides which fields can be read or written; sensitive field names
+  are refused.
+- **Confirmation flag on destructive tools.** `sn_delete` and `sn_batch`
+  change nothing unless the call carries `confirm: true`. The model sets that
+  flag itself, so it is a guard against accidents, not an approval. A person
+  approves through the client's own tool-approval prompt, and many clients let
+  you "always allow" a tool. `sn_create` and `sn_update` take no confirm flag;
+  keep write grants narrow.
 - **Safe batching.** `sn_batch` takes a structured filter (no raw encoded
   queries), runs as a dry run by default, caps a run at 10,000 records, and
   never re-sends a batch.
-- **Audit.** Every completed tool call writes one structured JSON-line event to
-  stderr, labelled with `MCP_OWNER_ID` and `MCP_CLIENT_ID`.
+- **Activity events.** Each completed tool call writes one JSON line to
+  stderr with the tool, profile, instance and outcome, plus hashed owner and
+  client labels. It records no table, record or fields. Delivery is
+  best-effort through stderr, and events are dropped above 256 pending lines.
+  Use ServiceNow's own audit history for record changes.
 - **Explicit profile on every call.** There is no default or "active"
-  instance, so a prompt about dev cannot land on prod by accident.
+  instance. Each call names its profile, so nothing reaches an instance the
+  call didn't name. Keep write grants on production profiles narrow.
 - **Credentials stay out of clients.** Secrets are entered at a hidden prompt,
   verified against the instance before anything is saved, and stored
   encrypted in an owner-only `~/.servicenow-mcp` directory.
-- **Every change is reviewed.** Changes to this repository are reviewed for
-  performance and security before release; the [CHANGELOG](CHANGELOG.md)
-  records what each release changed.
+
+> **Limits of these controls.** They hold against the model's tool calls. A
+> client that gives the model a shell or file access (Claude Code and Codex
+> can) could run `servicenow-mcp-setup grant` or read
+> `~/.servicenow-mcp/server.env`. The encryption key sits in the same
+> owner-only folder as the encrypted profiles, so it protects against other
+> users and stray copies of the files, not against your own account. Run
+> production profiles from a client or account without shell access where you
+> can.
 
 Details: [Table access policy](#table-access-policy),
 [Safety Features](#safety-features) and [docs/PRODUCTION-SECURITY.md](docs/PRODUCTION-SECURITY.md).
@@ -53,6 +65,8 @@ and **Codex** automatically; **Claude Desktop**, **Cursor**, **VS Code** and
 2. **Set up a connection:** `servicenow-mcp-setup`. It asks for your instance
    and credential, checks them against the instance, asks which tables to
    allow, and registers Claude Code and Codex if their CLIs are installed.
+   Choose **OAuth** when the wizard asks for the authentication type; Basic
+   is the wizard's default but is [deprecated by ServiceNow](#basic-default-deprecated-by-servicenow).
 3. **Open your client and ask.** There is no server to start; the client
    launches `servicenow-mcp` itself.
 
@@ -64,8 +78,8 @@ to **none**. Grant more later with `servicenow-mcp-setup grant`.
 These work with the default read grant (profile named `dev`):
 
 1. "On dev, list the 10 most recent open P1 incidents."
-2. "On dev, how many open incidents are there, grouped by priority?"
-3. "On dev, which assignment groups have the most open incidents?"
+2. "On dev, how many incidents are there, grouped by priority?"
+3. "On dev, which assignment groups have the most incidents?"
 4. "On dev, which open incidents have no assignee, oldest first?"
 5. "On dev, show incident INC0010001 and summarize where it stands."
 
