@@ -2803,6 +2803,7 @@
           "description": "ServiceNow table name"
         },
         "structured_query": {
+          "description": "Required policy-authorized structured filter selecting records. Raw encoded queries are prohibited.",
           "type": "object",
           "properties": {
             "filter": {
@@ -3933,8 +3934,7 @@
               }
             }
           },
-          "additionalProperties": false,
-          "description": "Required policy-authorized structured filter selecting records. Raw encoded queries are prohibited."
+          "additionalProperties": false
         },
         "action": {
           "type": "string",

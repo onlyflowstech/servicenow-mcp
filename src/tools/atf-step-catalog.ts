@@ -1,5 +1,6 @@
 import { ATF_STEP_REFERENCE } from "../atf-form.js";
 import { z } from "zod";
+import { boundedArray, boundedRecord } from "../bounded-input.js";
 import { runWithServiceNowRequestSignal } from "../client.js";
 import definitions from "./atf-step-definitions.json";
 import { AtfPolicyError } from "../atf-policy.js";
@@ -14,6 +15,10 @@ import { filteredWriteRecord, requiredCreatedSysId } from "./record-write-shared
 interface Input { element: string; internal_type: string; mandatory: boolean; order: number; variable: string; default?: string; choices?: string[]; sdk_constant: boolean }
 interface Definition { step_config: string; name: string; step_env: string; executes_user_code: boolean; inputs: Input[] }
 const catalog: Record<string, Definition> = definitions;
+/** Steps one add_steps call may carry. */
+export const MAX_ATF_AUTHOR_STEPS = 50;
+/** Entries in one name-to-value map input. */
+const MAX_NAME_VALUE_ENTRIES = 50;
 const reference = z.union([id, z.string().regex(ATF_STEP_REFERENCE)]);
 function inputSchema(input: Input): z.ZodType {
   let schema: z.ZodType;
@@ -22,7 +27,7 @@ function inputSchema(input: Input): z.ZodType {
     case "reference": case "document_id": schema = reference; break;
     case "boolean": schema = z.boolean(); break;
     case "integer": schema = z.number().int().min(-2147483648).max(2147483647); break;
-    case "simple_name_values": schema = z.union([z.literal(""), z.record(z.string().min(1).max(128).regex(/^[^\r\n]+$/), z.string().max(2000)).refine(value => Object.keys(value).length <= 50)]); break;
+    case "simple_name_values": schema = z.union([z.literal(""), boundedRecord(z.record(z.string().min(1).max(128).regex(/^[^\r\n]+$/), z.string().max(2000)).refine(value => Object.keys(value).length <= MAX_NAME_VALUE_ENTRIES), MAX_NAME_VALUE_ENTRIES, `Expected at most ${MAX_NAME_VALUE_ENTRIES} entries`)]); break;
     case "choice": schema = input.choices?.length ? z.enum(input.choices as [string, ...string[]]) : input.element === "jasmine_version" ? z.string().regex(/^\d+\.\d+$/u) : z.literal(input.default ?? ""); break;
     default: schema = z.string().max(input.internal_type === "script" ? 100000 : 4000);
   }
@@ -52,7 +57,7 @@ export interface PreparedStep { type: string; definition: Definition; inputs: Re
 export const STEP_READ_TABLES = ["sys_atf_test", "sys_atf_step", "sys_atf_step_config", "var_dictionary", "sys_variable_value", "sys_element_mapping"];
 export function prepareSteps(args: Record<string, unknown>, allowScripts: boolean) {
   const testId = id.parse(args.test_sys_id);
-  const requests = z.array(stepRequestSchema).min(1).max(50).parse(args.steps);
+  const requests = boundedArray(stepRequestSchema, MAX_ATF_AUTHOR_STEPS, { min: 1 }).parse(args.steps);
   const steps: PreparedStep[] = requests.map((request, index) => {
     if (!Object.hasOwn(catalog, request.type)) throw new Error("Unknown ATF step type");
     const definition = catalog[request.type];

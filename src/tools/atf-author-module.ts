@@ -1,5 +1,6 @@
 import { prepareAtfReads, readAtfRows, value } from "./atf-shared.js";
-import { stepRequestSchema, prepareSteps, authorSteps, stepTypes, STEP_READ_TABLES } from "./atf-step-catalog.js";
+import { stepRequestSchema, prepareSteps, authorSteps, stepTypes, STEP_READ_TABLES, MAX_ATF_AUTHOR_STEPS } from "./atf-step-catalog.js";
+import { boundedArray } from "../bounded-input.js";
 import type { ResolvedEffectivePolicyReference } from "../execution-context.js";
 /** ATF authoring with instance metadata verification before step writes. */
 import { z } from "zod";
@@ -12,16 +13,17 @@ import { defineServiceNowToolModule, withRequiredProfile } from "./tool-module.j
 import { envelopeCompatibilityResult, productionToolOutputSchemas, registerEnvelopeTextRenderer } from "./result-envelope.js";
 import { headline, recordLink, renderMarkdown, table, text } from "./markdown.js";
 
+const MAX_ATF_AUTHOR_TEST_IDS = 100;
 const schema = z.object({
   action: z.enum(["create_test", "create_suite", "add_tests_to_suite", "add_steps", "list_step_types"]).describe("Create tests/suites, add memberships or typed steps, or list supported step types"),
   test_sys_id: serviceNowSysIdSchema.optional().describe("Test sys_id for add_steps"),
-  steps: z.array(stepRequestSchema).min(1).max(50).optional().describe("Ordered typed steps with validated inputs for add_steps"),
+  steps: boundedArray(stepRequestSchema, MAX_ATF_AUTHOR_STEPS, { min: 1 }).optional().describe("Ordered typed steps with validated inputs for add_steps"),
   name: z.string().trim().min(1).max(100).optional().describe("Name required for create_test and create_suite"),
   description: z.string().max(1000).optional().describe("Description for a new test or suite"),
   active: z.boolean().optional().describe("Whether the new test or suite is active (default true)"),
   application_scope: z.union([serviceNowSysIdSchema, z.literal("global")]).optional().describe("Application scope sys_id or global for Global scope"),
   suite_sys_id: serviceNowSysIdSchema.optional().describe("Suite sys_id required for add_tests_to_suite"),
-  test_sys_ids: z.array(serviceNowSysIdSchema).min(1).max(100).refine(ids => new Set(ids).size === ids.length, "test_sys_ids must be unique").optional().describe("Unique test sys_ids to add, in execution order (maximum 100)"),
+  test_sys_ids: boundedArray(serviceNowSysIdSchema, MAX_ATF_AUTHOR_TEST_IDS, { min: 1 }).refine(ids => new Set(ids).size === ids.length, "test_sys_ids must be unique").optional().describe("Unique test sys_ids to add, in execution order (maximum 100)"),
   start_order: z.number().int().min(0).max(1000000).optional().describe("First membership order (default 100); existing memberships are unchanged"),
 }).strict();
 export const atfAuthorInputSchema = withRequiredProfile(schema);

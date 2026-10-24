@@ -62,6 +62,11 @@ import {
   createHttpRequestSignalController,
   type HttpRequestAbortKind,
 } from "./http-request-signal.js";
+import {
+  inspectJsonShape,
+  JSON_SHAPE_REJECTION_CODE,
+  JSON_SHAPE_REJECTION_MESSAGE,
+} from "./json-shape-limits.js";
 
 export const MCP_HTTP_PATH = "/mcp";
 export const MCP_LIVENESS_PATH = "/health/live";
@@ -872,6 +877,13 @@ class StatelessHttpRuntime implements HttpRuntime {
     if (Array.isArray(parsedBody)) {
       observedReason = "invalid_protocol";
       writeJsonRpcError(response, 400, -32600, "JSON-RPC batches are not supported.");
+      return;
+    }
+    // Before any schema sees the message, including the SDK's own protocol
+    // schemas, which no tool-level bound reaches. The reply is fixed text.
+    if (inspectJsonShape(parsedBody) !== undefined) {
+      observedReason = "invalid_protocol";
+      writeJsonRpcError(response, 400, JSON_SHAPE_REJECTION_CODE, JSON_SHAPE_REJECTION_MESSAGE);
       return;
     }
 

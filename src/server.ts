@@ -4,6 +4,7 @@ import {
   type ServerResult,
 } from "@modelcontextprotocol/sdk/types.js";
 
+import { MAX_TOOL_INPUT_ELEMENTS } from "./json-shape-limits.js";
 import { VERSION } from "./version.js";
 
 export type LowLevelMcpRegistrationSurface = Pick<
@@ -161,6 +162,10 @@ export async function createMcpServer<TDependencies extends object>(
         tools: {},
         prompts: {},
       },
+      // Counted before any input schema runs, on every transport, so the
+      // cost of validating one tool call is bounded by its element count.
+      // Derived from the largest legitimate call, a full field write.
+      maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS,
     }
   );
 
