@@ -3,7 +3,7 @@
 <!-- Logo placeholder -->
 <!-- ![ServiceNow MCP Server](banner.png) -->
 
-**The most comprehensive ServiceNow MCP server.** 23 tools for full CRUD, append-only incident journals, CMDB graph traversal, ATF testing, multi-instance profiles, and more.
+**The most comprehensive ServiceNow MCP server.** 24 tools for full CRUD, append-only incident journals, CMDB graph traversal, ATF testing, Flow Designer flow views, multi-instance profiles, and more.
 
 Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](https://github.com/onlyflowstech)
 
@@ -517,7 +517,7 @@ deny-by-default table and tool policy:
 | Natural language interface | ❌ | 🚧 currently policy-denied pending a typed access plan |
 | Background scripts | ❌ | 🚧 on the [roadmap](#roadmap) (SNS-39) |
 | Multi-instance profiles | ❌ | ✅ (named profiles, per-call override) |
-| **Total tools** | **1–3** | **23** |
+| **Total tools** | **1–3** | **24** |
 
 ---
 

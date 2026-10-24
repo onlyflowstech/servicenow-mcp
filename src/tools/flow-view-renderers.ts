@@ -42,7 +42,7 @@ import {
   type RenderableEnvelope,
 } from "./result-envelope.js";
 
-export const FLOW_VIEW_TOOL = "sn_flow_view";
+export const FLOW_VIEW_TOOL = "sn_flow_view" satisfies ProductionToolName;
 
 export const OUTLINE_MAX_LINES = FLOW_VIEW_LIMITS.OUTLINE_MAX_LINES;
 export const OUTLINE_MAX_CHARS = FLOW_VIEW_LIMITS.OUTLINE_MAX_CHARS;
@@ -633,11 +633,10 @@ let registered = false;
 
 /**
  * Register the `sn_flow_view` text renderer with the result envelope, once.
- * Task F calls this at module load, after adding `sn_flow_view` to the
- * production tool schemas; until then registration throws.
+ * `flow-view-module.ts` calls this at module load.
  */
 export function registerFlowViewRenderer(): void {
   if (registered) return;
-  registerEnvelopeTextRenderer(FLOW_VIEW_TOOL as ProductionToolName, renderFlowView);
+  registerEnvelopeTextRenderer(FLOW_VIEW_TOOL, renderFlowView);
   registered = true;
 }

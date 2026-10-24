@@ -18,6 +18,7 @@ import * as codesearch from "./codesearch.js";
 import { createToolModule } from "./create-module.js";
 import * as del from "./delete.js";
 import * as discover from "./discover.js";
+import { flowViewToolModule } from "./flow-view-module.js";
 import { getToolModule } from "./get-module.js";
 import * as health from "./health.js";
 import {
@@ -190,6 +191,7 @@ export const serviceNowToolModules = Object.freeze([
     fieldPolicies: ["read"],
     capabilities: ["metadata:discover"],
   }),
+  flowViewToolModule,
   atfAuthorToolModule,
   atfRunToolModule,
   atfResultsToolModule,
