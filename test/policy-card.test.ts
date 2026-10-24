@@ -438,6 +438,43 @@ describe("sn_profile policy card", () => {
     expect(everything).not.toMatch(/secret_ref|apiKey|clientSecret|encrypted/iu);
   });
 
+  it("stays within its byte budget for 100 tables of 80 long field names, and says it truncated", async () => {
+    const tables = Array.from({ length: 100 }, (_, t) => `x_big_table_${String(t).padStart(3, "0")}`);
+    const names = Array.from(
+      { length: 80 },
+      (_, f) => `u_${String(f).padStart(2, "0")}_${"a".repeat(75)}`
+    );
+    expect(names[0]!.length).toBe(80);
+    const { client } = await connect({
+      tableAccess: {
+        readTables: tables,
+        writeTables: tables,
+        targets: tables.map((table) => target(table, ["sn_query", "sn_update"])),
+      },
+      fieldPolicy: {
+        fieldPolicy: Object.fromEntries(
+          tables.map((table) => [table, { readable: names, writable: names }])
+        ),
+      },
+    });
+    const result = await client.callTool({ name: "sn_profile", arguments: { profile: PROFILE } });
+    expect(result.isError).toBeFalsy();
+    const data = dataOf(result);
+    const policy = data.policy as PolicyCard;
+    expect(policy.truncated?.hint).toContain("policy show --json");
+    expect(policy.truncated?.field_lists_narrowed).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(policy))).toBeLessThanOrEqual(40_000);
+    expect(JSON.stringify(result).length).toBeLessThan(100_000);
+    // Field lists are cut with a count of what was left out, never silently.
+    const first = policy.tables[0]!;
+    expect(first.readable).not.toBe("*");
+    if (first.readable !== "*") expect(first.readable.more).toBeGreaterThan(0);
+    // The text is kept only when it fits whole; if present it carries the marker.
+    if (data.policy_card !== undefined) {
+      expect(String(data.policy_card)).toContain("TRUNCATED");
+    }
+  });
+
   it("says so when the profile cannot write", async () => {
     const { client } = await connect({
       tableAccess: { readTables: ["incident"], targets: [target("incident", ["sn_query"])] },

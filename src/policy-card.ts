@@ -68,6 +68,12 @@ export interface PolicyCard {
   write_all_tables: boolean;
   tables: CardTableRow[];
   tables_more: number;
+  /** Set when the card was cut to fit a byte budget; never a silent cut. */
+  truncated?: {
+    tables_omitted: number;
+    field_lists_narrowed: boolean;
+    hint: string;
+  };
   /** Fields for tables only a "*" grant reaches; absent when none are. */
   other_tables?: { read: boolean; write: boolean; readable: CardFieldSet; writable: CardFieldSet };
   explicit_write_fields: string[];
@@ -205,7 +211,7 @@ export function buildPolicyCard(input: PolicyCardInput): PolicyCard {
 
 function renderFields(set: CardFieldSet): string {
   if (set === "*") return "all*";
-  if (set.fields.length === 0) return "none";
+  if (set.fields.length === 0) return set.more > 0 ? `(${set.more} fields, omitted)` : "none";
   const shown = set.fields.slice(0, MAX_RENDERED_FIELDS).join(",");
   const hidden = set.fields.length - MAX_RENDERED_FIELDS + set.more;
   return hidden > 0 ? `${shown} +${hidden}` : shown;
@@ -257,6 +263,7 @@ export function renderPolicyCard(card: PolicyCard): string {
   if (body.length > 0) {
     lines.push(...pad([header, ...body]));
     if (card.tables_more > 0) lines.push(`... and ${card.tables_more} more table(s)`);
+    if (card.truncated) lines.push(`TRUNCATED: ${card.truncated.hint}`);
   } else {
     lines.push("No tables are granted.");
   }
@@ -289,4 +296,64 @@ export function renderPolicyCard(card: PolicyCard): string {
       `dry run previews ${card.batch.dry_run_sample}`
   );
   return `${lines.join("\n")}\n`;
+}
+
+/** Byte budgets for the sn_profile response; both sit far below the 100 KB result limit. */
+export const POLICY_DATA_BUDGET_BYTES = 40_000;
+export const POLICY_TEXT_BUDGET_BYTES = 24_000;
+const NARROWED_FIELDS = 6;
+const TRUNCATION_HINT =
+  "truncated to fit the response budget; run `servicenow-mcp-setup policy show --json` for the full detail.";
+
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function narrow(set: CardFieldSet): CardFieldSet {
+  if (set === "*" || set.fields.length <= NARROWED_FIELDS) return set;
+  return {
+    fields: set.fields.slice(0, NARROWED_FIELDS),
+    more: set.more + set.fields.length - NARROWED_FIELDS,
+  };
+}
+
+function emptied(set: CardFieldSet): CardFieldSet {
+  return set === "*" ? set : { fields: [], more: set.more + set.fields.length };
+}
+
+/**
+ * Fit a card to a byte budget by data, not by count: first narrow every
+ * per-table field list, then drop the lists, then drop table rows. Whatever
+ * was cut is recorded in `truncated`; a card within budget is returned as is.
+ */
+export function budgetPolicyCard(
+  card: PolicyCard,
+  maxBytes: number = POLICY_DATA_BUDGET_BYTES
+): PolicyCard {
+  if (jsonBytes(card) <= maxBytes) return card;
+  let rows = card.tables.map((row) => ({
+    ...row,
+    readable: narrow(row.readable),
+    writable: narrow(row.writable),
+  }));
+  const build = (): PolicyCard => ({
+    ...card,
+    tables: rows,
+    truncated: {
+      tables_omitted: card.tables.length - rows.length + card.tables_more,
+      field_lists_narrowed: true,
+      hint: TRUNCATION_HINT,
+    },
+  });
+  if (jsonBytes(build()) > maxBytes) {
+    rows = rows.map((row) => ({
+      ...row,
+      readable: emptied(row.readable),
+      writable: emptied(row.writable),
+    }));
+  }
+  while (rows.length > 0 && jsonBytes(build()) > maxBytes) {
+    rows = rows.slice(0, Math.floor(rows.length / 2));
+  }
+  return build();
 }

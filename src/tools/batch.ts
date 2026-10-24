@@ -211,6 +211,7 @@ const DRY_RUN_DISPLAY_FIELDS: readonly string[] = Object.freeze([
   "short_description",
   "title",
 ]);
+const DRY_RUN_SAMPLE_DEADLINE_MS = 5_000;
 const DRY_RUN_NOTE =
   "The sample is a preview of the first matches, not a list of what will change. " +
   "Running again with confirm true re-runs the query, so it can match different " +
@@ -248,7 +249,12 @@ async function dryRunSample(
   );
   let response: { result?: unknown } | null;
   try {
-    response = await inOwnResponseBudget(signal, () =>
+    // A short deadline: the count is already in hand, so a slow instance
+    // costs the preview, never the dry run.
+    const deadline = AbortSignal.timeout(DRY_RUN_SAMPLE_DEADLINE_MS);
+    response = await inOwnResponseBudget(
+      signal === undefined ? deadline : AbortSignal.any([signal, deadline]),
+      () =>
       uncachedOperations(client).get(`/api/now/table/${table}`, {
         sysparm_fields: selection.join(","),
         sysparm_limit: String(DRY_RUN_SAMPLE_SIZE),

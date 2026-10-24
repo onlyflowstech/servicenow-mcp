@@ -251,7 +251,7 @@ const profileResultSchema = z
     auth_type: z.enum(["apikey", "basic", "oauth"]),
     /** The effective policy as data, and the same card as text. */
     policy: dynamicRecordSchema,
-    policy_card: z.string(),
+    policy_card: z.string().optional(),
   })
   .strict();
 

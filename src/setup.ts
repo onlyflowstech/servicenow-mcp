@@ -1024,6 +1024,7 @@ function renderWizardSummary(
   checks: readonly Check[]
 ): string {
   const failed = checks.filter((check) => !check.ok).length;
+  const riskWarning = riskyGrantWarning(tableAccess.writeTables ?? []);
   const lines = [
     "",
     "Setup complete.",
@@ -1031,13 +1032,7 @@ function renderWizardSummary(
     `Profile   ${profile}`,
     `Reads     ${(tableAccess.readTables ?? []).join(", ") || "(none)"}`,
     `Writes    ${(tableAccess.writeTables ?? []).join(", ") || "(none)"}`,
-    ...(riskyGrantWarning(tableAccess.writeTables ?? []) === undefined
-      ? []
-      : [
-          "",
-          riskyGrantWarning(tableAccess.writeTables ?? [])!.trimEnd(),
-          "",
-        ]),
+    ...(riskWarning === undefined ? [] : ["", riskWarning.trimEnd(), ""]),
     `Transport stdio (each client spawns its own ${SERVER_COMMAND})`,
     `Clients   ${registered.length > 0 ? registered.join(", ") : "(none registered)"}`,
     "",

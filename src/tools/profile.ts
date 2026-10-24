@@ -12,7 +12,12 @@ import { z } from "zod";
 
 import type { AuthType } from "../config.js";
 import type { ExecutionContext } from "../execution-context.js";
-import { buildPolicyCard, renderPolicyCard } from "../policy-card.js";
+import {
+  POLICY_TEXT_BUDGET_BYTES,
+  budgetPolicyCard,
+  buildPolicyCard,
+  renderPolicyCard,
+} from "../policy-card.js";
 import { ok } from "../utils.js";
 
 export interface ProfileDiagnostic {
@@ -46,7 +51,7 @@ export async function handler(
   // The card is built from the policy this invocation is bound to, the same
   // object the dispatcher enforced, so it cannot describe anything else.
   const policy = context.effectivePolicy;
-  const card = buildPolicyCard({
+  const full = buildPolicyCard({
     profile: context.profile.name,
     instance: profile.instance,
     authType: profile.authType,
@@ -55,11 +60,18 @@ export async function handler(
     encodedQueryAccess: policy.encodedQueryAccess,
     atf: policy.atf,
   });
+  // Budgeted here so the result fitter never has to cut it: the structured
+  // policy is narrowed by bytes (and says so), and a text card that still does
+  // not fit is dropped whole rather than halved.
+  const card = budgetPolicyCard(full);
+  const text = renderPolicyCard(card);
   return ok({
     name: context.profile.name,
     instance: profile.instance,
     auth_type: profile.authType,
     policy: card,
-    policy_card: renderPolicyCard(card),
+    ...(Buffer.byteLength(text, "utf8") <= POLICY_TEXT_BUDGET_BYTES
+      ? { policy_card: text }
+      : {}),
   });
 }
