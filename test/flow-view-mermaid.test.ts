@@ -62,12 +62,11 @@ function node(id: string, overrides: Partial<FlowNode> = {}): FlowNode {
 function graph(nodes: FlowNode[], edges: FlowEdge[] = [], overrides: Partial<FlowGraph> = {}): FlowGraph {
   return {
     schema_version: 1,
-    source: "processflow",
-    source_detail: { requested: "auto" },
+    source: "table",
     flows: [
       {
         index: 0,
-        source: "processflow",
+        source: "table",
         sys_id: "0123456789abcdef0123456789abcdef",
         name: ft("Root flow"),
         description: ft(null),

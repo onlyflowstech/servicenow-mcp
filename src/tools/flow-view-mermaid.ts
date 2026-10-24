@@ -12,7 +12,7 @@
  * @module tools/flow-view-mermaid
  */
 
-import type { FlowGraph } from "./flow-view-contracts.js";
+import { FLOW_VIEW_LIMITS, type FlowGraph } from "./flow-view-contracts.js";
 import {
   MAX_MERMAID_EDGES,
   MAX_MERMAID_NODES,
@@ -22,8 +22,7 @@ import {
   type MermaidDiagram,
 } from "./markdown.js";
 
-/** Mirrors `FLOW_VIEW_LIMITS.MERMAID_MAX_LABEL_CHARS`. */
-export const MERMAID_MAX_LABEL_CHARS = 80;
+export const MERMAID_MAX_LABEL_CHARS: number = FLOW_VIEW_LIMITS.MERMAID_MAX_LABEL_CHARS;
 
 // E3 step 3: line breaks (CR, LF, NEL, LS, PS) and tab become a space. This
 // runs before step 2's stripping, which would otherwise delete CR/LF/tab as

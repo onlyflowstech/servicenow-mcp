@@ -12,7 +12,16 @@
  * @module tools/flow-view-renderers
  */
 
-import type { FlowGraph } from "./flow-view-contracts.js";
+import {
+  FLOW_GRAPH_SCHEMA_BOUNDS,
+  FLOW_LIMIT_HITS,
+  FLOW_SOURCE_NAMES,
+  FLOW_VIEW_LIMITS,
+  FLOW_WARNING_CODES,
+  REDACTION_REASONS as CONTRACT_REDACTION_REASONS,
+  type FlowGraph,
+  type FlowWarningCode,
+} from "./flow-view-contracts.js";
 import { buildFlowMermaid } from "./flow-view-mermaid.js";
 import {
   bulletList,
@@ -35,12 +44,11 @@ import {
 
 export const FLOW_VIEW_TOOL = "sn_flow_view";
 
-/** Mirrors `FLOW_VIEW_LIMITS.OUTLINE_*`. */
-export const OUTLINE_MAX_LINES = 800;
-export const OUTLINE_MAX_CHARS = 40_000;
-export const OUTLINE_MAX_VALUE_CHARS = 300;
-/** Mirrors `FLOW_VIEW_LIMITS.MAX_INPUT_VALUE_CHARS` (structuredContent cap). */
-const STRUCTURED_VALUE_CHARS = 2_000;
+export const OUTLINE_MAX_LINES = FLOW_VIEW_LIMITS.OUTLINE_MAX_LINES;
+export const OUTLINE_MAX_CHARS = FLOW_VIEW_LIMITS.OUTLINE_MAX_CHARS;
+export const OUTLINE_MAX_VALUE_CHARS = FLOW_VIEW_LIMITS.OUTLINE_MAX_VALUE_CHARS;
+/** The structuredContent cap on one input value. */
+const STRUCTURED_VALUE_CHARS = FLOW_VIEW_LIMITS.MAX_INPUT_VALUE_CHARS;
 /** Bytes kept free under `metadata.limits.max_bytes` (section 4.3). */
 export const RESPONSE_BYTE_MARGIN = 512;
 
@@ -51,7 +59,11 @@ const MAX_PILL_REPLACEMENTS = 50;
 const MAX_OUTLINE_NAME_CHARS = 100;
 // Room left under OUTLINE_MAX_CHARS for the closing truncation line.
 const OUTLINE_RESERVE_CHARS = 200;
-const STEP_NUMBER = /^\d{1,4}(?:\.\d{1,4}){0,23}$/u;
+// The graph builder prefixes an expanded subflow's steps with its call site
+// ("2.1.3"), so a step may have as many segments as the schema's step bound
+// allows; the length check keeps the match linear.
+const STEP_NUMBER = /^\d{1,4}(?:\.\d{1,4})*$/u;
+const MAX_STEP_CHARS = FLOW_GRAPH_SCHEMA_BOUNDS.MAX_STEP_CHARS;
 const SYS_ID = /^[0-9a-f]{32}$/u;
 
 const LINE_BREAKS = /\r\n?|[\n\u0085\u2028\u2029]/gu;
@@ -60,42 +72,11 @@ const STRIPPED_CHARACTERS =
   /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\u{E0000}-\u{E007F}]/gu;
 const LONE_SURROGATES = /[\uD800-\uDFFF]/gu;
 
-const REDACTION_REASONS = new Set([
-  "field_policy",
-  "sensitive_name",
-  "sensitive_type",
-  "not_requested",
-  "decode_failed",
-  "limit",
-]);
-const SOURCES = new Set(["processflow", "table"]);
-const SOURCE_REQUESTS = new Set(["auto", "processflow", "table"]);
-const FALLBACK_REASONS = new Set([
-  "not_attempted",
-  "unavailable",
-  "forbidden",
-  "upstream_error",
-  "too_large",
-  "shape_mismatch",
-  "flow_mismatch",
-  "error_message",
-]);
-const LIMITS = new Set([
-  "max_nodes",
-  "max_nesting",
-  "max_depth",
-  "max_subflow_expansions",
-  "upstream_scopes",
-  "rows_per_table",
-  "inputs_per_node",
-  "input_value_chars",
-  "pills",
-  "edges",
-  "response_bytes",
-]);
+const REDACTION_REASONS: ReadonlySet<string> = new Set(CONTRACT_REDACTION_REASONS);
+const SOURCES: ReadonlySet<string> = new Set(FLOW_SOURCE_NAMES);
+const LIMITS: ReadonlySet<string> = new Set(FLOW_LIMIT_HITS);
 const NOT_EXPANDED = new Set(["depth", "cycle", "limit", "denied", "not_found"]);
-const WARNING_TEXT: Readonly<Record<string, string>> = Object.freeze({
-  processflow_fallback: "ProcessFlow was not used; the Table API supplied the flow.",
+const WARNING_TEXT: Readonly<Record<FlowWarningCode, string>> = Object.freeze({
   subflow_cycle: "A subflow call cycle was found and not expanded again.",
   subflow_not_found: "A called subflow could not be found.",
   subflow_denied: "A called subflow was not expanded because policy denies it.",
@@ -106,6 +87,8 @@ const WARNING_TEXT: Readonly<Record<string, string>> = Object.freeze({
   label_cache_unavailable: "Data pill labels were unavailable; raw pill tokens are shown.",
   flow_version_unknown: "The flow version could not be determined.",
 });
+
+const KNOWN_WARNINGS: ReadonlySet<string> = new Set(FLOW_WARNING_CODES);
 
 type Format = "both" | "mermaid" | "outline";
 
@@ -129,7 +112,7 @@ function truncateCodePoints(value: string, max: number): string {
 }
 
 /** One line of inert outline text: no breaks, controls, bidi or invisibles. */
-function outlineText(raw: unknown, max = OUTLINE_MAX_VALUE_CHARS): string {
+function outlineText(raw: unknown, max: number = OUTLINE_MAX_VALUE_CHARS): string {
   const value =
     typeof raw === "string"
       ? raw
@@ -152,7 +135,7 @@ function redactedMarker(reason: unknown): string {
 }
 
 /** Display text for a `FlowText`: its text, a redaction marker, or `(not set)`. */
-function flowTextValue(value: unknown, max = OUTLINE_MAX_VALUE_CHARS): string {
+function flowTextValue(value: unknown, max: number = OUTLINE_MAX_VALUE_CHARS): string {
   const flowText = record(value);
   if (flowText && typeof flowText.text === "string" && flowText.text.trim() !== "") {
     return outlineText(flowText.text, max);
@@ -303,7 +286,9 @@ function writeNode(context: OutlineContext, base: number, node: Record<string, u
   const depth = count(node.depth) ?? 0;
   const level = base + Math.min(depth, MAX_INDENT_LEVELS);
   const step =
-    typeof node.step === "string" && STEP_NUMBER.test(node.step) ? `${node.step}.` : "-";
+    typeof node.step === "string" && node.step.length <= MAX_STEP_CHARS && STEP_NUMBER.test(node.step)
+      ? `${node.step}.`
+      : "-";
   const title = hasFlowText(node.title) ? flowTextValue(node.title) : "(unnamed)";
   if (node.kind === "more") {
     const omitted = count(node.omitted_steps);
@@ -420,16 +405,9 @@ function rootFlow(root: Record<string, unknown>): Record<string, unknown> | unde
 }
 
 function summaryTable(root: Record<string, unknown>): MarkdownFragment {
-  const detail = record(root.source_detail) ?? {};
   const counts = record(root.counts) ?? {};
-  const source = SOURCES.has(root.source as string) ? (root.source as string) : "unknown";
-  const requested = SOURCE_REQUESTS.has(detail.requested as string)
-    ? (detail.requested as string)
-    : "unknown";
-  const rows: string[][] = [["Source", `${source} (requested: ${requested})`]];
-  if (FALLBACK_REASONS.has(detail.fallback_reason as string)) {
-    rows.push(["Fallback reason", detail.fallback_reason as string]);
-  }
+  const source = SOURCES.has(root.source as string) ? `${root.source as string} API` : "unknown";
+  const rows: string[][] = [["Source", source]];
   const trigger = record(root.trigger);
   rows.push(["Trigger", trigger ? flowTextValue(trigger.type, 120) : "none"]);
   const returned = count(counts.nodes_returned);
@@ -456,7 +434,8 @@ function warningList(root: Record<string, unknown>): MarkdownFragment | undefine
   const warnings = [
     ...new Set(
       array(root.warnings).filter(
-        (warning): warning is string => typeof warning === "string" && Object.hasOwn(WARNING_TEXT, warning)
+        (warning): warning is FlowWarningCode =>
+          typeof warning === "string" && KNOWN_WARNINGS.has(warning) && Object.hasOwn(WARNING_TEXT, warning)
       )
     ),
   ];

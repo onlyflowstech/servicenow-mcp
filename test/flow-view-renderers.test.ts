@@ -62,12 +62,11 @@ function node(id: string, step: string, overrides: Partial<FlowNode> = {}): Flow
 function baseGraph(nodes: FlowNode[], edges: FlowEdge[] = [], overrides: Partial<FlowGraph> = {}): FlowGraph {
   return {
     schema_version: 1,
-    source: "processflow",
-    source_detail: { requested: "auto" },
+    source: "table",
     flows: [
       {
         index: 0,
-        source: "processflow",
+        source: "table",
         sys_id: SYS_ID,
         name: ft("Incident triage"),
         description: ft(null),
@@ -103,8 +102,6 @@ function sampleGraph(): FlowGraph {
   const root = baseGraph([]);
   return {
     ...root,
-    source: "table",
-    source_detail: { requested: "auto", fallback_reason: "forbidden" },
     flows: [
       root.flows[0]!,
       {
@@ -190,7 +187,7 @@ function sampleGraph(): FlowGraph {
     ],
     pills: [{ token: "pill-a", label: "Trigger > Assigned to" }],
     limits_hit: ["max_nodes", "nope" as never],
-    warnings: ["processflow_fallback", "bogus" as never, "processflow_fallback"],
+    warnings: ["orphan_steps", "bogus" as never, "processflow_fallback" as never, "orphan_steps"],
     counts: { steps_seen: 13, nodes_returned: 10, inputs_redacted: 1, inputs_truncated: 1, items_dropped: 0 },
   };
 }
@@ -383,13 +380,15 @@ describe("renderFlowView", () => {
     const rendered = render(sampleGraph());
     expect(rendered.startsWith("### Flow: Incident triage \u2014 active, published, version 4\n\n")).toBe(true);
     expect(rendered).toContain(`[Open the flow record](${ORIGIN}/sys_hub_flow.do?sys_id=${SYS_ID})`);
-    expect(rendered).toContain("| Source | table (requested: auto) |");
-    expect(rendered).toContain("| Fallback reason | forbidden |");
+    expect(rendered).toContain("| Source | table API |");
+    expect(rendered).not.toContain("Fallback");
+    expect(rendered).not.toContain("(requested:");
     expect(rendered).toContain("| Steps | 10 shown of 13 |");
     expect(rendered).toContain("| Subflows expanded | 1 |");
     expect(rendered).toContain("| Inputs | 1 redacted, 1 truncated |");
     expect(rendered).toContain("| Limits hit | max_nodes |");
-    expect(rendered).toContain("- ProcessFlow was not used; the Table API supplied the flow.");
+    expect(rendered).toContain("- Some steps had an unknown parent and are shown at the top level.");
+    expect(rendered).not.toMatch(/processflow/iu);
     expect(rendered.match(/^- /gmu)).toHaveLength(1);
     expect(rendered).not.toContain("bogus");
     expect(rendered).not.toContain("nope");
@@ -579,7 +578,7 @@ describe("response budget ladder", () => {
     const limit = boundary(outlineMin) - 1;
     expect(fitted(limit)).toMatchObject({ step: 4, outline_lines: 0 });
     expect(render(graph, limit)).toBe(summaryOnly);
-    expect(summaryOnly).toContain("| Source | processflow (requested: auto) |");
+    expect(summaryOnly).toContain("| Source | table API |");
     expect(summaryOnly).toContain(
       "Omitted to fit the response budget: the diagram and the outline. The full graph is in structuredContent."
     );
