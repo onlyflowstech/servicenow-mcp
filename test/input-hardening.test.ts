@@ -55,8 +55,18 @@ import { withRequiredProfile } from "../src/tools/tool-module.js";
 
 const ONE_MIB = 1024 * 1024;
 const SYS_ID = "0123456789abcdef0123456789abcdef";
-/** Generous ceiling for one rejection; the measured cost is a few milliseconds. */
-const FAST_MS = 100;
+/**
+ * Time ceiling for one hostile rejection, applied to the best of
+ * {@link TIMING_ROUNDS} rounds. This is a regression gate, not a benchmark: a
+ * single wall-clock reading on a loaded machine measures the machine as much
+ * as this code (a 100 ms ceiling failed at 158 ms under load). The measured
+ * cost is a few milliseconds; the ceiling catches an order-of-magnitude
+ * regression. The strict properties are the issue counts below, and in H5 the
+ * 128 MB heap and the 1 KB response bound: before these checks every hostile
+ * case produced hundreds of thousands of issues or ran out of memory.
+ */
+const REJECTION_CEILING_MS = 1_000;
+const TIMING_ROUNDS = 3;
 const MAX_ISSUES = 50;
 
 /** The SDK's own count: array elements plus own object members, below the root. */
@@ -102,10 +112,16 @@ const leaf = (index: number) => ({
 const repeat = <T>(count: number, make: (index: number) => T): T[] =>
   Array.from({ length: count }, (_, index) => make(index));
 
+/** Run `run` {@link TIMING_ROUNDS} times; report the last result and the fastest round. */
 async function timed<T>(run: () => Promise<T> | T): Promise<{ result: T; ms: number }> {
-  const started = performance.now();
-  const result = await run();
-  return { result, ms: performance.now() - started };
+  let ms = Number.POSITIVE_INFINITY;
+  let result: T | undefined;
+  for (let round = 0; round < TIMING_ROUNDS; round += 1) {
+    const started = performance.now();
+    result = await run();
+    ms = Math.min(ms, performance.now() - started);
+  }
+  return { result: result as T, ms };
 }
 
 describe("H1 message shape bounds", () => {
@@ -159,7 +175,7 @@ describe("H1 message shape bounds", () => {
     const huge = new Array(5_000_000).fill(0);
     const { result, ms } = await timed(() => inspectJsonShape(huge));
     expect(result).toBe("array_length");
-    expect(ms).toBeLessThan(FAST_MS);
+    expect(ms).toBeLessThan(REJECTION_CEILING_MS);
   });
 
   it("accepts the largest legitimate tool call", () => {
@@ -413,7 +429,7 @@ describe("H3 structured query pre-check", () => {
       expect(result.error.issues).toHaveLength(1);
       expect(result.error.issues[0]?.message).toBe(STRUCTURED_QUERY_STRUCTURAL_LIMIT_MESSAGE);
     }
-    expect(ms).toBeLessThan(FAST_MS);
+    expect(ms).toBeLessThan(REJECTION_CEILING_MS);
   });
 });
 
@@ -529,7 +545,7 @@ describe("H4 bounded arrays", () => {
     const { result, ms } = await timed(() => atfAuthorInputSchema.safeParseAsync(value));
     expect(result.success).toBe(false);
     if (!result.success) expect(result.error.issues.length).toBeLessThanOrEqual(MAX_ISSUES);
-    expect(ms).toBeLessThan(FAST_MS);
+    expect(ms).toBeLessThan(REJECTION_CEILING_MS);
   });
 });
 
@@ -595,7 +611,7 @@ describe("pre-schema checks are fatal and run before parsing (installed zod)", (
         ["custom", "map"],
       ]);
     }
-    expect(ms).toBeLessThan(FAST_MS);
+    expect(ms).toBeLessThan(REJECTION_CEILING_MS);
     expect(seen).toEqual({ elements: 0, containers: 0 });
 
     expect(issued.safeParse({ profile: "p", items: [1], map: { a: 1 } }).success).toBe(true);
@@ -627,7 +643,7 @@ describe("pre-schema checks are fatal and run before parsing (installed zod)", (
         }),
       ]);
     }
-    expect(ms).toBeLessThan(FAST_MS);
+    expect(ms).toBeLessThan(REJECTION_CEILING_MS);
   });
 });
 
@@ -668,7 +684,7 @@ describe("H5 hostile messages through the built server under a reduced heap", ()
           expect(result.kind, result.name).not.toBe("tool-result");
           expect(result.issues, result.name).toBeLessThanOrEqual(MAX_ISSUES);
           expect(result.responseBytes, result.name).toBeLessThan(1024);
-          expect(result.minMs, result.name).toBeLessThan(FAST_MS);
+          expect(result.minMs, result.name).toBeLessThan(REJECTION_CEILING_MS);
         } else {
           // Past input validation: the harness has no profile, so the
           // handler's first step is what answers.
