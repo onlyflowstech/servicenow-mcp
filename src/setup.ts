@@ -70,6 +70,7 @@ import {
   type TableAccessPolicyInput,
   type TableAccessTargetInput,
 } from "./table-policy.js";
+import { FLOW_VIEW_TABLES } from "./tools/flow-view-contracts.js";
 import { resolveTableHierarchy } from "./tools/table-hierarchy.js";
 
 export interface SetupCliDependencies {
@@ -201,6 +202,8 @@ const ATF_AUTHOR_TABLES = Object.freeze(["sys_atf_test", "sys_atf_test_suite", "
 
 interface GrantOptions {
   readonly atf?: boolean;
+  /** Read on the sn_flow_view table closure, bound to sn_flow_view only. */
+  readonly flows?: boolean;
   readonly profile: string;
   readonly read: readonly string[];
   readonly write: readonly string[];
@@ -1585,9 +1588,12 @@ function runGrant(
     : (current.tableAccess ?? Object.freeze({}));
 
   const ordinary = buildTableAccess(existing, options);
-  const tableAccess = options.atf
+  const withAtf = options.atf
     ? buildTableAccess(ordinary, { ...options, read: ["sys_atf_test_suite", "sys_atf_test", "sys_atf_step", "sys_atf_step_config", "var_dictionary", "sys_variable_value", "sys_element_mapping"], write: ATF_AUTHOR_TABLES, tools: ["sn_atf_author"] })
     : ordinary;
+  const tableAccess = options.flows
+    ? buildTableAccess(withAtf, { ...options, read: FLOW_VIEW_TABLES, write: [], tools: ["sn_flow_view"] })
+    : withAtf;
 
   if (options.dryRun) {
     out(
@@ -2194,7 +2200,7 @@ function parseGrantArguments(args: readonly string[]): GrantOptions {
   const parsed = parseFlags(
     args,
     {
-      boolean: new Set(["--replace", "--dry-run", "--json", "--atf"]),
+      boolean: new Set(["--replace", "--dry-run", "--json", "--atf", "--flows"]),
       value: new Set(["--profile", "--read", "--write", "--tools", "--related"]),
       repeatable: new Set(["--related"]),
     },
@@ -2204,8 +2210,8 @@ function parseGrantArguments(args: readonly string[]): GrantOptions {
   if (!profile) throw new Error(`--profile is required.\n\n${usage}`);
   const read = parseTableList(parsed.values.get("--read"), "--read");
   const write = parseTableList(parsed.values.get("--write"), "--write");
-  if (read.length === 0 && write.length === 0 && !parsed.flags.has("--atf")) {
-    throw new Error(`Give at least one of --read, --write, or --atf.\n\n${usage}`);
+  if (read.length === 0 && write.length === 0 && !parsed.flags.has("--atf") && !parsed.flags.has("--flows")) {
+    throw new Error(`Give at least one of --read, --write, --atf or --flows.\n\n${usage}`);
   }
   return Object.freeze({
     profile,
@@ -2215,6 +2221,7 @@ function parseGrantArguments(args: readonly string[]): GrantOptions {
       ? { tools: parseToolList(parsed.values.get("--tools") as string) }
       : {}),
     atf: parsed.flags.has("--atf"),
+    flows: parsed.flags.has("--flows"),
     related: parseRelated(parsed.repeated.get("--related") ?? []),
     replace: parsed.flags.has("--replace"),
     dryRun: parsed.flags.has("--dry-run"),
@@ -2671,6 +2678,8 @@ function renderGrantHelp(): string {
     "  --write TABLES          Comma-separated tables to allow for writes",
     "  --atf                   Grant the ATF authoring tables to sn_atf_author only",
     "                          Does not enable execution or script-step authoring",
+    "  --flows                 Grant read on the 15 sn_flow_view tables to sn_flow_view only",
+    "                          (see docs/FLOW-VIEW.md)",
     `  --tools LIST            Tools permitted on these targets`,
     `                          (default read: ${DEFAULT_READ_TOOLS.join(",")};`,
     `                           default write adds: ${DEFAULT_WRITE_TOOLS.join(",")};`,
