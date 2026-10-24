@@ -26,8 +26,15 @@ export type ToolErrorRetry =
   | "retry_if_safe_and_idempotent"
   | "retry_later";
 
+/**
+ * Fixed sub-reasons within the `upstream` category for a response that is an
+ * HTML page instead of an API response. No upstream text is part of either.
+ */
+export type ToolErrorReason = "instance_hibernating" | "html_response";
+
 export interface ToolErrorDescriptor {
   readonly category: ToolErrorCategory;
+  readonly reason?: ToolErrorReason;
   readonly message: string;
   readonly retry: ToolErrorRetry;
   readonly retryAfterSeconds?: number;
@@ -62,6 +69,57 @@ const INTERNAL_DESCRIPTOR: ToolErrorDescriptor = descriptor(
   "internal",
   "do_not_retry"
 );
+
+const HTML_RESPONSE_MESSAGE =
+  "The instance returned an HTML page instead of an API response. It may be " +
+  "asleep, behind single sign-on, or under maintenance. Check that the " +
+  "instance URL is reachable in a browser.";
+
+const HOST_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(?::\d{1,5})?$/u;
+
+function hibernatingMessage(host: string | undefined): string {
+  const subject =
+    host !== undefined && HOST_PATTERN.test(host)
+      ? `The ServiceNow instance ${host}`
+      : "The ServiceNow instance";
+  return (
+    `${subject} appears to be hibernating. Developer instances sleep when ` +
+    "idle: wake it at https://developer.servicenow.com, wait a few minutes, " +
+    "then retry."
+  );
+}
+
+/**
+ * Issue the trusted error for a hibernating instance. `host` must come from
+ * the validated profile configuration, never from a response; a value that is
+ * not a plain host[:port] is dropped rather than echoed.
+ */
+export function createInstanceHibernatingError(host?: string): Error {
+  return issue({
+    category: "upstream",
+    reason: "instance_hibernating",
+    message: hibernatingMessage(host),
+    retry: "retry_later",
+  });
+}
+
+/** Issue the trusted error for an HTML page where an API response was due. */
+export function createHtmlResponseError(): Error {
+  return issue({
+    category: "upstream",
+    reason: "html_response",
+    message: HTML_RESPONSE_MESSAGE,
+    retry: "retry_after_correction",
+  });
+}
+
+function issue(candidate: ToolErrorDescriptor): Error {
+  const safeDescriptor = Object.freeze({ ...candidate });
+  const error = new Error(formatToolErrorDescriptor(safeDescriptor));
+  error.name = "ServiceNowToolError";
+  TOOL_ERROR_PROVENANCE.set(error, safeDescriptor);
+  return Object.freeze(error);
+}
 
 /**
  * Issue a trusted structural error. Only fixed module-owned text is attached
@@ -145,6 +203,15 @@ export function createCommonToolError(candidates: readonly unknown[]): Error {
   )
     ? first.retryAfterSeconds
     : undefined;
+  if (
+    first.reason !== undefined &&
+    descriptors.every(
+      (candidate) =>
+        candidate.reason === first.reason && candidate.message === first.message
+    )
+  ) {
+    return issue(first);
+  }
   return createToolError(first.category, first.retry, retryAfterSeconds);
 }
 

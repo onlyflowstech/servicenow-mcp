@@ -19,6 +19,7 @@
  */
 
 import { GrantType, ServiceNowConfig } from "./config.js";
+import { configuredHost, htmlResponseError, sniffPrefix } from "./html-response.js";
 import {
   boundedRetryAfterSeconds,
   createToolError,
@@ -262,12 +263,21 @@ export class OAuthProvider implements AuthProvider {
     }
 
     let json: Record<string, unknown>;
+    let htmlError: Error | undefined;
     try {
       const text = await readBoundedResponseText(
         response,
         MAX_TOKEN_RESPONSE_BYTES,
         tokenSignal
       );
+      // A hibernating instance (or SSO/maintenance page) answers 200 with
+      // HTML. Only a bounded prefix is inspected; nothing from it is echoed.
+      htmlError = htmlResponseError(
+        response.headers.get("content-type"),
+        sniffPrefix(text),
+        configuredHost(this.options.instance)
+      );
+      if (htmlError !== undefined) throw htmlError;
       const candidate: unknown = JSON.parse(text);
       if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
         throw new TypeError("OAuth token response must be a JSON object");
@@ -278,6 +288,7 @@ export class OAuthProvider implements AuthProvider {
       if (timeoutSignal.aborted) {
         throw createToolError("timeout", "retry_if_safe_and_idempotent");
       }
+      if (htmlError !== undefined) throw htmlError;
       // Never echo the raw body -- it may contain token material.
       throw createToolError("upstream", "retry_if_safe_and_idempotent");
     }

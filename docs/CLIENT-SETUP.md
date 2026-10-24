@@ -80,6 +80,25 @@ completeness, credential resolution, table-access rules, and the live endpoint,
 and prints the exact remedy for anything it finds. It never prints a secret and
 exits non-zero when a check fails.
 
+`doctor` never touches the network by default. `doctor --live` also makes one
+bounded authenticated read per profile, so it can tell you whether ServiceNow
+accepts the credential and whether the instance is awake.
+
+### Troubleshooting: "appears to be hibernating"
+
+A personal developer instance sleeps when idle and answers every request,
+including the OAuth token request, with an HTML "Instance Hibernating" page and
+HTTP 200. The server reports `The ServiceNow instance <host> appears to be
+hibernating.` with the retry decision "retry later". Wake the instance at
+https://developer.servicenow.com, wait a few minutes, then retry; the server
+does not retry on its own. `servicenow-mcp-setup doctor --live` shows the same
+condition as `Instance hibernating`.
+
+If the message instead says `The instance returned an HTML page instead of an
+API response`, the instance may be asleep, behind single sign-on, or under
+maintenance: open the instance URL in a browser to see which. The detection
+reads only the first 16 KB of the page and never repeats any of it.
+
 ### What the bootstrap writes
 
 | File | Mode | Contents |

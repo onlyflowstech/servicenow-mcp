@@ -214,6 +214,8 @@ interface GrantOptions {
 interface DoctorOptions {
   readonly profile?: string;
   readonly json: boolean;
+  /** Opt in to one bounded authenticated read per profile. */
+  readonly live: boolean;
 }
 
 const CONFIG_RELATIVE_DIR = ".servicenow-mcp";
@@ -715,6 +717,22 @@ export function classifyVerificationFailure(
   const descriptor = trustedToolErrorDescriptor(error);
   const host = safeHost(config.instance);
 
+  if (descriptor?.reason === "instance_hibernating") {
+    return Object.freeze({
+      ok: false,
+      detail: `Instance hibernating: ${host} answered with a hibernation page instead of the API.`,
+      remedy:
+        "Developer instances sleep when idle. Wake it at https://developer.servicenow.com, wait a few minutes, then retry.",
+    });
+  }
+  if (descriptor?.reason === "html_response") {
+    return Object.freeze({
+      ok: false,
+      detail: `${host} returned an HTML page instead of an API response.`,
+      remedy:
+        "The instance may be asleep, behind single sign-on, or under maintenance. Check that the instance URL is reachable in a browser.",
+    });
+  }
   if (descriptor?.category === "authentication") {
     return Object.freeze({
       ok: false,
@@ -1725,7 +1743,12 @@ async function runDoctor(
   out: (value: string) => void
 ): Promise<void> {
   const paths = resolvePaths(home);
-  const checks = runInstallChecks(paths, home, env, dependencies, options.profile);
+  const checks = options.live
+    ? [
+        ...runInstallChecks(paths, home, env, dependencies, options.profile),
+        ...(await runLiveChecks(paths, home, dependencies, options.profile)),
+      ]
+    : runInstallChecks(paths, home, env, dependencies, options.profile);
   const failed = checks.filter((check) => !check.ok);
   if (options.json) {
     out(
@@ -1739,6 +1762,48 @@ async function runDoctor(
     out(renderDoctorText(checks));
   }
   if (failed.length > 0) process.exitCode = 1;
+}
+
+/**
+ * `doctor --live`: one bounded authenticated read per profile, through the
+ * same probe the wizard uses, so a hibernating instance is reported as such
+ * with the wake hint instead of a generic failure. Opt-in, because plain
+ * `doctor` never touches the network.
+ */
+async function runLiveChecks(
+  paths: ResolvedPaths,
+  home: string,
+  dependencies: SetupCliDependencies,
+  only: string | undefined
+): Promise<readonly Check[]> {
+  if (!existsSync(paths.profileConfig) && dependencies.profileManager === undefined) return [];
+  const verify = dependencies.verifyCredential ?? verifyCredentialAgainstInstance;
+  const checks: Check[] = [];
+  try {
+    const manager = dependencies.profileManager ?? profileManagerFor(home);
+    const names = manager
+      .listProfiles()
+      .map((entry) => entry.name)
+      .filter((name) => only === undefined || name === only);
+    for (const name of names) {
+      let config: ServiceNowConfig;
+      try {
+        config = manager.getConfig(name);
+      } catch {
+        continue; // The credential check has already reported why.
+      }
+      const result = await verify(config);
+      checks.push({
+        name: `profile ${name}: live instance`,
+        ok: result.ok,
+        detail: result.detail,
+        ...(result.remedy === undefined ? {} : { remedy: result.remedy }),
+      });
+    }
+  } catch {
+    // Profile loading failures are reported by the static checks.
+  }
+  return checks;
 }
 
 /**
@@ -2227,7 +2292,7 @@ function parseDoctorArguments(args: readonly string[]): DoctorOptions {
   const parsed = parseFlags(
     args,
     {
-      boolean: new Set(["--json"]),
+      boolean: new Set(["--json", "--live"]),
       value: new Set(["--profile"]),
     },
     usage
@@ -2235,6 +2300,7 @@ function parseDoctorArguments(args: readonly string[]): DoctorOptions {
   return Object.freeze({
     ...(parsed.values.has("--profile") ? { profile: parsed.values.get("--profile") } : {}),
     json: parsed.flags.has("--json"),
+    live: parsed.flags.has("--live"),
   });
 }
 
@@ -2690,15 +2756,17 @@ function renderGrantHelp(): string {
 
 function renderDoctorHelp(): string {
   return [
-    "Usage: servicenow-mcp-setup doctor [--profile NAME]",
+    "Usage: servicenow-mcp-setup doctor [--profile NAME] [--live]",
     "",
     "Checks Node version, that the servicenow-mcp command clients spawn resolves",
     "on PATH, config file ownership and modes, profile completeness, credential",
     "resolution, and table access. Exits non-zero when any check fails. Never",
-    "prints a secret value, and never touches the network.",
+    "prints a secret value. It touches the network only with --live.",
     "",
     "Options:",
     "  --profile NAME    Check only this profile (default: every configured profile)",
+    "  --live            Also make one authenticated read per profile; reports a",
+    "                    hibernating instance with how to wake it",
     "  --json            Machine-readable output",
   ].join("\n");
 }

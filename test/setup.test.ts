@@ -24,7 +24,11 @@ import {
   type TableAccessPolicy,
   type TableAccessPolicyInput,
 } from "../src/table-policy.js";
-import { createToolError } from "../src/tool-error.js";
+import {
+  createHtmlResponseError,
+  createInstanceHibernatingError,
+  createToolError,
+} from "../src/tool-error.js";
 import { resolveToolTableAccess } from "../src/tool-table-access.js";
 import {
   classifyVerificationFailure,
@@ -865,6 +869,51 @@ describe("setup doctor", () => {
     });
     return JSON.parse(io.out.join(""));
   }
+
+  it("doctor --live reports a hibernating instance with the wake hint", async () => {
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+    });
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const verifyCredential = vi.fn(async (config: { instance: string }) =>
+      classifyVerificationFailure(
+        createInstanceHibernatingError("dev00001.service-now.com"),
+        config as never
+      )
+    );
+
+    const report = await doctor(
+      ["doctor", "--profile", "dev", "--live", "--json"],
+      { HOME: home },
+      undefined,
+      () => true,
+      { verifyCredential }
+    );
+    const live = report.checks.find((check) => check.name === "profile dev: live instance");
+    expect(verifyCredential).toHaveBeenCalledTimes(1);
+    expect(live?.ok).toBe(false);
+    expect(live?.detail).toContain("Instance hibernating");
+    expect(live?.remedy).toContain("https://developer.servicenow.com");
+    expect(JSON.stringify(report)).not.toContain("not-a-real-value");
+  });
+
+  it("plain doctor never probes the instance", async () => {
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+    });
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const verifyCredential = vi.fn();
+    await doctor(["doctor", "--profile", "dev", "--json"], { HOME: home }, undefined, () => true, {
+      verifyCredential,
+    });
+    expect(verifyCredential).not.toHaveBeenCalled();
+  });
 
   it("reports a profile with no table access as denying every call", async () => {
     manager.addProfile("dev", {
@@ -2095,6 +2144,21 @@ describe("credential verification diagnosis", () => {
 
   const diagnose = (error: unknown, overrides: Record<string, unknown> = {}) =>
     classifyVerificationFailure(error, { ...config, ...overrides } as never);
+
+  it("names a hibernating instance and gives the wake hint", () => {
+    const result = diagnose(createInstanceHibernatingError("dev00001.service-now.com"));
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("Instance hibernating");
+    expect(result.detail).toContain("dev00001.service-now.com");
+    expect(result.remedy).toContain("https://developer.servicenow.com");
+  });
+
+  it("explains a generic HTML response", () => {
+    const result = diagnose(createHtmlResponseError());
+    expect(result.ok).toBe(false);
+    expect(result.detail).toMatch(/HTML page/u);
+    expect(result.remedy).toMatch(/single sign-on/u);
+  });
 
   it("names a rejected credential and keeps the host, not the secret", () => {
     const result = diagnose(createToolError("authentication", "retry_after_correction"));

@@ -17,6 +17,13 @@ tool error.
 | `upstream` | ServiceNow could not complete the request. | `retry_if_safe_and_idempotent` for safe operations; otherwise `do_not_retry` |
 | `internal` | The operation failed unexpectedly. | `do_not_retry` |
 
+Within `upstream`, an HTML page returned in place of an API response has two
+fixed variants. A page mentioning hibernation reports that the named instance
+(taken from the profile, never the response) appears to be hibernating, with
+`retry_later`. Any other HTML page reports that the instance returned an HTML
+page and may be asleep, behind single sign-on, or under maintenance, with
+`retry_after_correction`. Neither repeats any response text.
+
 `retry_later` may include a whole-second `Retry-After` value. The value is
 validated and capped at one hour before it becomes caller-visible. A caller
 must still respect the tool's idempotency and confirmation rules.
