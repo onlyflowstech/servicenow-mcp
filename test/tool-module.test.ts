@@ -16,6 +16,7 @@ import {
   validateToolModuleCatalog,
   withRequiredProfile,
   withResolvedProfileOutput,
+  type AnyZodObject,
   type ToolModuleContract,
   type ToolModuleRequirements,
 } from "../src/tools/index.js";
@@ -271,8 +272,8 @@ describe("tool-module contract", () => {
       [normalizedModule]
     );
     const config = registeredConfig as {
-      inputSchema: z.AnyZodObject;
-      outputSchema: z.AnyZodObject;
+      inputSchema: AnyZodObject;
+      outputSchema: AnyZodObject;
     };
     expect(
       config.inputSchema.safeParse({ profile: "prod", table: "incident" }).success
@@ -287,14 +288,25 @@ describe("tool-module contract", () => {
 
   it("makes the full nested schema graph parse-stable before and after SDK preflight", async () => {
     const field = z.string().min(2);
-    const sourceDefinition = field._def;
+    const sourceInternals = field._zod;
+    const sourceDefinition = field._zod.def as { coerce?: boolean; checks: unknown[] };
     const sourceChecks = sourceDefinition.checks;
-    const sourceMinimumCheck = sourceChecks[0];
+    const sourceMinimumCheck = field._zod.def.checks?.[0] as z.core.$ZodCheckMinLength;
     const sourceUnion = z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("first"), value: z.string() }),
       z.object({ kind: z.literal("second"), count: z.number() }),
     ]);
-    const sourceOptionsMap = sourceUnion._def.optionsMap;
+    const sourceUnionOptions = sourceUnion._zod.def.options as unknown[];
+    // zod 4 definitions hold no Map of their own, so one is planted to prove
+    // that hardening iterates collections through intrinsics, never through
+    // methods a source shadowed.
+    const sourceOptionsMap = new Map<unknown, unknown>([["first", sourceUnion.options[0]]]);
+    Object.defineProperty(sourceUnion._zod.def, "optionsMap", {
+      value: sourceOptionsMap,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
     const shadowedEntries = vi.fn(() =>
       Array.from({ length: 3_000 }, (_, index) => [
         `spoofed-${index}`,
@@ -312,6 +324,7 @@ describe("tool-module contract", () => {
       configurable: true,
     });
     const sourceEnum = z.enum(["open", "closed"]);
+    const sourceEnumValues = sourceEnum._zod.values as Set<unknown>;
     const normalizedInput = withRequiredProfile(
       z.object({ field, choice: sourceUnion, state: sourceEnum })
     );
@@ -320,47 +333,62 @@ describe("tool-module contract", () => {
     const hardenedField = normalizedInput.shape.field as typeof field;
     const hardenedUnion = normalizedInput.shape.choice as typeof sourceUnion;
     const hardenedEnum = normalizedInput.shape.state as typeof sourceEnum;
-    const hardenedChecks = hardenedField._def.checks;
-    const hardenedMinimumCheck = hardenedChecks[0];
-    const hardenedOptionsMap = hardenedUnion._def.optionsMap;
-    const hardenedEnumCache = (
-      hardenedEnum as unknown as { readonly _cache: Set<string> }
-    )._cache;
+    const hardenedChecks = hardenedField._zod.def.checks as unknown[];
+    const hardenedMinimumCheck = hardenedChecks[0] as z.core.$ZodCheckMinLength;
+    const hardenedOptionsMap = (
+      hardenedUnion._zod.def as unknown as { optionsMap: Map<unknown, unknown> }
+    ).optionsMap;
+    const hardenedEnumValues = hardenedEnum._zod.values as Set<unknown>;
     const originalFieldPrototype = Object.getPrototypeOf(hardenedField);
 
+    // Every node is rebuilt from a contract-owned definition, so the source
+    // graph shares no parse state with the issued one.
+    expect(hardenedField).not.toBe(field);
+    expect(hardenedMinimumCheck).not.toBe(sourceMinimumCheck);
     expect(Object.isFrozen(hardenedField)).toBe(true);
-    expect(Object.isFrozen(hardenedField._def)).toBe(true);
+    expect(Object.isFrozen(hardenedField._zod)).toBe(true);
+    expect(Object.isFrozen(hardenedField._zod.def)).toBe(true);
     expect(Object.isFrozen(hardenedChecks)).toBe(true);
     expect(Object.isFrozen(hardenedMinimumCheck)).toBe(true);
-    expect(Object.getOwnPropertyDescriptor(hardenedField, "_def")).toMatchObject({
+    expect(Object.isFrozen(hardenedMinimumCheck._zod.def)).toBe(true);
+    expect(Object.isFrozen(hardenedUnion._zod.def.options)).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(hardenedField, "_zod")).toMatchObject({
       configurable: false,
       writable: false,
     });
     expect(hardenedOptionsMap).not.toBe(sourceOptionsMap);
     expect(hardenedOptionsMap).not.toBeInstanceOf(Map);
-    expect(hardenedEnumCache).not.toBeInstanceOf(Set);
+    expect(hardenedEnumValues).not.toBe(sourceEnumValues);
+    expect(hardenedEnumValues).not.toBeInstanceOf(Set);
     expect(shadowedEntries).not.toHaveBeenCalled();
 
     // References retained before contract issuance are no longer parse-active.
     sourceDefinition.coerce = true;
-    sourceChecks.push({ kind: "max", value: 1 });
-    if (sourceMinimumCheck.kind === "min") sourceMinimumCheck.value = 100;
+    sourceChecks.push(z.string().max(1)._zod.def.checks?.[0]);
+    (sourceMinimumCheck._zod.def as { minimum: number }).minimum = 100;
+    sourceEnumValues.add("spoofed");
+    sourceUnionOptions.push(
+      z.object({ kind: z.literal("third"), bypass: z.boolean() })
+    );
     sourceOptionsMap.set(
       "third",
       z.object({ kind: z.literal("third"), bypass: z.boolean() })
     );
 
     expect(() => {
-      (hardenedField as unknown as { _def: unknown })._def = sourceDefinition;
+      (hardenedField as unknown as { _zod: unknown })._zod = sourceInternals;
     }).toThrow(TypeError);
     expect(() => {
-      (hardenedField._def as { coerce: boolean }).coerce = true;
+      (hardenedField._zod.def as { coerce?: boolean }).coerce = true;
     }).toThrow(TypeError);
     expect(() => {
-      hardenedChecks.push({ kind: "max", value: 1 });
+      hardenedChecks.push(sourceMinimumCheck);
     }).toThrow(TypeError);
     expect(() => {
-      if (hardenedMinimumCheck.kind === "min") hardenedMinimumCheck.value = 100;
+      (hardenedMinimumCheck._zod.def as { minimum: number }).minimum = 100;
+    }).toThrow(TypeError);
+    expect(() => {
+      (hardenedField._zod as { run: unknown }).run = () => ({ value: "ok", issues: [] });
     }).toThrow(TypeError);
     expect(() => {
       (hardenedField as unknown as { safeParse: unknown }).safeParse = () => ({
@@ -372,8 +400,8 @@ describe("tool-module contract", () => {
       /disabled/u
     );
     expect(() => hardenedOptionsMap.delete("first")).toThrow(/disabled/u);
-    expect(() => hardenedEnumCache.add("spoofed")).toThrow(/disabled/u);
-    expect(() => hardenedEnumCache.clear()).toThrow(/disabled/u);
+    expect(() => hardenedEnumValues.add("spoofed")).toThrow(/disabled/u);
+    expect(() => hardenedEnumValues.clear()).toThrow(/disabled/u);
     expect(() =>
       Map.prototype.set.call(
         hardenedOptionsMap,
@@ -381,7 +409,7 @@ describe("tool-module contract", () => {
         sourceUnion.options[0]
       )
     ).toThrow(TypeError);
-    expect(() => Set.prototype.add.call(hardenedEnumCache, "spoofed")).toThrow(
+    expect(() => Set.prototype.add.call(hardenedEnumValues, "spoofed")).toThrow(
       TypeError
     );
 
@@ -391,8 +419,8 @@ describe("tool-module contract", () => {
       "value",
       "target[key] = value; return target[key];"
     ) as (target: object, key: string, value: unknown) => unknown;
-    expect(sloppyAssign(hardenedField._def, "coerce", true)).toBe(false);
-    expect(sloppyAssign(hardenedMinimumCheck, "value", 100)).toBe(2);
+    expect(sloppyAssign(hardenedField._zod.def, "coerce", true)).toBeUndefined();
+    expect(sloppyAssign(hardenedMinimumCheck._zod.def, "minimum", 100)).toBe(2);
     expect(sloppyAssign(hardenedField, "safeParse", null)).toBe(
       hardenedField.safeParse
     );
@@ -407,6 +435,12 @@ describe("tool-module contract", () => {
     expect(normalizedInput.safeParse(validInput).success).toBe(true);
     expect(
       normalizedInput.safeParse({ ...validInput, field: 42 }).success
+    ).toBe(false);
+    expect(
+      normalizedInput.safeParse({ ...validInput, field: "x" }).success
+    ).toBe(false);
+    expect(
+      normalizedInput.safeParse({ ...validInput, state: "spoofed" }).success
     ).toBe(false);
     expect(
       normalizedInput.safeParse({
@@ -442,13 +476,13 @@ describe("tool-module contract", () => {
       [module]
     );
     const config = registeredConfig as {
-      inputSchema: z.AnyZodObject;
-      outputSchema: z.AnyZodObject;
+      inputSchema: AnyZodObject;
+      outputSchema: AnyZodObject;
     };
-    const registeredField = config.inputSchema.shape.field;
+    const registeredField = config.inputSchema.shape.field as typeof field;
     expect(registeredField).toBe(hardenedField);
     expect(() => {
-      (registeredField._def as { coerce?: boolean }).coerce = true;
+      (registeredField._zod.def as { coerce?: boolean }).coerce = true;
     }).toThrow(TypeError);
     expect(() => Object.setPrototypeOf(registeredField, null)).toThrow(TypeError);
     expect(config.inputSchema.safeParse(validInput).success).toBe(true);
@@ -459,10 +493,9 @@ describe("tool-module contract", () => {
       true
     );
     expect(() =>
-      Map.prototype.set.call(
-        (config.inputSchema.shape.choice as typeof sourceUnion)._def.optionsMap,
-        "third",
-        sourceUnion.options[0]
+      Set.prototype.add.call(
+        (config.inputSchema.shape.state as typeof sourceEnum)._zod.values,
+        "spoofed"
       )
     ).toThrow(TypeError);
   });
@@ -472,15 +505,51 @@ describe("tool-module contract", () => {
       z.object({ kind: z.literal("first") }),
       z.object({ kind: z.literal("second") }),
     ]);
-    const oversizedOptions = new Map<unknown, z.AnyZodObject>();
+    const oversizedOptions = new Map<unknown, AnyZodObject>();
     for (let index = 0; index <= 2_048; index += 1) {
       oversizedOptions.set(index, oversized.options[0]);
     }
-    oversized._def.optionsMap = oversizedOptions;
+    // zod 4 definitions hold no Map of their own; one is planted to reach
+    // the collection bound.
+    Object.defineProperty(oversized._zod.def, "optionsMap", {
+      value: oversizedOptions,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
 
     expect(() =>
       withRequiredProfile(z.object({ choice: oversized }))
     ).toThrow(/map is too large/u);
+  });
+
+  it("refuses lazy (recursive) schemas, which a frozen zod 4 graph cannot resolve", () => {
+    const node = z.lazy(() => z.object({ name: z.string() }));
+    expect(() => withRequiredProfile(z.object({ tree: node }))).toThrow(
+      /does not support lazy/u
+    );
+  });
+
+  it("freezes a bare refinement check in place and keeps enforcing it", () => {
+    const refined = z.string().superRefine((value, context) => {
+      if (value === "blocked") context.addIssue({ code: "custom", message: "blocked value" });
+    });
+    const sourceCheck = refined._zod.def.checks?.[0] as z.core.$ZodCheck;
+    const issued = withRequiredProfile(z.object({ value: refined }));
+    const issuedCheck = (issued.shape.value as typeof refined)._zod.def.checks?.[0];
+
+    // Its behaviour is assigned after construction, so it is not rebuilt.
+    expect(issuedCheck).toBe(sourceCheck);
+    expect(Object.isFrozen(sourceCheck)).toBe(true);
+    expect(Object.isFrozen(sourceCheck._zod)).toBe(true);
+    expect(Object.isFrozen(sourceCheck._zod.def)).toBe(true);
+    expect(() => {
+      (sourceCheck._zod as { check: unknown }).check = () => {};
+    }).toThrow(TypeError);
+    expect(issued.safeParse({ profile: "prod", value: "fine" }).success).toBe(true);
+    expect(issued.safeParse({ profile: "prod", value: "blocked" }).error?.issues).toEqual([
+      expect.objectContaining({ code: "custom", message: "blocked value", path: ["value"] }),
+    ]);
   });
 
   it("rejects accessor-based invalid source shapes with zero target side effects", async () => {
@@ -510,15 +579,19 @@ describe("tool-module contract", () => {
   });
 
   it("rejects the exact forged ZodObject-prototype replay with no partial target registration", async () => {
-    const forged = Object.create(z.ZodObject.prototype) as z.AnyZodObject;
-    Object.defineProperty(forged, "_def", {
+    // zod 4 keeps a node's state in `_zod`, and instanceof reads its traits.
+    const forged = Object.create(z.ZodObject.prototype) as AnyZodObject;
+    Object.defineProperty(forged, "_zod", {
       value: {
-        typeName: z.ZodFirstPartyTypeKind.ZodObject,
-        unknownKeys: "strict",
-        catchall: z.never(),
-        shape: () => ({ profile: profileNameSchema, table: z.string() }),
+        def: {
+          type: "object",
+          catchall: z.never(),
+          shape: { profile: profileNameSchema, table: z.string() },
+        },
+        constr: z.ZodObject,
+        traits: new Set(["$ZodType", "ZodType", "$ZodObject", "ZodObject"]),
       },
-      enumerable: true,
+      enumerable: false,
       configurable: true,
       writable: true,
     });
@@ -724,9 +797,10 @@ describe("tool-module contract", () => {
         "metadata",
         "profile",
       ]);
-      expect(module.outputSchema._def.unknownKeys, module.definition.name).toBe(
-        "strict"
-      );
+      expect(
+        module.outputSchema._zod.def.catchall?._zod.def.type,
+        module.definition.name
+      ).toBe("never");
     }
   });
 });

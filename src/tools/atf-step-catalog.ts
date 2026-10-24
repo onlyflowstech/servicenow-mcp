@@ -15,8 +15,8 @@ interface Input { element: string; internal_type: string; mandatory: boolean; or
 interface Definition { step_config: string; name: string; step_env: string; executes_user_code: boolean; inputs: Input[] }
 const catalog: Record<string, Definition> = definitions;
 const reference = z.union([id, z.string().regex(ATF_STEP_REFERENCE)]);
-function inputSchema(input: Input): z.ZodTypeAny {
-  let schema: z.ZodTypeAny;
+function inputSchema(input: Input): z.ZodType {
+  let schema: z.ZodType;
   switch (input.internal_type) {
     case "table_name": schema = z.string().regex(/^[a-z][a-z0-9_]{0,79}$/u); break;
     case "reference": case "document_id": schema = reference; break;
@@ -29,7 +29,9 @@ function inputSchema(input: Input): z.ZodTypeAny {
   if (input.mandatory && schema instanceof z.ZodString) schema = schema.min(1);
   if (input.default !== undefined) {
     const fallback = input.internal_type === "boolean" ? input.default === "true" || input.default === "1" : input.internal_type === "integer" ? Number(input.default) : input.default;
-    schema = schema.default(fallback);
+    // prefault, not default: zod 4 returns a default without validating it,
+    // and a catalog default must still pass the input schema, as in zod 3.
+    schema = schema.prefault(fallback);
   } else if (!input.mandatory) schema = schema.optional();
   return schema;
 }
@@ -45,7 +47,7 @@ export function stepTypes(allowScripts: boolean) {
     },
   }));
 }
-export const stepRequestSchema = z.object({ type: z.string().min(1).max(80), inputs: z.record(z.unknown()) }).strict();
+export const stepRequestSchema = z.object({ type: z.string().min(1).max(80), inputs: z.record(z.string(), z.unknown()) }).strict();
 export interface PreparedStep { type: string; definition: Definition; inputs: Record<string, string>; order: number }
 export const STEP_READ_TABLES = ["sys_atf_test", "sys_atf_step", "sys_atf_step_config", "var_dictionary", "sys_variable_value", "sys_element_mapping"];
 export function prepareSteps(args: Record<string, unknown>, allowScripts: boolean) {

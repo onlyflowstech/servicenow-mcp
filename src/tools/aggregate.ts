@@ -4,7 +4,7 @@ import type { ExecutionContext } from "../execution-context.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
 import {
   authorizeRawEncodedRead,
-  ENCODED_QUERY_MIGRATION_MESSAGE,
+  ENCODED_QUERY_STRICT_OBJECT_PARAMS,
 } from "../encoded-query-policy.js";
 import {
   filterAggregateResult,
@@ -65,7 +65,7 @@ export const definition = {
 };
 
 export const schema = z
-  .object({
+  .strictObject({
     table: z.string().describe("ServiceNow table name (e.g. incident)"),
     type: z
       .enum(["COUNT", "AVG", "MIN", "MAX", "SUM"])
@@ -81,8 +81,7 @@ export const schema = z
       .describe("Display values mode: true, false, or all"),
     limit: z.number().int().min(1).max(MAX_AGGREGATE_PAGE).optional().default(MAX_AGGREGATE_PAGE).describe("Maximum aggregate groups to return (default and max 1000)"),
     offset: z.number().int().min(0).max(MAX_AGGREGATE_OFFSET).optional().default(0).describe("Deterministic aggregate-group offset (default 0)"),
-  })
-  .strict(ENCODED_QUERY_MIGRATION_MESSAGE);
+  }, ENCODED_QUERY_STRICT_OBJECT_PARAMS);
 
 export async function handler(
   args: z.infer<typeof schema>,

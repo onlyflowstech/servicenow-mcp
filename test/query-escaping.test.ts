@@ -87,7 +87,7 @@ describe("encoded-query injection is neutralized", () => {
     expect(parsed.success).toBe(false);
     if (!parsed.success) {
       expect(parsed.error.issues).toContainEqual(
-        expect.objectContaining({ path: ["sys_id"], code: "invalid_string" })
+        expect.objectContaining({ path: ["sys_id"], code: "invalid_format" })
       );
     }
     expect(get).not.toHaveBeenCalled();
@@ -211,7 +211,7 @@ describe("encoded-query injection is neutralized", () => {
       expect(parsed.error.issues).toContainEqual(
         expect.objectContaining({
           path: ["execution_id"],
-          code: "invalid_string",
+          code: "invalid_format",
         })
       );
     }
