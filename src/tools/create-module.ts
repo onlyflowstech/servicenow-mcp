@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { ServiceNowOperations } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
 import {
-  ENCODED_QUERY_MIGRATION_MESSAGE,
+  ENCODED_QUERY_STRICT_OBJECT_PARAMS,
   rejectRawEncodedWrite,
 } from "../encoded-query-policy.js";
 import {
@@ -51,19 +51,18 @@ export const definition = Object.freeze({
 
 function compatibleInputSchema() {
   return z
-    .object({
+    .strictObject({
       table: z
         .string()
         .describe(
           "Target table; must be granted for writes by the configured table policy"
         ),
       fields: z
-        .record(z.unknown())
+        .record(z.string(), z.unknown())
         .describe(
           'Field values approved by the configured field policy. On incident, short_description is required (e.g. {"short_description":"Server down","urgency":"1"})'
         ),
-    })
-    .strict(ENCODED_QUERY_MIGRATION_MESSAGE);
+    }, ENCODED_QUERY_STRICT_OBJECT_PARAMS);
 }
 
 export const schema = compatibleInputSchema();

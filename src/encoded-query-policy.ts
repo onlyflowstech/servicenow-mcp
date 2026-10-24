@@ -26,6 +26,17 @@ export const ENCODED_QUERY_POLICY_ENV = "SN_ENCODED_QUERY_READ_POLICY";
 export const ENCODED_QUERY_MIGRATION_MESSAGE =
   "Raw encoded query denied by policy. Use structured_query with policy-authorized filters.";
 
+/**
+ * Params for a strict tool input object (`z.strictObject(shape, these)`).
+ * An unknown key, such as a legacy raw `query`, is reported with the
+ * migration message, as zod 3's `.strict(message)` did; zod 4 takes no
+ * message there. Every other issue keeps zod's own message.
+ */
+export const ENCODED_QUERY_STRICT_OBJECT_PARAMS = Object.freeze({
+  error: (issue: { readonly code?: string }): string | undefined =>
+    issue.code === "unrecognized_keys" ? ENCODED_QUERY_MIGRATION_MESSAGE : undefined,
+});
+
 export const SUPPORTED_ENCODED_QUERY_OPERATORS = Object.freeze([
   "=",
   "!=",

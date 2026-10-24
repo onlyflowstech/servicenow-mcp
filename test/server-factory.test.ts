@@ -514,7 +514,10 @@ describe("createMcpServer", () => {
     const tools = await listToolsOf(await createMcpServer({ dependencies: {}, register }));
 
     expect(JSON.stringify(tools)).not.toContain("$schema");
-    // Only the declaration goes; everything else about each tool is served as is.
+    // Only the declaration goes; everything else about each tool is served as
+    // is. A raw shape becomes a stripping object, for which zod 4's converter
+    // emits no additionalProperties on input (zod 3's emitted false); the
+    // catalog's own stripping inputs carry it as metadata (tool-module.ts).
     expect(tools).toEqual([
       {
         name: "structured-tool",
@@ -523,7 +526,6 @@ describe("createMcpServer", () => {
           type: "object",
           properties: { profile: { type: "string", minLength: 1 } },
           required: ["profile"],
-          additionalProperties: false,
         },
         outputSchema: {
           type: "object",
@@ -540,7 +542,6 @@ describe("createMcpServer", () => {
           type: "object",
           properties: { profile: { type: "string" } },
           required: ["profile"],
-          additionalProperties: false,
         },
         execution: { taskSupport: "forbidden" },
       },

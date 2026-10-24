@@ -115,6 +115,7 @@ export {
   withResolvedProfileOutput,
 } from "./tool-module.js";
 export type {
+  AnyZodObject,
   ContextOnlyToolHandlerServices,
   RequiredToolAnnotations,
   SchemaCacheBinding,

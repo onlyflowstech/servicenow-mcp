@@ -155,7 +155,7 @@ const structuredLeafConditionSchema = z.union([
   nullConditionSchema,
 ]);
 
-function structuredQueryGroupSchema<FilterSchema extends z.ZodTypeAny>(
+function structuredQueryGroupSchema<FilterSchema extends z.ZodType>(
   filterSchema: FilterSchema
 ) {
   return z
