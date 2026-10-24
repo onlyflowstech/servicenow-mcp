@@ -55,6 +55,67 @@ const ISSUED_INPUT_SCHEMAS = new WeakSet<object>();
 const ISSUED_OUTPUT_SCHEMAS = new WeakSet<object>();
 const ISSUED_SCHEMA_SNAPSHOTS = new WeakMap<object, IssuedSchemaSnapshot>();
 const HARDENED_SCHEMA_NODES = new WeakSet<object>();
+/**
+ * Process-wide: each source zod node maps to the one hardened rebuild made
+ * from it. Tools share source schemas (every output envelope embeds the same
+ * result metadata), and without this every tool rebuilt and froze its own
+ * copy. Two consequences, both intended:
+ *
+ * - The first issuance wins. A source schema changed after it was first
+ *   hardened is not read again, so no issued schema, earlier or later, sees
+ *   the change; issued graphs stay inert to their sources.
+ * - Reuse skips the rebuild but not the budgets. A graph that reuses a
+ *   hardened subgraph is charged for every value in it that the graph has not
+ *   already counted, exactly as a fresh traversal would have counted it, and
+ *   the subgraph's height is checked at the depth it is reached (see
+ *   {@link HARDENED_SUBGRAPHS} and `chargeReusedSubgraph`).
+ */
+const HARDENED_FROM_SOURCE = new WeakMap<object, object>();
+
+/**
+ * What hardening one zod node charged to the budgets. A node's own charge
+ * folds in every non-zod value (definition, container, regex, function) its
+ * build cloned, and also any non-zod value it reached that another node
+ * cloned first, so that value is still paid for when this node is reused
+ * without that other node. That second case counts the value twice in a graph
+ * holding both nodes, which only makes the budgets stricter.
+ */
+interface SubgraphRecord {
+  /** Traversal nodes charged for the node itself, excluding child zod nodes. */
+  readonly nodes: number;
+  /** Own-key charges for the node itself, excluding child zod nodes. */
+  readonly ownKeys: number;
+  /** Deepest level below the node's parent reached through any path. */
+  readonly height: number;
+  /** Every zod node the build reached, directly or through non-zod values. */
+  readonly children: readonly object[];
+}
+
+/**
+ * Budget records for every hardened zod node, so the nodes reachable from a
+ * reused subgraph, and what a fresh traversal would have charged for each,
+ * can be recovered without traversing it again.
+ */
+const HARDENED_SUBGRAPHS = new WeakMap<object, SubgraphRecord>();
+
+/** Charges made while one value is being built. */
+interface SubgraphFrame {
+  /** The nearest frame building a zod node: itself, or an enclosing one. */
+  zodFrame: SubgraphFrame | undefined;
+  /** Charged by zod nodes built or reused below this value. */
+  zodNodes: number;
+  zodOwnKeys: number;
+  /** Folded in for non-zod values first cloned by another zod node. */
+  extraNodes: number;
+  extraOwnKeys: number;
+  readonly zodChildren: object[];
+}
+
+/** A cloned non-zod value's folded charge, kept for the current graph only. */
+interface LocalSubgraphRecord extends SubgraphRecord {
+  /** The zod frame whose node's charge already includes this value. */
+  readonly owner: SubgraphFrame | undefined;
+}
 const MAX_TOOL_SCHEMA_FIELDS = 128;
 const MAX_SCHEMA_GRAPH_DEPTH = 128;
 const MAX_SCHEMA_GRAPH_NODES = 10_000;
@@ -121,6 +182,12 @@ const MEMOIZED_CONTAINER_TYPES: ReadonlySet<unknown> = new Set([
 interface SchemaGraphState {
   readonly seen: WeakMap<object, unknown>;
   depth: number;
+  /** Deepest level reached within the value being measured. */
+  maxDepth: number;
+  /** One frame per value being built, innermost last. */
+  readonly frames: SubgraphFrame[];
+  /** Folded charges of this graph's cloned non-zod values. */
+  readonly local: WeakMap<object, LocalSubgraphRecord>;
   nodes: number;
   ownKeys: number;
 }
@@ -565,6 +632,9 @@ function hardenSchemaGraph<TSchema extends z.ZodType>(schema: TSchema): TSchema 
   const state: SchemaGraphState = {
     seen: new WeakMap<object, unknown>(),
     depth: 0,
+    maxDepth: 0,
+    frames: [],
+    local: new WeakMap<object, LocalSubgraphRecord>(),
     nodes: 0,
     ownKeys: 0,
   };
@@ -607,13 +677,28 @@ function hardenZodNode(node: object, state: SchemaGraphState): object {
   if (nodeUtilTypes.isProxy(node)) {
     throw new TypeError("tool schema graph must not contain a Proxy");
   }
-  if (HARDENED_SCHEMA_NODES.has(node)) return node;
-  const seen = state.seen.get(node);
-  if (seen) return seen as object;
+  const reused = HARDENED_SCHEMA_NODES.has(node)
+    ? node
+    : (HARDENED_FROM_SOURCE.get(node) ?? (state.seen.get(node) as object | undefined));
+  if (reused !== undefined) {
+    // Already counted in this graph, or built by an earlier one.
+    if (state.seen.has(reused)) noteSeenSubgraph(state, reused);
+    else chargeReusedSubgraph(state, reused);
+    if (reused !== node) state.seen.set(node, reused);
+    return reused;
+  }
   const constructor = zodNodeConstructor(node);
   if (!constructor) {
     throw new TypeError("tool schema graph contains an unsupported schema node");
   }
+  return measureSubgraph(state, () => rebuildZodNode(node, constructor, state), true);
+}
+
+function rebuildZodNode(
+  node: object,
+  constructor: ZodNodeConstructor,
+  state: SchemaGraphState
+): object {
   const internals = ownDataValue(node, "_zod") as object;
   const definitionDescriptor = Object.getOwnPropertyDescriptor(internals, "def");
   if (
@@ -660,9 +745,171 @@ function hardenZodNode(node: object, state: SchemaGraphState): object {
     copySchemaMetadata(node, rebuilt, state);
     sealRebuiltZodNode(rebuilt, state);
     HARDENED_SCHEMA_NODES.add(rebuilt);
+    // Only a completely sealed rebuild is shared; a failure above leaves
+    // nothing behind for the next graph.
+    HARDENED_FROM_SOURCE.set(node, rebuilt);
     return rebuilt;
   } finally {
     leaveSchemaGraphValue(state);
+  }
+}
+
+/**
+ * Build a hardened value and record its budget charge and height. A zod
+ * node's record is kept for the process (see {@link HARDENED_SUBGRAPHS}); a
+ * non-zod value's folded record is kept for the current graph only, and its
+ * charge is part of the enclosing zod node's.
+ */
+function measureSubgraph<T extends object>(
+  state: SchemaGraphState,
+  build: () => T,
+  isZodNode: boolean
+): T {
+  const startNodes = state.nodes;
+  const startOwnKeys = state.ownKeys;
+  const startDepth = state.depth;
+  const outerMaxDepth = state.maxDepth;
+  const parent = state.frames.at(-1);
+  const frame: SubgraphFrame = {
+    zodFrame: parent?.zodFrame,
+    zodNodes: 0,
+    zodOwnKeys: 0,
+    extraNodes: 0,
+    extraOwnKeys: 0,
+    zodChildren: [],
+  };
+  if (isZodNode) frame.zodFrame = frame;
+  state.maxDepth = startDepth;
+  state.frames.push(frame);
+  let hardened: T;
+  let height: number;
+  try {
+    hardened = build();
+    height = state.maxDepth - startDepth;
+  } finally {
+    state.frames.pop();
+    state.maxDepth = Math.max(outerMaxDepth, state.maxDepth);
+  }
+  const nodes = state.nodes - startNodes;
+  const ownKeys = state.ownKeys - startOwnKeys;
+  const ownCharge = {
+    nodes: nodes - frame.zodNodes + frame.extraNodes,
+    ownKeys: ownKeys - frame.zodOwnKeys + frame.extraOwnKeys,
+    height,
+  };
+  if (isZodNode) {
+    if (!HARDENED_SUBGRAPHS.has(hardened)) {
+      HARDENED_SUBGRAPHS.set(
+        hardened,
+        Object.freeze({ ...ownCharge, children: Object.freeze(frame.zodChildren) })
+      );
+    }
+    if (parent) {
+      parent.zodNodes += nodes;
+      parent.zodOwnKeys += ownKeys;
+      parent.zodChildren.push(hardened);
+    }
+    return hardened;
+  }
+  if (!state.local.has(hardened)) {
+    state.local.set(hardened, {
+      ...ownCharge,
+      children: frame.zodChildren,
+      owner: frame.zodFrame,
+    });
+  }
+  if (parent) {
+    parent.zodNodes += frame.zodNodes;
+    parent.zodOwnKeys += frame.zodOwnKeys;
+    parent.extraNodes += frame.extraNodes;
+    parent.extraOwnKeys += frame.extraOwnKeys;
+    for (const child of frame.zodChildren) parent.zodChildren.push(child);
+  }
+  return hardened;
+}
+
+/** Record a depth reached through a subgraph, failing past the bound. */
+function reachSchemaGraphDepth(state: SchemaGraphState, depth: number): void {
+  if (depth > state.maxDepth) state.maxDepth = depth;
+  if (depth > MAX_SCHEMA_GRAPH_DEPTH) {
+    throw new TypeError("tool schema graph traversal budget exceeded");
+  }
+}
+
+/**
+ * A zod node reached again within the graph that already counted it: no new
+ * charge, as before, but its height is checked at this depth too and it is
+ * linked as a child of the node being built. A node with no record is still
+ * being built (a node reached through its own members) and is counted by
+ * that build. Schema graphs have no other cycles: lazy nodes are refused and
+ * accessors are not followed.
+ */
+function noteSeenSubgraph(state: SchemaGraphState, hardened: object): void {
+  const record = HARDENED_SUBGRAPHS.get(hardened);
+  if (record === undefined) return;
+  reachSchemaGraphDepth(state, state.depth + record.height);
+  state.frames.at(-1)?.zodChildren.push(hardened);
+}
+
+/**
+ * A cloned non-zod value reached again within this graph. No new charge to
+ * the graph and its height is checked at this depth. When another zod node
+ * cloned it first, its folded charge and its zod nodes are added to the
+ * current node's record as well, so reusing the current node without that
+ * other node still pays for it.
+ */
+function noteSeenValue(state: SchemaGraphState, hardened: object): void {
+  const record = state.local.get(hardened);
+  if (record === undefined) return;
+  reachSchemaGraphDepth(state, state.depth + record.height);
+  const frame = state.frames.at(-1);
+  if (frame === undefined || record.owner === frame.zodFrame) return;
+  frame.extraNodes += record.nodes;
+  frame.extraOwnKeys += record.ownKeys;
+  for (const child of record.children) frame.zodChildren.push(child);
+}
+
+/**
+ * A hardened subgraph built by an earlier graph. Every value in it that this
+ * graph has not counted yet is charged its recorded own nodes and own keys,
+ * which is what a fresh traversal of the same subgraph would have charged,
+ * and its height is checked at the depth it is reached. The walk follows the
+ * recorded links only; it does not touch the frozen nodes.
+ */
+function chargeReusedSubgraph(state: SchemaGraphState, hardened: object): void {
+  const record = HARDENED_SUBGRAPHS.get(hardened);
+  if (record === undefined) {
+    throw new TypeError("tool schema graph reuses a node with no recorded budget");
+  }
+  reachSchemaGraphDepth(state, state.depth + record.height);
+  let nodes = 0;
+  let ownKeys = 0;
+  const pending: object[] = [hardened];
+  while (pending.length > 0) {
+    const value = pending.pop() as object;
+    if (state.seen.has(value)) continue;
+    const valueRecord = HARDENED_SUBGRAPHS.get(value);
+    if (valueRecord === undefined) {
+      throw new TypeError("tool schema graph reuses a node with no recorded budget");
+    }
+    state.seen.set(value, value);
+    nodes += valueRecord.nodes;
+    ownKeys += valueRecord.ownKeys;
+    for (const child of valueRecord.children) pending.push(child);
+  }
+  state.nodes += nodes;
+  state.ownKeys += ownKeys;
+  if (state.nodes > MAX_SCHEMA_GRAPH_NODES) {
+    throw new TypeError("tool schema graph traversal budget exceeded");
+  }
+  if (state.ownKeys > MAX_SCHEMA_GRAPH_OWN_KEYS) {
+    throw new TypeError("tool schema graph property budget exceeded");
+  }
+  const parent = state.frames.at(-1);
+  if (parent) {
+    parent.zodNodes += nodes;
+    parent.zodOwnKeys += ownKeys;
+    parent.zodChildren.push(hardened);
   }
 }
 
@@ -1001,7 +1248,15 @@ function cloneAndHardenGraphValue(
   }
   if (zodNodeConstructor(value)) return hardenZodNode(value as object, state);
   const existing = state.seen.get(value);
-  if (existing) return existing;
+  if (existing) {
+    noteSeenValue(state, existing as object);
+    return existing;
+  }
+  return measureSubgraph(state, () => cloneFreshGraphValue(value as object, state), false);
+}
+
+/** Clone and freeze one non-zod value not yet seen in this graph. */
+function cloneFreshGraphValue(value: object, state: SchemaGraphState): object {
   if (typeof value === "function") {
     Object.freeze(value);
     state.seen.set(value, value);
@@ -1428,6 +1683,7 @@ function enterSchemaGraphValue(state: SchemaGraphState, value: object): void {
   }
   state.depth += 1;
   state.nodes += 1;
+  if (state.depth > state.maxDepth) state.maxDepth = state.depth;
   if (
     state.depth > MAX_SCHEMA_GRAPH_DEPTH ||
     state.nodes > MAX_SCHEMA_GRAPH_NODES

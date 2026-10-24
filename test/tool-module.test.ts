@@ -552,6 +552,97 @@ describe("tool-module contract", () => {
     ]);
   });
 
+  describe("process-wide reuse of hardened subgraphs", () => {
+    // Each case builds its own source nodes: the reuse map is process-wide,
+    // so sharing sources across cases would make them depend on order.
+    const wide = (fields: number) =>
+      z.object(
+        Object.fromEntries(
+          Array.from({ length: fields }, (_, index) => [`f${index}`, z.string().max(index + 1)])
+        )
+      );
+    const nest = (inner: z.ZodType, levels: number): z.ZodType => {
+      let schema = inner;
+      for (let level = 0; level < levels; level += 1) schema = z.object({ inner: schema });
+      return schema;
+    };
+    // About 13 budget nodes per field: one 450-field object fits the 10,000
+    // node budget, two do not. 30 nested levels fit the depth budget, 50 do
+    // not (calibrated against fresh traversals of the same shapes).
+    const HALF_BUDGET_FIELDS = 450;
+
+    it("reuses the first hardened copy of a shared source node", () => {
+      const shared = wide(3);
+      const first = withRequiredProfile(z.object({ a: shared }));
+      const second = withRequiredProfile(z.object({ b: shared }));
+      expect(second.shape.b).toBe(first.shape.a);
+      expect(Object.isFrozen(first.shape.a)).toBe(true);
+    });
+
+    it("first issuance wins: mutating a source schema reaches no issued schema", () => {
+      const shared = z.string().min(3);
+      const minimum = shared._zod.def.checks?.[0] as z.core.$ZodCheckMinLength;
+      const setMinimum = (value: number) => {
+        (minimum._zod.def as { minimum: number }).minimum = value;
+      };
+      const first = withRequiredProfile(z.object({ a: shared }));
+
+      // Mutated between two issuances: the source itself changes, and the
+      // second issuance gets the copy made before the change.
+      setMinimum(0);
+      expect(shared.safeParse("ab").success).toBe(true);
+      const second = withRequiredProfile(z.object({ b: shared }));
+      expect(second.shape.b).toBe(first.shape.a);
+      expect(first.safeParse({ profile: "p", a: "ab" }).success).toBe(false);
+      expect(second.safeParse({ profile: "p", b: "ab" }).success).toBe(false);
+
+      // Mutated after both: neither issued schema moves.
+      setMinimum(100);
+      expect(shared.safeParse("abcd").success).toBe(false);
+      expect(first.safeParse({ profile: "p", a: "abcd" }).success).toBe(true);
+      expect(second.safeParse({ profile: "p", b: "abcd" }).success).toBe(true);
+    });
+
+    it("charges reused subgraphs against the node budget of the graph reusing them", () => {
+      const left = wide(HALF_BUDGET_FIELDS);
+      const right = wide(HALF_BUDGET_FIELDS);
+      // Each half fits on its own and is hardened, and cached, here.
+      withRequiredProfile(z.object({ left }));
+      withRequiredProfile(z.object({ right }));
+      // Reusing both costs no rebuild, but the graph is charged for every
+      // node in both, exactly as a fresh traversal would have been.
+      expect(() => withRequiredProfile(z.object({ left, right }))).toThrow(
+        /traversal budget exceeded/u
+      );
+      // The same control without reuse: fresh halves fail the same way.
+      expect(() =>
+        withRequiredProfile(
+          z.object({ left: wide(HALF_BUDGET_FIELDS), right: wide(HALF_BUDGET_FIELDS) })
+        )
+      ).toThrow(/traversal budget exceeded/u);
+    });
+
+    it("counts a subgraph reused twice in one graph once, as a fresh traversal does", () => {
+      const half = wide(HALF_BUDGET_FIELDS);
+      const first = withRequiredProfile(z.object({ half }));
+      const twice = withRequiredProfile(z.object({ one: half, two: half }));
+      expect(twice.shape.one).toBe(first.shape.half);
+      expect(twice.shape.two).toBe(first.shape.half);
+    });
+
+    it("checks a reused subgraph's height at the depth it is reached", () => {
+      const deep = nest(z.string(), 30);
+      withRequiredProfile(z.object({ deep }));
+      expect(() => withRequiredProfile(z.object({ deeper: nest(deep, 20) }))).toThrow(
+        /traversal budget exceeded/u
+      );
+      // The same total depth built fresh fails the same way.
+      expect(() =>
+        withRequiredProfile(z.object({ deeper: nest(nest(z.string(), 30), 20) }))
+      ).toThrow(/traversal budget exceeded/u);
+    });
+  });
+
   it("rejects accessor-based invalid source shapes with zero target side effects", async () => {
     const invalidSource = z.object({ table: z.string() });
     Object.defineProperty(invalidSource.shape, "table", {
