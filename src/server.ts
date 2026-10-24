@@ -75,9 +75,10 @@ function createRegistrationSurface(server: McpServer): McpServerRegistrationSurf
  * contract test holds them to that. Declaring 2020-12 instead would break the
  * older clients.
  *
- * The SDK installs its tools/list handler through `setRequestHandler` when the
- * first tool is registered, so the handler is wrapped as it is installed; no
- * SDK internals are read.
+ * Before SDK 1.32 the tools/list handler was installed through
+ * `setRequestHandler` when the first tool was registered, so wrapping that
+ * method was enough. From 1.32 the constructor installs it up front, so the
+ * already-installed handler is re-installed wrapped as well.
  */
 function serveDialectNeutralToolSchemas(server: McpServer): void {
   const lowLevel = server.server;
@@ -93,6 +94,22 @@ function serveDialectNeutralToolSchemas(server: McpServer): void {
     );
   };
   lowLevel.setRequestHandler = setRequestHandler;
+
+  // SDK 1.32 installs the tools/list handler in the McpServer constructor when
+  // the tools capability is declared, before this wrapper exists, so the
+  // handler that is already in place is re-installed wrapped. This reads one
+  // SDK-private map, the single place the dependency is reached into; the
+  // exact SDK pin and the dialect contract tests catch any change to it.
+  const installed = (
+    lowLevel as unknown as {
+      _requestHandlers?: Map<string, (request: unknown, extra: unknown) => Promise<ServerResult>>;
+    }
+  )._requestHandlers?.get("tools/list");
+  if (installed !== undefined) {
+    install(ListToolsRequestSchema, async (request, extra) =>
+      withoutSchemaDialects(await installed(request, extra))
+    );
+  }
 }
 
 function withoutSchemaDialects(result: ServerResult): ServerResult {
