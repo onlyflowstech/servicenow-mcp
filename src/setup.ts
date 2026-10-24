@@ -1770,6 +1770,9 @@ async function runDoctor(
  * with the wake hint instead of a generic failure. Opt-in, because plain
  * `doctor` never touches the network.
  */
+/** Per-profile bound for `doctor --live`; shorter than the client default. */
+const DOCTOR_LIVE_TIMEOUT_MS = 10_000;
+
 async function runLiveChecks(
   paths: ResolvedPaths,
   home: string,
@@ -1785,21 +1788,26 @@ async function runLiveChecks(
       .listProfiles()
       .map((entry) => entry.name)
       .filter((name) => only === undefined || name === only);
-    for (const name of names) {
-      let config: ServiceNowConfig;
-      try {
-        config = manager.getConfig(name);
-      } catch {
-        continue; // The credential check has already reported why.
-      }
-      const result = await verify(config);
-      checks.push({
-        name: `profile ${name}: live instance`,
-        ok: result.ok,
-        detail: result.detail,
-        ...(result.remedy === undefined ? {} : { remedy: result.remedy }),
-      });
-    }
+    // Concurrent, with doctor's own short timeout, so unresponsive profiles
+    // cost one timeout in total. Promise.all keeps the profile-name order.
+    const results = await Promise.all(
+      [...names].sort().map(async (name): Promise<Check | undefined> => {
+        let config: ServiceNowConfig;
+        try {
+          config = { ...manager.getConfig(name), timeoutMs: DOCTOR_LIVE_TIMEOUT_MS };
+        } catch {
+          return undefined; // The credential check has already reported why.
+        }
+        const result = await verify(config);
+        return {
+          name: `profile ${name}: live instance`,
+          ok: result.ok,
+          detail: result.detail,
+          ...(result.remedy === undefined ? {} : { remedy: result.remedy }),
+        };
+      })
+    );
+    for (const check of results) if (check !== undefined) checks.push(check);
   } catch {
     // Profile loading failures are reported by the static checks.
   }

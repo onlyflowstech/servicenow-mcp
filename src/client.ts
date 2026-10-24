@@ -153,11 +153,13 @@ export class ServiceNowClient {
   readonly #timeoutMs: number;
   readonly #maxRetries: number;
   readonly #baseRetryDelayMs: number;
+  readonly #host: string | undefined;
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #limiter: UpstreamConcurrencyLimiter;
 
   constructor(config: ServiceNowConfig, options: ClientOptions = {}) {
     this.#baseUrl = config.instance;
+    this.#host = configuredHost(config.instance);
     this.#auth = options.auth ?? createAuthProvider(config);
     this.#timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
@@ -369,7 +371,7 @@ export class ServiceNowClient {
     const htmlError = htmlResponseError(
       response.headers.get("content-type"),
       sniffPrefix(text),
-      configuredHost(this.#baseUrl)
+      this.#host
     );
     if (htmlError !== undefined) throw htmlError;
     return JSON.parse(text) as T;

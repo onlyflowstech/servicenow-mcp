@@ -103,7 +103,10 @@ export class OAuthProvider implements AuthProvider {
   private expiresAt = 0;
   private refresh: OAuthRefresh | null = null;
 
+  private readonly host: string | undefined;
+
   constructor(private readonly options: OAuthProviderOptions) {
+    this.host = configuredHost(options.instance);
     const grantType = options.grantType ?? "client_credentials";
     if (grantType === "password" && (!options.username || !options.password)) {
       throw createToolError("authentication", "retry_after_correction");
@@ -275,7 +278,7 @@ export class OAuthProvider implements AuthProvider {
       htmlError = htmlResponseError(
         response.headers.get("content-type"),
         sniffPrefix(text),
-        configuredHost(this.options.instance)
+        this.host
       );
       if (htmlError !== undefined) throw htmlError;
       const candidate: unknown = JSON.parse(text);

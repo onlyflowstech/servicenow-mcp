@@ -900,6 +900,41 @@ describe("setup doctor", () => {
     expect(JSON.stringify(report)).not.toContain("not-a-real-value");
   });
 
+  it("doctor --live probes profiles concurrently, with a short timeout, in name order", async () => {
+    for (const name of ["zeta", "alpha"]) {
+      manager.addProfile(name, {
+        instance: "https://dev00001.service-now.com",
+        authType: "basic",
+        username: "u",
+        credential: "env:SN_PASSWORD",
+      });
+    }
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const timeouts: Array<number | undefined> = [];
+    const verifyCredential = vi.fn(async (config: { timeoutMs?: number }) => {
+      timeouts.push(config.timeoutMs);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return { ok: false, detail: "no answer", remedy: "wait" };
+    });
+
+    const started = Date.now();
+    const report = await doctor(
+      ["doctor", "--live", "--json"],
+      { HOME: home },
+      undefined,
+      () => true,
+      { verifyCredential }
+    );
+    const elapsed = Date.now() - started;
+    const live = report.checks.filter((check) => check.name.endsWith(": live instance"));
+    expect(live.map((check) => check.name)).toEqual([
+      "profile alpha: live instance",
+      "profile zeta: live instance",
+    ]);
+    expect(timeouts).toEqual([10_000, 10_000]);
+    expect(elapsed).toBeLessThan(750); // one 400 ms wait, not two
+  });
+
   it("plain doctor never probes the instance", async () => {
     manager.addProfile("dev", {
       instance: "https://dev00001.service-now.com",

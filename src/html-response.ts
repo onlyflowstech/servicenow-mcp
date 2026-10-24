@@ -24,7 +24,7 @@ import {
   createInstanceHibernatingError,
 } from "./tool-error.js";
 
-/** Upper bound on body bytes inspected for markers. */
+/** Upper bound on body characters (not bytes) inspected for markers. */
 export const HTML_SNIFF_BYTES = 16 * 1024;
 
 const HIBERNATION_MARKER = /hibernat/iu;
