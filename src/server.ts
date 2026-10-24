@@ -67,7 +67,8 @@ function createRegistrationSurface(server: McpServer): McpServerRegistrationSurf
 /**
  * Serve every tool schema without a `$schema` dialect declaration.
  *
- * The SDK converts zod schemas with zod-to-json-schema, which stamps each one
+ * The SDK converts zod schemas with a draft-07 target (zod 4's own converter),
+ * which stamps each one
  * `"$schema": "http://json-schema.org/draft-07/schema#"`. Clients built on the
  * current MCP spec validate with a JSON Schema 2020-12 validator and refuse a
  * schema that names draft-07, which disabled every tool (SNSDK-86). With no
@@ -79,7 +80,7 @@ function createRegistrationSurface(server: McpServer): McpServerRegistrationSurf
  * Before SDK 1.32 the tools/list handler was installed through
  * `setRequestHandler` when the first tool was registered, so wrapping that
  * method was enough. From 1.32 the constructor installs it up front, so the
- * already-installed handler is re-installed wrapped as well.
+ * already-installed entry is wrapped in place as well.
  */
 function serveDialectNeutralToolSchemas(server: McpServer): void {
   const lowLevel = server.server;
@@ -97,17 +98,20 @@ function serveDialectNeutralToolSchemas(server: McpServer): void {
   lowLevel.setRequestHandler = setRequestHandler;
 
   // SDK 1.32 installs the tools/list handler in the McpServer constructor when
-  // the tools capability is declared, before this wrapper exists, so the
-  // handler that is already in place is re-installed wrapped. This reads one
-  // SDK-private map, the single place the dependency is reached into; the
-  // exact SDK pin and the dialect contract tests catch any change to it.
-  const installed = (
+  // the tools capability is declared, before this wrapper exists. That entry
+  // already parses the request, so the wrapped entry replaces it in the
+  // handler map directly; going through `setRequestHandler` again would add a
+  // second parse to every call. This reaches into one SDK-private map, the
+  // single place the dependency is touched; the exact SDK pin and the dialect
+  // contract tests catch any change to it.
+  const handlers = (
     lowLevel as unknown as {
       _requestHandlers?: Map<string, (request: unknown, extra: unknown) => Promise<ServerResult>>;
     }
-  )._requestHandlers?.get("tools/list");
-  if (installed !== undefined) {
-    install(ListToolsRequestSchema, async (request, extra) =>
+  )._requestHandlers;
+  const installed = handlers?.get("tools/list");
+  if (handlers !== undefined && installed !== undefined) {
+    handlers.set("tools/list", async (request, extra) =>
       withoutSchemaDialects(await installed(request, extra))
     );
   }
@@ -169,7 +173,9 @@ export async function createMcpServer<TDependencies extends object>(
     }
   );
 
-  // Before registration: the SDK installs tools/list on the first registerTool.
+  // Before registration. On SDK 1.32 the constructor has already installed
+  // tools/list (the tools capability is declared above); this wraps that
+  // entry, and the setRequestHandler wrapper covers any later install.
   serveDialectNeutralToolSchemas(server);
   const registrationSurface = createRegistrationSurface(server);
   try {

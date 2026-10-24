@@ -3,8 +3,10 @@ import { readFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Protocol } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
+  ListToolsRequestSchema,
   PingRequestSchema,
   type JSONRPCMessage,
   type Tool,
@@ -465,6 +467,51 @@ describe("createMcpServer", () => {
     expect(transport.close).toHaveBeenCalledOnce();
     expect(candidate).toBeDefined();
     expect(candidate?.isConnected()).toBe(true);
+  });
+
+  it("parses each tools/list request once while stripping the dialect", async () => {
+    // Every handler installed through the SDK's setRequestHandler parses the
+    // request before it runs. Count how many of those tools/list layers one
+    // call passes through: the dialect wrapper must not add a second one.
+    const original = Protocol.prototype.setRequestHandler;
+    let layers = 0;
+    const spy = vi
+      .spyOn(Protocol.prototype, "setRequestHandler")
+      .mockImplementation(function (this: Protocol<never, never, never>, schema, handler) {
+        if ((schema as unknown) !== ListToolsRequestSchema) {
+          original.call(this, schema, handler);
+          return;
+        }
+        original.call(this, schema, (request, extra) => {
+          layers += 1;
+          return handler(request, extra);
+        });
+      });
+    try {
+      const server = await createMcpServer({
+        dependencies: {},
+        register: (surface) => {
+          surface.registerTool("one", { inputSchema: { profile: z.string() } }, async () => ({
+            content: [{ type: "text", text: "ok" }],
+          }));
+        },
+      });
+      const client = new Client({ name: "single-parse-test", version: "0.0.0" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      try {
+        const { tools } = await client.listTools();
+        expect(tools.map((tool) => tool.name)).toEqual(["one"]);
+        expect(JSON.stringify(tools)).not.toContain("$schema");
+      } finally {
+        await client.close();
+        await server.close();
+      }
+      expect(layers).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("serves tool schemas without the draft-07 dialect the SDK declares", async () => {
