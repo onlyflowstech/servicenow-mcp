@@ -1,0 +1,19 @@
+{
+  "note": "Shape of capture F5 (Fixture Try Catch Subflow): Top Level Try and Top Level Catch are roots; orders start at 0; the For Each holds an If/Else; Else shares the If's parent.",
+  "header": { "sys_id": "2222222222222222222222222222bbbb", "name": "Fixture Try Catch Subflow", "type": "subflow", "active": true, "status": "Published", "version": "1", "scope": "global" },
+  "trigger": null,
+  "label_cache": [["subflow.role", "Subflow Inputs > Role"]],
+  "variables": [{ "scope": "input", "name": "role", "label": "Role", "type": "reference" }],
+  "steps": [
+    { "uid": "t01", "parent_uid": null, "order": 0, "kind": "logic", "logic_kind": "top_level_try", "title": "Top Level Try" },
+    { "uid": "t02", "parent_uid": "t01", "order": 1, "kind": "logic", "logic_kind": "for_each", "title": "For Each", "condition": "users" },
+    { "uid": "t03", "parent_uid": "t02", "order": 1, "kind": "logic", "logic_kind": "if", "title": "If", "condition": "is group" },
+    { "uid": "t04", "parent_uid": "t03", "order": 1, "kind": "action", "title": "Add Group Role" },
+    { "uid": "t05", "parent_uid": "t02", "order": 2, "connected_uid": "t03", "kind": "logic", "logic_kind": "else", "title": "Else" },
+    { "uid": "t06", "parent_uid": "t05", "order": 1, "kind": "action", "title": "Add User Role", "inputs": [{ "name": "role", "value": "{{subflow.role}}" }] },
+    { "uid": "t07", "parent_uid": "t01", "order": 2, "kind": "subflow", "title": "Notify", "subflow": { "flow_sys_id": "3333333333333333333333333333cccc", "name": "Fixture Notify Subflow" } },
+    { "uid": "t08", "parent_uid": "t01", "order": 3, "kind": "logic", "logic_kind": "assign_subflow_outputs", "title": "Assign Subflow Outputs" },
+    { "uid": "t09", "parent_uid": null, "order": 1, "connected_uid": "t01", "kind": "logic", "logic_kind": "top_level_catch", "title": "Top Level Catch" },
+    { "uid": "t10", "parent_uid": "t09", "order": 1, "kind": "action", "title": "Log Error" }
+  ]
+}
