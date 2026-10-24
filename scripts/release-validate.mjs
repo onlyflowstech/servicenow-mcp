@@ -168,7 +168,6 @@ export function validateReleaseContract(options = {}) {
   });
 }
 
-/** Only reviewed stable and dev channels can be published. */
 /**
  * Fail closed on the official-registry manifest: it must describe exactly one
  * stdio npm package that is this package at this version, with nothing that
@@ -204,6 +203,14 @@ export function validateServerJson(serverJson, packageJson) {
   for (const key of keys(entry)) {
     assert(allowedPackage.has(key), `server.json package has unexpected field ${key}`);
   }
+  assert(entry.runtimeHint === "npx", 'server.json runtimeHint must be "npx"');
+  const repo = serverJson.repository;
+  assert(
+    repo?.url === "https://github.com/onlyflowstech/servicenow-mcp" &&
+      repo.source === "github" &&
+      keys(repo).length === 2,
+    "server.json repository must be exactly the onlyflowstech/servicenow-mcp GitHub URL"
+  );
   assert(entry.registryType === "npm", "server.json package must be registryType npm");
   assert(
     entry.identifier === packageJson.name && entry.version === packageJson.version,
@@ -215,6 +222,7 @@ export function validateServerJson(serverJson, packageJson) {
   );
 }
 
+/** Only reviewed stable and dev channels can be published. */
 export function releaseChannel(version) {
   const match = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(-dev\.(?:0|[1-9][0-9]*))?$/u.exec(version);
   assert(typeof version === "string" && match !== null && match[0] === version, "package version must be stable semver or a dev.N prerelease");

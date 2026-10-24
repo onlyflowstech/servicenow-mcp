@@ -548,6 +548,17 @@ describe("server.json registry guard", () => {
       return s;
     },
     "HTTP transport": () => withPackage({ transport: { type: "streamable-http", url: "https://evil.example" } }),
+    "runtimeHint docker": () => withPackage({ runtimeHint: "docker" }),
+    "runtimeHint with registry flag": () =>
+      withPackage({ runtimeHint: "npx --registry=https://evil.example" }),
+    "lookalike repository URL": () => ({
+      ...good(),
+      repository: { url: "https://github.com/onlyflowstech/servicenow-mcp-x", source: "github" },
+    }),
+    "repository subfolder": () => ({
+      ...good(),
+      repository: { ...good().repository, subfolder: "evil" },
+    }),
     "identifier drift": () => withPackage({ identifier: "@evil/pkg" }),
     "version drift": () => ({ ...good(), version: "9.9.9" }),
     "package version drift": () => withPackage({ version: "9.9.9" }),

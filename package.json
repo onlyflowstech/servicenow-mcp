@@ -2,7 +2,7 @@
   "name": "@onlyflows/servicenow-mcp",
   "mcpName": "io.github.onlyflowstech/servicenow-mcp",
   "version": "2.2.0-dev.6",
-  "description": "Governed stdio ServiceNow MCP server for production: 23 tools with per-profile table and field policy, dry-run bulk changes, audit events, multi-instance profiles, CMDB traversal and ATF testing.",
+  "description": "Governed stdio ServiceNow MCP server for production: 23 tools with per-profile table and field policy, dry-run bulk changes, activity events, multi-instance profiles, CMDB traversal and ATF testing.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
