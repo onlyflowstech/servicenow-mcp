@@ -1004,6 +1004,12 @@ describe("setup doctor", () => {
     const { text } = await liveText(["doctor", "--live"]);
     expect(text).toMatch(/ok\s+profile a: live instance/u);
     expect(text).toMatch(/FAIL\s+profile b: live instance/u);
+    expect(text).toMatch(/profile b: live instance: .*credentials are incomplete, so no request was sent/u);
+    expect(text).not.toMatch(/401/u);
+    // Only profile a's probe reached fetch; profile b sent nothing.
+    const urls = vi.mocked(fetch).mock.calls.map((call) => String(call[0]));
+    expect(urls).toHaveLength(2); // profile a, once per liveText run
+    expect(urls.every((url) => url.startsWith("https://deva.service-now.com/"))).toBe(true);
   });
 
   it("plain doctor never probes the instance", async () => {

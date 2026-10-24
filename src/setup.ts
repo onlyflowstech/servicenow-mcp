@@ -694,8 +694,19 @@ function wizardConfig(
 async function verifyCredentialAgainstInstance(
   config: ServiceNowConfig
 ): Promise<CredentialVerification> {
+  let client: ServiceNowClient;
   try {
-    const client = new ServiceNowClient(config, { maxRetries: 0 });
+    client = new ServiceNowClient(config, { maxRetries: 0 });
+  } catch {
+    // Construction failed (for example an OAuth profile with no client
+    // secret): no request was sent, so this is not an HTTP 401.
+    return Object.freeze({
+      ok: false,
+      detail: `${safeHost(config.instance)}: the profile's credentials are incomplete, so no request was sent.`,
+      remedy: "Re-enter them with servicenow-mcp-setup.",
+    });
+  }
+  try {
     await client.get(`/api/now/table/${WIZARD_PROBE_TABLE}`, {
       sysparm_limit: "1",
       sysparm_fields: "user_name",
