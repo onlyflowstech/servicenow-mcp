@@ -217,16 +217,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries `libssl3t64` 3.5.7-1~deb13u3 (CVE-2026-84782) and Node 22.23.3. The
   developer-only inspector toolchain, which is not shipped, takes the same
   fixes plus `undici` and `source-map-js`.
-- **zod 4.** `zod` moves from 3.25.76 to 4.6.7 (GHSA-mrhx-c7xc-m3w5,
-  CVE-2023-54404; no 3.x release is fixed), and the MCP SDK resolves the same
-  copy. Tool validation is unchanged. What clients can see changes in three
-  ways: input validation errors the SDK reports use zod 4's wording (for
-  example `Invalid input: expected string, received undefined` instead of
-  `Required`), while the server's own messages are unchanged; tool schemas
-  are served inline instead of with internal `$ref`s, so `tools/list` is about
-  18 KB larger (`sn_query` and `sn_batch` inputs about 6 KB each); and integer
-  fields in output schemas state the safe-integer range. Recursive (`z.lazy`)
-  tool schemas are refused at registration.
+- **October dependency advisories, request-size bounds and zod 4.**
+  - *Dependencies.* `@modelcontextprotocol/sdk` moves to 1.32.2
+    (GHSA-22jm-h49p-29qw, GHSA-6prh-2h8m-c8cw, GHSA-46jr-4wx8-v453,
+    GHSA-rvq5-wwqv-78pq). `body-parser` 2.4.0 (GHSA-27r3-jxmh-p828),
+    `fast-uri` 3.1.9 (GHSA-w74x-v6f9-j3xg), `iconv-lite` 0.7.3 and `qs`
+    6.16.1 clear the remaining production advisories, and the developer-only
+    inspector's lockfile takes the matching fixes. Tool schemas are still
+    served without a `$schema` dialect declaration on SDK 1.32.
+  - *Input-size hardening.* Validating an oversized or deeply nested request
+    could cost far more memory and time than the request's size suggests, so
+    plain structural checks now run before any schema does, and each rejects
+    with one short, fixed error:
+    - Every incoming message, over stdio and HTTP: arrays of at most 10,000
+      elements, at most 52,176 array elements and object members in total,
+      and at most 32 levels of nesting. Over HTTP a message outside these
+      bounds gets a 400 with JSON-RPC error `-32600` `Request exceeds
+      structural limits.` and no server is created. Over stdio a request with
+      a usable id gets the same error. Notifications, responses and requests
+      without a usable id are dropped.
+    - Tool arguments: at most 52,112 array elements and object members, the
+      size of the largest legitimate call (a 50,000-node field write together
+      with a structured query).
+    - `structured_query`: at most 2,048 values, 12 levels deep, arrays of 32,
+      objects of 8 keys, 64 leaf conditions and 65 groups. A query the
+      compiler accepts is never outside these bounds.
+    - Collection limits that already existed (`sn_atf_author` `steps` 50 and
+      `test_sys_ids` 100, `structured_query` `order_by` 4, group `conditions`
+      32, set `values` 20, ATF name-value inputs 50 entries) are now checked
+      before any element is parsed.
+  - *zod 4.* `zod` moves from 3.25.76 to 4.6.7, pinned exactly
+    (GHSA-mrhx-c7xc-m3w5, CVE-2023-54404; no 3.x release is fixed). The MCP
+    SDK uses the same copy. Tool validation accepts and rejects the same input
+    as before. Clients can see three changes:
+    - Input validation errors reported by the SDK use zod 4's wording, for
+      example `Invalid input: expected string, received undefined` instead of
+      `Required`, and `Too big: expected array to have <=50 items` for an
+      over-long array. The server's own messages are unchanged.
+    - Tool schemas are served inline instead of with internal `$ref`s, so
+      `tools/list` is about 18 KB larger (about 108 KB). The `sn_query` and
+      `sn_batch` inputs each grow by about 6 KB.
+    - Integer fields in output schemas state the safe-integer range.
+
+    Recursive (`z.lazy`) tool schemas are refused at registration.
 
 ### Fixed
 
