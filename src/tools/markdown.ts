@@ -336,3 +336,123 @@ export function renderMarkdown(
     .map((block) => (isMarkdownFragment(block) ? block.markdown : escapeInline(block)))
     .join("\n\n");
 }
+
+/*
+ * Mermaid flowcharts (sn_flow_view). A diagram is issued only after its whole
+ * source passes a closed line grammar: a fixed header, generated node ids with
+ * constant shape delimiters around an encoded label, edges whose labels come
+ * from a fixed vocabulary, and flat subgraphs. Labels admit only a small ASCII
+ * set and decimal entity codes, so instance text cannot open or close quotes,
+ * brackets, or fences, start a directive or comment, or form click syntax.
+ */
+
+export const MAX_MERMAID_SOURCE_LENGTH = 20_000;
+export const MAX_MERMAID_NODES = 150;
+export const MAX_MERMAID_EDGES = 300;
+export const MAX_MERMAID_SUBGRAPHS = 64;
+export const MERMAID_HEADER = "flowchart TD";
+
+/** Every encoded Mermaid label matches this, without its surrounding quotes. */
+export const MERMAID_LABEL_PATTERN =
+  /^(?:[A-Za-z0-9 ,.:_()/+=?-]|#[0-9]{1,7};)*$/u;
+
+/** Opaque, frozen Mermaid source issued by `issueMermaidDiagram`. */
+export interface MermaidDiagram {
+  readonly source: string;
+}
+
+const ISSUED_DIAGRAMS = new WeakSet<object>();
+
+const MERMAID_LABEL = String.raw`"(?:[A-Za-z0-9 ,.:_()/+=?-]|#[0-9]{1,7};)*"`;
+const MERMAID_NODE_ID = String.raw`n(?:[1-9][0-9]{0,3}|More)`;
+const MERMAID_NODE_LINE = new RegExp(
+  String.raw`^(?: {4})?${MERMAID_NODE_ID}(?:\(\[${MERMAID_LABEL}\]\)|\[${MERMAID_LABEL}\]|\{${MERMAID_LABEL}\}|\{\{${MERMAID_LABEL}\}\}|\[\[${MERMAID_LABEL}\]\]|\(\(${MERMAID_LABEL}\)\))$`,
+  "u"
+);
+const MERMAID_EDGE_LINE = new RegExp(
+  String.raw`^${MERMAID_NODE_ID} (?:-->|-\.->)(?:\|(?:true|false|each|repeat|branch|catch|calls)\|)? ${MERMAID_NODE_ID}$`,
+  "u"
+);
+const MERMAID_SUBGRAPH_LINE = new RegExp(
+  String.raw`^subgraph sg[1-9][0-9]{0,3} \[${MERMAID_LABEL}\]$`,
+  "u"
+);
+
+/**
+ * True only when every line of `source` belongs to the closed grammar: the
+ * header first and once, node lines (indented exactly when inside a
+ * subgraph), top-level edges, and balanced, non-nested subgraphs, within the
+ * size, node, edge, and subgraph caps.
+ */
+export function isValidMermaidSource(source: unknown): source is string {
+  if (
+    typeof source !== "string" ||
+    source.length === 0 ||
+    source.length > MAX_MERMAID_SOURCE_LENGTH
+  ) {
+    return false;
+  }
+  const lines = source.split("\n");
+  if (lines[0] !== MERMAID_HEADER) return false;
+  let nodes = 0;
+  let edges = 0;
+  let subgraphs = 0;
+  let inSubgraph = false;
+  for (const line of lines.slice(1)) {
+    if (MERMAID_NODE_LINE.test(line)) {
+      if (line.startsWith(" ") !== inSubgraph) return false;
+      nodes += 1;
+    } else if (MERMAID_EDGE_LINE.test(line)) {
+      if (inSubgraph) return false;
+      edges += 1;
+    } else if (MERMAID_SUBGRAPH_LINE.test(line)) {
+      if (inSubgraph) return false;
+      inSubgraph = true;
+      subgraphs += 1;
+    } else if (line === "end") {
+      if (!inSubgraph) return false;
+      inSubgraph = false;
+    } else {
+      return false;
+    }
+  }
+  return (
+    !inSubgraph &&
+    nodes <= MAX_MERMAID_NODES &&
+    edges <= MAX_MERMAID_EDGES &&
+    subgraphs <= MAX_MERMAID_SUBGRAPHS
+  );
+}
+
+/** Issue a frozen diagram for `source`, or undefined if it fails the grammar. */
+export function issueMermaidDiagram(source: unknown): MermaidDiagram | undefined {
+  if (!isValidMermaidSource(source)) return undefined;
+  const diagram = Object.freeze({ source });
+  ISSUED_DIAGRAMS.add(diagram);
+  return diagram;
+}
+
+/** True only for diagrams `issueMermaidDiagram` issued, never for look-alikes. */
+export function isMermaidDiagram(value: unknown): value is MermaidDiagram {
+  return typeof value === "object" && value !== null && ISSUED_DIAGRAMS.has(value);
+}
+
+/**
+ * A fenced `mermaid` block for an issued diagram. The grammar is checked
+ * again here, and the fence is longer than any backtick run in the source.
+ */
+export function mermaidBlock(diagram: MermaidDiagram): MarkdownFragment {
+  if (!isMermaidDiagram(diagram)) {
+    throw new TypeError("mermaidBlock accepts only issued diagrams");
+  }
+  const source = diagram.source;
+  if (!isValidMermaidSource(source)) {
+    throw new TypeError("mermaid diagram does not match the line grammar");
+  }
+  const longestRun = (source.match(/`+/gu) ?? []).reduce(
+    (longest, run) => Math.max(longest, run.length),
+    0
+  );
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  return issue(`${fence}mermaid\n${source}\n${fence}`, "block");
+}
