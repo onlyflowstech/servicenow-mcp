@@ -157,24 +157,38 @@ ever requested.
 | Limit | Value |
 | --- | --- |
 | Subflows expanded per call | 8 |
-| Response scopes per call | 12 (each holds at most 1 MiB of instance JSON) |
+| Response scopes per call | 12 (each holds at most 1 MiB of instance JSON): 2 for the root, 1 per subflow, the rest for retries without input values |
 | Rows read per table and flow | 500 |
 | Logic nesting levels | 16 |
 | Inputs per step | 40 |
 | Characters per value (structured) | 2,000 |
 | Edges | 600 |
 
-Reads run one after another. The root flow's record lookup and its load each
-run in their own response scope; so does each subflow level's lookup and each
-subflow load. A subflow that cannot be loaded (missing, denied or too large)
+Each flow is read in one or two batches of requests issued together; the
+server sends at most four requests to an instance at a time. Compressed input
+values are read in their own requests without display values, which would
+repeat them. The root flow's record lookup and its load each run in their own
+response scope, and each subflow (its record and its load) runs in its own;
+the subflows of one level load together.
+
+When a flow is too large for its scope with its input values, it is read
+again without them, in a new scope while any remain, and the result carries
+the warning that input values were left out. A root flow too large even
+without input values is shown as its record only, with a warning; it does not
+fail the call. A subflow that cannot be loaded (missing, denied or too large)
 is marked on its call site and never fails the call.
+
+Older (V1) steps keep their values in `sys_variable_value`. Those reads are
+paged past the 500-row cap, up to 40 values per step (the most a step shows);
+if a step stores more, the result says its inputs may be incomplete.
 
 The result fits `max_response_bytes`. The graph gets about 55% of it and is
 reduced in fixed steps when needed: values cut to 500 then 120 characters,
-then values dropped, then steps halved behind a "more" node, then pills and
-variables dropped. The text gets the rest: diagram and full outline, then a
-shortened outline, then the outline alone, then the summary table. Every
-reduction is reported in `limits_hit`.
+then values dropped, then descriptions, annotations and conditions cut to 200
+characters, then steps halved behind a "more" node, then pills and variables
+dropped. The text gets the rest: diagram and full outline, then a shortened
+outline, then the outline alone, then the summary table. Every reduction is
+reported in `limits_hit`.
 
 ## How clients show it
 
