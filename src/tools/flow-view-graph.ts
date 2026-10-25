@@ -382,6 +382,8 @@ class GraphBuilder {
     for (const step of sorted) inList.set(step.uid, step);
 
     const branchHead = new Map<NormalizedStep, NormalizedStep>();
+    // Branches of each head, in `sorted` order; built once so grouping is linear.
+    const branchesOf = new Map<NormalizedStep, NormalizedStep[]>();
     const lastHead = new Map<BranchFamily, NormalizedStep>();
     for (const step of sorted) {
       const kind = ctx.kinds.get(step) ?? null;
@@ -390,8 +392,14 @@ class GraphBuilder {
         let head = step.connected_uid ? inList.get(step.connected_uid) : undefined;
         if (head && (head === step || headFamily(ctx.kinds.get(head) ?? null) !== family)) head = undefined;
         head ??= lastHead.get(family);
-        if (head) branchHead.set(step, head);
-        else this.warnings.add("orphan_steps");
+        if (head) {
+          branchHead.set(step, head);
+          const branches = branchesOf.get(head);
+          if (branches) branches.push(step);
+          else branchesOf.set(head, [step]);
+        } else {
+          this.warnings.add("orphan_steps");
+        }
       }
       const own = headFamily(kind);
       if (own) lastHead.set(own, step);
@@ -406,7 +414,7 @@ class GraphBuilder {
     for (const step of sorted) {
       if (branchHead.has(step)) continue;
       const head = entry(step);
-      const attached = sorted.filter((candidate) => branchHead.get(candidate) === step);
+      const attached = [...(branchesOf.get(step) ?? [])];
       // else_if branches first, the else last; each ordered by `order`.
       const rank = (s: NormalizedStep): number => (ctx.kinds.get(s) === "else" ? 1 : 0);
       attached.sort((a, b) => rank(a) - rank(b));
