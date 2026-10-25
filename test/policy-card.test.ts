@@ -6,13 +6,13 @@
  * for the same policy, so a drift between the two fails here.
  */
 
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import { createAtfExecutionPolicy } from "../src/atf-policy.js";
 import { createEncodedQueryAccessPolicy } from "../src/encoded-query-policy.js";
@@ -285,7 +285,7 @@ describe("policy card matches the enforced policy", () => {
     expect(renderPolicyCard(result)).toContain("[+sys_class_name]");
   });
 
-  it("flags write access on role and approval tables without hiding the grant", () => {
+  it("flags write access on privilege-sensitive tables without hiding the grant", () => {
     const result = card({
       readTables: ["sys_user_has_role"],
       writeTables: ["sys_user_has_role", "sysapproval_approver", "incident"],
@@ -297,7 +297,7 @@ describe("policy card matches the enforced policy", () => {
     });
     expect(result.risky_write_tables).toEqual(["sys_user_has_role", "sysapproval_approver"]);
     expect(result.tables.find((row) => row.table === "sys_user_has_role")!.write).toBe(true);
-    expect(renderPolicyCard(result)).toContain("WARNING: write access on role/approval tables");
+    expect(renderPolicyCard(result)).toContain("WARNING: write access on privilege-sensitive tables");
   });
 
   it("flags the write wildcard", () => {
@@ -408,7 +408,7 @@ function dataOf(result: Awaited<ReturnType<Client["callTool"]>>): Record<string,
   return structured.data;
 }
 
-describe("sn_profile policy card", { timeout: 60_000 }, () => {
+describe("sn_profile policy card", { timeout: 15_000 }, () => {
   const access: TableAccessPolicyInput = {
     readTables: ["incident"],
     writeTables: ["incident"],
@@ -658,7 +658,7 @@ function cardInput(shape: ReturnType<typeof bigShape>) {
   };
 }
 
-describe("a dropped text card is always marked", { timeout: 60_000 }, () => {
+describe("a dropped text card is always marked", { timeout: 15_000 }, () => {
   it("17 tables x 8 fields x 80 chars: data fits, text does not, and text_omitted says so", () => {
     const { card, text } = fitPolicyCard(buildPolicyCard(cardInput(bigShape(17, 8, 80))));
     expect(text).toBeUndefined();
@@ -708,7 +708,7 @@ describe("a dropped text card is always marked", { timeout: 60_000 }, () => {
   });
 });
 
-describe("the policy card is built once per loaded profile", { timeout: 60_000 }, () => {
+describe("the policy card is built once per loaded profile", { timeout: 15_000 }, () => {
   it("a second call is served from memory in under 1 ms, with fresh table policies", () => {
     const shape = bigShape(100, 40, 80);
     const frozen = JSON.parse(JSON.stringify(shape.fieldPolicy)) as object;
@@ -745,6 +745,7 @@ describe("the policy card is built once per loaded profile", { timeout: 60_000 }
 
   it("rebuilds after the profile is reloaded with addProfile", () => {
     const directory = mkdtempSync(join(tmpdir(), "card-memo-"));
+    onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
     const manager = new RealProfileManager({
       configFilePath: join(directory, "config.json"),
     });
@@ -854,7 +855,7 @@ describe("sn_batch dry-run sample deadline", () => {
   }, 20_000);
 });
 
-describe("the budgets hold with the truncation marker included", { timeout: 60_000 }, () => {
+describe("the budgets hold with the truncation marker included", { timeout: 15_000 }, () => {
   it.each([
     [26, 8],
     [17, 8],
@@ -875,5 +876,168 @@ describe("the budgets hold with the truncation marker included", { timeout: 60_0
     } else {
       expect(Buffer.byteLength(text)).toBeLessThanOrEqual(24_000);
     }
+  });
+});
+
+// ── security review fixes ───────────────────────────────────────────────────
+
+describe("write and risky facts cover every named table, not only the rows shown", () => {
+  const readOnly = Array.from({ length: 120 }, (_, i) => `a_tbl_${String(i).padStart(3, "0")}`);
+  const lateAccess: TableAccessPolicyInput = {
+    readTables: [...readOnly, "sys_user_has_role"],
+    writeTables: ["sys_user_has_role"],
+    targets: [
+      ...readOnly.map((table) => target(table, ["sn_query"])),
+      target("sys_user_has_role", ["sn_query", "sn_create"]),
+    ],
+  };
+
+  it("buildPolicyCard sees a write grant that sorts after the 100th row", () => {
+    const result = card(lateAccess);
+    expect(result.tables).toHaveLength(100);
+    expect(result.tables_more).toBe(21);
+    expect(result.tables.some((row) => row.table === "sys_user_has_role")).toBe(false);
+    expect(result.can_write_anything).toBe(true);
+    expect(result.risky_write_tables).toEqual(["sys_user_has_role"]);
+    const text = renderPolicyCard(result);
+    expect(text).not.toContain("cannot write");
+    expect(text).toContain("WARNING: write access on privilege-sensitive tables: sys_user_has_role");
+  });
+
+  it("sn_profile reports it through the dispatcher", async () => {
+    const { client } = await connect({ tableAccess: lateAccess });
+    const data = dataOf(
+      await client.callTool({ name: "sn_profile", arguments: { profile: PROFILE } })
+    );
+    const policy = data.policy as PolicyCard;
+    expect(policy.can_write_anything).toBe(true);
+    expect(policy.risky_write_tables).toEqual(["sys_user_has_role"]);
+    expect(String(data.policy_card)).not.toContain("cannot write");
+  });
+});
+
+describe("a wildcard profile states what the system tables keep", () => {
+  const wildcard: TableAccessPolicyInput = { readTables: ["*"], writeTables: ["*"], targets: [] };
+  const star = { fieldPolicy: { "*": { readable: ["sys_id", "number"], writable: ["short_description"] } } };
+
+  it("lists the system tables that stay fully open, in data and in text", () => {
+    const result = card(wildcard, star);
+    const other = result.other_tables!;
+    expect(other.writable).toEqual({ fields: ["short_description"], more: 0 });
+    expect(other.system_tables.star_field_entry_applies).toBe(false);
+    expect(other.system_tables.full_access).toContain("sys_script");
+    expect(other.system_tables.full_access).toContain("sys_user");
+    expect(
+      other.system_tables.full_access.length + other.system_tables.narrowed.length
+    ).toBe(BUILT_IN_TABLE_CLASSES.system.length);
+    expect(renderPolicyCard(result)).toContain("does not apply to the 23 system tables");
+  });
+
+  it("matches enforcement: a script write passes on sys_script and not on a custom table", () => {
+    expect(enforcedWritable(star, "sys_script", "script")).toBe(true);
+    expect(enforcedWritable(star, "x_custom", "script")).toBe(false);
+    const full = card(wildcard, star).other_tables!.system_tables.full_access;
+    for (const table of BUILT_IN_TABLE_CLASSES.system) {
+      const open = enforcedWritable(star, table, "script") && enforcedReadable(star, table, "script");
+      expect(full.includes(table), table).toBe(open);
+    }
+  });
+
+  it("a system table the profile names is reported as narrowed", () => {
+    const named = { fieldPolicy: { "*": { readable: ["sys_id"] }, sys_user: { readable: ["sys_id"], writable: ["email"] } } };
+    const system = card(wildcard, named).other_tables!.system_tables;
+    expect(system.narrowed).toContain("sys_user");
+    expect(system.full_access).not.toContain("sys_user");
+  });
+});
+
+describe("the instance in the card is a bare origin", () => {
+  it("drops credentials, path and query", () => {
+    const result = buildPolicyCard({
+      ...cardInput(bigShape(1, 1, 20)),
+      instance: "https://admin:canary-pw-123@dev1.service-now.com/path?token=canary-tok",
+    });
+    expect(result.instance).toBe("https://dev1.service-now.com");
+    const everything = JSON.stringify(result) + renderPolicyCard(result);
+    expect(everything).not.toContain("canary");
+  });
+
+  it("does not echo an unparseable instance", () => {
+    const result = buildPolicyCard({ ...cardInput(bigShape(1, 1, 20)), instance: "not a url canary-pw" });
+    expect(result.instance).toBe("(invalid instance URL)");
+    expect(JSON.stringify(result)).not.toContain("canary");
+  });
+});
+
+describe("the dry-run sample comes only from the matched set", () => {
+  it("drops foreign, duplicate and malformed sys_ids from the answer", async () => {
+    const asked = ["1", "2"].map((n) => n.repeat(32));
+    const foreign = "f".repeat(32);
+    const { client } = await connect({
+      tableAccess: { readTables: ["*"], writeTables: ["*"], targets: [] },
+      get: async (_path, params) =>
+        params.sysparm_query?.startsWith("sys_idIN")
+          ? {
+              result: [
+                { sys_id: foreign, number: "INC-FOREIGN" },
+                { sys_id: asked[0], number: "INC1" },
+                { sys_id: asked[0], number: "INC1-dup" },
+                { sys_id: "x^ORactive=true", number: "INC-BAD" },
+                { sys_id: asked[1], number: "INC2" },
+              ],
+            }
+          : { result: asked.map((sys_id) => ({ sys_id })) },
+    });
+    const data = dataOf(
+      await client.callTool({
+        name: "sn_batch",
+        arguments: {
+          profile: PROFILE,
+          table: "incident",
+          action: "update",
+          structured_query: {
+            filter: { type: "equality", field: "active", operator: "eq", value: true },
+          },
+          fields: { state: "7" },
+        },
+      })
+    );
+    expect(data.sample).toEqual([
+      { sys_id: asked[0], display: "INC1" },
+      { sys_id: asked[1], display: "INC2" },
+    ]);
+    expect(JSON.stringify(data)).not.toMatch(/FOREIGN|dup|BAD/u);
+  });
+});
+
+describe("the memoized card is keyed by more than the field policy", () => {
+  it("two profiles sharing one frozen field policy get their own cards", () => {
+    const shared = Object.freeze({
+      incident: Object.freeze({ writable: Object.freeze(["short_description"]) }),
+    });
+    const input = (profile: string, tables: TableAccessPolicyInput) => ({
+      profile,
+      instance: INSTANCE,
+      authType: "basic" as const,
+      tableAccess: createTableAccessPolicy(tables),
+      fieldPolicy: Object.freeze({ fieldPolicy: shared }),
+      encodedQueryAccess: createEncodedQueryAccessPolicy(),
+      atf: createAtfExecutionPolicy(undefined),
+    });
+    const readOnly = policyCardResponse(
+      input("ro", { readTables: ["incident"], targets: [target("incident", ["sn_query"])] })
+    );
+    const writer = policyCardResponse(
+      input("rw", {
+        readTables: ["incident"],
+        writeTables: ["incident"],
+        targets: [target("incident", ["sn_query", "sn_update"])],
+      })
+    );
+    expect(readOnly.card.profile).toBe("ro");
+    expect(readOnly.card.can_write_anything).toBe(false);
+    expect(writer.card.profile).toBe("rw");
+    expect(writer.card.can_write_anything).toBe(true);
+    expect(writer).not.toBe(readOnly);
   });
 });

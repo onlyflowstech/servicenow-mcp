@@ -77,7 +77,22 @@ export interface PolicyCard {
     hint: string;
   };
   /** Fields for tables only a "*" grant reaches; absent when none are. */
-  other_tables?: { read: boolean; write: boolean; readable: CardFieldSet; writable: CardFieldSet };
+  other_tables?: {
+    read: boolean;
+    write: boolean;
+    readable: CardFieldSet;
+    writable: CardFieldSet;
+    /**
+     * The row above describes custom and ITSM tables. A "*" field entry never
+     * reaches the system tables, which keep their own access: the ones listed
+     * in `full_access` stay fully readable and writable under this profile.
+     */
+    system_tables: {
+      star_field_entry_applies: false;
+      full_access: string[];
+      narrowed: string[];
+    };
+  };
   explicit_write_fields: string[];
   risky_write_tables: string[];
   raw_encoded_reads: { allowed: boolean; rules: number };
@@ -103,6 +118,17 @@ function fieldSet(set: readonly string[] | "*"): CardFieldSet {
   };
 }
 
+/** Which system tables stay fully open under the current field-policy scope. */
+function systemTableAccess(): NonNullable<PolicyCard["other_tables"]>["system_tables"] {
+  const fullAccess: string[] = [];
+  const narrowed: string[] = [];
+  for (const table of [...BUILT_IN_TABLE_CLASSES.system].sort()) {
+    const fields = describeFieldPolicy(table);
+    (fields.readable === "*" && fields.writable === "*" ? fullAccess : narrowed).push(table);
+  }
+  return { star_field_entry_applies: false, full_access: fullAccess, narrowed };
+}
+
 function classOf(table: string): CardTableRow["class"] {
   if (BUILT_IN_TABLE_CLASSES.system.includes(table)) return "system";
   if (BUILT_IN_TABLE_CLASSES.itsm.includes(table)) return "itsm";
@@ -124,6 +150,21 @@ function allowed(
   }
 }
 
+/**
+ * The bare origin of a configured instance URL. Credentials, path and query
+ * are dropped, so a URL written as https://user:pw@host/... cannot leak.
+ */
+export function safeInstanceOrigin(instance: string): string {
+  try {
+    const url = new URL(instance);
+    return url.protocol === "https:" || url.protocol === "http:"
+      ? url.origin
+      : "(invalid instance URL)";
+  } catch {
+    return "(invalid instance URL)";
+  }
+}
+
 export function buildPolicyCard(input: PolicyCardInput): PolicyCard {
   const policy = input.tableAccess;
   const named = new Set<string>();
@@ -137,9 +178,13 @@ export function buildPolicyCard(input: PolicyCardInput): PolicyCard {
   const ordered = [...named].sort();
 
   const rows: CardTableRow[] = [];
+  const writeGranted: string[] = [];
+  let anyRead = false;
   let other: PolicyCard["other_tables"];
   runWithFieldPolicyConfiguration(input.fieldPolicy, () => {
-    for (const table of ordered.slice(0, MAX_CARD_TABLES)) {
+    // Read, write and risky-table facts cover every named table; only the
+    // rows shown (and their field lists, the costly part) are capped.
+    for (const [index, table] of ordered.entries()) {
       const target = policy.targets.find((entry) => entry.table === table);
       const tools = target
         ? [...target.tools].sort()
@@ -152,6 +197,9 @@ export function buildPolicyCard(input: PolicyCardInput): PolicyCard {
       const write = (target ? target.tools : ["sn_update"]).some((tool) =>
         allowed(policy, "write", table, tool)
       );
+      if (read) anyRead = true;
+      if (write) writeGranted.push(table);
+      if (index >= MAX_CARD_TABLES) continue;
       const fields = describeFieldPolicy(table);
       rows.push({
         table,
@@ -173,17 +221,15 @@ export function buildPolicyCard(input: PolicyCardInput): PolicyCard {
         write: otherWrite,
         readable: fieldSet(fields.readable),
         writable: fieldSet(fields.writable),
+        system_tables: systemTableAccess(),
       };
     }
   });
 
-  const writeTables = [
-    ...rows.filter((row) => row.write).map((row) => row.table),
-    ...(other?.write ? ["*"] : []),
-  ];
+  const writeTables = [...writeGranted, ...(other?.write ? ["*"] : [])];
   return {
     profile: input.profile,
-    instance: input.instance,
+    instance: safeInstanceOrigin(input.instance),
     auth_type: input.authType,
     ...(input.grantType === undefined ? {} : { grant_type: input.grantType }),
     read_all_tables: other?.read === true,
@@ -206,7 +252,7 @@ export function buildPolicyCard(input: PolicyCardInput): PolicyCard {
       rest_batch_chunk: BATCH_LIMITS.restBatchChunkSize,
       dry_run_sample: BATCH_LIMITS.dryRunSampleSize,
     },
-    can_read_anything: rows.some((row) => row.read) || other?.read === true,
+    can_read_anything: anyRead || other?.read === true,
     can_write_anything: writeTables.length > 0,
   };
 }
@@ -255,6 +301,7 @@ export function renderPolicyCard(card: PolicyCard): string {
     ]);
   }
 
+  const system = card.other_tables?.system_tables;
   const lines: string[] = [
     `Policy card: ${card.profile} (${card.instance})`,
     `Auth: ${card.auth_type}${card.grant_type ? ` (${card.grant_type})` : ""}; credentials are never shown`,
@@ -270,6 +317,13 @@ export function renderPolicyCard(card: PolicyCard): string {
   } else {
     lines.push("No tables are granted.");
   }
+  if (system && system.full_access.length > 0) {
+    lines.push(
+      "",
+      `NOTE: the "(any other table)" row does not apply to the ${BUILT_IN_TABLE_CLASSES.system.length} system tables.`,
+      `  ${system.full_access.length} of them keep full field access under this profile: ${system.full_access.join(", ")}`
+    );
+  }
   lines.push(
     "",
     "Fields: all* = every field except sensitive-name fields (password, token, secret,",
@@ -283,7 +337,7 @@ export function renderPolicyCard(card: PolicyCard): string {
   if (card.risky_write_tables.length > 0) {
     lines.push(
       "",
-      `WARNING: write access on role/approval tables: ${card.risky_write_tables.join(", ")}`
+      `WARNING: write access on privilege-sensitive tables: ${card.risky_write_tables.join(", ")}`
     );
   }
   lines.push(
