@@ -85,12 +85,17 @@ export interface PolicyCard {
     /**
      * The row above describes custom and ITSM tables. A "*" field entry never
      * reaches the system tables, which keep their own access: the ones listed
-     * in `full_access` stay fully readable and writable under this profile.
+     * in `fully_writable` and `fully_readable` stay open to every field (bar
+     * the sensitive-name blocklist) for that operation, each judged on its
+     * own: narrowing only a table's readable fields leaves it fully writable.
+     * A list is empty when the profile has no wildcard grant for the operation.
      */
     system_tables: {
       star_field_entry_applies: false;
-      full_access: string[];
-      narrowed: string[];
+      fully_readable: string[];
+      fully_writable: string[];
+      read_narrowed: string[];
+      write_narrowed: string[];
     };
   };
   explicit_write_fields: string[];
@@ -118,15 +123,28 @@ function fieldSet(set: readonly string[] | "*"): CardFieldSet {
   };
 }
 
-/** Which system tables stay fully open under the current field-policy scope. */
-function systemTableAccess(): NonNullable<PolicyCard["other_tables"]>["system_tables"] {
-  const fullAccess: string[] = [];
-  const narrowed: string[] = [];
+/**
+ * How the system tables stand under the current field-policy scope, read and
+ * write judged separately so the card never claims narrower access than the
+ * enforcing resolver gives.
+ */
+function systemTableAccess(
+  read: boolean,
+  write: boolean
+): NonNullable<PolicyCard["other_tables"]>["system_tables"] {
+  const out = {
+    star_field_entry_applies: false as const,
+    fully_readable: [] as string[],
+    fully_writable: [] as string[],
+    read_narrowed: [] as string[],
+    write_narrowed: [] as string[],
+  };
   for (const table of [...BUILT_IN_TABLE_CLASSES.system].sort()) {
     const fields = describeFieldPolicy(table);
-    (fields.readable === "*" && fields.writable === "*" ? fullAccess : narrowed).push(table);
+    if (read) (fields.readable === "*" ? out.fully_readable : out.read_narrowed).push(table);
+    if (write) (fields.writable === "*" ? out.fully_writable : out.write_narrowed).push(table);
   }
-  return { star_field_entry_applies: false, full_access: fullAccess, narrowed };
+  return out;
 }
 
 function classOf(table: string): CardTableRow["class"] {
@@ -221,7 +239,7 @@ export function buildPolicyCard(input: PolicyCardInput): PolicyCard {
         write: otherWrite,
         readable: fieldSet(fields.readable),
         writable: fieldSet(fields.writable),
-        system_tables: systemTableAccess(),
+        system_tables: systemTableAccess(otherRead, otherWrite),
       };
     }
   });
@@ -317,12 +335,21 @@ export function renderPolicyCard(card: PolicyCard): string {
   } else {
     lines.push("No tables are granted.");
   }
-  if (system && system.full_access.length > 0) {
+  if (system && (system.fully_writable.length > 0 || system.fully_readable.length > 0)) {
     lines.push(
       "",
-      `NOTE: the "(any other table)" row does not apply to the ${BUILT_IN_TABLE_CLASSES.system.length} system tables.`,
-      `  ${system.full_access.length} of them keep full field access under this profile: ${system.full_access.join(", ")}`
+      `NOTE: the "(any other table)" row does not apply to the ${BUILT_IN_TABLE_CLASSES.system.length} system tables.`
     );
+    if (system.fully_writable.length > 0) {
+      lines.push(
+        `  ${system.fully_writable.length} stay fully writable (every field): ${system.fully_writable.join(", ")}`
+      );
+    }
+    if (system.fully_readable.length > 0) {
+      lines.push(
+        `  ${system.fully_readable.length} stay fully readable (every field): ${system.fully_readable.join(", ")}`
+      );
+    }
   }
   lines.push(
     "",

@@ -925,29 +925,95 @@ describe("a wildcard profile states what the system tables keep", () => {
     const other = result.other_tables!;
     expect(other.writable).toEqual({ fields: ["short_description"], more: 0 });
     expect(other.system_tables.star_field_entry_applies).toBe(false);
-    expect(other.system_tables.full_access).toContain("sys_script");
-    expect(other.system_tables.full_access).toContain("sys_user");
+    expect(other.system_tables.fully_writable).toContain("sys_script");
+    expect(other.system_tables.fully_writable).toContain("sys_user");
     expect(
-      other.system_tables.full_access.length + other.system_tables.narrowed.length
+      other.system_tables.fully_writable.length + other.system_tables.write_narrowed.length
     ).toBe(BUILT_IN_TABLE_CLASSES.system.length);
-    expect(renderPolicyCard(result)).toContain("does not apply to the 23 system tables");
+    const text = renderPolicyCard(result);
+    expect(text).toContain("does not apply to the 23 system tables");
+    expect(text).toContain("stay fully writable (every field)");
   });
 
   it("matches enforcement: a script write passes on sys_script and not on a custom table", () => {
     expect(enforcedWritable(star, "sys_script", "script")).toBe(true);
     expect(enforcedWritable(star, "x_custom", "script")).toBe(false);
-    const full = card(wildcard, star).other_tables!.system_tables.full_access;
+  });
+
+  // The card must never claim narrower access than enforcement gives, for
+  // reads and writes separately, in both field-policy formats.
+  const shapes: ReadonlyArray<[string, FieldPolicyConfigurationInput | undefined]> = [
+    ["no field policy", undefined],
+    ["star narrows both", star],
+    ["star narrows reads only", { fieldPolicy: { "*": { readable: ["sys_id"] } } }],
+    ["star narrows writes only", { fieldPolicy: { "*": { writable: ["short_description"] } } }],
+    ["sys_script narrows reads only", { fieldPolicy: { sys_script: { readable: ["sys_id", "name"] } } }],
+    ["sys_script narrows writes only", { fieldPolicy: { sys_script: { writable: ["name"] } } }],
+    [
+      "list format: sys_db_object reads only",
+      { readableTableFields: [{ table: "sys_db_object", fields: ["sys_id", "name"] }] },
+    ],
+    [
+      "list format: sys_app writes only",
+      { writableTableFields: [{ table: "sys_app", fields: ["name"] }] },
+    ],
+    [
+      "mixed, several system tables",
+      {
+        fieldPolicy: {
+          "*": { readable: ["sys_id"], writable: ["short_description"] },
+          sys_user: { readable: ["sys_id", "email"] },
+          syslog: { writable: ["message"] },
+          sys_atf_test: { readable: ["sys_id"], writable: ["name"] },
+        },
+      },
+    ],
+  ];
+
+  it.each(shapes)("sweep (%s): card system_tables equals enforcement, reads and writes apart", (_name, policy) => {
+    const system = card(wildcard, policy).other_tables!.system_tables;
     for (const table of BUILT_IN_TABLE_CLASSES.system) {
-      const open = enforcedWritable(star, table, "script") && enforcedReadable(star, table, "script");
-      expect(full.includes(table), table).toBe(open);
+      const read = enforcedReadable(policy, table, "script");
+      const write = enforcedWritable(policy, table, "script");
+      expect(system.fully_readable.includes(table), `${table} read`).toBe(read);
+      expect(system.read_narrowed.includes(table), `${table} read narrowed`).toBe(!read);
+      expect(system.fully_writable.includes(table), `${table} write`).toBe(write);
+      expect(system.write_narrowed.includes(table), `${table} write narrowed`).toBe(!write);
     }
   });
 
-  it("a system table the profile names is reported as narrowed", () => {
+  it.each([
+    ["fieldPolicy format", { fieldPolicy: { sys_script: { readable: ["sys_id", "name"] } } }],
+    [
+      "readableTableFields format",
+      { readableTableFields: [{ table: "sys_script", fields: ["sys_id", "name"] }] },
+    ],
+  ] as const)("narrowing only the reads of sys_script still reports it fully writable (%s)", (_name, policy) => {
+    const result = card(wildcard, policy);
+    const system = result.other_tables!.system_tables;
+    expect(enforcedWritable(policy, "sys_script", "script")).toBe(true);
+    expect(system.read_narrowed).toContain("sys_script");
+    expect(system.fully_writable).toContain("sys_script");
+    expect(system.write_narrowed).not.toContain("sys_script");
+    const note = renderPolicyCard(result)
+      .split("\n")
+      .find((line) => line.includes("stay fully writable"))!;
+    expect(note).toContain("sys_script");
+  });
+
+  it("a system table the profile names is reported as narrowed for the operation it narrows", () => {
     const named = { fieldPolicy: { "*": { readable: ["sys_id"] }, sys_user: { readable: ["sys_id"], writable: ["email"] } } };
     const system = card(wildcard, named).other_tables!.system_tables;
-    expect(system.narrowed).toContain("sys_user");
-    expect(system.full_access).not.toContain("sys_user");
+    expect(system.read_narrowed).toContain("sys_user");
+    expect(system.write_narrowed).toContain("sys_user");
+    expect(system.fully_writable).not.toContain("sys_user");
+  });
+
+  it("lists nothing for an operation the profile has no wildcard grant for", () => {
+    const readOnly = card({ readTables: ["*"], targets: [] }).other_tables!.system_tables;
+    expect(readOnly.fully_writable).toEqual([]);
+    expect(readOnly.write_narrowed).toEqual([]);
+    expect(readOnly.fully_readable).toContain("sys_script");
   });
 });
 
