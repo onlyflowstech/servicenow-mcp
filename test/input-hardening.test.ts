@@ -475,12 +475,44 @@ describe("hostile rejections read a bounded number of elements", () => {
     expect(ms).toBeLessThan(REJECTION_CEILING_MS);
   });
 
-  it("H4: an oversized bounded array is rejected without reading its elements", async () => {
+  it("H4: an oversized bounded array is rejected by boundedArray's own pre-check", async () => {
+    // zod 4.6.7's .max() also stops before the elements, so a read count
+    // alone cannot tell the two apart. The pre-check reports a custom issue
+    // (with .max()'s text); zod's own bound would report too_big.
     const { array, reads } = countingArray(new Array<number>(ONE_MIB).fill(0));
     const { result, ms } = await timed(() => boundedArray(z.number(), 50).safeParseAsync(array));
     expect(result.success).toBe(false);
-    if (!result.success) expect(result.error.issues).toHaveLength(1);
+    if (!result.success) {
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({ code: "custom", message: "Too big: expected array to have <=50 items" }),
+      ]);
+    }
     expect(reads()).toBeLessThanOrEqual(MAX_ELEMENT_READS);
+    expect(ms).toBeLessThan(REJECTION_CEILING_MS);
+  });
+
+  it("H4: an oversized bounded record is rejected without reading its values", async () => {
+    // zod has no size bound for records, so without boundedRecord's pre-check
+    // every value would be read and parsed.
+    let reads = 0;
+    const record = new Proxy(
+      Object.fromEntries(repeat(100_000, (index) => [`k${index}`, index])),
+      {
+        get(target, key, receiver) {
+          reads += 1;
+          return Reflect.get(target, key, receiver) as unknown;
+        },
+      }
+    );
+    const schema = boundedRecord(z.record(z.string(), z.number()), 50, "too many entries");
+    const { result, ms } = await timed(() => schema.safeParseAsync(record));
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({ code: "custom", message: "too many entries" }),
+      ]);
+    }
+    expect(reads).toBeLessThanOrEqual(MAX_ELEMENT_READS);
     expect(ms).toBeLessThan(REJECTION_CEILING_MS);
   });
 });
