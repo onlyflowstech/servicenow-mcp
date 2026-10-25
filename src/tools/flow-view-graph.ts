@@ -64,10 +64,14 @@ export const FLOW_GRAPH_BUDGET_STEPS = Object.freeze({
   VALUES_500: 1,
   VALUES_120: 2,
   INPUTS_DROPPED: 3,
-  NODES_HALVED: 4,
-  PILLS_VARIABLES_DROPPED: 5,
-  NODES_HALVED_REPEATEDLY: 6,
+  TEXTS_CUT: 4,
+  NODES_HALVED: 5,
+  PILLS_VARIABLES_DROPPED: 6,
+  NODES_HALVED_REPEATEDLY: 7,
 } as const);
+
+/** Descriptions, annotations and conditions are cut to this many units by the ladder. */
+export const FLOW_GRAPH_LADDER_TEXT_CHARS = 200;
 
 /** A subflow the module could not load. */
 export interface FlowSubflowUnavailable {
@@ -894,6 +898,33 @@ function dropPillsAndVariables(graph: FlowGraph): void {
   graph.variables = [];
 }
 
+/** Cut a long FlowText in place, recording its original length. */
+function cutText(text: FlowText | undefined, max: number): void {
+  if (!text || text.text === null || text.text.length <= max) return;
+  text.original_length = Math.max(text.original_length ?? 0, text.text.length);
+  text.text = cutUnits(text.text, max);
+}
+
+function cutLongTexts(graph: FlowGraph): void {
+  for (const flow of graph.flows) cutText(flow.description, FLOW_GRAPH_LADDER_TEXT_CHARS);
+  if (graph.trigger) cutText(graph.trigger.condition, FLOW_GRAPH_LADDER_TEXT_CHARS);
+  for (const node of graph.nodes) {
+    cutText(node.annotation, FLOW_GRAPH_LADDER_TEXT_CHARS);
+    cutText(node.condition, FLOW_GRAPH_LADDER_TEXT_CHARS);
+  }
+}
+
+/**
+ * A cheap lower bound on the serialized size: every UTF-16 unit of an input
+ * value is at least one UTF-8 byte. When it alone passes the target, the
+ * graph cannot fit and is not serialized to find out.
+ */
+function inputValueUnits(graph: FlowGraph): number {
+  let units = 0;
+  for (const input of allInputs(graph)) units += input.value?.length ?? 0;
+  return units;
+}
+
 function stepCount(graph: FlowGraph): number {
   return graph.nodes.filter((node) => node.kind !== "more").length;
 }
@@ -906,16 +937,23 @@ function stepCount(graph: FlowGraph): number {
  * 1. input values cut to 500 characters;
  * 2. input values cut to 120 characters;
  * 3. input values dropped (names kept, `redacted: "limit"`);
- * 4. step nodes halved, with a single `more` node;
- * 5. pills and variables dropped;
- * 6. (fallback) step nodes halved again until the graph fits or none remain.
+ * 4. flow descriptions, step annotations and conditions cut to 200 units
+ *    (`original_length` set);
+ * 5. step nodes halved, with a single `more` node;
+ * 6. pills and variables dropped;
+ * 7. (fallback) step nodes halved again until the graph fits or none remain.
+ *
+ * A measurement whose outcome is already known (the input values alone are
+ * larger than the target) is skipped, so a graph of very large values is not
+ * serialized whole; the result is the same.
  *
  * `response_bytes` is added to `limits_hit` whenever any step runs.
  * Returns the step that made it fit (0 = already fit); when even the empty
  * skeleton is larger than the target the last step is returned.
  */
 export function fitFlowGraphToBudget(graph: FlowGraph, targetBytes: number): number {
-  if (byteLength(graph) <= targetBytes) return FLOW_GRAPH_BUDGET_STEPS.FITS;
+  const fits = (): boolean => inputValueUnits(graph) <= targetBytes && byteLength(graph) <= targetBytes;
+  if (fits()) return FLOW_GRAPH_BUDGET_STEPS.FITS;
   graph.limits_hit = sortedLimits([...graph.limits_hit, "response_bytes"]);
   const halve = (): void => {
     const steps = stepCount(graph);
@@ -925,17 +963,18 @@ export function fitFlowGraphToBudget(graph: FlowGraph, targetBytes: number): num
     () => cutValues(graph, 500),
     () => cutValues(graph, 120),
     () => dropInputValues(graph),
+    () => cutLongTexts(graph),
     halve,
     () => dropPillsAndVariables(graph),
   ];
   for (let i = 0; i < ladder.length; i += 1) {
     ladder[i]!();
     recount(graph);
-    if (byteLength(graph) <= targetBytes) return i + 1;
+    if (fits()) return i + 1;
   }
   while (stepCount(graph) > 0) {
     halve();
-    if (byteLength(graph) <= targetBytes) break;
+    if (fits()) break;
   }
   return FLOW_GRAPH_BUDGET_STEPS.NODES_HALVED_REPEATEDLY;
 }

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type {
   FlowLogicKind,
@@ -185,5 +185,62 @@ describe("graph builder scaling", () => {
     expect(graph.counts.steps_seen).toBe(9 * 3_000 + 8);
     // The quadratic grouping took 1.4-2.6 s on this shape.
     expect(elapsed).toBeLessThan(1_000);
+  });
+});
+
+describe("byte ladder cost and long texts", () => {
+  const long = (n: number) => "d".repeat(n);
+
+  it("cuts descriptions, annotations and conditions before dropping steps", () => {
+    const steps: Raw[] = Array.from({ length: 6 }, (_, index) => ({
+      uid: `s${index}`,
+      order: index,
+      ...(index % 2 === 0
+        ? { logic_kind: "if" as const, title: "If", condition: text(long(2_000)) }
+        : { title: "Action" }),
+      annotation: text(long(2_000)),
+    }));
+    const base = definition(sid(0x51), steps);
+    const root = { ...base, header: { ...base.header, description: text(long(2_000)) } };
+    const graph = buildFlowGraph({ root, options: { ...OPTIONS, max_response_bytes: 10_000 } });
+    // Uncut, the texts alone are 6 x 2 x 2,000 + 2,000 characters against a 5,500-byte target.
+    expect(graph.nodes.filter((node) => node.kind !== "more")).toHaveLength(6);
+    expect(graph.flows[0]!.description).toEqual({ text: long(200), original_length: 2_000 });
+    for (const node of graph.nodes) {
+      expect(node.annotation).toEqual({ text: long(200), original_length: 2_000 });
+      if (node.condition) expect(node.condition).toEqual({ text: long(200), original_length: 2_000 });
+    }
+    expect(graph.limits_hit).toContain("response_bytes");
+    expect(graph.limits_hit).not.toContain("max_nodes");
+    expect(Buffer.byteLength(JSON.stringify(graph))).toBeLessThanOrEqual(5_500);
+  });
+
+  it("does not serialize a graph of huge input values whole to learn that it is too large", () => {
+    const inputs = Array.from({ length: 40 }, (_, index) => ({
+      name: `in${index}`,
+      label: null,
+      type: "string",
+      value: "v".repeat(2_000),
+    }));
+    const steps: Raw[] = Array.from({ length: 300 }, (_, index) => ({ uid: `s${index}`, order: index, inputs }));
+    const input: FlowGraphBuildInput = {
+      root: definition(sid(0x52), steps),
+      options: { ...OPTIONS, max_response_bytes: 10_000 },
+    };
+    const original = JSON.stringify.bind(JSON);
+    let largest = 0;
+    const spy = vi.spyOn(JSON, "stringify").mockImplementation(((...args: Parameters<typeof JSON.stringify>) => {
+      const out = original(...args);
+      largest = Math.max(largest, out?.length ?? 0);
+      return out;
+    }) as typeof JSON.stringify);
+    try {
+      buildFlowGraph(input);
+    } finally {
+      spy.mockRestore();
+    }
+    // The uncut values alone are 300 x 40 x 2,000 = 24 MB. Serializing starts only
+    // once they are cut (500 characters: about 6 MB).
+    expect(largest).toBeLessThan(7_000_000);
   });
 });
