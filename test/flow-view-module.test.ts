@@ -6,7 +6,11 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ServiceNowClient, ServiceNowOperations } from "../src/client.js";
+import {
+  ServiceNowResponseTooLargeError,
+  type ServiceNowClient,
+  type ServiceNowOperations,
+} from "../src/client.js";
 import type { ServiceNowConfig } from "../src/config.js";
 import type { ExecutionContextDependencies } from "../src/execution-context.js";
 import type { FieldPolicyConfigurationInput } from "../src/field-policy.js";
@@ -25,6 +29,7 @@ import {
 } from "../src/tools/flow-view-contracts.js";
 import {
   FlowViewScopeBudget,
+  SUBFLOW_LOAD_CONCURRENCY,
   expandFlowViewSubflows,
   flowViewToolModule,
 } from "../src/tools/flow-view-module.js";
@@ -32,25 +37,28 @@ import type { FlowFieldPlan } from "../src/tools/flow-view-policy.js";
 import { registerServiceNowToolModules, toolModules } from "../src/tools/index.js";
 
 // Every response scope the module opens gets a number, so calls can be
-// attributed to the scope they ran in. The real scope still runs underneath.
+// attributed to the scope they ran in, and its signal, so the fake can refuse
+// to send a cancelled request as the client does. The real scope still runs
+// underneath.
 const scopes = vi.hoisted(() => ({ next: 0, storage: undefined as unknown }));
 vi.mock("../src/client.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/client.js")>();
   const { AsyncLocalStorage: Storage } = await import("node:async_hooks");
-  const storage = new Storage<number>();
+  const storage = new Storage<{ id: number; signal: AbortSignal }>();
   scopes.storage = storage;
   return {
     ...actual,
     runWithServiceNowRequestSignal: <T>(signal: AbortSignal, operation: () => Promise<T>) => {
       scopes.next += 1;
       const id = scopes.next;
-      return actual.runWithServiceNowRequestSignal(signal, () => storage.run(id, operation));
+      return actual.runWithServiceNowRequestSignal(signal, () => storage.run({ id, signal }, operation));
     },
   };
 });
 
-const currentScope = (): number | undefined =>
-  (scopes.storage as AsyncLocalStorage<number>).getStore();
+const currentStore = () =>
+  (scopes.storage as AsyncLocalStorage<{ id: number; signal: AbortSignal }>).getStore();
+const currentScope = (): number | undefined => currentStore()?.id;
 
 // ---------------------------------------------------------------------------
 // A fake instance answering Table API reads from captures and synthetic rows
@@ -64,6 +72,10 @@ interface Call {
   readonly path: string;
   readonly params: Record<string, string>;
   readonly scope: number | undefined;
+  /** performance.now() when the request was sent. */
+  readonly at: number;
+  /** performance.now() when its answer was ready. */
+  done?: number;
 }
 
 const CAPTURE_DIR = new URL("./fixtures/flow-view/table/brazil-patch0/", import.meta.url);
@@ -90,6 +102,8 @@ interface FakeOptions {
   readonly failFlow?: Readonly<Record<string, unknown>>;
   /** Emulate the client's per-scope cumulative JSON budget. */
   readonly scopeBudgetBytes?: number;
+  /** Emulate latency and the client's limit of 4 requests in flight. */
+  readonly latencyMs?: number;
 }
 
 function fakeInstance(sources: readonly Capture[], options: FakeOptions = {}) {
@@ -109,65 +123,102 @@ function fakeInstance(sources: readonly Capture[], options: FakeOptions = {}) {
   const labels = new Map<string, string>();
   for (const row of merged.variable_value ?? []) labels.set(row.variable!.value, row.variable!.display_value);
   const usedBytes = new Map<number | undefined, number>();
+  const overflows: Array<{ scope: number | undefined; at: number }> = [];
+  let inFlight = 0;
+  const waiting: Array<() => void> = [];
+  const acquire = () =>
+    new Promise<void>((resolve) => {
+      if (inFlight < 4) {
+        inFlight += 1;
+        resolve();
+      } else {
+        waiting.push(() => {
+          inFlight += 1;
+          resolve();
+        });
+      }
+    });
+  const release = () => {
+    inFlight -= 1;
+    waiting.shift()?.();
+  };
+
+  const send = async (path: string, params: Record<string, string>) => {
+    if (options.latencyMs === undefined) return answer(path, params);
+    await acquire();
+    try {
+      return await answer(path, params);
+    } finally {
+      release();
+    }
+  };
+
+  const answer = async (path: string, params: Record<string, string>) => {
+    // Like the client: a request whose signal is aborted is never sent.
+    if (currentStore()?.signal.aborted === true) throw new Error("cancelled before sending");
+    const call: Call = { path, params: { ...params }, scope: currentScope(), at: performance.now() };
+    calls.push(call);
+    if (options.latencyMs !== undefined) await new Promise((resolve) => setTimeout(resolve, options.latencyMs));
+    call.done = performance.now();
+    const table = path.replace("/api/now/table/", "");
+    const query = params.sysparm_query ?? "";
+    for (const [flowId, error] of Object.entries(options.failFlow ?? {})) {
+      if (query.includes(`flow=${flowId}`) || query.includes(`model=${flowId}`)) throw error;
+      if (table === "sys_hub_flow" && query.startsWith(`sys_id=${flowId}`) && !query.includes("typeIN")) throw error;
+    }
+    const key = table === "sys_hub_flow" ? "flow" : table === "sys_variable_value" ? "variable_value" : table;
+    if (missing.has(key)) throw createToolError("upstream", "do_not_retry");
+    const ids = new Set((/(?:document_key|sys_id)IN([0-9a-f,]+)/u.exec(query)?.[1] ?? "").split(","));
+    let rows: Row[];
+    if (table === "sys_hub_flow") {
+      const bySysId = /^sys_id=([0-9a-f]{32})/u.exec(query)?.[1];
+      const byName = /^name=([^^]*)\^/u.exec(query)?.[1];
+      rows = (merged.flow ?? []).filter((row) =>
+        bySysId ? row.sys_id!.value === bySysId : row.name!.value.toLowerCase() === byName?.toLowerCase()
+      );
+    } else if (table === "sys_hub_flow_snapshot") {
+      rows = [...ids]
+        .filter((id) => options.snapshots && Object.hasOwn(options.snapshots, id))
+        .map((id) => ({ sys_id: cell(id), parent_flow: cell(options.snapshots![id]!) }));
+    } else if (table === "var_dictionary") {
+      rows = [...ids]
+        .filter((id) => labels.has(id))
+        .map((id) => ({
+          sys_id: cell(id),
+          element: cell(labels.get(id)!.toLowerCase().replace(/[^a-z0-9]+/gu, "_")),
+          internal_type: cell("string"),
+        }));
+    } else if (table === "sys_variable_value") {
+      rows = (merged.variable_value ?? []).filter((row) => ids.has(row.document_key!.value));
+    } else {
+      const model = /^model=([0-9a-f]{32})/u.exec(query)?.[1];
+      const flow = /^flow=([0-9a-f]{32})/u.exec(query)?.[1];
+      rows = (merged[table] ?? []).filter((row) => (model ? row.model?.value === model : row.flow?.value === flow));
+    }
+    const fields = (params.sysparm_fields ?? "").split(",");
+    // sysparm_display_value=false returns bare values, as the Table API does.
+    const raw = params.sysparm_display_value === "false";
+    const projected = rows.map((row) =>
+      Object.fromEntries(
+        fields.filter((field) => Object.hasOwn(row, field)).map((field) => [field, raw ? row[field]!.value : row[field]])
+      )
+    );
+    const offset = Number(params.sysparm_offset ?? "0");
+    const result = { result: projected.slice(offset, offset + Number(params.sysparm_limit ?? "10000")) };
+    if (options.scopeBudgetBytes !== undefined) {
+      const scope = currentScope();
+      const total = (usedBytes.get(scope) ?? 0) + Buffer.byteLength(JSON.stringify(result));
+      if (total > options.scopeBudgetBytes) {
+        overflows.push({ scope, at: performance.now() });
+        throw new ServiceNowResponseTooLargeError("cumulative upstream response exceeds configured byte limit");
+      }
+      usedBytes.set(scope, total);
+    }
+    return result;
+  };
 
   const ops = Object.freeze({
-    async get(path: string, params: Record<string, string> = {}) {
-      calls.push({ path, params: { ...params }, scope: currentScope() });
-      const table = path.replace("/api/now/table/", "");
-      const query = params.sysparm_query ?? "";
-      for (const [flowId, error] of Object.entries(options.failFlow ?? {})) {
-        if (query.includes(`flow=${flowId}`) || query.includes(`model=${flowId}`)) throw error;
-        if (table === "sys_hub_flow" && query.startsWith(`sys_id=${flowId}`) && !query.includes("typeIN")) throw error;
-      }
-      const key = table === "sys_hub_flow" ? "flow" : table === "sys_variable_value" ? "variable_value" : table;
-      if (missing.has(key)) throw createToolError("upstream", "do_not_retry");
-      const ids = new Set((/(?:document_key|sys_id)IN([0-9a-f,]+)/u.exec(query)?.[1] ?? "").split(","));
-      let rows: Row[];
-      if (table === "sys_hub_flow") {
-        const bySysId = /^sys_id=([0-9a-f]{32})/u.exec(query)?.[1];
-        const byName = /^name=([^^]*)\^/u.exec(query)?.[1];
-        rows = (merged.flow ?? []).filter((row) =>
-          bySysId ? row.sys_id!.value === bySysId : row.name!.value.toLowerCase() === byName?.toLowerCase()
-        );
-      } else if (table === "sys_hub_flow_snapshot") {
-        rows = [...ids]
-          .filter((id) => options.snapshots && Object.hasOwn(options.snapshots, id))
-          .map((id) => ({ sys_id: cell(id), parent_flow: cell(options.snapshots![id]!) }));
-      } else if (table === "var_dictionary") {
-        rows = [...ids]
-          .filter((id) => labels.has(id))
-          .map((id) => ({
-            sys_id: cell(id),
-            element: cell(labels.get(id)!.toLowerCase().replace(/[^a-z0-9]+/gu, "_")),
-            internal_type: cell("string"),
-          }));
-      } else if (table === "sys_variable_value") {
-        rows = (merged.variable_value ?? []).filter((row) => ids.has(row.document_key!.value));
-      } else {
-        const model = /^model=([0-9a-f]{32})/u.exec(query)?.[1];
-        const flow = /^flow=([0-9a-f]{32})/u.exec(query)?.[1];
-        rows = (merged[table] ?? []).filter((row) => (model ? row.model?.value === model : row.flow?.value === flow));
-      }
-      const fields = (params.sysparm_fields ?? "").split(",");
-      // sysparm_display_value=false returns bare values, as the Table API does.
-      const raw = params.sysparm_display_value === "false";
-      const projected = rows.map((row) =>
-        Object.fromEntries(
-          fields.filter((field) => Object.hasOwn(row, field)).map((field) => [field, raw ? row[field]!.value : row[field]])
-        )
-      );
-      const offset = Number(params.sysparm_offset ?? "0");
-      const result = { result: projected.slice(offset, offset + Number(params.sysparm_limit ?? "10000")) };
-      if (options.scopeBudgetBytes !== undefined) {
-        const scope = currentScope();
-        const total = (usedBytes.get(scope) ?? 0) + Buffer.byteLength(JSON.stringify(result));
-        if (total > options.scopeBudgetBytes) {
-          throw new RangeError("cumulative upstream response exceeds configured byte limit");
-        }
-        usedBytes.set(scope, total);
-      }
-      return result;
-    },
+    get: (path: string, params: Record<string, string> = {}) => send(path, params),
     getWithMeta: unsupported,
     post: unsupported,
     patch: unsupported,
@@ -175,7 +226,7 @@ function fakeInstance(sources: readonly Capture[], options: FakeOptions = {}) {
     postBinary: unsupported,
     getRaw: unsupported,
   }) as unknown as ServiceNowOperations;
-  return { ops, calls };
+  return { ops, calls, overflows };
 }
 
 /** Hand-built flows whose only steps are subflow calls (V2 storage). */
@@ -794,5 +845,134 @@ describe("subflow expansion limits", () => {
     await expect(
       expandFlowViewSubflows(fake.ops, OPEN_PLAN, OPTIONS, rootDef(root, [child]), new FlowViewScopeBudget(), signal)
     ).rejects.toBeDefined();
+  });
+
+  it("reports a subflow whose read timed out as a timeout, not as missing", async () => {
+    const [root, slow, fine] = [sid(0x131), sid(0x132), sid(0x133)];
+    const { capture: flows, snapshots } = synthetic({ [root]: [slow, fine], [slow]: [], [fine]: [] });
+    const fake = fakeInstance([flows], {
+      snapshots,
+      failFlow: { [slow]: createToolError("timeout", "retry_if_safe_and_idempotent") },
+    });
+    const expansion = await expandFlowViewSubflows(
+      fake.ops,
+      OPEN_PLAN,
+      OPTIONS,
+      rootDef(root, [slow, fine]),
+      new FlowViewScopeBudget(),
+      signal
+    );
+    expect(expansion.subflows.get(slow)).toEqual({ unavailable: "timeout" });
+    expect("unavailable" in expansion.subflows.get(fine)!).toBe(false);
+  });
+
+  it("loads at most SUBFLOW_LOAD_CONCURRENCY subflows of a level at once, and still in parallel", async () => {
+    const root = sid(0x141);
+    const children = Array.from({ length: 6 }, (_, index) => sid(0x142 + index));
+    const { capture: flows, snapshots } = synthetic({ [root]: children, ...Object.fromEntries(children.map((c) => [c, []])) });
+    const fake = fakeInstance([flows], { snapshots, latencyMs: 3 });
+    await expandFlowViewSubflows(fake.ops, OPEN_PLAN, OPTIONS, rootDef(root, children), new FlowViewScopeBudget(), signal);
+    const spans = new Map<number | undefined, { start: number; end: number }>();
+    for (const call of fake.calls) {
+      const span = spans.get(call.scope) ?? { start: call.at, end: call.done! };
+      spans.set(call.scope, { start: Math.min(span.start, call.at), end: Math.max(span.end, call.done!) });
+    }
+    expect(spans.size).toBe(6);
+    const overlap = Math.max(
+      ...[...spans.values()].map(({ start }) =>
+        [...spans.values()].filter((other) => other.start <= start && other.end > start).length
+      )
+    );
+    expect(SUBFLOW_LOAD_CONCURRENCY).toBe(2);
+    expect(overlap).toBe(SUBFLOW_LOAD_CONCURRENCY);
+  });
+
+  it("treats a RangeError that is not the client's byte limit as a failure, not as too large", async () => {
+    const [root, child] = [sid(0x151), sid(0x152)];
+    const { capture: flows, snapshots } = synthetic({ [root]: [child], [child]: [] });
+    const fake = fakeInstance([flows], {
+      snapshots,
+      failFlow: { [child]: new RangeError("Maximum call stack size exceeded") },
+    });
+    const expansion = await expandFlowViewSubflows(
+      fake.ops,
+      OPEN_PLAN,
+      OPTIONS,
+      rootDef(root, [child]),
+      new FlowViewScopeBudget(),
+      signal
+    );
+    // Not too_large, so no retry without inputs and no too-large warning.
+    expect(expansion.subflows.get(child)).toEqual({ unavailable: "not_found" });
+    expect([...expansion.warnings]).toEqual([]);
+  });
+});
+
+describe("no requests after a failure", () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
+
+  it("stops a level's other subflow loads after a 401 fails the call", async () => {
+    const root = sid(0x161);
+    const children = Array.from({ length: 4 }, (_, index) => sid(0x162 + index));
+    const { capture: flows, snapshots } = synthetic({ [root]: children, ...Object.fromEntries(children.map((c) => [c, []])) });
+    const fake = fakeInstance([flows], {
+      snapshots,
+      latencyMs: 4,
+      failFlow: { [children[1]!]: createToolError("authentication", "do_not_retry") },
+    });
+    const result = await view(fake.ops, { flow: root, depth: 2 });
+    const returned = performance.now();
+    expect(result.isError).toBe(true);
+    await settle();
+    expect(fake.calls.filter((call) => call.at > returned)).toEqual([]);
+    // Two of four subflows were in flight; the rest were never started.
+    expect(fake.calls.some((call) => call.params.sysparm_query?.includes(children[3]!))).toBe(false);
+  });
+
+  it("stops a load's other reads after a 500 fails the root", async () => {
+    const root = sid(0x171);
+    const { capture: flows, snapshots } = synthetic({ [root]: [] });
+    const fake = fakeInstance([flows], {
+      snapshots,
+      latencyMs: 4,
+      failFlow: { [root]: createToolError("upstream", "retry_if_safe_and_idempotent") },
+    });
+    const result = await view(fake.ops, { flow: root });
+    const returned = performance.now();
+    expect(result.isError).toBe(true);
+    await settle();
+    expect(fake.calls.filter((call) => call.at > returned)).toEqual([]);
+    // Wave 1 holds 12 reads with 4 in flight; at most one more slot is taken
+    // in the moment between the 500 and the abort, and the rest never go out.
+    expect(fake.calls.filter((call) => /(?:flow|model)=/u.test(call.params.sysparm_query ?? "")).length).toBeLessThanOrEqual(5);
+  });
+
+  it("stops the rest of a load that overflowed its scope", async () => {
+    // Selected by name, so the oversized label_cache is the load's first read,
+    // with 11 more of its wave queued behind it.
+    const root = sid(0x181);
+    const flows = synthetic({ [root]: [sid(0x18e), sid(0x18f)] });
+    flows.capture.flow!.rows[0]!.label_cache = cell(`[${"x".repeat(1_100_000)}]`);
+    const fake = fakeInstance([flows.capture], { snapshots: flows.snapshots, scopeBudgetBytes: 1_048_576, latencyMs: 4 });
+    const graph = graphOf(await view(fake.ops, { flow: `Synthetic ${root.slice(-4)}` }));
+    expect(graph.warnings).toContain("inputs_omitted_too_large");
+    expect(fake.overflows).toHaveLength(1);
+    const [overflow] = fake.overflows;
+    // At most the request handed the freed slot in the moment before the
+    // abort lands; the other queued reads of that wave never go out.
+    expect(fake.calls.filter((call) => call.scope === overflow!.scope && call.at > overflow!.at).length).toBeLessThanOrEqual(1);
+    expect(fake.calls.filter((call) => call.scope === overflow!.scope).length).toBeLessThanOrEqual(5);
+  });
+
+  it("reads the root record again without labels when its label_cache alone is too large", async () => {
+    const root = sid(0x191);
+    const flows = synthetic({ [root]: [] });
+    flows.capture.flow!.rows[0]!.label_cache = cell(`[${"x".repeat(1_100_000)}]`);
+    const fake = fakeInstance([flows.capture], { snapshots: flows.snapshots, scopeBudgetBytes: 1_048_576 });
+    const graph = graphOf(await view(fake.ops, { flow: root }));
+    expect(graph.flows[0]!.sys_id).toBe(root);
+    expect(graph.warnings).toContain("inputs_omitted_too_large");
+    // Record with labels, record without, load (labels too large), load without inputs.
+    expect(new Set(fake.calls.map((call) => call.scope)).size).toBe(4);
   });
 });

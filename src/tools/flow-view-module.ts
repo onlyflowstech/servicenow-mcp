@@ -25,7 +25,11 @@
  */
 
 import { z } from "zod";
-import { runWithServiceNowRequestSignal } from "../client.js";
+import {
+  isServiceNowRequestCancellation,
+  isServiceNowResponseTooLarge,
+  runWithServiceNowRequestSignal,
+} from "../client.js";
 import { uncachedOperations } from "../metadata-cache.js";
 import { createToolError, trustedToolErrorDescriptor } from "../tool-error.js";
 import { resolveToolTableAccess } from "../tool-table-access.js";
@@ -124,12 +128,54 @@ export class FlowViewScopeBudget {
 }
 
 /**
- * Run `operation` in a fresh response-byte scope bound to the call's signal
- * (as `sn_batch` does per chunk). Without a signal, a direct handler call,
- * it runs in the caller's scope.
+ * Subflows of one level loaded at the same time. The client sends at most 4
+ * requests per instance and starts each request's timeout before it waits
+ * for a slot, so a deep queue can time a request out unsent; two loads keep
+ * the queue to about two loads' waves (measured in flow-f-dev.md).
  */
-function inOwnResponseBudget<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T> {
-  return signal instanceof AbortSignal ? runWithServiceNowRequestSignal(signal, operation) : operation();
+export const SUBFLOW_LOAD_CONCURRENCY = 2;
+
+/**
+ * Run `operation` in a fresh response-byte scope bound to `parent` (the
+ * call's signal, or a level's), as `sn_batch` does per chunk. The scope gets
+ * its own abort: when the operation fails, reads it launched alongside the
+ * failing one are cancelled instead of still reaching the instance. Without
+ * a signal (a direct handler call) it runs in the caller's scope.
+ */
+async function inOwnResponseBudget<T>(parent: AbortSignal | undefined, operation: () => Promise<T>): Promise<T> {
+  if (!(parent instanceof AbortSignal)) return operation();
+  const controller = new AbortController();
+  try {
+    return await runWithServiceNowRequestSignal(AbortSignal.any([parent, controller.signal]), operation);
+  } catch (error) {
+    controller.abort();
+    throw error;
+  }
+}
+
+/** Map with at most `limit` calls in flight; results keep input order; stops launching on the first failure. */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  run: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  let failed = false;
+  const worker = async (): Promise<void> => {
+    while (!failed && next < items.length) {
+      const index = next;
+      next += 1;
+      try {
+        results[index] = await run(items[index]!);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 function selectorFor(flow: string): FlowRecordSelector {
@@ -137,21 +183,25 @@ function selectorFor(flow: string): FlowRecordSelector {
 }
 
 /**
- * A load that did not fit its response scope: the client throws a
- * RangeError when one response, or a scope's cumulative JSON, passes its
- * byte limit.
+ * A load that did not fit its response scope: the client's byte-limit error
+ * for one response or a scope's cumulative JSON. Any other RangeError (a
+ * bug, a stack overflow) is not this, and fails the call.
  */
 function isTooLarge(error: unknown, signal: AbortSignal | undefined): boolean {
-  return error instanceof RangeError && signal?.aborted !== true;
+  return isServiceNowResponseTooLarge(error) && signal?.aborted !== true;
 }
 
-/** Why a subflow could not be used. Cancellation is never swallowed. */
+/**
+ * Why a subflow could not be used. Cancellation (of the call, or of the
+ * level after a sibling failed the call) and broken credentials propagate.
+ */
 function unavailableFrom(error: unknown, signal: AbortSignal | undefined): FlowSubflowUnavailable {
-  if (signal?.aborted) throw error;
-  if (error instanceof RangeError) return { unavailable: "too_large" };
+  if (signal?.aborted || isServiceNowRequestCancellation(error)) throw error;
+  if (isServiceNowResponseTooLarge(error)) return { unavailable: "too_large" };
   const category = trustedToolErrorDescriptor(error)?.category;
   // Broken credentials fail the whole call, as they would for the root flow.
   if (category === "authentication") throw error;
+  if (category === "timeout") return { unavailable: "timeout" };
   return { unavailable: category === "authorization" ? "denied" : "not_found" };
 }
 
@@ -163,17 +213,18 @@ export interface SubflowExpansion {
 
 /**
  * Read one subflow's record (with its pill labels) and load it, in one
- * response scope. Too large, missing and denied subflows come back as
- * markers; cancellation and broken credentials propagate.
+ * response scope under `parent`. Too large, timed out, missing and denied
+ * subflows come back as markers; cancellation and broken credentials
+ * propagate.
  */
 function loadSubflow(
   ops: ServiceNowToolHandlerServices["serviceNow"],
   plan: FlowFieldPlan,
   id: string,
   includeInputs: boolean,
-  signal: AbortSignal | undefined
+  parent: AbortSignal | undefined
 ): Promise<NormalizedFlowDefinition | FlowSubflowUnavailable> {
-  return inOwnResponseBudget(signal, async () => {
+  return inOwnResponseBudget(parent, async () => {
     const resolution = await resolveFlowRecord(ops, plan, { sys_id: id }, {
       withLabelCache: { include_inputs: includeInputs },
     });
@@ -182,14 +233,16 @@ function loadSubflow(
       include_inputs: includeInputs,
       ...(resolution.label_cache === undefined ? {} : { label_cache: resolution.label_cache }),
     });
-  }).catch((error: unknown) => unavailableFrom(error, signal));
+  }).catch((error: unknown) => unavailableFrom(error, parent));
 }
 
 /**
  * Load the subflows the root calls, breadth first, one level per depth step;
- * the subflows of a level load together, each in its own scope. Never loads
- * a flow twice (that also stops cycles); the graph builder marks cycles,
- * depth and limits at each call site from what is in the map.
+ * at most SUBFLOW_LOAD_CONCURRENCY subflows of a level load at once, each in
+ * its own scope. Never loads a flow twice (that also stops cycles); the
+ * graph builder marks cycles, depth and limits at each call site from what
+ * is in the map. A failure that fails the call cancels the level's other
+ * loads.
  */
 export async function expandFlowViewSubflows(
   ops: ServiceNowToolHandlerServices["serviceNow"],
@@ -222,9 +275,18 @@ export async function expandFlowViewSubflows(
     }
     if (targets.length === 0) break;
 
-    const loaded = await Promise.all(
-      targets.map((id) => loadSubflow(ops, plan, id, options.include_inputs, signal))
-    );
+    const levelAbort = new AbortController();
+    const levelSignal =
+      signal instanceof AbortSignal ? AbortSignal.any([signal, levelAbort.signal]) : undefined;
+    let loaded: (NormalizedFlowDefinition | FlowSubflowUnavailable)[];
+    try {
+      loaded = await mapWithConcurrency(targets, SUBFLOW_LOAD_CONCURRENCY, (id) =>
+        loadSubflow(ops, plan, id, options.include_inputs, levelSignal)
+      );
+    } catch (error) {
+      levelAbort.abort();
+      throw error;
+    }
 
     // Retries run one at a time, in call order, so which subflow gets a
     // remaining scope does not depend on timing.
@@ -234,7 +296,7 @@ export async function expandFlowViewSubflows(
       let result = loaded[index]!;
       if ("unavailable" in result && result.unavailable === "too_large" && options.include_inputs) {
         if (scopes.take()) {
-          result = await loadSubflow(ops, plan, id, false, signal);
+          result = await loadSubflow(ops, plan, id, false, levelSignal);
           if (!("unavailable" in result)) warnings.add("inputs_omitted_too_large");
         } else {
           limits.add("upstream_scopes");
@@ -278,11 +340,24 @@ async function handleFlowView(
 
   // The first two scopes always fit: MAX_UPSTREAM_SCOPES is well above 3.
   scopes.take();
-  const resolution = await inOwnResponseBudget(signal, () =>
-    resolveFlowRecord(ops, plan, selectorFor(options.flow), {
-      withLabelCache: { include_inputs: options.include_inputs },
-    })
-  );
+  const resolveRoot = (withLabels: boolean) =>
+    inOwnResponseBudget(signal, () =>
+      resolveFlowRecord(
+        ops,
+        plan,
+        selectorFor(options.flow),
+        withLabels ? { withLabelCache: { include_inputs: options.include_inputs } } : {}
+      )
+    );
+  let resolution: Awaited<ReturnType<typeof resolveRoot>>;
+  try {
+    resolution = await resolveRoot(true);
+  } catch (error) {
+    // A label_cache too large for the record read: read the record without
+    // it, in a new scope; the load then reads (or drops) the labels itself.
+    if (!isTooLarge(error, signal) || !scopes.take()) throw error;
+    resolution = await resolveRoot(false);
+  }
   if (resolution.status === "not_found") {
     throw createToolError("not_found", "retry_after_correction");
   }
