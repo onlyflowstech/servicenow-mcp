@@ -632,7 +632,7 @@ async function readBoundedResponseBody(
       } catch {
         // Cancellation is best effort after the response is rejected.
       }
-      throw new RangeError("raw response exceeds configured byte limit");
+      throw new ServiceNowResponseTooLargeError("raw response exceeds configured byte limit");
     }
     if (cumulativeBudget) {
       try {
@@ -666,7 +666,7 @@ async function readBoundedResponseBody(
       total += chunk.length;
       if (total > maximum) {
         await reader.cancel("response exceeds configured byte limit");
-        throw new RangeError("raw response exceeds configured byte limit");
+        throw new ServiceNowResponseTooLargeError("raw response exceeds configured byte limit");
       }
       if (cumulativeBudget && total > reserved) {
         try {
@@ -686,6 +686,23 @@ async function readBoundedResponseBody(
     reader.releaseLock();
   }
   return Buffer.concat(chunks, total);
+}
+
+/**
+ * A response, or a request scope's cumulative upstream JSON, passed its byte
+ * limit. A RangeError, as before, so existing handling is unchanged; the
+ * class lets callers tell it apart from any other RangeError.
+ */
+export class ServiceNowResponseTooLargeError extends RangeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ServiceNowResponseTooLargeError";
+  }
+}
+
+/** True when a request failed because a response or its scope passed a byte limit. */
+export function isServiceNowResponseTooLarge(error: unknown): boolean {
+  return error instanceof ServiceNowResponseTooLargeError;
 }
 
 class ServiceNowRequestCancelledError extends Error {
@@ -787,7 +804,7 @@ class CumulativeResponseByteBudget {
       throw new TypeError("upstream byte reservation is invalid");
     }
     if (this.#consumed + bytes > this.maximum) {
-      throw new RangeError("cumulative upstream response exceeds configured byte limit");
+      throw new ServiceNowResponseTooLargeError("cumulative upstream response exceeds configured byte limit");
     }
     this.#consumed += bytes;
   }

@@ -5,6 +5,7 @@ import {
   MAX_CUMULATIVE_UPSTREAM_JSON_BYTES,
   MAX_RETRY_DELAY_MS,
   ServiceNowClient,
+  isServiceNowResponseTooLarge,
   parseRetryAfterMs,
   retryDelayMs,
   runWithServiceNowRequestSignal,
@@ -462,6 +463,21 @@ describe("bounded raw responses and path confinement", () => {
       makeClient().getRaw("/api/now/attachment/file", { maxBytes: 10 })
     ).rejects.toThrow(/exceeds configured byte limit/u);
     expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks byte-limit failures so callers can tell them from other RangeErrors", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(8));
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status: 200 })));
+    const error = await makeClient()
+      .getRaw("/api/now/attachment/file", { maxBytes: 10 })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(RangeError);
+    expect(isServiceNowResponseTooLarge(error)).toBe(true);
+    expect(isServiceNowResponseTooLarge(new RangeError("Maximum call stack size exceeded"))).toBe(false);
   });
 
   it.each([
