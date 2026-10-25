@@ -170,21 +170,33 @@ describe("graph builder sibling grouping", () => {
   });
 });
 
+/** Flat, action-only steps: every step is a top-level sibling of every other. */
+function actions(id: string, count: number, prefix: string): NormalizedFlowDefinition {
+  return definition(
+    id,
+    Array.from({ length: count }, (_, index) => ({ uid: `${prefix}${index}`, order: index, title: "Action" }))
+  );
+}
+
 describe("graph builder scaling", () => {
-  it("builds nine 3,000-step flat flows (the loader's row maximum) well under a second", () => {
+  it("builds nine 3,000-step flat flows (the loader's row maximum) in under 150 ms", () => {
     const children = Array.from({ length: 8 }, (_, index) => sid(0x100 + index));
     const input: FlowGraphBuildInput = {
-      root: withCalls(flat(sid(0xff), 3_000, "r"), children),
-      subflows: new Map(children.map((child, index) => [child, flat(child, 3_000, `s${index}`)])),
+      root: withCalls(actions(sid(0xff), 3_000, "r"), children),
+      subflows: new Map(children.map((child, index) => [child, actions(child, 3_000, `s${index}`)])),
       options: OPTIONS,
     };
-    buildFlowGraph(input); // warm up
-    const started = performance.now();
-    const graph = buildFlowGraph(input);
-    const elapsed = performance.now() - started;
-    expect(graph.counts.steps_seen).toBe(9 * 3_000 + 8);
-    // The quadratic grouping took 1.4-2.6 s on this shape.
-    expect(elapsed).toBeLessThan(1_000);
+    // Best of three, so a busy host does not fail it: linear grouping takes
+    // ~35-50 ms here; the quadratic grouping it replaced took 320 ms at best on the same host (0.5-1.4 s in review).
+    let best = Number.POSITIVE_INFINITY;
+    let steps = 0;
+    for (let run = 0; run < 3; run += 1) {
+      const started = performance.now();
+      steps = buildFlowGraph(input).counts.steps_seen;
+      best = Math.min(best, performance.now() - started);
+    }
+    expect(steps).toBe(9 * 3_000 + 8);
+    expect(best).toBeLessThan(150);
   });
 });
 
