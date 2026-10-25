@@ -346,24 +346,32 @@ function hasLongList(card: PolicyCard): boolean {
  */
 export function budgetPolicyCard(
   card: PolicyCard,
-  maxBytes: number = POLICY_DATA_BUDGET_BYTES
+  maxBytes: number = POLICY_DATA_BUDGET_BYTES,
+  textOmitted = false
 ): PolicyCard {
-  if (jsonBytes(card) <= maxBytes) return card;
+  // The marker is part of the card, so it counts against the budget. A card
+  // that gets one only because its text was dropped is measured with it.
+  const marked = (rows: PolicyCard["tables"], narrowed: boolean): PolicyCard => ({
+    ...card,
+    tables: rows,
+    truncated: {
+      tables_omitted: card.tables.length - rows.length + card.tables_more,
+      field_lists_narrowed: narrowed,
+      ...(textOmitted ? { text_omitted: true as const } : {}),
+      hint: truncationHint(card.profile),
+    },
+  });
+  if (!textOmitted && jsonBytes(card) <= maxBytes) return card;
+  if (textOmitted && jsonBytes(marked(card.tables, false)) <= maxBytes) {
+    return marked(card.tables, false);
+  }
   const narrowedAny = hasLongList(card);
   let rows = card.tables.map((row) => ({
     ...row,
     readable: narrow(row.readable),
     writable: narrow(row.writable),
   }));
-  const build = (): PolicyCard => ({
-    ...card,
-    tables: rows,
-    truncated: {
-      tables_omitted: card.tables.length - rows.length + card.tables_more,
-      field_lists_narrowed: narrowedAny,
-      hint: truncationHint(card.profile),
-    },
-  });
+  const build = (): PolicyCard => marked(rows, narrowedAny);
   if (jsonBytes(build()) > maxBytes) {
     rows = rows.map((row) => ({
       ...row,
@@ -388,17 +396,9 @@ export function fitPolicyCard(full: PolicyCard): PolicyCardResponse {
   const card = budgetPolicyCard(full);
   const text = renderPolicyCard(card);
   if (Buffer.byteLength(text, "utf8") <= POLICY_TEXT_BUDGET_BYTES) return { card, text };
-  return {
-    card: {
-      ...card,
-      truncated: {
-        tables_omitted: card.truncated?.tables_omitted ?? card.tables_more,
-        field_lists_narrowed: card.truncated?.field_lists_narrowed ?? false,
-        text_omitted: true,
-        hint: truncationHint(card.profile),
-      },
-    },
-  };
+  // Re-budget from the full card with the marker counted, so the data card
+  // stays within its budget with the marker included.
+  return { card: budgetPolicyCard(full, POLICY_DATA_BUDGET_BYTES, true) };
 }
 
 // ── memoization ────────────────────────────────────────────────────
