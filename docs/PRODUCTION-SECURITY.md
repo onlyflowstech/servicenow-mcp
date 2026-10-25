@@ -447,6 +447,31 @@ client's ordinary retry on 502, 503, 504 and connection errors, so a gateway
 failure after the instance applied such a write can append the entry twice.
 Where a duplicate would matter, withhold such fields with field policy.
 
+## Flow views
+
+`sn_flow_view` is read-only. It reads 15 tables through the Table API and
+never calls Flow Designer's internal API (`/api/now/processflow/...`), whose
+flow read creates a Workflow Studio history record. Approve it on these terms:
+
+- Grant the 15 tables with targets bound to `sn_flow_view` only, as
+  `servicenow-mcp-setup grant --flows` does. The flow tables hold scripts and
+  configuration; binding them keeps `sn_query` and `sn_get` off them.
+- Input values are shown by default. Names that look sensitive and the
+  `password`, `password2`, `masked` and `encrypted_text` types are always
+  redacted, but redaction is by name and type: a credential typed into an
+  ordinary string input or a script is shown. Where that matters, hide the
+  value fields with field policy or tell callers to pass
+  `include_inputs: false`.
+- `sys_variable_value` is a system table: a `"*"` field-policy entry does not
+  narrow it. Name it in `fieldPolicy` to hide older (V1) flows' values. The
+  ATF tools read the same table.
+- Flow text is untrusted instance content. The Mermaid diagram is built from
+  a closed grammar with encoded labels, and the outline is fenced as
+  untrusted.
+
+[docs/FLOW-VIEW.md](FLOW-VIEW.md) lists every table, required field and
+field-policy switch.
+
 ## Denied exposure patterns
 
 Do not approve a deployment that has any of these properties:

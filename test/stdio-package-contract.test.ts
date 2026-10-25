@@ -112,6 +112,7 @@ describe("stdio-only package contract", () => {
     expect(packageJson.files).toContain("docs/V2-MIGRATION.md");
     expect(packageJson.files).toContain("docs/PROFILE-CREDENTIALS.md");
     expect(packageJson.files).toContain("docs/CONTAINER-DEPLOYMENT.md");
+    expect(packageJson.files).toContain("docs/FLOW-VIEW.md");
     // The published description and keywords must name the transport clients
     // actually get, not the one 2.0 briefly shipped.
     expect(packageJson.description).toContain("stdio");

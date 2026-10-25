@@ -662,6 +662,12 @@ in this section is needed to use this server.
 stub and is **not published in 2.0** — it does not appear in `tools/list`. Use
 `sn_query` and `sn_batch` instead. See [Roadmap](#roadmap).
 
+### Flow Designer
+
+| Tool | Description |
+|------|-------------|
+| `sn_flow_view` | Show a flow or subflow as a Mermaid diagram, an outline and a structured graph: trigger, steps, branches, loops, error handling, input values under field policy, and called subflows to depth 3. Read-only through the Table API; never calls Flow Designer's internal API. See [docs/FLOW-VIEW.md](docs/FLOW-VIEW.md) |
+
 ### Profile Management
 
 | Tool | Description |
@@ -905,6 +911,7 @@ the same loader the server uses at request time:
 servicenow-mcp-setup grant --profile dev --read incident,problem --write incident
 servicenow-mcp-setup grant --profile dev --read cmdb_ci --tools sn_query,sn_relationships
 servicenow-mcp-setup grant --profile dev --read change_request --related change_request=task
+servicenow-mcp-setup grant --profile dev --flows   # sn_flow_view's 15 tables, bound to sn_flow_view only
 ```
 
 Allowlist entries may be exact table names or the literal `*` to allow every
