@@ -179,24 +179,44 @@ function actions(id: string, count: number, prefix: string): NormalizedFlowDefin
 }
 
 describe("graph builder scaling", () => {
-  it("builds nine 3,000-step flat flows (the loader's row maximum) in under 150 ms", () => {
+  /** Nine flat, action-only flows (root + 8 subflows) of `steps` steps each. */
+  function nineFlows(steps: number): FlowGraphBuildInput {
     const children = Array.from({ length: 8 }, (_, index) => sid(0x100 + index));
-    const input: FlowGraphBuildInput = {
-      root: withCalls(actions(sid(0xff), 3_000, "r"), children),
-      subflows: new Map(children.map((child, index) => [child, actions(child, 3_000, `s${index}`)])),
+    return {
+      root: withCalls(actions(sid(0xff), steps, "r"), children),
+      subflows: new Map(children.map((child, index) => [child, actions(child, steps, `s${index}`)])),
       options: OPTIONS,
     };
-    // Best of three, so a busy host does not fail it: linear grouping takes
-    // ~35-50 ms here; the quadratic grouping it replaced took 320 ms at best on the same host (0.5-1.4 s in review).
-    let best = Number.POSITIVE_INFINITY;
-    let steps = 0;
-    for (let run = 0; run < 3; run += 1) {
-      const started = performance.now();
-      steps = buildFlowGraph(input).counts.steps_seen;
-      best = Math.min(best, performance.now() - started);
+  }
+
+  /**
+   * Best time of each input over `runs` interleaved rounds, in ms. The best
+   * run is the one least disturbed by other work on the host, and
+   * interleaving exposes both inputs to the same load.
+   */
+  function bestBuilds(inputs: readonly FlowGraphBuildInput[], runs = 7): number[] {
+    const best = inputs.map(() => Number.POSITIVE_INFINITY);
+    for (let run = 0; run < runs; run += 1) {
+      inputs.forEach((input, index) => {
+        const started = performance.now();
+        buildFlowGraph(input);
+        best[index] = Math.min(best[index]!, performance.now() - started);
+      });
     }
-    expect(steps).toBe(9 * 3_000 + 8);
-    expect(best).toBeLessThan(150);
+    return best;
+  }
+
+  it("grows linearly with flat siblings: 10x the steps takes well under 30x the time", () => {
+    const small = nineFlows(300);
+    const large = nineFlows(3_000);
+    expect(buildFlowGraph(large).counts.steps_seen).toBe(9 * 3_000 + 8);
+    buildFlowGraph(small); // warm up
+    // A ratio holds up on a busy host, where absolute times do not. Measured
+    // (best of 7, interleaved): linear grouping 11x idle and up to 18x with
+    // every core busy; the quadratic grouping it replaced 65x idle. A 3x
+    // spread separated them too little (linear 3.6-7x against quadratic 8x).
+    const [smallMs, largeMs] = bestBuilds([small, large]);
+    expect(largeMs! / smallMs!).toBeLessThan(30);
   });
 });
 
