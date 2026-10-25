@@ -271,6 +271,10 @@ async function dryRunSample(
     selection
   );
   const rows: DryRunSampleRow[] = [];
+  // Only rows for the sys_ids asked for, each once: the sample must come from
+  // the matched set, whatever the instance answers.
+  const requested = new Set(ids);
+  const shown = new Set<string>();
   for (const record of Array.isArray(filtered) ? filtered : []) {
     const item = plainRecord(record);
     if (item === undefined) continue;
@@ -280,6 +284,8 @@ async function dryRunSample(
     } catch {
       continue;
     }
+    if (!requested.has(sysId) || shown.has(sysId)) continue;
+    shown.add(sysId);
     const display =
       displayField === undefined ? undefined : displayText(item[displayField]);
     rows.push(display === undefined ? { sys_id: sysId } : { sys_id: sysId, display });
