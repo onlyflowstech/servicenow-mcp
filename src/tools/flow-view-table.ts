@@ -7,19 +7,26 @@
  * flow-view field policy. Flow Designer's internal ProcessFlow API is never
  * called: its flow GET writes a Workflow Studio history row.
  *
- * Read order for one flow load (each read: `sysparm_display_value=all`,
- * `sysparm_exclude_reference_link=true`, `sysparm_limit=501` sentinel):
- *   0. `sys_hub_flow` label_cache (only when inputs are requested)
- *   1. trigger V1, trigger V2
- *   2. action V1, action V2
- *   3. logic V1, logic V2
- *   4. subflow V1, subflow V2, then `sys_hub_flow_snapshot` for call targets
- *   5. flow variables, inputs, outputs (`model=<flow>`)
- *   6. `sys_variable_value` by `document_keyIN<≤100 ids>` (V1 values)
- *   7. `var_dictionary` by `sys_idIN<≤100 ids>` (V1 input names and types)
- * Reads 0, 6 and 7 happen only with `include_inputs`; reads that have
- * nothing to look up are skipped. A missing `_v2` table (HTTP 400) reads as
- * zero rows.
+ * Reads for one flow load (each: `sysparm_exclude_reference_link=true`,
+ * `sysparm_limit=501` sentinel; `sysparm_display_value=all` unless noted).
+ * Independent reads are issued together and the client bounds how many run
+ * at once; results are always processed in this fixed order:
+ *   wave 1, together:
+ *     0. `sys_hub_flow` label_cache, raw (only with inputs, and only when the
+ *        caller did not already read it with the header)
+ *     1. trigger V1, trigger V2
+ *     2. action V1, action V2; logic V1, logic V2; subflow V1, subflow V2
+ *     3. flow variables, inputs, outputs (`model=<flow>`)
+ *   wave 2, together, each only when there is something to look up:
+ *     4. `sys_hub_flow_snapshot` by `sys_idIN` for subflow call targets
+ *     5. the compressed value column of each non-empty V2 table, raw
+ *        (`sysparm_display_value=false`: its display value is the same
+ *        blob, which would double the bytes)
+ *     6. `sys_variable_value` by `document_keyIN<≤100 ids>` (V1 values),
+ *        paged with `sysparm_offset`, then `var_dictionary` by
+ *        `sys_idIN<≤100 ids>` (V1 input names and types)
+ * Reads 0, 5 and 6 happen only with `include_inputs`. A missing `_v2` table
+ * (HTTP 400) reads as zero rows.
  *
  * @module tools/flow-view-table
  */
@@ -77,7 +84,16 @@ import {
 export type FlowHeaderRecord = NormalizedFlowDefinition["header"];
 
 export type FlowRecordResolution =
-  | { status: "found"; header: FlowHeaderRecord }
+  | {
+      status: "found";
+      header: FlowHeaderRecord;
+      /**
+       * Raw `label_cache` text, present only when it was requested with
+       * `withLabelCache` (by-sys_id lookups with inputs on and pill labels
+       * readable); pass it on to `loadFlowFromTables` to skip that read.
+       */
+      label_cache?: string;
+    }
   | { status: "not_found" }
   | { status: "ambiguous"; candidates: string[] /* ≤ 5 sys_ids */ };
 
@@ -85,6 +101,17 @@ export type FlowRecordSelector = { sys_id: string } | { name: string };
 
 export interface TableLoadOptions {
   include_inputs: boolean;
+  /** `label_cache` already read with the header (see `resolveFlowRecord`). */
+  label_cache?: string;
+}
+
+export interface FlowRecordOptions {
+  /**
+   * Read `label_cache` in the same by-sys_id request, saving the loader one
+   * read. Honoured only for a sys_id selector, with inputs on and pill labels
+   * readable; a name lookup can match up to six rows, so it never asks.
+   */
+  withLabelCache?: { include_inputs: boolean };
 }
 
 /** Rows kept per table read; one more is requested as the overflow sentinel. */
@@ -113,20 +140,27 @@ const DECODE_FAILED_NAMES = Object.freeze({
  *   contains `^` cannot match (`escapeQueryValue` strips it, and the
  *   post-filter compares the original text).
  *
- * The header is policy-projected. `label_cache` is never requested here; the
- * loader reads it only when inputs are requested.
+ * The header is policy-projected. `label_cache` is requested only with
+ * `withLabelCache` on a sys_id selector.
  */
 export async function resolveFlowRecord(
   ops: ServiceNowOperations,
   plan: FlowFieldPlan,
-  selector: FlowRecordSelector
+  selector: FlowRecordSelector,
+  options: FlowRecordOptions = {}
 ): Promise<FlowRecordResolution> {
   const reader = uncachedOperations(ops);
-  const fields = fieldsFor(plan, "sys_hub_flow", { exclude: ["label_cache"] });
+  let fields = fieldsFor(plan, "sys_hub_flow", { exclude: ["label_cache"] });
+  let withLabels = false;
   let matches: Row[];
   if (isSysIdSelector(selector)) {
     const id = sysIdOf(selector.sys_id);
     if (id === null) return { status: "not_found" };
+    withLabels =
+      options.withLabelCache?.include_inputs === true &&
+      inputsIncluded(plan) &&
+      canShow(plan, "pill_labels");
+    if (withLabels) fields = `${fields},label_cache`;
     const { rows } = await readTable(reader, "sys_hub_flow", `sys_id=${id}^typeINflow,subflow`, fields, {
       maxRows: 1,
     });
@@ -155,7 +189,8 @@ export async function resolveFlowRecord(
     return { status: "ambiguous", candidates: [...new Set(candidates)].slice(0, FLOW_AMBIGUOUS_CANDIDATES) };
   }
   const row = matches[0]!;
-  return { status: "found", header: headerFrom(plan, row, sysIdOf(scalar(row.sys_id))!) };
+  const header = headerFrom(plan, row, sysIdOf(scalar(row.sys_id))!);
+  return withLabels ? { status: "found", header, label_cache: scalar(row.label_cache) } : { status: "found", header };
 }
 
 /**
@@ -199,48 +234,72 @@ export async function loadFlowFromTables(
     warnings: new Set(),
     limits: new Set(),
     dropped: 0,
+    blobs: new Map(),
   };
+  const knownLabels = typeof options?.label_cache === "string" ? options.label_cache : undefined;
+
+  // Wave 1: every read that depends only on the flow id, issued together.
+  const triggerTables = ["sys_hub_trigger_instance", "sys_hub_trigger_instance_v2"] as const;
+  const [labelText, triggerReads, stepReads, variableReads] = await Promise.all([
+    load.includeInputs && knownLabels === undefined ? readLabelCacheText(load) : Promise.resolve(knownLabels),
+    Promise.all(triggerTables.map((table) => readTriggerTable(load, table))),
+    Promise.all(
+      STEP_SPECS.map((spec) =>
+        readTable(
+          reader,
+          spec.table,
+          `flow=${flowId}^ORDERBYorder^ORDERBYsys_id`,
+          fieldsFor(plan, spec.table, { values: false }),
+          { missingIsEmpty: spec.v2 }
+        )
+      )
+    ),
+    readVariableTables(load),
+  ]);
 
   // 0. Pill labels.
-  const labelCache = load.includeInputs ? await readLabelCache(load) : [];
+  const labelCache = load.includeInputs ? parseLabelCache(load, labelText) : [];
 
   // 1. Trigger.
-  const triggerRows = await readTriggerRows(load, ["sys_hub_trigger_instance", "sys_hub_trigger_instance_v2"]);
+  const triggerRows = collectTriggerRows(load, triggerTables, triggerReads);
 
-  // 2–4. Steps.
+  // 2. Steps.
   const steps = new Map<string, RawStep>();
-  for (const spec of STEP_SPECS) {
-    const { rows, truncated } = await readTable(
-      reader,
-      spec.table,
-      `flow=${flowId}^ORDERBYorder^ORDERBYsys_id`,
-      fieldsFor(plan, spec.table, { values: load.includeInputs }),
-      { missingIsEmpty: spec.v2 }
-    );
+  STEP_SPECS.forEach((spec, index) => {
+    const { rows, truncated } = stepReads[index]!;
     if (truncated) load.limits.add("rows_per_table");
     for (const row of rows) addStep(load, steps, spec, row);
-  }
+  });
   normalizeStructure(load, steps);
 
-  // 4b. Subflow call targets (snapshot -> parent_flow).
-  const snapshotIds = [...steps.values()]
-    .map((step) => (step.spec.kind === "subflow" ? sysIdOf(scalar(step.row.subflow)) : null))
-    .filter((id): id is string => id !== null);
-  const targets = snapshotIds.length > 0 ? await resolveSubflowTargets(reader, plan, snapshotIds) : new Map();
-
-  // 5. Flow variables, inputs and outputs.
-  const variables = await readVariables(load);
+  // 3. Flow variables, inputs and outputs.
+  const variables = collectVariables(load, variableReads);
 
   // Trigger choice: V2 over V1, first row of each.
   const trigger = triggerRows.v2[0] ?? triggerRows.v1[0];
 
-  // 6–7. V1 values for the V1 rows that were kept.
-  const v1Values = load.includeInputs
-    ? await readV1Values(load, [
-        ...(trigger && !trigger.v2 ? [{ table: trigger.table, sysId: trigger.sysId }] : []),
-        ...[...steps.values()].filter((step) => !step.spec.v2).map((step) => ({ table: step.spec.table, sysId: step.sysId })),
-      ])
-    : new Map<string, RawInput[]>();
+  // Wave 2: lookups keyed by what wave 1 returned, issued together.
+  const snapshotIds = [...steps.values()]
+    .map((step) => (step.spec.kind === "subflow" ? sysIdOf(scalar(step.row.subflow)) : null))
+    .filter((id): id is string => id !== null);
+  const v1Documents = [
+    ...(trigger && !trigger.v2 ? [{ table: trigger.table, sysId: trigger.sysId }] : []),
+    ...[...steps.values()].filter((step) => !step.spec.v2).map((step) => ({ table: step.spec.table, sysId: step.sysId })),
+  ];
+  const blobTables = load.includeInputs ? blobReadsFor(load, triggerRows, steps) : [];
+  const [targets, blobReads, v1Values] = await Promise.all([
+    snapshotIds.length > 0 ? resolveSubflowTargets(reader, plan, snapshotIds) : Promise.resolve(new Map<string, string>()),
+    Promise.all(blobTables.map((blob) => readBlobColumn(load, blob))),
+    load.includeInputs ? readV1Values(load, v1Documents) : Promise.resolve(new Map<string, RawInput[]>()),
+  ]);
+  blobTables.forEach((blob, index) => {
+    const { rows, truncated } = blobReads[index]!;
+    if (truncated) load.limits.add("rows_per_table");
+    for (const row of rows) {
+      const sysId = sysIdOf(scalar(row.sys_id));
+      if (sysId !== null) load.blobs.set(`${blob.table}:${sysId}`, scalar(row[blob.column]));
+    }
+  });
 
   // Blobs decode in display order (trigger, then steps by order), sharing one budget.
   const normalizedTrigger = trigger ? assembleTrigger(load, trigger, v1Values) : null;
@@ -357,6 +416,8 @@ interface LoadState {
   readonly warnings: Set<FlowWarningCode>;
   readonly limits: Set<FlowLimitHit>;
   dropped: number;
+  /** Raw V2 value blobs by `<table>:<sys_id>`, read without display values. */
+  readonly blobs: Map<string, string>;
 }
 
 interface RawStep {
@@ -511,7 +572,7 @@ async function readTable(
   table: FlowTableName,
   query: string,
   fields: string,
-  options: { maxRows?: number; missingIsEmpty?: boolean } = {}
+  options: { maxRows?: number; missingIsEmpty?: boolean; raw?: boolean; offset?: number } = {}
 ): Promise<ReadResult> {
   const maxRows = options.maxRows ?? FLOW_TABLE_ROW_LIMIT;
   let response: unknown;
@@ -519,9 +580,10 @@ async function readTable(
     response = await reader.get(`${TABLE_PATH}${table}`, {
       sysparm_query: query,
       sysparm_fields: fields,
-      sysparm_display_value: "all",
+      sysparm_display_value: options.raw === true ? "false" : "all",
       sysparm_exclude_reference_link: "true",
       sysparm_limit: String(maxRows + 1),
+      ...(options.offset !== undefined && options.offset > 0 ? { sysparm_offset: String(options.offset) } : {}),
     });
   } catch (error) {
     if (options.missingIsEmpty === true && isMissingTableError(error)) {
@@ -579,21 +641,27 @@ function headerFrom(plan: FlowFieldPlan, row: Row, sysId: string): FlowHeaderRec
 
 // --- Label cache -------------------------------------------------------------
 
-async function readLabelCache(load: LoadState): Promise<(readonly [string, string])[]> {
-  const { plan } = load;
-  if (!canShow(plan, "pill_labels")) {
-    load.warnings.add("label_cache_unavailable");
-    return [];
-  }
+/** The raw `label_cache` text; undefined when pill labels are not readable. */
+async function readLabelCacheText(load: LoadState): Promise<string | undefined> {
+  if (!canShow(load.plan, "pill_labels")) return undefined;
   const { rows } = await readTable(
     load.reader,
     "sys_hub_flow",
     `sys_id=${load.flowId}`,
-    fieldsFor(plan, "sys_hub_flow", { only: ["sys_id", "label_cache"] }),
-    { maxRows: 1 }
+    fieldsFor(load.plan, "sys_hub_flow", { only: ["sys_id", "label_cache"] }),
+    // The display value of label_cache is the same JSON text.
+    { maxRows: 1, raw: true }
   );
   const row = rows.find((candidate) => sysIdOf(scalar(candidate.sys_id)) === load.flowId);
-  const text = row ? scalar(row.label_cache) : "";
+  return row ? scalar(row.label_cache) : "";
+}
+
+function parseLabelCache(load: LoadState, text: string | undefined): (readonly [string, string])[] {
+  const { plan } = load;
+  if (text === undefined || !canShow(plan, "pill_labels")) {
+    load.warnings.add("label_cache_unavailable");
+    return [];
+  }
   if (text.trim() === "") return [];
   const parsed = text.length > FLOW_LABEL_CACHE_MAX_CHARS ? null : parseBoundedJson(text);
   if (!parsed?.ok || !Array.isArray(parsed.value)) {
@@ -631,20 +699,25 @@ async function readLabelCache(load: LoadState): Promise<(readonly [string, strin
 
 // --- Triggers ----------------------------------------------------------------
 
-async function readTriggerRows(
+function readTriggerTable(load: LoadState, table: TriggerTable): Promise<ReadResult> {
+  return readTable(
+    load.reader,
+    table,
+    `flow=${load.flowId}^ORDERBYsys_id`,
+    fieldsFor(load.plan, table, { values: false }),
+    { missingIsEmpty: table.endsWith("_v2") }
+  );
+}
+
+function collectTriggerRows(
   load: LoadState,
-  tables: readonly [TriggerTable, TriggerTable]
-): Promise<{ v1: TriggerRow[]; v2: TriggerRow[] }> {
+  tables: readonly [TriggerTable, TriggerTable],
+  reads: readonly ReadResult[]
+): { v1: TriggerRow[]; v2: TriggerRow[] } {
   const output: { v1: TriggerRow[]; v2: TriggerRow[] } = { v1: [], v2: [] };
-  for (const table of tables) {
+  for (const [index, table] of tables.entries()) {
     const v2 = table.endsWith("_v2");
-    const { rows, truncated } = await readTable(
-      load.reader,
-      table,
-      `flow=${load.flowId}^ORDERBYsys_id`,
-      fieldsFor(load.plan, table, { values: load.includeInputs }),
-      { missingIsEmpty: v2 }
-    );
+    const { rows, truncated } = reads[index]!;
     if (truncated) load.limits.add("rows_per_table");
     for (const row of rows) {
       const sysId = sysIdOf(scalar(row.sys_id));
@@ -672,7 +745,7 @@ function assembleTrigger(
   };
   if (!load.includeInputs) return output;
   const inputs = trigger.v2
-    ? decodeInputs(load, trigger.row.trigger_inputs, "list", "trigger_inputs", "trigger_inputs")
+    ? decodeInputs(load, load.blobs.get(`${trigger.table}:${trigger.sysId}`), "list", "trigger_inputs", "trigger_inputs")
     : projectV1(load, "trigger_inputs", v1Values.get(trigger.sysId) ?? []);
   output.inputs = inputs;
   output.table = fromInputs(plan, "trigger_inputs", inputs, TRIGGER_TABLE_INPUTS, FLOW_VIEW_LIMITS.MAX_INPUT_VALUE_CHARS);
@@ -719,6 +792,55 @@ function fromInputs(
     return { text: line(text, maxChars)!, original_length: input.original_length ?? text.length };
   }
   return canShow(plan, element) ? { text: null } : { text: null, redacted: "field_policy" };
+}
+
+// --- Compressed value columns --------------------------------------------------
+
+interface BlobRead {
+  readonly table: TriggerTable | StepTable;
+  readonly column: "trigger_inputs" | "values" | "subflow_inputs";
+  readonly query: string;
+}
+
+/**
+ * One raw read per V2 table that returned rows and whose value column is
+ * readable. The structural reads leave the column out, because with
+ * `sysparm_display_value=all` it would come back twice.
+ */
+function blobReadsFor(
+  load: LoadState,
+  triggers: { v2: readonly TriggerRow[] },
+  steps: ReadonlyMap<string, RawStep>
+): BlobRead[] {
+  const readable = (table: FlowTableName, column: string) => load.plan.readable.get(table)?.has(column) === true;
+  const output: BlobRead[] = [];
+  if (triggers.v2.length > 0 && readable("sys_hub_trigger_instance_v2", "trigger_inputs")) {
+    output.push({
+      table: "sys_hub_trigger_instance_v2",
+      column: "trigger_inputs",
+      query: `flow=${load.flowId}^ORDERBYsys_id`,
+    });
+  }
+  const kept = new Set([...steps.values()].map((step) => step.spec.table));
+  for (const spec of STEP_SPECS) {
+    if (spec.valueColumn === null || !kept.has(spec.table) || !readable(spec.table, spec.valueColumn)) continue;
+    output.push({
+      table: spec.table,
+      column: spec.valueColumn,
+      query: `flow=${load.flowId}^ORDERBYorder^ORDERBYsys_id`,
+    });
+  }
+  return output;
+}
+
+function readBlobColumn(load: LoadState, blob: BlobRead): Promise<ReadResult> {
+  return readTable(
+    load.reader,
+    blob.table,
+    blob.query,
+    fieldsFor(load.plan, blob.table, { only: ["sys_id", blob.column] }),
+    { raw: true }
+  );
 }
 
 // --- Steps -------------------------------------------------------------------
@@ -857,7 +979,7 @@ function assembleSteps(
     if (load.includeInputs) {
       step.inputs =
         spec.valueColumn !== null
-          ? decodeInputs(load, row[spec.valueColumn], spec.valueShape, spec.inputs, spec.valueColumn)
+          ? decodeInputs(load, load.blobs.get(`${spec.table}:${raw.sysId}`), spec.valueShape, spec.inputs, spec.valueColumn)
           : projectV1(load, spec.inputs, v1Values.get(raw.sysId) ?? []);
     }
     if (raw.logicKind !== undefined && CONDITION_KINDS.has(raw.logicKind)) {
@@ -982,13 +1104,25 @@ async function readV1Values(
   const values: { key: string; variable: string; row: Row }[] = [];
   for (const chunk of chunks([...tableOf.keys()], FLOW_VIEW_LIMITS.MAX_SYS_ID_IN_CHUNK)) {
     const keys = new Set(chunk);
-    const { rows, truncated } = await readTable(
-      load.reader,
-      "sys_variable_value",
-      `document_keyIN${chunk.join(",")}^ORDERBYorder^ORDERBYsys_id`,
-      fields
-    );
-    if (truncated) load.limits.add("rows_per_table");
+    const rows: Row[] = [];
+    // Page past the row cap, up to what MAX_INPUTS_PER_NODE values per step
+    // can use; anything beyond that is reported, never dropped silently.
+    const pages = Math.max(1, Math.ceil((chunk.length * FLOW_VIEW_LIMITS.MAX_INPUTS_PER_NODE) / FLOW_TABLE_ROW_LIMIT));
+    for (let page = 0; page < pages; page += 1) {
+      const read = await readTable(
+        load.reader,
+        "sys_variable_value",
+        `document_keyIN${chunk.join(",")}^ORDERBYorder^ORDERBYsys_id`,
+        fields,
+        { offset: page * FLOW_TABLE_ROW_LIMIT }
+      );
+      rows.push(...read.rows);
+      if (!read.truncated) break;
+      if (page === pages - 1) {
+        load.limits.add("rows_per_table");
+        load.warnings.add("input_values_incomplete");
+      }
+    }
     for (const row of rows) {
       const key = sysIdOf(scalar(row.document_key));
       const variable = sysIdOf(scalar(row.variable));
@@ -1088,16 +1222,26 @@ const VARIABLE_TABLES = Object.freeze([
   ["sys_hub_flow_output", "output", "flow_outputs"],
 ] as const);
 
-async function readVariables(load: LoadState): Promise<Omit<FlowVariableDef, "flow_index">[]> {
+/** The variable, input and output reads whose element is showable; null where skipped. */
+function readVariableTables(load: LoadState): Promise<(ReadResult | null)[]> {
+  return Promise.all(
+    VARIABLE_TABLES.map(([table, , element]) =>
+      canShow(load.plan, element)
+        ? readTable(load.reader, table, `model=${load.flowId}^ORDERBYorder^ORDERBYsys_id`, fieldsFor(load.plan, table))
+        : Promise.resolve(null)
+    )
+  );
+}
+
+function collectVariables(
+  load: LoadState,
+  reads: readonly (ReadResult | null)[]
+): Omit<FlowVariableDef, "flow_index">[] {
   const output: Omit<FlowVariableDef, "flow_index">[] = [];
-  for (const [table, scope, element] of VARIABLE_TABLES) {
-    if (!canShow(load.plan, element)) continue;
-    const { rows, truncated } = await readTable(
-      load.reader,
-      table,
-      `model=${load.flowId}^ORDERBYorder^ORDERBYsys_id`,
-      fieldsFor(load.plan, table)
-    );
+  for (const [index, [, scope, element]] of VARIABLE_TABLES.entries()) {
+    const read = reads[index];
+    if (!read) continue;
+    const { rows, truncated } = read;
     if (truncated) load.limits.add("rows_per_table");
     for (const row of rows) {
       if (sysIdOf(scalar(row.sys_id)) === null || sysIdOf(scalar(row.model)) !== load.flowId) {

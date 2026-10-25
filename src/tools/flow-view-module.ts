@@ -11,11 +11,15 @@
  * (1 MiB). Each load therefore runs in its own scope, bound to the call's
  * cancellation signal, and at most `MAX_UPSTREAM_SCOPES` scopes are opened
  * per call:
- * - root flow: one scope to resolve the record, one to load it;
- * - each subflow level: one scope resolving that level's targets (small
- *   by-sys_id header reads), then one scope per subflow load.
- * With the default limits that is 2 + 2 levels + 8 subflows = 12. Loads run
- * sequentially; each raw response is projected and dropped before the next.
+ * - root flow: one scope to resolve the record (with its pill labels when
+ *   selected by sys_id), one to load it;
+ * - each subflow: one scope that reads its record and pill labels, then
+ *   loads it. The subflows of one level load together.
+ * - a load that overflows its scope with input values is retried once
+ *   without them, in a new scope, while scopes remain.
+ * Without retries that is at most 2 + 8 subflows = 10 scopes. Inside a
+ * load, independent reads are issued together; the client bounds how many
+ * run at once. Each raw response is projected and then dropped.
  *
  * @module tools/flow-view-module
  */
@@ -34,6 +38,7 @@ import {
   canonicalFlowViewArgs,
   type CanonicalFlowViewArgs,
   type FlowLimitHit,
+  type FlowWarningCode,
   type NormalizedFlowDefinition,
 } from "./flow-view-contracts.js";
 import {
@@ -46,7 +51,6 @@ import { registerFlowViewRenderer } from "./flow-view-renderers.js";
 import {
   loadFlowFromTables,
   resolveFlowRecord,
-  type FlowHeaderRecord,
   type FlowRecordSelector,
 } from "./flow-view-table.js";
 import { envelopeCompatibilityResult, productionToolOutputSchemas } from "./result-envelope.js";
@@ -132,9 +136,19 @@ function selectorFor(flow: string): FlowRecordSelector {
   return SYS_ID.test(flow) ? { sys_id: flow } : { name: flow };
 }
 
+/**
+ * A load that did not fit its response scope: the client throws a
+ * RangeError when one response, or a scope's cumulative JSON, passes its
+ * byte limit.
+ */
+function isTooLarge(error: unknown, signal: AbortSignal | undefined): boolean {
+  return error instanceof RangeError && signal?.aborted !== true;
+}
+
 /** Why a subflow could not be used. Cancellation is never swallowed. */
 function unavailableFrom(error: unknown, signal: AbortSignal | undefined): FlowSubflowUnavailable {
   if (signal?.aborted) throw error;
+  if (error instanceof RangeError) return { unavailable: "too_large" };
   const category = trustedToolErrorDescriptor(error)?.category;
   // Broken credentials fail the whole call, as they would for the root flow.
   if (category === "authentication") throw error;
@@ -144,12 +158,38 @@ function unavailableFrom(error: unknown, signal: AbortSignal | undefined): FlowS
 export interface SubflowExpansion {
   readonly subflows: Map<string, NormalizedFlowDefinition | FlowSubflowUnavailable>;
   readonly limits: Set<FlowLimitHit>;
+  readonly warnings: Set<FlowWarningCode>;
 }
 
 /**
- * Load the subflows the root calls, breadth first, one level per depth step.
- * Never loads a flow twice (that also stops cycles); the graph builder marks
- * cycles, depth and limits at each call site from what is in the map.
+ * Read one subflow's record (with its pill labels) and load it, in one
+ * response scope. Too large, missing and denied subflows come back as
+ * markers; cancellation and broken credentials propagate.
+ */
+function loadSubflow(
+  ops: ServiceNowToolHandlerServices["serviceNow"],
+  plan: FlowFieldPlan,
+  id: string,
+  includeInputs: boolean,
+  signal: AbortSignal | undefined
+): Promise<NormalizedFlowDefinition | FlowSubflowUnavailable> {
+  return inOwnResponseBudget(signal, async () => {
+    const resolution = await resolveFlowRecord(ops, plan, { sys_id: id }, {
+      withLabelCache: { include_inputs: includeInputs },
+    });
+    if (resolution.status !== "found") return { unavailable: "not_found" as const };
+    return loadFlowFromTables(ops, resolution.header, plan, {
+      include_inputs: includeInputs,
+      ...(resolution.label_cache === undefined ? {} : { label_cache: resolution.label_cache }),
+    });
+  }).catch((error: unknown) => unavailableFrom(error, signal));
+}
+
+/**
+ * Load the subflows the root calls, breadth first, one level per depth step;
+ * the subflows of a level load together, each in its own scope. Never loads
+ * a flow twice (that also stops cycles); the graph builder marks cycles,
+ * depth and limits at each call site from what is in the map.
  */
 export async function expandFlowViewSubflows(
   ops: ServiceNowToolHandlerServices["serviceNow"],
@@ -161,6 +201,7 @@ export async function expandFlowViewSubflows(
 ): Promise<SubflowExpansion> {
   const subflows = new Map<string, NormalizedFlowDefinition | FlowSubflowUnavailable>();
   const limits = new Set<FlowLimitHit>();
+  const warnings = new Set<FlowWarningCode>();
   const visited = new Set<string>([root.header.sys_id]);
   let expansions = 0;
   let frontier = subflowCallTargets(root);
@@ -173,59 +214,55 @@ export async function expandFlowViewSubflows(
         limits.add("max_subflow_expansions");
         break;
       }
+      if (!scopes.take()) {
+        limits.add("upstream_scopes");
+        break;
+      }
       targets.push(id);
     }
     if (targets.length === 0) break;
-    if (!scopes.take()) {
-      limits.add("upstream_scopes");
-      break;
-    }
 
-    // One scope resolves this level's headers: by-sys_id reads of at most
-    // MAX_SUBFLOW_EXPANSIONS small rows, without label_cache.
-    const headers = await inOwnResponseBudget(signal, async () => {
-      const resolved = new Map<string, FlowHeaderRecord | FlowSubflowUnavailable>();
-      for (const id of targets) {
-        try {
-          const resolution = await resolveFlowRecord(ops, plan, { sys_id: id });
-          resolved.set(id, resolution.status === "found" ? resolution.header : { unavailable: "not_found" });
-        } catch (error) {
-          resolved.set(id, unavailableFrom(error, signal));
+    const loaded = await Promise.all(
+      targets.map((id) => loadSubflow(ops, plan, id, options.include_inputs, signal))
+    );
+
+    // Retries run one at a time, in call order, so which subflow gets a
+    // remaining scope does not depend on timing.
+    const next: string[] = [];
+    for (const [index, id] of targets.entries()) {
+      visited.add(id);
+      let result = loaded[index]!;
+      if ("unavailable" in result && result.unavailable === "too_large" && options.include_inputs) {
+        if (scopes.take()) {
+          result = await loadSubflow(ops, plan, id, false, signal);
+          if (!("unavailable" in result)) warnings.add("inputs_omitted_too_large");
+        } else {
+          limits.add("upstream_scopes");
         }
       }
-      return resolved;
-    });
-
-    const next: string[] = [];
-    let exhausted = false;
-    for (const id of targets) {
-      const header = headers.get(id);
-      if (header === undefined) continue;
-      visited.add(id);
-      if ("unavailable" in header) {
-        subflows.set(id, header);
-        continue;
-      }
-      if (!scopes.take()) {
-        limits.add("upstream_scopes");
-        exhausted = true;
-        break;
-      }
-      try {
-        const def = await inOwnResponseBudget(signal, () =>
-          loadFlowFromTables(ops, header, plan, { include_inputs: options.include_inputs })
-        );
-        subflows.set(id, def);
-        expansions += 1;
-        next.push(...subflowCallTargets(def));
-      } catch (error) {
-        subflows.set(id, unavailableFrom(error, signal));
-      }
+      subflows.set(id, result);
+      if ("unavailable" in result) continue;
+      expansions += 1;
+      next.push(...subflowCallTargets(result));
     }
-    if (exhausted) break;
     frontier = next;
   }
-  return { subflows, limits };
+  return { subflows, limits, warnings };
+}
+
+/** A flow known only by its record: what is shown when even its structure is too large. */
+function recordOnly(header: NormalizedFlowDefinition["header"]): NormalizedFlowDefinition {
+  return {
+    source: "table",
+    header,
+    trigger: null,
+    steps: [],
+    label_cache: [],
+    variables: [],
+    warnings: [],
+    limits_hit: [],
+    items_dropped: 0,
+  };
 }
 
 async function handleFlowView(
@@ -237,11 +274,14 @@ async function handleFlowView(
   const ops = uncachedOperations(services.serviceNow);
   const signal = services.context?.signal;
   const scopes = new FlowViewScopeBudget();
+  const warnings = new Set<FlowWarningCode>();
 
-  // The first two scopes always fit: MAX_UPSTREAM_SCOPES is well above 2.
+  // The first two scopes always fit: MAX_UPSTREAM_SCOPES is well above 3.
   scopes.take();
   const resolution = await inOwnResponseBudget(signal, () =>
-    resolveFlowRecord(ops, plan, selectorFor(options.flow))
+    resolveFlowRecord(ops, plan, selectorFor(options.flow), {
+      withLabelCache: { include_inputs: options.include_inputs },
+    })
   );
   if (resolution.status === "not_found") {
     throw createToolError("not_found", "retry_after_correction");
@@ -253,21 +293,41 @@ async function handleFlowView(
     throw createToolError("conflict", "retry_after_correction");
   }
 
+  const loadRoot = (includeInputs: boolean) =>
+    inOwnResponseBudget(signal, () =>
+      loadFlowFromTables(ops, resolution.header, plan, {
+        include_inputs: includeInputs,
+        ...(includeInputs && resolution.label_cache !== undefined ? { label_cache: resolution.label_cache } : {}),
+      })
+    );
   scopes.take();
-  const root = await inOwnResponseBudget(signal, () =>
-    loadFlowFromTables(ops, resolution.header, plan, { include_inputs: options.include_inputs })
-  );
+  let root: NormalizedFlowDefinition | undefined;
+  try {
+    root = await loadRoot(options.include_inputs);
+  } catch (error) {
+    if (!isTooLarge(error, signal)) throw error;
+  }
+  if (root === undefined && options.include_inputs && scopes.take()) {
+    try {
+      root = await loadRoot(false);
+      warnings.add("inputs_omitted_too_large");
+    } catch (error) {
+      if (!isTooLarge(error, signal)) throw error;
+    }
+  }
+  if (root === undefined) warnings.add("flow_too_large");
 
   const expansion =
-    options.depth > 1
+    root !== undefined && options.depth > 1
       ? await expandFlowViewSubflows(ops, plan, options, root, scopes, signal)
-      : { subflows: new Map(), limits: new Set<FlowLimitHit>() };
+      : undefined;
 
   const graph = buildFlowGraph({
-    root,
-    subflows: expansion.subflows,
+    root: root ?? recordOnly(resolution.header),
+    subflows: expansion?.subflows ?? new Map(),
     options,
-    limits_hit: [...expansion.limits],
+    limits_hit: [...(expansion?.limits ?? [])],
+    warnings: [...warnings, ...(expansion?.warnings ?? [])],
   });
 
   services.logger?.write({

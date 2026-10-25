@@ -149,10 +149,15 @@ function fakeInstance(sources: readonly Capture[], options: FakeOptions = {}) {
         rows = (merged[table] ?? []).filter((row) => (model ? row.model?.value === model : row.flow?.value === flow));
       }
       const fields = (params.sysparm_fields ?? "").split(",");
+      // sysparm_display_value=false returns bare values, as the Table API does.
+      const raw = params.sysparm_display_value === "false";
       const projected = rows.map((row) =>
-        Object.fromEntries(fields.filter((field) => Object.hasOwn(row, field)).map((field) => [field, row[field]]))
+        Object.fromEntries(
+          fields.filter((field) => Object.hasOwn(row, field)).map((field) => [field, raw ? row[field]!.value : row[field]])
+        )
       );
-      const result = { result: projected.slice(0, Number(params.sysparm_limit ?? "10000")) };
+      const offset = Number(params.sysparm_offset ?? "0");
+      const result = { result: projected.slice(offset, offset + Number(params.sysparm_limit ?? "10000")) };
       if (options.scopeBudgetBytes !== undefined) {
         const scope = currentScope();
         const total = (usedBytes.get(scope) ?? 0) + Buffer.byteLength(JSON.stringify(result));
@@ -174,7 +179,7 @@ function fakeInstance(sources: readonly Capture[], options: FakeOptions = {}) {
 }
 
 /** Hand-built flows whose only steps are subflow calls (V2 storage). */
-function synthetic(flows: Readonly<Record<string, readonly string[]>>, bigComment = 0): {
+function synthetic(flows: Readonly<Record<string, readonly string[]>>, bigComment = 0, blobChars = 0): {
   capture: Capture;
   snapshots: Record<string, string>;
 } {
@@ -205,6 +210,7 @@ function synthetic(flows: Readonly<Record<string, readonly string[]>>, bigCommen
         parent_ui_id: cell(""),
         subflow: cell(snapshot, `Call ${target.slice(-4)}`),
         comment: cell("x".repeat(bigComment)),
+        ...(blobChars > 0 ? { subflow_inputs: cell(`H4sI${"A".repeat(blobChars)}`) } : {}),
       });
     });
   }
@@ -482,12 +488,15 @@ describe("sn_flow_view end to end", () => {
     const back = graph.nodes.find((node) => node.flow_index === 1 && node.subflow?.flow_sys_id === F2F3P)!;
     expect(back.subflow!.not_expanded).toBe("cycle");
     const rootLoads = fake.calls.filter(
-      (call) => call.path === "/api/now/table/sys_hub_action_instance_v2" && call.params.sysparm_query?.includes(F2F3P)
+      (call) =>
+        call.path === "/api/now/table/sys_hub_action_instance_v2" &&
+        call.params.sysparm_query?.includes(F2F3P) &&
+        call.params.sysparm_display_value === "all"
     );
     expect(rootLoads).toHaveLength(1);
   });
 
-  it("runs the root resolve, the root load and each subflow load in separate scopes", async () => {
+  it("runs the root resolve, the root load and each subflow (record and load) in separate scopes", async () => {
     const fake = fakeInstance([capture("tables-F2F3p.json"), capture("tables-F3c1.json")], {
       snapshots: { [F3C1_SNAPSHOT]: F3C1 },
     });
@@ -495,18 +504,23 @@ describe("sn_flow_view end to end", () => {
     const scopeOf = (predicate: (call: Call) => boolean) =>
       new Set(fake.calls.filter(predicate).map((call) => call.scope));
     const rootResolve = new Set([fake.calls[0]!.scope]);
-    const rootLoad = scopeOf((call) => /flow=6bdd/u.test(call.params.sysparm_query ?? ""));
-    const childResolve = scopeOf(
-      (call) => call.path === "/api/now/table/sys_hub_flow" && call.params.sysparm_query?.startsWith(`sys_id=${F3C1}^typeIN`) === true
+    expect(fake.calls[0]!.params.sysparm_query).toBe(`sys_id=${F2F3P}^typeINflow,subflow`);
+    // Selected by sys_id: the pill labels come with the record, not in the load.
+    expect(fake.calls[0]!.params.sysparm_fields).toMatch(/,label_cache$/u);
+    const rootLoad = scopeOf((call) => /(?:flow|model)=6bdd/u.test(call.params.sysparm_query ?? ""));
+    const child = scopeOf(
+      (call) =>
+        /(?:flow|model)=9073/u.test(call.params.sysparm_query ?? "") ||
+        call.params.sysparm_query?.startsWith(`sys_id=${F3C1}^typeIN`) === true
     );
-    const childLoad = scopeOf((call) => /flow=9073/u.test(call.params.sysparm_query ?? ""));
-    for (const set of [rootResolve, rootLoad, childResolve, childLoad]) {
+    for (const set of [rootResolve, rootLoad, child]) {
       expect(set.size).toBe(1);
       expect([...set][0]).toBeTypeOf("number");
     }
-    const ids = [rootResolve, rootLoad, childResolve, childLoad].map((set) => [...set][0]);
-    expect(new Set(ids).size).toBe(4);
-    expect(new Set(fake.calls.map((call) => call.scope)).size).toBe(4);
+    const ids = [rootResolve, rootLoad, child].map((set) => [...set][0]);
+    expect(new Set(ids).size).toBe(3);
+    expect(new Set(fake.calls.map((call) => call.scope)).size).toBe(3);
+    expect(fake.calls.filter((call) => call.path.endsWith("/sys_hub_flow") && !/typeIN/u.test(call.params.sysparm_query ?? ""))).toEqual([]);
   });
 
   it("keeps a subflow that overflows its own scope from affecting the next one", async () => {
@@ -522,17 +536,51 @@ describe("sn_flow_view end to end", () => {
     const graph = graphOf(await view(fake.ops, { flow: root, depth: 2 }));
     const calls = graph.nodes.filter((node) => node.flow_index === 0 && node.kind === "subflow");
     expect(calls.map((node) => node.subflow?.flow_sys_id)).toEqual([big, small]);
-    expect(calls[0]!.subflow!.not_expanded).toBe("not_found");
+    expect(calls[0]!.subflow!.not_expanded).toBe("too_large");
     expect(calls[1]!.subflow!.expanded_index).toBe(1);
     expect(graph.flows.map((flow) => flow.sys_id)).toEqual([root, small]);
+    expect(graph.warnings).toContain("subflow_too_large");
+    expect(graph.warnings).not.toContain("subflow_not_found");
   });
 
-  it("fails the whole call when the root load overflows its scope", async () => {
+  it("retries a subflow too large with its input values once without them", async () => {
+    const [root, heavy] = [sid(0xb3), sid(0xb4)];
+    const heavyFlow = synthetic({ [heavy]: Array.from({ length: 400 }, () => sid(0xbe)) }, 0, 3_000);
+    const rest = synthetic({ [root]: [heavy] });
+    const fake = fakeInstance([rest.capture, heavyFlow.capture], { snapshots: rest.snapshots, scopeBudgetBytes: 1_048_576 });
+    const graph = graphOf(await view(fake.ops, { flow: root, depth: 2 }));
+    expect(graph.flows.map((flow) => flow.sys_id)).toEqual([root, heavy]);
+    expect(graph.warnings).toContain("inputs_omitted_too_large");
+    expect(graph.nodes.filter((node) => node.flow_index === 1).some((node) => node.inputs !== undefined)).toBe(false);
+  });
+
+  it("reads a root flow too large with its input values again without them, and says so", async () => {
+    const root = sid(0xc1);
+    const heavy = synthetic({ [root]: Array.from({ length: 400 }, () => sid(0xce)) }, 0, 3_000);
+    const fake = fakeInstance([heavy.capture], { scopeBudgetBytes: 1_048_576 });
+    const result = await view(fake.ops, { flow: root });
+    const graph = graphOf(result);
+    expect(graph.warnings).toContain("inputs_omitted_too_large");
+    expect(graph.nodes.length).toBeGreaterThan(100);
+    expect(graph.nodes.some((node) => node.inputs !== undefined)).toBe(false);
+    expect(textOf(result)).toContain("read as with include_inputs=false");
+    // Three scopes: resolve, the load that overflowed, the retry.
+    expect(new Set(fake.calls.map((call) => call.scope)).size).toBe(3);
+  });
+
+  it("shows only the record of a root flow too large even without input values", async () => {
     const root = sid(0xc0);
     const big = synthetic({ [root]: Array.from({ length: 400 }, () => sid(0xcf)) }, 3_000);
     const fake = fakeInstance([big.capture], { scopeBudgetBytes: 1_048_576 });
     const result = await view(fake.ops, { flow: root });
-    expect(result.isError).toBe(true);
+    const graph = graphOf(result);
+    expect(graph.flows.map((flow) => flow.sys_id)).toEqual([root]);
+    expect(graph.nodes).toEqual([]);
+    expect(graph.warnings).toEqual(expect.arrayContaining(["flow_too_large"]));
+    expect(textOf(result)).toContain("too large to read, even without input values");
+    const noInputs = graphOf(await view(fakeInstance([big.capture], { scopeBudgetBytes: 1_048_576 }).ops, { flow: root, include_inputs: false }));
+    expect(noInputs.warnings).toContain("flow_too_large");
+    expect(noInputs.warnings).not.toContain("inputs_omitted_too_large");
   });
 
   it("denies the call when a closure table's target does not list sn_flow_view", async () => {
@@ -642,20 +690,38 @@ describe("subflow expansion limits", () => {
     const children = [sid(0xd1), sid(0xd2), sid(0xd3)];
     const { capture: flows, snapshots } = synthetic({ [root]: children, ...Object.fromEntries(children.map((c) => [c, []])) });
     const fake = fakeInstance([flows], { snapshots });
-    // root resolve + root load already spent: 2 of 4; one level resolve + one load fit.
+    // root resolve + root load already spent: 2 of 4, so two subflow loads fit.
     const budget = new FlowViewScopeBudget(4);
     budget.take();
     budget.take();
     const expansion = await expandFlowViewSubflows(fake.ops, OPEN_PLAN, OPTIONS, rootDef(root, children), budget, signal);
     expect(budget.opened).toBe(4);
     expect([...expansion.limits]).toContain("upstream_scopes");
-    expect([...expansion.subflows.keys()]).toEqual([sid(0xd1)]);
+    expect([...expansion.subflows.keys()]).toEqual([sid(0xd1), sid(0xd2)]);
   });
 
-  it("opens exactly MAX_UPSTREAM_SCOPES scopes at the default limits in the worst case", () => {
-    expect(2 + (FLOW_VIEW_LIMITS.MAX_DEPTH - 1) + FLOW_VIEW_LIMITS.MAX_SUBFLOW_EXPANSIONS).toBe(
-      FLOW_VIEW_LIMITS.MAX_UPSTREAM_SCOPES
-    );
+  it("leaves room under MAX_UPSTREAM_SCOPES for retries at the default limits", () => {
+    // Root resolve and load, one scope per subflow; the rest serve retries without inputs.
+    expect(2 + FLOW_VIEW_LIMITS.MAX_SUBFLOW_EXPANSIONS).toBeLessThan(FLOW_VIEW_LIMITS.MAX_UPSTREAM_SCOPES);
+  });
+
+  it("gives remaining scopes to too-large retries in call order", async () => {
+    const root = sid(0xd8);
+    const heavy = [sid(0xd9), sid(0xda), sid(0xdb)];
+    const heavyFlows = synthetic(Object.fromEntries(heavy.map((id) => [id, Array.from({ length: 400 }, () => sid(0xdf))])), 0, 3_000);
+    const rest = synthetic({ [root]: heavy });
+    const fake = fakeInstance([rest.capture, heavyFlows.capture], { snapshots: rest.snapshots, scopeBudgetBytes: 1_048_576 });
+    // 2 spent, 3 loads, 1 left for one retry.
+    const budget = new FlowViewScopeBudget(6);
+    budget.take();
+    budget.take();
+    const expansion = await expandFlowViewSubflows(fake.ops, OPEN_PLAN, OPTIONS, rootDef(root, heavy), budget, signal);
+    expect(budget.opened).toBe(6);
+    expect("unavailable" in expansion.subflows.get(heavy[0]!)!).toBe(false);
+    expect(expansion.subflows.get(heavy[1]!)).toEqual({ unavailable: "too_large" });
+    expect(expansion.subflows.get(heavy[2]!)).toEqual({ unavailable: "too_large" });
+    expect([...expansion.limits]).toContain("upstream_scopes");
+    expect([...expansion.warnings]).toEqual(["inputs_omitted_too_large"]);
   });
 
   it("loads at most MAX_SUBFLOW_EXPANSIONS subflows", async () => {
@@ -669,7 +735,7 @@ describe("subflow expansion limits", () => {
     const expansion = await expandFlowViewSubflows(fake.ops, OPEN_PLAN, OPTIONS, rootDef(root, children), budget, signal);
     expect(expansion.subflows.size).toBe(FLOW_VIEW_LIMITS.MAX_SUBFLOW_EXPANSIONS);
     expect([...expansion.limits]).toEqual(["max_subflow_expansions"]);
-    expect(budget.opened).toBe(2 + 1 + FLOW_VIEW_LIMITS.MAX_SUBFLOW_EXPANSIONS);
+    expect(budget.opened).toBe(2 + FLOW_VIEW_LIMITS.MAX_SUBFLOW_EXPANSIONS);
   });
 
   it("expands breadth first, one level per depth step, and stops at depth", async () => {

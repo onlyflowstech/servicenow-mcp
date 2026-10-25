@@ -163,10 +163,15 @@ function fakeInstance(
         );
       }
       const fields = (params.sysparm_fields ?? "").split(",");
+      // sysparm_display_value=false returns bare values, as the Table API does.
+      const raw = params.sysparm_display_value === "false";
       const projected = rows.map((row) =>
-        Object.fromEntries(fields.filter((field) => Object.hasOwn(row, field)).map((field) => [field, row[field]]))
+        Object.fromEntries(
+          fields.filter((field) => Object.hasOwn(row, field)).map((field) => [field, raw ? row[field]!.value : row[field]])
+        )
       );
-      return { result: projected.slice(0, Number(params.sysparm_limit ?? "10000")) };
+      const offset = Number(params.sysparm_offset ?? "0");
+      return { result: projected.slice(offset, offset + Number(params.sysparm_limit ?? "10000")) };
     },
     getWithMeta: unsupported,
     post: unsupported,
@@ -615,40 +620,46 @@ describe("loadFlowFromTables reads", () => {
       new Set([source.sys_hub_trigger_instance!.rows[0]!.sys_id!.value, ...definition.steps.map((step) => step.ref!.sys_id)])
     );
     const variables = [...new Set(source.variable_value!.rows.map((row) => row.variable!.value))];
-    const read = (table: string, query: string, fields: string, limit = "501") => ({
+    const read = (table: string, query: string, fields: string, limit = "501", raw = false) => ({
       path: `/api/now/table/${table}`,
-      params: { sysparm_query: query, sysparm_fields: fields, ...READ_PARAMS, sysparm_limit: limit },
+      params: {
+        sysparm_query: query,
+        sysparm_fields: fields,
+        ...READ_PARAMS,
+        ...(raw ? { sysparm_display_value: "false" } : {}),
+        sysparm_limit: limit,
+      },
     });
+    // Wave 1 (issued together, in this order), then wave 2. Blob columns are
+    // never in the structural reads; F6a has no V2 rows, so no blob reads.
     expect(calls).toEqual([
-      read("sys_hub_flow", `sys_id=${flowId}^typeINflow,subflow`, FIELDS.header, "2"), // headerOf (separate fake)
-    ].slice(1).concat([
-      read("sys_hub_flow", `sys_id=${flowId}`, "sys_id,label_cache", "2"),
+      read("sys_hub_flow", `sys_id=${flowId}`, "sys_id,label_cache", "2", true),
       read("sys_hub_trigger_instance", `flow=${flowId}^ORDERBYsys_id`, FIELDS.trigger),
-      read("sys_hub_trigger_instance_v2", `flow=${flowId}^ORDERBYsys_id`, `${FIELDS.trigger},trigger_inputs`),
+      read("sys_hub_trigger_instance_v2", `flow=${flowId}^ORDERBYsys_id`, FIELDS.trigger),
       read("sys_hub_action_instance", steps, FIELDS.action),
-      read("sys_hub_action_instance_v2", steps, `${FIELDS.action},values`),
+      read("sys_hub_action_instance_v2", steps, FIELDS.action),
       read("sys_hub_flow_logic", steps, FIELDS.logic),
-      read("sys_hub_flow_logic_instance_v2", steps, `${FIELDS.logic},values`),
+      read("sys_hub_flow_logic_instance_v2", steps, FIELDS.logic),
       read("sys_hub_sub_flow_instance", steps, FIELDS.subflow),
-      read("sys_hub_sub_flow_instance_v2", steps, `${FIELDS.subflow},subflow_inputs`),
-      read("sys_hub_flow_snapshot", `sys_idIN${snapshot}^ORDERBYsys_id`, "sys_id,parent_flow"),
+      read("sys_hub_sub_flow_instance_v2", steps, FIELDS.subflow),
       read("sys_hub_flow_variable", `model=${flowId}^ORDERBYorder^ORDERBYsys_id`, FIELDS.io),
       read("sys_hub_flow_input", `model=${flowId}^ORDERBYorder^ORDERBYsys_id`, FIELDS.io),
       read("sys_hub_flow_output", `model=${flowId}^ORDERBYorder^ORDERBYsys_id`, FIELDS.io),
+      read("sys_hub_flow_snapshot", `sys_idIN${snapshot}^ORDERBYsys_id`, "sys_id,parent_flow"),
       read("sys_variable_value", `document_keyIN${documents.join(",")}^ORDERBYorder^ORDERBYsys_id`, FIELDS.value),
       read("var_dictionary", `sys_idIN${variables.join(",")}^ORDERBYsys_id`, FIELDS.dictionary),
-    ]));
+    ]);
   });
 
   it("consumes a FIFO mock exactly, skipping reads with nothing to look up", async () => {
     const empty: MockServiceNowStep = { operation: "get", response: { result: [] } };
     const blob = gz([{ name: "short_description", value: "Synthetic", displayValue: "Synthetic" }]);
     const fixture = createMockServiceNowFixture([
-      { operation: "get", response: { result: [{ sys_id: cell(FLOW), label_cache: cell("[]") }] } },
+      { operation: "get", response: { result: [{ sys_id: FLOW, label_cache: "[]" }] } },
       empty, // trigger v1
       empty, // trigger v2
       empty, // action v1
-      { operation: "get", response: { result: [actionRow(1, { values: cell(blob) })] } },
+      { operation: "get", response: { result: [actionRow(1)] } },
       empty, // logic v1
       empty, // logic v2
       empty, // subflow v1
@@ -656,6 +667,8 @@ describe("loadFlowFromTables reads", () => {
       empty, // variables
       empty, // inputs
       empty, // outputs
+      // Wave 2: the raw value column of the one non-empty V2 table.
+      { operation: "get", response: { result: [{ sys_id: hid("a", 1), values: blob }] } },
     ]);
     const definition = await loadFlowFromTables(fixture.operations, HAND_HEADER, OPEN, { include_inputs: true });
     fixture.assertConsumed();
@@ -786,6 +799,85 @@ describe("loadFlowFromTables reads", () => {
     expect(definition.steps[149]!.inputs).toEqual([
       { name: "field_150", label: "Field 150", type: "string", value: "value 150" },
     ]);
+  });
+
+  it("pages sys_variable_value past the row cap instead of losing values", async () => {
+    const actions = Array.from({ length: 30 }, (_, index) => actionRow(index + 1));
+    const values = actions.flatMap((row, step) =>
+      Array.from({ length: 25 }, (_, n) => ({
+        sys_id: cell(hid("9", step * 100 + n + 1)),
+        document: cell("sys_hub_action_instance"),
+        document_key: cell(row.sys_id!.value),
+        variable: cell(hid("7", n + 1), `Field ${n + 1}`),
+        order: cell(String(n + 1)),
+        value: cell(`value ${step}.${n}`),
+      }))
+    );
+    const fake = fakeInstance(handCapture({ sys_hub_action_instance: actions }, values));
+    const definition = await loadFlowFromTables(fake.ops, HAND_HEADER, OPEN, { include_inputs: true });
+    const valueCalls = fake.calls.filter((call) => call.path.endsWith("/sys_variable_value"));
+    // 750 rows: a full page with its sentinel, then the rest from offset 500.
+    expect(valueCalls.map((call) => call.params.sysparm_offset)).toEqual([undefined, "500"]);
+    expect(definition.steps.every((step) => step.inputs.length === 25)).toBe(true);
+    expect(definition.warnings).not.toContain("input_values_incomplete");
+    expect(definition.limits_hit).not.toContain("rows_per_table");
+  });
+
+  it("warns when a V1 chunk holds more values than its steps can show", async () => {
+    // 10 steps x 60 values: more than 10 x MAX_INPUTS_PER_NODE (400) fit one page.
+    const actions = Array.from({ length: 10 }, (_, index) => actionRow(index + 1));
+    const values = actions.flatMap((row, step) =>
+      Array.from({ length: 60 }, (_, n) => ({
+        sys_id: cell(hid("9", step * 100 + n + 1)),
+        document: cell("sys_hub_action_instance"),
+        document_key: cell(row.sys_id!.value),
+        variable: cell(hid("7", n + 1), `Field ${n + 1}`),
+        order: cell(String(n + 1)),
+        value: cell(`value ${step}.${n}`),
+      }))
+    );
+    const fake = fakeInstance(handCapture({ sys_hub_action_instance: actions }, values));
+    const definition = await loadFlowFromTables(fake.ops, HAND_HEADER, OPEN, { include_inputs: true });
+    expect(fake.calls.filter((call) => call.path.endsWith("/sys_variable_value"))).toHaveLength(1);
+    expect(definition.warnings).toContain("input_values_incomplete");
+    expect(definition.limits_hit).toContain("rows_per_table");
+  });
+
+  it("reads V2 value blobs raw, in a separate read, and only for tables with rows", async () => {
+    const { calls, definition } = await load("tables-F1.json");
+    const raw = calls.filter((call) => call.params.sysparm_display_value === "false");
+    expect(raw.map((call) => [call.path.replace("/api/now/table/", ""), call.params.sysparm_fields])).toEqual([
+      ["sys_hub_flow", "sys_id,label_cache"],
+      ["sys_hub_trigger_instance_v2", "sys_id,trigger_inputs"],
+      ["sys_hub_action_instance_v2", "sys_id,values"],
+      ["sys_hub_flow_logic_instance_v2", "sys_id,values"],
+    ]);
+    for (const call of calls.filter((candidate) => candidate.params.sysparm_display_value === "all")) {
+      expect(call.params.sysparm_fields).not.toMatch(/(?:^|,)(?:values|trigger_inputs|subflow_inputs|label_cache)(?:,|$)/u);
+    }
+    expect(definition.steps.some((step) => step.inputs.length > 0)).toBe(true);
+    expect(definition.trigger!.inputs!.length).toBeGreaterThan(0);
+  });
+
+  it("skips the label read when the header read already carried label_cache", async () => {
+    const source = capture("tables-F1.json");
+    const { ops } = fakeInstance(source);
+    const resolution = await resolveFlowRecord(ops, OPEN, { sys_id: flowIdOf(source) }, { withLabelCache: { include_inputs: true } });
+    if (resolution.status !== "found") throw new Error("not found");
+    expect(resolution.label_cache).toBe(source.flow!.rows[0]!.label_cache!.value);
+    const fake = fakeInstance(source);
+    const withLabels = await loadFlowFromTables(fake.ops, resolution.header, OPEN, {
+      include_inputs: true,
+      label_cache: resolution.label_cache!,
+    });
+    expect(fake.calls.some((call) => call.path.endsWith("/sys_hub_flow"))).toBe(false);
+    const separate = await load("tables-F1.json");
+    expect(withLabels.label_cache).toEqual(separate.definition.label_cache);
+    // A name lookup never asks for it.
+    const byName = await resolveFlowRecord(ops, OPEN, { name: source.flow!.rows[0]!.name!.value }, {
+      withLabelCache: { include_inputs: true },
+    });
+    expect(byName).not.toHaveProperty("label_cache");
   });
 
   it("post-filters V1 values by document table and key", async () => {
@@ -1051,7 +1143,7 @@ describe("loadFlowFromTables policy", () => {
     const step = definition.steps.find((candidate) => candidate.uid === commented.ui_id!.value)!;
     expect(step.annotation).toEqual({ text: null, redacted: "field_policy" });
     expect(calls.find((call) => call.path.endsWith("/sys_hub_flow_logic_instance_v2"))!.params.sysparm_fields).toBe(
-      `${FIELDS.logic.replace(",comment", "")},values`
+      FIELDS.logic.replace(",comment", "")
     );
     const open = await load("tables-F5.json");
     expect(open.definition.steps.find((candidate) => candidate.uid === commented.ui_id!.value)!.annotation).toEqual({
