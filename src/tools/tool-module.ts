@@ -73,21 +73,23 @@ const HARDENED_SCHEMA_NODES = new WeakSet<object>();
 const HARDENED_FROM_SOURCE = new WeakMap<object, object>();
 
 /**
- * What hardening one zod node charged to the budgets. A node's own charge
- * folds in every non-zod value (definition, container, regex, function) its
- * build cloned, and also any non-zod value it reached that another node
- * cloned first, so that value is still paid for when this node is reused
- * without that other node. That second case counts the value twice in a graph
- * holding both nodes, which only makes the budgets stricter.
+ * What hardening one zod node charged to the budgets, complete by
+ * construction. `nodes` and `ownKeys` cover the node itself and every non-zod
+ * value (definition, container, regex, function) reachable from it without
+ * passing through another zod node: its whole value closure, walked when the
+ * node is finished, whoever cloned each value first. `children` are the zod
+ * nodes that closure reaches. A value shared by two nodes is in both closures,
+ * so a graph holding both is charged for it twice, which only makes the
+ * budgets stricter; nothing reachable is ever left out.
  */
 interface SubgraphRecord {
-  /** Traversal nodes charged for the node itself, excluding child zod nodes. */
+  /** Traversal nodes for the node and its value closure, excluding child zod nodes. */
   readonly nodes: number;
-  /** Own-key charges for the node itself, excluding child zod nodes. */
+  /** Own-key charges for the node and its value closure, excluding child zod nodes. */
   readonly ownKeys: number;
   /** Deepest level below the node's parent reached through any path. */
   readonly height: number;
-  /** Every zod node the build reached, directly or through non-zod values. */
+  /** Every zod node the node's value closure reaches. */
   readonly children: readonly object[];
 }
 
@@ -98,25 +100,40 @@ interface SubgraphRecord {
  */
 const HARDENED_SUBGRAPHS = new WeakMap<object, SubgraphRecord>();
 
-/** Charges made while one value is being built. */
+/** What one value's build reached and charged, collected while it is built. */
 interface SubgraphFrame {
   /** The nearest frame building a zod node: itself, or an enclosing one. */
   zodFrame: SubgraphFrame | undefined;
   /** On a zod frame, the node being built, once it exists. */
   node: object | undefined;
-  /** Charged by zod nodes built or reused below this value. */
-  zodNodes: number;
-  zodOwnKeys: number;
-  /** Folded in for non-zod values first cloned by another zod node. */
-  extraNodes: number;
-  extraOwnKeys: number;
-  readonly zodChildren: object[];
+  /** Charged by the values and zod nodes built or reused below this value. */
+  childNodes: number;
+  childOwnKeys: number;
+  /** Non-zod values reached directly: built, or already built in this graph. */
+  readonly values: object[];
+  /** Zod nodes reached directly. */
+  readonly zods: object[];
+  /** On a non-zod frame: the node still being built that this value reached. */
+  boundTo: object | undefined;
 }
 
-/** A cloned non-zod value's folded charge, kept for the current graph only. */
-interface LocalSubgraphRecord extends SubgraphRecord {
-  /** The zod frame whose node's charge already includes this value. */
-  readonly owner: SubgraphFrame | undefined;
+/**
+ * A cloned non-zod value's own charge and direct links, kept for the current
+ * graph only. Zod node records are computed from these.
+ */
+interface LocalSubgraphRecord {
+  /** Traversal nodes charged for the value itself, excluding what it reaches. */
+  readonly nodes: number;
+  /** Own-key charges for the value itself, excluding what it reaches. */
+  readonly ownKeys: number;
+  readonly height: number;
+  readonly values: readonly object[];
+  readonly zods: readonly object[];
+  /**
+   * The node this value reached while that node was still being built: the
+   * value is part of a cycle through that node. Only that node may hold it.
+   */
+  readonly boundTo: object | undefined;
 }
 const MAX_TOOL_SCHEMA_FIELDS = 128;
 const MAX_SCHEMA_GRAPH_DEPTH = 128;
@@ -766,10 +783,10 @@ function rebuildZodNode(
 }
 
 /**
- * Build a hardened value and record its budget charge and height. A zod
- * node's record is kept for the process (see {@link HARDENED_SUBGRAPHS}); a
- * non-zod value's folded record is kept for the current graph only, and its
- * charge is part of the enclosing zod node's.
+ * Build a hardened value and record what it charged and reached. A non-zod
+ * value gets a per-graph record of its own charge and its direct links. A zod
+ * node's process-wide record (see {@link HARDENED_SUBGRAPHS}) is computed from
+ * those when the node is finished, by walking its whole value closure.
  */
 function measureSubgraph<T extends object>(
   state: SchemaGraphState,
@@ -786,11 +803,11 @@ function measureSubgraph<T extends object>(
   const frame: SubgraphFrame = {
     zodFrame: parent?.zodFrame,
     node: undefined,
-    zodNodes: 0,
-    zodOwnKeys: 0,
-    extraNodes: 0,
-    extraOwnKeys: 0,
-    zodChildren: [],
+    childNodes: 0,
+    childOwnKeys: 0,
+    values: [],
+    zods: [],
+    boundTo: undefined,
   };
   if (isZodNode) frame.zodFrame = frame;
   state.maxDepth = startDepth;
@@ -808,40 +825,86 @@ function measureSubgraph<T extends object>(
   }
   const nodes = state.nodes - startNodes;
   const ownKeys = state.ownKeys - startOwnKeys;
-  const ownCharge = {
-    nodes: nodes - frame.zodNodes + frame.extraNodes,
-    ownKeys: ownKeys - frame.zodOwnKeys + frame.extraOwnKeys,
-    height,
-  };
+  const ownNodes = nodes - frame.childNodes;
+  const ownOwnKeys = ownKeys - frame.childOwnKeys;
   if (isZodNode) {
     if (!HARDENED_SUBGRAPHS.has(hardened)) {
       HARDENED_SUBGRAPHS.set(
         hardened,
-        Object.freeze({ ...ownCharge, children: Object.freeze(frame.zodChildren) })
+        zodNodeRecord(state, hardened, frame, ownNodes, ownOwnKeys, height)
       );
     }
     if (parent) {
-      parent.zodNodes += nodes;
-      parent.zodOwnKeys += ownKeys;
-      parent.zodChildren.push(hardened);
+      parent.childNodes += nodes;
+      parent.childOwnKeys += ownKeys;
+      parent.zods.push(hardened);
     }
     return hardened;
   }
   if (!state.local.has(hardened)) {
     state.local.set(hardened, {
-      ...ownCharge,
-      children: frame.zodChildren,
-      owner: frame.zodFrame,
+      nodes: ownNodes,
+      ownKeys: ownOwnKeys,
+      height,
+      values: frame.values,
+      zods: frame.zods,
+      boundTo: frame.boundTo,
     });
   }
   if (parent) {
-    parent.zodNodes += frame.zodNodes;
-    parent.zodOwnKeys += frame.zodOwnKeys;
-    parent.extraNodes += frame.extraNodes;
-    parent.extraOwnKeys += frame.extraOwnKeys;
-    for (const child of frame.zodChildren) parent.zodChildren.push(child);
+    parent.childNodes += nodes;
+    parent.childOwnKeys += ownKeys;
+    parent.values.push(hardened);
+    if (parent.zodFrame !== parent) parent.boundTo ??= frame.boundTo;
   }
   return hardened;
+}
+
+/**
+ * A finished zod node's record: its own charge plus that of every non-zod
+ * value in its closure (the values reachable from it without passing through
+ * another zod node), and the zod nodes that closure reaches. Every value in
+ * the closure has a record by now, because it was built in this graph and
+ * finished before this node did; one that has not is still being built by an
+ * enclosing node and closes a cycle. A value bound to a cycle through another
+ * node, or another node still being built, likewise means a cycle. Either
+ * case is refused, so a finished record never leaves anything out.
+ */
+function zodNodeRecord(
+  state: SchemaGraphState,
+  hardened: object,
+  frame: SubgraphFrame,
+  ownNodes: number,
+  ownOwnKeys: number,
+  height: number
+): SubgraphRecord {
+  let nodes = ownNodes;
+  let ownKeys = ownOwnKeys;
+  const children = new Set<object>(frame.zods);
+  const visited = new Set<object>();
+  const pending: object[] = [...frame.values];
+  while (pending.length > 0) {
+    const value = pending.pop() as object;
+    if (visited.has(value)) continue;
+    visited.add(value);
+    const record = state.local.get(value);
+    if (record === undefined) throw schemaGraphCycle();
+    if (record.boundTo !== undefined && record.boundTo !== hardened) throw schemaGraphCycle();
+    nodes += record.nodes;
+    ownKeys += record.ownKeys;
+    for (const child of record.zods) children.add(child);
+    for (const next of record.values) pending.push(next);
+  }
+  children.delete(hardened);
+  for (const child of children) {
+    if (!HARDENED_SUBGRAPHS.has(child)) throw schemaGraphCycle();
+  }
+  return Object.freeze({
+    nodes,
+    ownKeys,
+    height,
+    children: Object.freeze([...children]),
+  });
 }
 
 /** Record a depth reached through a subgraph, failing past the bound. */
@@ -853,12 +916,12 @@ function reachSchemaGraphDepth(state: SchemaGraphState, depth: number): void {
 }
 
 /**
- * The error for a graph that reaches back into something still being built
- * by another node. Metadata is attached after a node is constructed, so it
- * can point back at an enclosing value or node and close a cycle even though
- * lazy nodes are refused and accessors are not followed. The node closing the
- * cycle would be recorded without what lies behind it, and a later graph
- * reusing it would be charged too little, so such graphs are refused.
+ * The error for a graph with a cycle that runs through more than one node.
+ * Metadata and check parameters are attached after a node is constructed, so
+ * they can point back at an enclosing value or node even though lazy nodes
+ * are refused and accessors are not followed. A node reaching itself is
+ * allowed, and charged in full; any other cycle is refused, because a node
+ * inside it could not be given a complete record.
  */
 function schemaGraphCycle(): TypeError {
   return new TypeError("tool schema graph contains a cycle");
@@ -870,56 +933,69 @@ function nodeBeingBuilt(state: SchemaGraphState): object | undefined {
 }
 
 /**
+ * Bind the value being built (and so every value enclosing it up to its zod
+ * node) to that node: it reached the node while the node was being built.
+ */
+function bindToNodeBeingBuilt(state: SchemaGraphState): void {
+  const frame = state.frames.at(-1);
+  if (frame !== undefined && frame.zodFrame !== frame) frame.boundTo ??= frame.zodFrame?.node;
+}
+
+/**
  * A zod node reached again within the graph that already counted it: no new
  * charge, as before, but its height is checked at this depth too and it is
- * linked as a child of the node being built. A node with no record is still
- * being built; reaching it is allowed only from within its own build (a node
- * reached through its own members), which is counted by that build. Reaching
- * any other node still being built is a cycle and is refused.
+ * linked from the value or node being built. A node with no record is still
+ * being built; reaching it is allowed only from within its own build, and
+ * binds the reaching values to it. Reaching any other node still being built
+ * is a cycle and is refused.
  */
 function noteSeenSubgraph(state: SchemaGraphState, hardened: object): void {
   const record = HARDENED_SUBGRAPHS.get(hardened);
   if (record === undefined) {
     if (hardened !== nodeBeingBuilt(state)) throw schemaGraphCycle();
+    bindToNodeBeingBuilt(state);
     return;
   }
   reachSchemaGraphDepth(state, state.depth + record.height);
-  state.frames.at(-1)?.zodChildren.push(hardened);
+  state.frames.at(-1)?.zods.push(hardened);
 }
 
 /**
- * A cloned non-zod value reached again within this graph. No new charge to
- * the graph and its height is checked at this depth. When another zod node
- * cloned it first, its folded charge and its zod nodes are added to the
- * current node's record as well, so reusing the current node without that
- * other node still pays for it. A value still being built may be reached
- * again only from within the same zod node's build; reaching it from another
- * node is a cycle and is refused.
+ * A cloned non-zod value reached again within this graph: no new charge to
+ * the graph, its height is checked at this depth, and it is linked from the
+ * value or node being built, whose record will then include it. A value bound
+ * to a cycle through another node may not be reached from this one. A value
+ * still being built may be reached again only from within the same zod
+ * node's build, which binds the reaching values to that node; from another
+ * node it is a cycle. Both are refused.
  */
 function noteSeenValue(state: SchemaGraphState, source: object, hardened: object): void {
+  const frame = state.frames.at(-1);
   const record = state.local.get(hardened);
   if (record === undefined) {
     const building = state.building.get(source);
     if (building === undefined) {
       throw new TypeError("tool schema graph reuses a value with no recorded budget");
     }
-    if (building.zodFrame !== state.frames.at(-1)?.zodFrame) throw schemaGraphCycle();
+    if (building.zodFrame !== frame?.zodFrame) throw schemaGraphCycle();
+    bindToNodeBeingBuilt(state);
+    frame?.values.push(hardened);
     return;
   }
+  if (record.boundTo !== undefined) {
+    if (record.boundTo !== nodeBeingBuilt(state)) throw schemaGraphCycle();
+    bindToNodeBeingBuilt(state);
+  }
   reachSchemaGraphDepth(state, state.depth + record.height);
-  const frame = state.frames.at(-1);
-  if (frame === undefined || record.owner === frame.zodFrame) return;
-  frame.extraNodes += record.nodes;
-  frame.extraOwnKeys += record.ownKeys;
-  for (const child of record.children) frame.zodChildren.push(child);
+  frame?.values.push(hardened);
 }
 
 /**
- * A hardened subgraph built by an earlier graph. Every value in it that this
- * graph has not counted yet is charged its recorded own nodes and own keys,
- * which is what a fresh traversal of the same subgraph would have charged,
- * and its height is checked at the depth it is reached. The walk follows the
- * recorded links only; it does not touch the frozen nodes.
+ * A hardened subgraph built by an earlier graph. Every node in it that this
+ * graph has not counted yet is charged its recorded nodes and own keys,
+ * which covers everything a fresh traversal of it would have charged, and its
+ * height is checked at the depth it is reached. The walk follows the recorded
+ * links only; it does not touch the frozen nodes.
  */
 function chargeReusedSubgraph(state: SchemaGraphState, hardened: object): void {
   const record = HARDENED_SUBGRAPHS.get(hardened);
@@ -952,9 +1028,9 @@ function chargeReusedSubgraph(state: SchemaGraphState, hardened: object): void {
   }
   const parent = state.frames.at(-1);
   if (parent) {
-    parent.zodNodes += nodes;
-    parent.zodOwnKeys += ownKeys;
-    parent.zodChildren.push(hardened);
+    parent.childNodes += nodes;
+    parent.childOwnKeys += ownKeys;
+    parent.zods.push(hardened);
   }
 }
 

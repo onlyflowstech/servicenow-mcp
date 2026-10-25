@@ -683,6 +683,103 @@ describe("tool-module contract", () => {
       );
     });
 
+    // Graph-size refusal for a reused shape: either message is a refusal, and
+    // which one depends on whether the cycle or the budget is met first.
+    const REFUSED = /contains a cycle|traversal budget exceeded/u;
+
+    // X's metadata holds W and Y; W points back at X; Y's metadata holds W.
+    const selfBoundValue = (hidden: z.ZodType) => {
+      const value: Record<string, unknown> = {};
+      const reacher = z.string().meta({ value });
+      const node = z.number().meta({ value, reacher, hidden });
+      value.node = node;
+      return { node, reacher };
+    };
+
+    it("refuses another node reaching a value bound to its node's cycle, issued first", () => {
+      const parts = [selfBoundValue(wide(HALF_BUDGET_FIELDS)), selfBoundValue(wide(HALF_BUDGET_FIELDS))];
+      for (const { node } of parts) {
+        expect(() => withRequiredProfile(z.object({ node }))).toThrow(/contains a cycle/u);
+      }
+      expect(() =>
+        withRequiredProfile(z.object({ r0: parts[0]!.reacher, r1: parts[1]!.reacher }))
+      ).toThrow(REFUSED);
+      const fresh = [selfBoundValue(wide(HALF_BUDGET_FIELDS)), selfBoundValue(wide(HALF_BUDGET_FIELDS))];
+      expect(() =>
+        withRequiredProfile(z.object({ r0: fresh[0]!.reacher, r1: fresh[1]!.reacher }))
+      ).toThrow(REFUSED);
+    });
+
+    it("refuses the depth form of a value bound to its node's cycle", () => {
+      const { node, reacher } = selfBoundValue(nest(z.string(), 30));
+      expect(() => withRequiredProfile(z.object({ node }))).toThrow(/contains a cycle/u);
+      expect(() => withRequiredProfile(z.object({ deeper: nest(reacher, 30) }))).toThrow(REFUSED);
+      const control = selfBoundValue(nest(z.string(), 30));
+      expect(() => withRequiredProfile(z.object({ deeper: nest(control.reacher, 30) }))).toThrow(
+        REFUSED
+      );
+    });
+
+    it("refuses a later sibling reaching a value bound to a finished node's cycle", () => {
+      const sibling = (hidden: z.ZodType) => {
+        const value: Record<string, unknown> = {};
+        const node = z.number().meta({ value, hidden });
+        value.node = node;
+        return { node, later: z.string().meta({ value }) };
+      };
+      const parts = [sibling(wide(HALF_BUDGET_FIELDS)), sibling(wide(HALF_BUDGET_FIELDS))];
+      for (const { node, later } of parts) {
+        expect(() => withRequiredProfile(z.object({ node, later }))).toThrow(/contains a cycle/u);
+      }
+      expect(() =>
+        withRequiredProfile(z.object({ l0: parts[0]!.later, l1: parts[1]!.later }))
+      ).toThrow(REFUSED);
+      const fresh = [sibling(wide(HALF_BUDGET_FIELDS)), sibling(wide(HALF_BUDGET_FIELDS))];
+      expect(() =>
+        withRequiredProfile(z.object({ l0: fresh[0]!.later, l1: fresh[1]!.later }))
+      ).toThrow(REFUSED);
+    });
+
+    it("charges a node for a shared value whose contents another node reached first", () => {
+      // No cycle: X's metadata holds U and V, and V holds U, so U is reached
+      // twice within X's build. Y, in the same graph, holds V. Y's record must
+      // still include U and what U holds.
+      const shared = (hidden: z.ZodType) => {
+        const inner = { hidden };
+        const outer = { inner };
+        return {
+          first: z.number().meta({ inner, outer }),
+          second: z.string().meta({ outer }),
+        };
+      };
+      const parts = [shared(wide(HALF_BUDGET_FIELDS)), shared(wide(HALF_BUDGET_FIELDS))];
+      for (const { first, second } of parts) {
+        // A legitimate DAG: accepted.
+        withRequiredProfile(z.object({ first, second }));
+      }
+      expect(() =>
+        withRequiredProfile(z.object({ s0: parts[0]!.second, s1: parts[1]!.second }))
+      ).toThrow(/traversal budget exceeded/u);
+      const fresh = [shared(wide(HALF_BUDGET_FIELDS)), shared(wide(HALF_BUDGET_FIELDS))];
+      expect(() =>
+        withRequiredProfile(z.object({ s0: fresh[0]!.second, s1: fresh[1]!.second }))
+      ).toThrow(/traversal budget exceeded/u);
+    });
+
+    it("accepts legitimate shared metadata values and shared nodes, issued twice", () => {
+      // A DAG through metadata: X holds W and Y, Y holds W, nothing points back.
+      const value = { note: "shared" };
+      const reacher = z.string().meta({ value });
+      const node = z.number().meta({ value, reacher });
+      expect(() => withRequiredProfile(z.object({ node }))).not.toThrow();
+      expect(() => withRequiredProfile(z.object({ node, reacher }))).not.toThrow();
+      // A node reached both directly and through a sibling's metadata.
+      const a = z.string();
+      const parent = z.object({ a, b: z.number().meta({ a }) });
+      expect(() => withRequiredProfile(z.object({ parent }))).not.toThrow();
+      expect(() => withRequiredProfile(z.object({ again: parent }))).not.toThrow();
+    });
+
     it("lets a node reach itself through its own metadata and charges what it holds", () => {
       expect(() =>
         withRequiredProfile(z.object({ small: metadataCycle(wide(3)).closing }))
