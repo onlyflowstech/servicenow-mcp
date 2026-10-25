@@ -102,6 +102,8 @@ const HARDENED_SUBGRAPHS = new WeakMap<object, SubgraphRecord>();
 interface SubgraphFrame {
   /** The nearest frame building a zod node: itself, or an enclosing one. */
   zodFrame: SubgraphFrame | undefined;
+  /** On a zod frame, the node being built, once it exists. */
+  node: object | undefined;
   /** Charged by zod nodes built or reused below this value. */
   zodNodes: number;
   zodOwnKeys: number;
@@ -188,6 +190,8 @@ interface SchemaGraphState {
   readonly frames: SubgraphFrame[];
   /** Folded charges of this graph's cloned non-zod values. */
   readonly local: WeakMap<object, LocalSubgraphRecord>;
+  /** Source non-zod values whose clone is still being built, and its frame. */
+  readonly building: WeakMap<object, SubgraphFrame>;
   nodes: number;
   ownKeys: number;
 }
@@ -635,6 +639,7 @@ function hardenSchemaGraph<TSchema extends z.ZodType>(schema: TSchema): TSchema 
     maxDepth: 0,
     frames: [],
     local: new WeakMap<object, LocalSubgraphRecord>(),
+    building: new WeakMap<object, SubgraphFrame>(),
     nodes: 0,
     ownKeys: 0,
   };
@@ -710,6 +715,9 @@ function rebuildZodNode(
     throw new TypeError("tool schema graph definition must be a data property");
   }
   const sourceDefinition = definitionDescriptor.value as object;
+  // measureSubgraph pushed this node's frame; the only in-progress node a
+  // build may reach again is the one recorded here (see noteSeenSubgraph).
+  const frame = state.frames.at(-1) as SubgraphFrame;
 
   enterSchemaGraphValue(state, node);
   try {
@@ -720,6 +728,7 @@ function rebuildZodNode(
       // place instead: a reference kept to it, or to its definition, can no
       // longer change it.
       state.seen.set(node, node);
+      frame.node = node;
       sealCheckDefinitionInPlace(sourceDefinition, state);
       sealRebuiltZodNode(node, state);
       HARDENED_SCHEMA_NODES.add(node);
@@ -728,9 +737,10 @@ function rebuildZodNode(
     if (ownDataValue(sourceDefinition, "type") === "lazy") {
       // zod 4 resolves a lazy target by writing it onto the definition and
       // the node on first use, which a frozen graph cannot allow. A lazy node
-      // is also the only way to build a cycle (shape getters are refused as
-      // accessors). No tool schema is recursive, so lazy nodes are refused
-      // rather than half supported.
+      // is also the way to build a recursive schema (shape getters are
+      // refused as accessors; a cycle closed through metadata is refused by
+      // noteSeenSubgraph and noteSeenValue). No tool schema is recursive, so
+      // lazy nodes are refused rather than half supported.
       throw new TypeError("tool schema graph does not support lazy (recursive) schemas");
     }
     const definition = cloneSchemaDefinition(sourceDefinition, state);
@@ -741,6 +751,7 @@ function rebuildZodNode(
     state.seen.set(node, rebuilt);
     // A rebuilt node reached again through its own members is itself.
     state.seen.set(rebuilt, rebuilt);
+    frame.node = rebuilt;
     sealSchemaDefinition(definition, assigned, state);
     copySchemaMetadata(node, rebuilt, state);
     sealRebuiltZodNode(rebuilt, state);
@@ -763,7 +774,9 @@ function rebuildZodNode(
 function measureSubgraph<T extends object>(
   state: SchemaGraphState,
   build: () => T,
-  isZodNode: boolean
+  isZodNode: boolean,
+  /** For a non-zod value, the source being cloned (tracked while in progress). */
+  source?: object
 ): T {
   const startNodes = state.nodes;
   const startOwnKeys = state.ownKeys;
@@ -772,6 +785,7 @@ function measureSubgraph<T extends object>(
   const parent = state.frames.at(-1);
   const frame: SubgraphFrame = {
     zodFrame: parent?.zodFrame,
+    node: undefined,
     zodNodes: 0,
     zodOwnKeys: 0,
     extraNodes: 0,
@@ -781,12 +795,14 @@ function measureSubgraph<T extends object>(
   if (isZodNode) frame.zodFrame = frame;
   state.maxDepth = startDepth;
   state.frames.push(frame);
+  if (source !== undefined) state.building.set(source, frame);
   let hardened: T;
   let height: number;
   try {
     hardened = build();
     height = state.maxDepth - startDepth;
   } finally {
+    if (source !== undefined) state.building.delete(source);
     state.frames.pop();
     state.maxDepth = Math.max(outerMaxDepth, state.maxDepth);
   }
@@ -837,16 +853,36 @@ function reachSchemaGraphDepth(state: SchemaGraphState, depth: number): void {
 }
 
 /**
+ * The error for a graph that reaches back into something still being built
+ * by another node. Metadata is attached after a node is constructed, so it
+ * can point back at an enclosing value or node and close a cycle even though
+ * lazy nodes are refused and accessors are not followed. The node closing the
+ * cycle would be recorded without what lies behind it, and a later graph
+ * reusing it would be charged too little, so such graphs are refused.
+ */
+function schemaGraphCycle(): TypeError {
+  return new TypeError("tool schema graph contains a cycle");
+}
+
+/** The node the innermost zod frame is building, if it exists yet. */
+function nodeBeingBuilt(state: SchemaGraphState): object | undefined {
+  return state.frames.at(-1)?.zodFrame?.node;
+}
+
+/**
  * A zod node reached again within the graph that already counted it: no new
  * charge, as before, but its height is checked at this depth too and it is
  * linked as a child of the node being built. A node with no record is still
- * being built (a node reached through its own members) and is counted by
- * that build. Schema graphs have no other cycles: lazy nodes are refused and
- * accessors are not followed.
+ * being built; reaching it is allowed only from within its own build (a node
+ * reached through its own members), which is counted by that build. Reaching
+ * any other node still being built is a cycle and is refused.
  */
 function noteSeenSubgraph(state: SchemaGraphState, hardened: object): void {
   const record = HARDENED_SUBGRAPHS.get(hardened);
-  if (record === undefined) return;
+  if (record === undefined) {
+    if (hardened !== nodeBeingBuilt(state)) throw schemaGraphCycle();
+    return;
+  }
   reachSchemaGraphDepth(state, state.depth + record.height);
   state.frames.at(-1)?.zodChildren.push(hardened);
 }
@@ -856,11 +892,20 @@ function noteSeenSubgraph(state: SchemaGraphState, hardened: object): void {
  * the graph and its height is checked at this depth. When another zod node
  * cloned it first, its folded charge and its zod nodes are added to the
  * current node's record as well, so reusing the current node without that
- * other node still pays for it.
+ * other node still pays for it. A value still being built may be reached
+ * again only from within the same zod node's build; reaching it from another
+ * node is a cycle and is refused.
  */
-function noteSeenValue(state: SchemaGraphState, hardened: object): void {
+function noteSeenValue(state: SchemaGraphState, source: object, hardened: object): void {
   const record = state.local.get(hardened);
-  if (record === undefined) return;
+  if (record === undefined) {
+    const building = state.building.get(source);
+    if (building === undefined) {
+      throw new TypeError("tool schema graph reuses a value with no recorded budget");
+    }
+    if (building.zodFrame !== state.frames.at(-1)?.zodFrame) throw schemaGraphCycle();
+    return;
+  }
   reachSchemaGraphDepth(state, state.depth + record.height);
   const frame = state.frames.at(-1);
   if (frame === undefined || record.owner === frame.zodFrame) return;
@@ -1249,10 +1294,10 @@ function cloneAndHardenGraphValue(
   if (zodNodeConstructor(value)) return hardenZodNode(value as object, state);
   const existing = state.seen.get(value);
   if (existing) {
-    noteSeenValue(state, existing as object);
+    noteSeenValue(state, value as object, existing as object);
     return existing;
   }
-  return measureSubgraph(state, () => cloneFreshGraphValue(value as object, state), false);
+  return measureSubgraph(state, () => cloneFreshGraphValue(value as object, state), false, value as object);
 }
 
 /** Clone and freeze one non-zod value not yet seen in this graph. */

@@ -20,6 +20,7 @@ import {
   type ToolModuleContract,
   type ToolModuleRequirements,
 } from "../src/tools/index.js";
+import { snapshotIssuedToolSchema } from "../src/tools/tool-module.js";
 
 const definition = {
   name: "sn_contract_fixture",
@@ -628,6 +629,83 @@ describe("tool-module contract", () => {
       const twice = withRequiredProfile(z.object({ one: half, two: half }));
       expect(twice.shape.one).toBe(first.shape.half);
       expect(twice.shape.two).toBe(first.shape.half);
+    });
+
+    // Metadata is attached after a node is built, so it can close a cycle:
+    // the ancestor's metadata holds `value`, `value` holds the closing node,
+    // and the closing node's metadata points back at `value` while `value` is
+    // still being built. Recording the closing node then would leave out
+    // everything `value` holds, and a later graph reusing it would be
+    // charged too little.
+    const metadataCycle = (hidden: z.ZodType) => {
+      const value: Record<string, unknown> = {};
+      const closing = z.string().meta({ value });
+      value.closing = closing;
+      value.hidden = hidden;
+      const ancestor = z.number().meta({ value });
+      return { ancestor, closing };
+    };
+
+    it("refuses a cycle closed through metadata, so no under-charged node is cached", () => {
+      const parts = [metadataCycle(wide(HALF_BUDGET_FIELDS)), metadataCycle(wide(HALF_BUDGET_FIELDS))];
+      for (const { ancestor } of parts) {
+        expect(() => withRequiredProfile(z.object({ ancestor }))).toThrow(/contains a cycle/u);
+      }
+      // Each closing node reaches its hidden half through its own metadata,
+      // so a graph holding both closing nodes is charged for both halves.
+      expect(() =>
+        withRequiredProfile(z.object({ c0: parts[0]!.closing, c1: parts[1]!.closing }))
+      ).toThrow(/traversal budget exceeded/u);
+      // Fresh control: the same shape, never issued before.
+      const fresh = [metadataCycle(wide(HALF_BUDGET_FIELDS)), metadataCycle(wide(HALF_BUDGET_FIELDS))];
+      expect(() =>
+        withRequiredProfile(z.object({ c0: fresh[0]!.closing, c1: fresh[1]!.closing }))
+      ).toThrow(/traversal budget exceeded/u);
+    });
+
+    it("refuses a cycle closed through metadata between two zod nodes", () => {
+      const backToAncestor: Record<string, unknown> = {};
+      const closing = z.string().meta(backToAncestor);
+      const ancestor = z.number().meta({ closing });
+      backToAncestor.ancestor = ancestor;
+      expect(() => withRequiredProfile(z.object({ ancestor }))).toThrow(/contains a cycle/u);
+    });
+
+    it("refuses the depth form of a metadata cycle, as a fresh build does", () => {
+      const { ancestor, closing } = metadataCycle(nest(z.string(), 30));
+      expect(() => withRequiredProfile(z.object({ ancestor }))).toThrow(/contains a cycle/u);
+      expect(() => withRequiredProfile(z.object({ deeper: nest(closing, 30) }))).toThrow(
+        /traversal budget exceeded/u
+      );
+      const control = metadataCycle(nest(z.string(), 30));
+      expect(() => withRequiredProfile(z.object({ deeper: nest(control.closing, 30) }))).toThrow(
+        /traversal budget exceeded/u
+      );
+    });
+
+    it("lets a node reach itself through its own metadata and charges what it holds", () => {
+      expect(() =>
+        withRequiredProfile(z.object({ small: metadataCycle(wide(3)).closing }))
+      ).not.toThrow();
+      expect(() =>
+        withRequiredProfile(z.object({ large: metadataCycle(wide(800)).closing }))
+      ).toThrow(/traversal budget exceeded/u);
+    });
+
+    it("re-issues every production schema at registration within the budgets", () => {
+      for (const tool of toolModules) {
+        expect(() => snapshotIssuedToolSchema(tool.inputSchema, "input")).not.toThrow();
+        expect(() => snapshotIssuedToolSchema(tool.outputSchema, "output")).not.toThrow();
+      }
+    });
+
+    it("re-issues a graph near the node budget at registration", () => {
+      // Registration re-issues each schema from its records, which can charge
+      // up to about one node per field more than a fresh issue (about 7%). A
+      // graph at about 85% of the node budget still re-issues; the largest
+      // production graph is about 12%.
+      const issued = withRequiredProfile(z.object({ near: wide(600) }));
+      expect(() => snapshotIssuedToolSchema(issued, "input")).not.toThrow();
     });
 
     it("checks a reused subgraph's height at the depth it is reached", () => {
