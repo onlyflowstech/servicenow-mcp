@@ -75,7 +75,7 @@ const LONE_SURROGATES = /[\uD800-\uDFFF]/gu;
 const REDACTION_REASONS: ReadonlySet<string> = new Set(CONTRACT_REDACTION_REASONS);
 const SOURCES: ReadonlySet<string> = new Set(FLOW_SOURCE_NAMES);
 const LIMITS: ReadonlySet<string> = new Set(FLOW_LIMIT_HITS);
-const NOT_EXPANDED = new Set(["depth", "cycle", "limit", "denied", "not_found", "too_large"]);
+const NOT_EXPANDED = new Set(["depth", "cycle", "limit", "denied", "not_found", "too_large", "timeout"]);
 const WARNING_TEXT: Readonly<Record<FlowWarningCode, string>> = Object.freeze({
   subflow_cycle: "A subflow call cycle was found and not expanded again.",
   subflow_not_found: "A called subflow could not be found.",
@@ -91,6 +91,7 @@ const WARNING_TEXT: Readonly<Record<FlowWarningCode, string>> = Object.freeze({
     "Input values were left out of a flow too large to read with them; it was read as with include_inputs=false.",
   flow_too_large: "The flow is too large to read, even without input values; only its record is shown.",
   input_values_incomplete: "Some older (V1) steps store more values than were read; their inputs may be incomplete.",
+  subflow_timeout: "A called subflow was not expanded because reading it timed out; retrying may help.",
 });
 
 const KNOWN_WARNINGS: ReadonlySet<string> = new Set(FLOW_WARNING_CODES);

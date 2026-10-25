@@ -75,8 +75,11 @@ export const FLOW_GRAPH_LADDER_TEXT_CHARS = 200;
 
 /** A subflow the module could not load. */
 export interface FlowSubflowUnavailable {
-  /** `too_large`: its load did not fit one response scope, even without inputs. */
-  unavailable: "denied" | "not_found" | "too_large";
+  /**
+   * `too_large`: its load did not fit one response scope, even without
+   * inputs. `timeout`: a read timed out.
+   */
+  unavailable: "denied" | "not_found" | "too_large" | "timeout";
 }
 
 export interface FlowGraphBuildInput {
@@ -662,7 +665,9 @@ class GraphBuilder {
           ? "subflow_denied"
           : loaded.unavailable === "too_large"
             ? "subflow_too_large"
-            : "subflow_not_found"
+            : loaded.unavailable === "timeout"
+              ? "subflow_timeout"
+              : "subflow_not_found"
       );
       return;
     }
