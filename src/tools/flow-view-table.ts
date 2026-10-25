@@ -125,13 +125,15 @@ export const FLOW_LABEL_CACHE_MAX_ENTRIES = 1_000;
 /** Longest label_cache JSON text parsed (plain JSON, not gzip). */
 export const FLOW_LABEL_CACHE_MAX_CHARS = FLOW_VIEW_LIMITS.MAX_GZIP_OUTPUT_BYTES;
 /**
- * Share of a load's 1 MiB response scope that extra pages of V1 values may
- * use. The first page of every chunk is always read; further pages stop
- * here and report `input_values_incomplete`, so a flow with very many V1
- * values keeps the values it has instead of overflowing its scope and
- * losing all of them to the retry without inputs.
+ * Of a load's 1 MiB response scope, the most that its wave-1 reads plus its
+ * V1 value reads may use; the rest is left for the `var_dictionary` reads
+ * that follow and for estimate error. V1 value reads (every page of every
+ * chunk after the first) stop when the next one, assumed as large as the
+ * last, would pass it, and report `input_values_incomplete`. A flow with
+ * very many V1 values then keeps the values it read instead of overflowing
+ * its scope and losing all of them to the retry without inputs.
  */
-const V1_VALUE_PAGING_BYTES = 256 * 1024;
+const V1_VALUE_SCOPE_BYTES = 896 * 1024;
 
 /** Name of the input that marks a blob that could not be decoded. */
 const DECODE_FAILED_NAMES = Object.freeze({
@@ -244,7 +246,7 @@ export async function loadFlowFromTables(
     limits: new Set(),
     dropped: 0,
     blobs: new Map(),
-    v1ValueBytes: 0,
+    readBytes: 0,
   };
   const knownLabels = typeof options?.label_cache === "string" ? options.label_cache : undefined;
 
@@ -266,6 +268,10 @@ export async function loadFlowFromTables(
     ),
     readVariableTables(load),
   ]);
+
+  load.readBytes =
+    Buffer.byteLength(labelText ?? "") +
+    [...triggerReads, ...stepReads, ...variableReads].reduce((sum, read) => sum + (read?.bytes ?? 0), 0);
 
   // 0. Pill labels.
   const labelCache = load.includeInputs ? parseLabelCache(load, labelText) : [];
@@ -428,8 +434,13 @@ interface LoadState {
   dropped: number;
   /** Raw V2 value blobs by `<table>:<sys_id>`, read without display values. */
   readonly blobs: Map<string, string>;
-  /** Bytes of V1 value rows read so far; extra pages stop at V1_VALUE_PAGING_BYTES. */
-  v1ValueBytes: number;
+  /**
+   * Estimated response bytes of this load's wave-1 reads, then of its V1
+   * value reads (JSON of each response's rows); see V1_VALUE_SCOPE_BYTES.
+   * Concurrent wave-2 reads are not counted, so the result stays
+   * deterministic.
+   */
+  readBytes: number;
 }
 
 interface RawStep {
@@ -572,6 +583,8 @@ function isMissingTableError(error: unknown): boolean {
 interface ReadResult {
   rows: Row[];
   truncated: boolean;
+  /** Estimated response size: the JSON of the response's result rows. */
+  bytes: number;
 }
 
 /**
@@ -599,18 +612,21 @@ async function readTable(
     });
   } catch (error) {
     if (options.missingIsEmpty === true && isMissingTableError(error)) {
-      return { rows: [], truncated: false };
+      return { rows: [], truncated: false, bytes: 0 };
     }
     throw error;
   }
   const result = ownData(response, "result");
   if (!Array.isArray(result)) throw createToolError("upstream", "do_not_retry");
+  const bytes = Buffer.byteLength(JSON.stringify(result));
   const filtered = filterReadableRecord(result, fields.split(","));
   if (!Array.isArray(filtered)) throw createToolError("upstream", "do_not_retry");
   const rows = filtered.filter(
     (row): row is Row => typeof row === "object" && row !== null && !Array.isArray(row)
   );
-  return rows.length > maxRows ? { rows: rows.slice(0, maxRows), truncated: true } : { rows, truncated: false };
+  return rows.length > maxRows
+    ? { rows: rows.slice(0, maxRows), truncated: true, bytes }
+    : { rows, truncated: false, bytes };
 }
 
 function chunks<T>(items: readonly T[], size: number): T[][] {
@@ -1114,16 +1130,21 @@ async function readV1Values(
   const tableOf = new Map(documents.map((document) => [document.sysId, document.table]));
   const fields = fieldsFor(load.plan, "sys_variable_value", { values: true });
   const values: { key: string; variable: string; row: Row }[] = [];
+  let lastReadBytes: number | undefined;
+  let budgetSpent = false;
   for (const chunk of chunks([...tableOf.keys()], FLOW_VIEW_LIMITS.MAX_SYS_ID_IN_CHUNK)) {
+    if (budgetSpent) break;
     const keys = new Set(chunk);
     const rows: Row[] = [];
     // Page past the row cap, up to what MAX_INPUTS_PER_NODE values per step
-    // can use; anything beyond that is reported, never dropped silently.
+    // can use, and while the scope allows; anything beyond that is
+    // reported, never dropped silently.
     const pages = Math.max(1, Math.ceil((chunk.length * FLOW_VIEW_LIMITS.MAX_INPUTS_PER_NODE) / FLOW_TABLE_ROW_LIMIT));
     for (let page = 0; page < pages; page += 1) {
-      if (page > 0 && load.v1ValueBytes >= V1_VALUE_PAGING_BYTES) {
+      if (lastReadBytes !== undefined && load.readBytes + lastReadBytes > V1_VALUE_SCOPE_BYTES) {
         load.limits.add("rows_per_table");
         load.warnings.add("input_values_incomplete");
+        budgetSpent = true;
         break;
       }
       const read = await readTable(
@@ -1134,7 +1155,8 @@ async function readV1Values(
         { offset: page * FLOW_TABLE_ROW_LIMIT }
       );
       rows.push(...read.rows);
-      load.v1ValueBytes += Buffer.byteLength(JSON.stringify(read.rows));
+      load.readBytes += read.bytes;
+      lastReadBytes = read.bytes;
       if (!read.truncated) break;
       if (page === pages - 1) {
         load.limits.add("rows_per_table");

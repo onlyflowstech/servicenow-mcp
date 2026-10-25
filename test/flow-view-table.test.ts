@@ -95,6 +95,8 @@ const FIELDS = {
 interface Call {
   path: string;
   params: Record<string, string>;
+  /** Size of the JSON response returned. */
+  bytes?: number;
 }
 
 function unsupported(): never {
@@ -127,7 +129,8 @@ function fakeInstance(
   const flowRows = source.flow?.rows ?? [];
   const ops = Object.freeze({
     async get(path: string, params: Record<string, string> = {}) {
-      calls.push({ path, params: { ...params } });
+      const call: Call = { path, params: { ...params } };
+      calls.push(call);
       const table = path.replace("/api/now/table/", "");
       if (options.errors && Object.hasOwn(options.errors, table)) throw options.errors[table];
       const key = table === "sys_hub_flow" ? "flow" : table === "sys_variable_value" ? "variable_value" : table;
@@ -171,7 +174,9 @@ function fakeInstance(
         )
       );
       const offset = Number(params.sysparm_offset ?? "0");
-      return { result: projected.slice(offset, offset + Number(params.sysparm_limit ?? "10000")) };
+      const response = { result: projected.slice(offset, offset + Number(params.sysparm_limit ?? "10000")) };
+      call.bytes = Buffer.byteLength(JSON.stringify(response));
+      return response;
     },
     getWithMeta: unsupported,
     post: unsupported,
@@ -632,7 +637,7 @@ describe("loadFlowFromTables reads", () => {
     });
     // Wave 1 (issued together, in this order), then wave 2. Blob columns are
     // never in the structural reads; F6a has no V2 rows, so no blob reads.
-    expect(calls).toEqual([
+    expect(calls.map(({ path, params }) => ({ path, params }))).toEqual([
       read("sys_hub_flow", `sys_id=${flowId}`, "sys_id,label_cache", "2", true),
       read("sys_hub_trigger_instance", `flow=${flowId}^ORDERBYsys_id`, FIELDS.trigger),
       read("sys_hub_trigger_instance_v2", `flow=${flowId}^ORDERBYsys_id`, FIELDS.trigger),
@@ -843,28 +848,63 @@ describe("loadFlowFromTables reads", () => {
     expect(definition.limits_hit).toContain("rows_per_table");
   });
 
-  it("stops paging V1 values at a share of the scope and keeps the values already read", async () => {
-    // 200 steps x 10 values of 400 characters: each 500-row page is ~0.5 MB.
-    const actions = Array.from({ length: 200 }, (_, index) => actionRow(index + 1));
+  /** V1 action steps with `perStep` stored values of `chars` characters each. */
+  function v1Flow(steps: number, perStep: number, chars: number) {
+    const actions = Array.from({ length: steps }, (_, index) => actionRow(index + 1));
     const values = actions.flatMap((row, step) =>
-      Array.from({ length: 10 }, (_, n) => ({
+      Array.from({ length: perStep }, (_, n) => ({
         sys_id: cell(hid("9", step * 100 + n + 1)),
         document: cell("sys_hub_action_instance"),
         document_key: cell(row.sys_id!.value),
         variable: cell(hid("7", n + 1), `Field ${n + 1}`),
         order: cell(String(n + 1)),
-        value: cell("w".repeat(400)),
+        value: cell("w".repeat(chars)),
       }))
     );
-    const fake = fakeInstance(handCapture({ sys_hub_action_instance: actions }, values));
+    return handCapture({ sys_hub_action_instance: actions }, values);
+  }
+  const loadBytes = (calls: readonly Call[]) => calls.reduce((sum, call) => sum + (call.bytes ?? 0), 0);
+
+  it("stops V1 value reads across chunks before they would overflow the scope, keeping what was read", async () => {
+    // 200 steps x 10 values of 400 characters: each 500-row page is ~0.5 MB.
+    const fake = fakeInstance(v1Flow(200, 10, 400));
     const definition = await loadFlowFromTables(fake.ops, HAND_HEADER, OPEN, { include_inputs: true });
     const valueCalls = fake.calls.filter((call) => call.path.endsWith("/sys_variable_value"));
-    // One page per 100-document chunk; no further pages once the share is used.
-    expect(valueCalls.map((call) => call.params.sysparm_offset)).toEqual([undefined, undefined]);
+    // The second chunk's first page would pass the scope's share: not read.
+    expect(valueCalls).toHaveLength(1);
+    expect(definition.warnings).toContain("input_values_incomplete");
+    expect(definition.limits_hit).toContain("rows_per_table");
+    const withInputs = definition.steps.filter((step) => step.inputs.length > 0);
+    expect(withInputs.length).toBe(50);
+    expect(withInputs.every((step) => step.inputs.length === 10)).toBe(true);
+    expect(loadBytes(fake.calls)).toBeLessThan(1_048_576);
+  });
+
+  it("keeps many V1 steps' values within the scope instead of losing them all (500 steps x 5 values)", async () => {
+    const fake = fakeInstance(v1Flow(500, 5, 60));
+    const definition = await loadFlowFromTables(fake.ops, HAND_HEADER, OPEN, { include_inputs: true });
+    const valueCalls = fake.calls.filter((call) => call.path.endsWith("/sys_variable_value"));
+    // Five 100-step chunks; reads stop before the scope would overflow.
+    expect(valueCalls.length).toBeGreaterThan(1);
+    expect(valueCalls.length).toBeLessThan(5);
     expect(definition.warnings).toContain("input_values_incomplete");
     const withInputs = definition.steps.filter((step) => step.inputs.length > 0);
-    expect(withInputs.length).toBe(100);
-    expect(withInputs.every((step) => step.inputs.length === 10)).toBe(true);
+    expect(withInputs.length).toBe(valueCalls.length * 100);
+    expect(withInputs.every((step) => step.inputs.length === 5)).toBe(true);
+    expect(loadBytes(fake.calls)).toBeLessThan(1_048_576);
+  });
+
+  it("pages V1 values while the scope has room (30 steps x 60 values)", async () => {
+    const fake = fakeInstance(v1Flow(30, 60, 60));
+    const definition = await loadFlowFromTables(fake.ops, HAND_HEADER, OPEN, { include_inputs: true });
+    const valueCalls = fake.calls.filter((call) => call.path.endsWith("/sys_variable_value"));
+    // 1,800 rows; three pages cover the 40 values a step can show for 25 steps.
+    expect(valueCalls.map((call) => call.params.sysparm_offset)).toEqual([undefined, "500", "1000"]);
+    const withInputs = definition.steps.filter((step) => step.inputs.length > 0);
+    expect(withInputs.length).toBe(25);
+    expect(withInputs.every((step) => step.inputs.length === FLOW_VIEW_LIMITS.MAX_INPUTS_PER_NODE)).toBe(true);
+    expect(definition.warnings).toContain("input_values_incomplete");
+    expect(loadBytes(fake.calls)).toBeLessThan(1_048_576);
   });
 
   it("reads V2 value blobs raw, in a separate read, and only for tables with rows", async () => {

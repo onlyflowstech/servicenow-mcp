@@ -182,9 +182,10 @@ is marked on its call site and never fails the call. A subflow whose read
 timed out is marked as a timeout, so retrying the call may expand it.
 
 Older (V1) steps keep their values in `sys_variable_value`. Those reads are
-paged past the 500-row cap, up to 40 values per step (the most a step shows)
-and up to a quarter of the load's response scope; past either, the values
-already read are kept and the result says some inputs may be incomplete.
+paged past the 500-row cap, up to 40 values per step (the most a step shows),
+while the load's response scope has room for another read of the same size;
+past either, the values already read are kept and the result says some
+inputs may be incomplete.
 
 The result fits `max_response_bytes`. The graph gets about 55% of it and is
 reduced in fixed steps when needed: values cut to 500 then 120 characters,
