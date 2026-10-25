@@ -103,7 +103,8 @@ export type FlowLimitHit = "max_nodes" | "max_nesting" | "max_depth" | "max_subf
   | "edges" | "response_bytes";
 export type FlowWarningCode = "subflow_cycle" | "subflow_not_found"
   | "subflow_denied" | "orphan_steps" | "unknown_logic_type" | "items_dropped_invalid"
-  | "gzip_decode_failed" | "label_cache_unavailable" | "flow_version_unknown";
+  | "gzip_decode_failed" | "label_cache_unavailable" | "flow_version_unknown"
+  | "subflow_too_large" | "inputs_omitted_too_large" | "flow_too_large" | "input_values_incomplete";
 
 /** Raw instance text after policy, redaction, pill relabelling and truncation. NOT markdown-escaped. */
 export interface FlowText { text: string | null; redacted?: RedactionReason; original_length?: number }
@@ -138,7 +139,7 @@ export interface FlowNode {
   title: FlowText; annotation: FlowText; condition?: FlowText;
   inputs?: FlowInputValue[];
   subflow?: { flow_sys_id: string | null; name: FlowText; expanded_index?: number;
-              not_expanded?: "depth" | "cycle" | "limit" | "denied" | "not_found" };
+              not_expanded?: "depth" | "cycle" | "limit" | "denied" | "not_found" | "too_large" };
   ref?: FlowRecordRef;
   omitted_steps?: number;        // only for kind "more"
 }
@@ -269,6 +270,7 @@ export const FLOW_WARNING_CODES = enumValues<FlowWarningCode>()([
   "subflow_cycle", "subflow_not_found",
   "subflow_denied", "orphan_steps", "unknown_logic_type", "items_dropped_invalid",
   "gzip_decode_failed", "label_cache_unavailable", "flow_version_unknown",
+  "subflow_too_large", "inputs_omitted_too_large", "flow_too_large", "input_values_incomplete",
 ]);
 export const FLOW_VIEW_FORMATS = Object.freeze(["both", "mermaid", "outline"] as const);
 
@@ -692,7 +694,7 @@ export const flowNodeSchema = z
         flow_sys_id: serviceNowSysIdSchema.nullable(),
         name: flowTextSchema,
         expanded_index: z.number().int().min(1).max(L.MAX_SUBFLOW_EXPANSIONS).optional(),
-        not_expanded: z.enum(["depth", "cycle", "limit", "denied", "not_found"]).optional(),
+        not_expanded: z.enum(["depth", "cycle", "limit", "denied", "not_found", "too_large"]).optional(),
       })
       .strict()
       .optional(),

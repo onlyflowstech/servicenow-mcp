@@ -71,7 +71,8 @@ export const FLOW_GRAPH_BUDGET_STEPS = Object.freeze({
 
 /** A subflow the module could not load. */
 export interface FlowSubflowUnavailable {
-  unavailable: "denied" | "not_found";
+  /** `too_large`: its load did not fit one response scope, even without inputs. */
+  unavailable: "denied" | "not_found" | "too_large";
 }
 
 export interface FlowGraphBuildInput {
@@ -652,7 +653,13 @@ class GraphBuilder {
     const loaded = this.input.subflows?.get(target);
     if (loaded !== undefined && "unavailable" in loaded) {
       info.not_expanded = loaded.unavailable;
-      this.warnings.add(loaded.unavailable === "denied" ? "subflow_denied" : "subflow_not_found");
+      this.warnings.add(
+        loaded.unavailable === "denied"
+          ? "subflow_denied"
+          : loaded.unavailable === "too_large"
+            ? "subflow_too_large"
+            : "subflow_not_found"
+      );
       return;
     }
     if (loaded === undefined) {

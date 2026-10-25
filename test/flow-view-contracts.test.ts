@@ -383,7 +383,7 @@ describe("flowGraphSchema", () => {
     expect(parses(logic)).toBe(false);
 
     expect(FLOW_LIMIT_HITS).toHaveLength(11);
-    expect(FLOW_WARNING_CODES).toHaveLength(9);
+    expect(FLOW_WARNING_CODES).toHaveLength(13);
     expect(Object.isFrozen(FLOW_LIMIT_HITS)).toBe(true);
   });
 });
