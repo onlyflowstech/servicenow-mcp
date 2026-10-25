@@ -112,12 +112,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   match different records. The sample costs one extra read of at most 5
   records, addressed by the `sys_id`s the lookup already returned; if it
   fails or takes more than 5 seconds, the dry run still returns the count.
+  A target granted only `sn_batch` can now see up to 5 display values
+  (`number`, `name`, `short_description` or `title`, if readable) in a dry
+  run, where before it saw a count.
 - **Warning on risky grants.** `servicenow-mcp-setup grant` and the setup
-  wizard print a warning when a grant gives write access on role or approval
-  tables (`sys_user_has_role`, `sys_user_grmember`, `sys_group_has_role`,
-  `sys_user_role`, `sys_user_role_contains`, `sys_user_delegate`,
-  `sys_security_acl`, `sys_security_acl_role`, `sysapproval_approver`,
-  `sysapproval_group`) or through the `"*"` write wildcard. The grant is still
+  wizard print a warning when a grant gives write access on a
+  privilege-sensitive table: role, group, delegation, ACL and approval tables
+  (`sys_user_has_role`, `sys_user_grmember`, `sys_group_has_role`,
+  `sys_user_role`, `sysapproval_approver`, ...), script tables (`sys_script`,
+  `sys_script_include`, `sysauto_script`, ...), `sys_properties`, `sys_user`,
+  `sys_user_group` and authentication tables. The wizard also warns when you
+  choose the `"*"` write wildcard; `grant` rejects `"*"`. The grant is still
   allowed; `grant --json` carries the text in `warnings`.
 - **Journal fields through the generic write tools, on every table.**
   `sn_create`, `sn_update` and `sn_batch` accept `comments` and `work_notes` on

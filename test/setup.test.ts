@@ -2637,7 +2637,7 @@ describe("risky grant warning", () => {
     "sysapproval_approver",
   ])("warns on a write grant on %s and still grants it", async (table) => {
     const out = await grantOutput(["--read", table, "--write", table]);
-    expect(out).toContain("WARNING: this grant gives write access on role and approval tables");
+    expect(out).toContain("WARNING: this grant gives write access on privilege-sensitive tables");
     expect(out).toContain(table);
     expect(out).toContain("The grant is still allowed");
     expect(out).toContain("Granted table access on profile dev.");
@@ -2769,4 +2769,105 @@ describe("setup policy show", () => {
     await expect(show([])).rejects.toThrow(/--profile is required/u);
     await expect(show(["--profile", "nope"])).rejects.toThrow();
   });
+});
+
+describe("security review fixes in setup", () => {
+  let home: string;
+  let manager: ProfileManager;
+
+  beforeEach(() => {
+    home = newHome("sn-mcp-secfix-");
+    mkdirSync(join(home, ".servicenow-mcp"), { recursive: true, mode: 0o700 });
+    manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+  });
+
+  async function run(argv: readonly string[]): Promise<string> {
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv,
+      env: { HOME: home },
+      profileManager: manager,
+      writeStdout: (value) => io.out.push(value),
+    });
+    return io.out.join("");
+  }
+
+  const target = (table: string, tools: string[]) => ({
+    table,
+    kind: "canonical" as const,
+    tools,
+    closureComplete: true as const,
+    relatedTables: [table],
+  });
+
+  it("policy show sees a late-sorting write grant behind more than 100 read-only tables", async () => {
+    const readOnly = Array.from({ length: 120 }, (_, i) => `a_tbl_${String(i).padStart(3, "0")}`);
+    manager.addProfile("big", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+      tableAccess: {
+        readTables: [...readOnly, "sys_user_has_role"],
+        writeTables: ["sys_user_has_role"],
+        targets: [
+          ...readOnly.map((table) => target(table, ["sn_query"])),
+          target("sys_user_has_role", ["sn_query", "sn_create"]),
+        ],
+      },
+    });
+    const text = await run(["policy", "show", "--profile", "big"]);
+    expect(text).not.toContain("cannot write");
+    expect(text).toContain("WARNING: write access on privilege-sensitive tables: sys_user_has_role");
+    const json = JSON.parse(await run(["policy", "show", "--profile", "big", "--json"])) as {
+      policy: { can_write_anything: boolean; risky_write_tables: string[] };
+    };
+    expect(json.policy.can_write_anything).toBe(true);
+    expect(json.policy.risky_write_tables).toEqual(["sys_user_has_role"]);
+  });
+
+  it("policy show prints a bare origin, never a password in the configured URL", async () => {
+    // addProfile refuses such a URL, so write the file by hand, as an
+    // operator editing config.json could.
+    writeFileSync(
+      profileConfigPath(home),
+      JSON.stringify({
+        version: 2,
+        profiles: {
+          p: {
+            instance: "https://admin:canary-pw-123@dev00001.service-now.com",
+            authType: "basic",
+            username: "u",
+            credential: "env:SN_PASSWORD",
+            tableAccess: { readTables: ["incident"], targets: [target("incident", ["sn_query"])] },
+          },
+        },
+      }),
+      { mode: 0o600 }
+    );
+    manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+    const text = await run(["policy", "show", "--profile", "p"]);
+    const json = await run(["policy", "show", "--profile", "p", "--json"]);
+    for (const out of [text, json]) {
+      expect(out).not.toContain("canary-pw-123");
+      expect(out).toContain("https://dev00001.service-now.com");
+    }
+  });
+
+  it.each(["sys_script", "sysauto_script", "sys_properties", "sys_user"])(
+    "warns on a write grant on %s, and names the real profile, not a placeholder",
+    async (table) => {
+      manager.addProfile("dev", {
+        instance: "https://dev00001.service-now.com",
+        authType: "basic",
+        username: "u",
+        credential: "env:SN_PASSWORD",
+      });
+      const out = await run(["grant", "--profile", "dev", "--write", table, "--dry-run"]);
+      expect(out).toContain("WARNING: this grant gives write access on privilege-sensitive tables");
+      expect(out).toContain("policy show --profile dev");
+      expect(out).not.toContain("<name>");
+    }
+  );
 });

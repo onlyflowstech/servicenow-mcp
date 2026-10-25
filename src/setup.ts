@@ -498,9 +498,9 @@ async function runWizard(
 
     // 5. Table access. A profile without rules denies every call.
     const tableAccess = await askTableAccess(prompter, config, dependencies);
-    // Allowed, never blocked: role and approval tables are controlled by the
+    // Allowed, never blocked: privilege-sensitive tables are controlled by the
     // profile's own configuration. The operator just has to see it said.
-    const riskWarning = riskyGrantWarning(tableAccess.writeTables ?? []);
+    const riskWarning = riskyGrantWarning(tableAccess.writeTables ?? [], name);
     if (riskWarning !== undefined) prompter.note(`\n${riskWarning}`);
 
     // 6. One write, with the rules already attached — never a rules-less window.
@@ -1024,7 +1024,7 @@ function renderWizardSummary(
   checks: readonly Check[]
 ): string {
   const failed = checks.filter((check) => !check.ok).length;
-  const riskWarning = riskyGrantWarning(tableAccess.writeTables ?? []);
+  const riskWarning = riskyGrantWarning(tableAccess.writeTables ?? [], profile);
   const lines = [
     "",
     "Setup complete.",
@@ -1614,7 +1614,7 @@ function runGrant(
       ...(tableAccess.writeTables ?? []).filter((table) => !alreadyWritable.has(table)),
     ]),
   ];
-  const riskWarning = riskyGrantWarning(grantedWrites);
+  const riskWarning = riskyGrantWarning(grantedWrites, options.profile);
   const warnings = riskWarning === undefined ? {} : { warnings: [riskWarning.trim()] };
 
   if (options.dryRun) {
@@ -2807,8 +2807,8 @@ function renderPolicyHelp(): string {
     "Prints what the profile may do, from the same policy the server enforces:",
     "tables readable and writable with their tools, readable and writable fields,",
     "the explicit-listing fields, auth type, raw encoded-query reads, ATF grants,",
-    "and the sn_batch limits. Warns when write access reaches role or approval",
-    "tables. Never prints a secret, a key, or a credential reference, and never",
+    "and the sn_batch limits. Warns when write access reaches privilege-sensitive",
+    "tables (roles, approvals, scripts, users). Never prints a secret, a key, or a credential reference, and never",
     "touches the network.",
     "",
     "Options:",

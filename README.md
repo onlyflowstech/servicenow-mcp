@@ -140,8 +140,9 @@ servicenow-mcp-setup grant --profile dev --read incident,problem --write inciden
 | `servicenow-mcp-setup doctor` | Diagnose the install and print remedies |
 
 `grant` and the wizard print a warning, and still grant, when write access
-lands on a role or approval table such as `sys_user_has_role` or
-`sysapproval_approver`.
+lands on a privilege-sensitive table: role, group, approval, script,
+property, user or authentication tables such as `sys_user_has_role`,
+`sysapproval_approver` or `sys_script`.
 
 `--force` regenerates the owner/client identifiers but deliberately preserves
 `SN_PROFILE_ENCRYPTION_KEY`, which decrypts every credential envelope in
