@@ -169,18 +169,22 @@ server sends at most four requests to an instance at a time. Compressed input
 values are read in their own requests without display values, which would
 repeat them. The root flow's record lookup and its load each run in their own
 response scope, and each subflow (its record and its load) runs in its own;
-the subflows of one level load together.
+at most two subflows of one level load at a time, which keeps the request
+queue short. When a read fails the call, the reads started with it are
+cancelled rather than sent.
 
 When a flow is too large for its scope with its input values, it is read
 again without them, in a new scope while any remain, and the result carries
 the warning that input values were left out. A root flow too large even
 without input values is shown as its record only, with a warning; it does not
 fail the call. A subflow that cannot be loaded (missing, denied or too large)
-is marked on its call site and never fails the call.
+is marked on its call site and never fails the call. A subflow whose read
+timed out is marked as a timeout, so retrying the call may expand it.
 
 Older (V1) steps keep their values in `sys_variable_value`. Those reads are
-paged past the 500-row cap, up to 40 values per step (the most a step shows);
-if a step stores more, the result says its inputs may be incomplete.
+paged past the 500-row cap, up to 40 values per step (the most a step shows)
+and up to a quarter of the load's response scope; past either, the values
+already read are kept and the result says some inputs may be incomplete.
 
 The result fits `max_response_bytes`. The graph gets about 55% of it and is
 reduced in fixed steps when needed: values cut to 500 then 120 characters,
