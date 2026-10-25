@@ -124,6 +124,15 @@ export const FLOW_AMBIGUOUS_CANDIDATES = 5;
 export const FLOW_LABEL_CACHE_MAX_ENTRIES = 1_000;
 /** Longest label_cache JSON text parsed (plain JSON, not gzip). */
 export const FLOW_LABEL_CACHE_MAX_CHARS = FLOW_VIEW_LIMITS.MAX_GZIP_OUTPUT_BYTES;
+/**
+ * Share of a load's 1 MiB response scope that extra pages of V1 values may
+ * use. The first page of every chunk is always read; further pages stop
+ * here and report `input_values_incomplete`, so a flow with very many V1
+ * values keeps the values it has instead of overflowing its scope and
+ * losing all of them to the retry without inputs.
+ */
+const V1_VALUE_PAGING_BYTES = 256 * 1024;
+
 /** Name of the input that marks a blob that could not be decoded. */
 const DECODE_FAILED_NAMES = Object.freeze({
   values: "values",
@@ -235,6 +244,7 @@ export async function loadFlowFromTables(
     limits: new Set(),
     dropped: 0,
     blobs: new Map(),
+    v1ValueBytes: 0,
   };
   const knownLabels = typeof options?.label_cache === "string" ? options.label_cache : undefined;
 
@@ -418,6 +428,8 @@ interface LoadState {
   dropped: number;
   /** Raw V2 value blobs by `<table>:<sys_id>`, read without display values. */
   readonly blobs: Map<string, string>;
+  /** Bytes of V1 value rows read so far; extra pages stop at V1_VALUE_PAGING_BYTES. */
+  v1ValueBytes: number;
 }
 
 interface RawStep {
@@ -1109,6 +1121,11 @@ async function readV1Values(
     // can use; anything beyond that is reported, never dropped silently.
     const pages = Math.max(1, Math.ceil((chunk.length * FLOW_VIEW_LIMITS.MAX_INPUTS_PER_NODE) / FLOW_TABLE_ROW_LIMIT));
     for (let page = 0; page < pages; page += 1) {
+      if (page > 0 && load.v1ValueBytes >= V1_VALUE_PAGING_BYTES) {
+        load.limits.add("rows_per_table");
+        load.warnings.add("input_values_incomplete");
+        break;
+      }
       const read = await readTable(
         load.reader,
         "sys_variable_value",
@@ -1117,6 +1134,7 @@ async function readV1Values(
         { offset: page * FLOW_TABLE_ROW_LIMIT }
       );
       rows.push(...read.rows);
+      load.v1ValueBytes += Buffer.byteLength(JSON.stringify(read.rows));
       if (!read.truncated) break;
       if (page === pages - 1) {
         load.limits.add("rows_per_table");

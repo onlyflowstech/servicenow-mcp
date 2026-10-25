@@ -843,6 +843,30 @@ describe("loadFlowFromTables reads", () => {
     expect(definition.limits_hit).toContain("rows_per_table");
   });
 
+  it("stops paging V1 values at a share of the scope and keeps the values already read", async () => {
+    // 200 steps x 10 values of 400 characters: each 500-row page is ~0.5 MB.
+    const actions = Array.from({ length: 200 }, (_, index) => actionRow(index + 1));
+    const values = actions.flatMap((row, step) =>
+      Array.from({ length: 10 }, (_, n) => ({
+        sys_id: cell(hid("9", step * 100 + n + 1)),
+        document: cell("sys_hub_action_instance"),
+        document_key: cell(row.sys_id!.value),
+        variable: cell(hid("7", n + 1), `Field ${n + 1}`),
+        order: cell(String(n + 1)),
+        value: cell("w".repeat(400)),
+      }))
+    );
+    const fake = fakeInstance(handCapture({ sys_hub_action_instance: actions }, values));
+    const definition = await loadFlowFromTables(fake.ops, HAND_HEADER, OPEN, { include_inputs: true });
+    const valueCalls = fake.calls.filter((call) => call.path.endsWith("/sys_variable_value"));
+    // One page per 100-document chunk; no further pages once the share is used.
+    expect(valueCalls.map((call) => call.params.sysparm_offset)).toEqual([undefined, undefined]);
+    expect(definition.warnings).toContain("input_values_incomplete");
+    const withInputs = definition.steps.filter((step) => step.inputs.length > 0);
+    expect(withInputs.length).toBe(100);
+    expect(withInputs.every((step) => step.inputs.length === 10)).toBe(true);
+  });
+
   it("reads V2 value blobs raw, in a separate read, and only for tables with rows", async () => {
     const { calls, definition } = await load("tables-F1.json");
     const raw = calls.filter((call) => call.params.sysparm_display_value === "false");
