@@ -433,6 +433,58 @@ describe("H3 structured query pre-check", () => {
   });
 });
 
+describe("hostile rejections read a bounded number of elements", () => {
+  // The deterministic form of "rejected fast": count element reads through a
+  // Proxy instead of timing them, so machine load cannot affect the result.
+  // A bound that stops at a collection's length reads none of its elements;
+  // without that early exit these inputs are read in full (millions of reads).
+  // The time ceiling stays only as a guard against hangs.
+  const MAX_ELEMENT_READS = 64;
+  function countingArray<T>(elements: T[]): { array: T[]; reads: () => number } {
+    let reads = 0;
+    const array = new Proxy(elements, {
+      get(target, key, receiver) {
+        if (typeof key === "string" && /^\d+$/u.test(key)) reads += 1;
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+    });
+    return { array, reads: () => reads };
+  }
+
+  it("H1: an oversized array is rejected on its length alone", async () => {
+    const { array, reads } = countingArray(new Array<number>(5_000_000).fill(0));
+    const { result, ms } = await timed(() => inspectJsonShape(array));
+    expect(result).toBe("array_length");
+    expect(reads()).toBeLessThanOrEqual(MAX_ELEMENT_READS);
+    expect(ms).toBeLessThan(REJECTION_CEILING_MS);
+  });
+
+  it("H3: 1 MiB of flat conditions is rejected on the conditions' length alone", async () => {
+    const { array, reads } = countingArray(
+      Array.from({ length: Math.floor(ONE_MIB / 3) }, () => ({}))
+    );
+    const { result, ms } = await timed(() =>
+      structuredQuerySchema.safeParseAsync({ filter: group(array) })
+    );
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toHaveLength(1);
+      expect(result.error.issues[0]?.message).toBe(STRUCTURED_QUERY_STRUCTURAL_LIMIT_MESSAGE);
+    }
+    expect(reads()).toBeLessThanOrEqual(MAX_ELEMENT_READS);
+    expect(ms).toBeLessThan(REJECTION_CEILING_MS);
+  });
+
+  it("H4: an oversized bounded array is rejected without reading its elements", async () => {
+    const { array, reads } = countingArray(new Array<number>(ONE_MIB).fill(0));
+    const { result, ms } = await timed(() => boundedArray(z.number(), 50).safeParseAsync(array));
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues).toHaveLength(1);
+    expect(reads()).toBeLessThanOrEqual(MAX_ELEMENT_READS);
+    expect(ms).toBeLessThan(REJECTION_CEILING_MS);
+  });
+});
+
 describe("H4 bounded arrays", () => {
   it("checks the length before parsing any element", () => {
     let parsed = 0;
