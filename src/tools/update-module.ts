@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { ServiceNowOperations } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
 import {
-  ENCODED_QUERY_MIGRATION_MESSAGE,
+  ENCODED_QUERY_STRICT_OBJECT_PARAMS,
   rejectRawEncodedWrite,
 } from "../encoded-query-policy.js";
 import {
@@ -54,7 +54,7 @@ export const definition = Object.freeze({
 
 function compatibleInputSchema() {
   return z
-    .object({
+    .strictObject({
       table: z
         .string()
         .describe(
@@ -64,12 +64,11 @@ function compatibleInputSchema() {
         "The exact 32-hex sys_id of the one record to update"
       ),
       fields: z
-        .record(z.unknown())
+        .record(z.string(), z.unknown())
         .describe(
           'At least one field approved by the configured field policy. comments and work_notes add a journal entry; "" or null clears a field (e.g. {"state":"2","work_notes":"Investigating"})'
         ),
-    })
-    .strict(ENCODED_QUERY_MIGRATION_MESSAGE);
+    }, ENCODED_QUERY_STRICT_OBJECT_PARAMS);
 }
 
 export const schema = compatibleInputSchema();
