@@ -629,6 +629,15 @@ async function readTable(
     : { rows, truncated: false, bytes };
 }
 
+/**
+ * Sort clause for a table whose `order` column is optional: by `order` only
+ * when the profile may read it, so a hidden column cannot leak through the
+ * order of the results; by `sys_id` alone otherwise.
+ */
+function orderBy(plan: FlowFieldPlan, table: FlowTableName): string {
+  return plan.readable.get(table)?.has("order") === true ? "ORDERBYorder^ORDERBYsys_id" : "ORDERBYsys_id";
+}
+
 function chunks<T>(items: readonly T[], size: number): T[][] {
   const output: T[][] = [];
   for (let index = 0; index < items.length; index += size) output.push(items.slice(index, index + size));
@@ -1150,7 +1159,7 @@ async function readV1Values(
       const read = await readTable(
         load.reader,
         "sys_variable_value",
-        `document_keyIN${chunk.join(",")}^ORDERBYorder^ORDERBYsys_id`,
+        `document_keyIN${chunk.join(",")}^${orderBy(load.plan, "sys_variable_value")}`,
         fields,
         { offset: page * FLOW_TABLE_ROW_LIMIT }
       );
@@ -1267,7 +1276,7 @@ function readVariableTables(load: LoadState): Promise<(ReadResult | null)[]> {
   return Promise.all(
     VARIABLE_TABLES.map(([table, , element]) =>
       canShow(load.plan, element)
-        ? readTable(load.reader, table, `model=${load.flowId}^ORDERBYorder^ORDERBYsys_id`, fieldsFor(load.plan, table))
+        ? readTable(load.reader, table, `model=${load.flowId}^${orderBy(load.plan, table)}`, fieldsFor(load.plan, table))
         : Promise.resolve(null)
     )
   );

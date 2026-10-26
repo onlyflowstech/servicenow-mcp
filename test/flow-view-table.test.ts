@@ -1215,6 +1215,34 @@ describe("loadFlowFromTables policy", () => {
     });
   });
 
+  it("sorts by order only where the profile may read it", async () => {
+    const hidden = planFor({
+      omit: [
+        ["sys_hub_flow_variable", "order"],
+        ["sys_hub_flow_input", "order"],
+        ["sys_hub_flow_output", "order"],
+        ["sys_variable_value", "order"],
+      ],
+    });
+    const queryOf = (calls: readonly Call[], table: string) =>
+      calls.filter((call) => call.path.endsWith(`/${table}`)).map((call) => call.params.sysparm_query!);
+    const narrowed = await load("tables-F6a.json", hidden);
+    const open = await load("tables-F6a.json");
+    for (const table of ["sys_hub_flow_input", "sys_variable_value"]) {
+      const queries = queryOf(narrowed.calls, table);
+      expect(queries.length).toBeGreaterThan(0);
+      for (const query of queries) {
+        expect(query).not.toContain("ORDERBYorder");
+        expect(query).toMatch(/\^ORDERBYsys_id$/u);
+      }
+      for (const query of queryOf(open.calls, table)) expect(query).toMatch(/\^ORDERBYorder\^ORDERBYsys_id$/u);
+    }
+    // Step tables still sort by order, a required field.
+    for (const query of queryOf(narrowed.calls, "sys_hub_action_instance")) {
+      expect(query).toMatch(/\^ORDERBYorder\^ORDERBYsys_id$/u);
+    }
+  });
+
   it("redacts every input of an element whose value source is unreadable", async () => {
     const plan = planFor({ omit: [["sys_variable_value", "value"]] });
     const v1 = await load("tables-F6a.json", plan);
