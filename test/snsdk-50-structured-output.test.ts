@@ -577,7 +577,7 @@ describe("SNSDK-50 representative Zod output contracts", () => {
         (candidate) => candidate.definition.name === name
       );
       expect(module?.outputSchema).toBe(productionToolOutputSchemas[name]);
-      expect(module?.outputSchema._def.unknownKeys).toBe("strict");
+      expect(module?.outputSchema._zod.def.catchall?._zod.def.type).toBe("never");
       expect(Object.keys(module?.outputSchema.shape ?? {}).sort()).toEqual([
         "data",
         "metadata",

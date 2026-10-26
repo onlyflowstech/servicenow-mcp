@@ -17,6 +17,7 @@ import {
   MAX_STRUCTURED_QUERY_SET_VALUES,
   MAX_STRUCTURED_QUERY_TERMS,
   MAX_STRUCTURED_QUERY_VALUE_LENGTH,
+  STRUCTURED_QUERY_STRUCTURAL_LIMIT_MESSAGE,
   StructuredQueryError,
   structuredQuerySchema,
 } from "../src/structured-query.js";
@@ -366,7 +367,14 @@ describe("SNSDK-31 policy bounds", () => {
       const direct = structuredQuerySchema.safeParse({ filter });
       const directElapsed = performance.now() - started;
       expect(direct.success).toBe(false);
-      if (!direct.success) expect(direct.error.issues[0]?.code).toBe("invalid_union");
+      // The structural pre-check rejects over-depth input with one fixed
+      // issue before the union schema runs.
+      if (!direct.success) {
+        expect(direct.error.issues).toHaveLength(1);
+        expect(direct.error.issues[0]?.message).toBe(
+          STRUCTURED_QUERY_STRUCTURAL_LIMIT_MESSAGE
+        );
+      }
       expect(directElapsed).toBeLessThan(250);
 
       const composedStarted = performance.now();
@@ -376,7 +384,13 @@ describe("SNSDK-31 policy bounds", () => {
       });
       const composedElapsed = performance.now() - composedStarted;
       expect(composed.success).toBe(false);
-      if (!composed.success) expect(composed.error.issues[0]?.code).toBe("invalid_union");
+      if (!composed.success) {
+        expect(composed.error.issues).toHaveLength(1);
+        expect(composed.error.issues[0]?.message).toBe(
+          STRUCTURED_QUERY_STRUCTURAL_LIMIT_MESSAGE
+        );
+        expect(composed.error.issues[0]?.path).toEqual(["structured_query"]);
+      }
       expect(composedElapsed).toBeLessThan(250);
     }
   );

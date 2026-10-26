@@ -163,9 +163,10 @@ describe("SNSDK-33 strict production envelopes", () => {
         "metadata",
         "profile",
       ]);
-      expect(module.outputSchema._def.unknownKeys, module.definition.name).toBe(
-        "strict"
-      );
+      expect(
+        module.outputSchema._zod.def.catchall?._zod.def.type,
+        module.definition.name
+      ).toBe("never");
       expect(
         module.outputSchema.safeParse({
           profile: PROFILE,

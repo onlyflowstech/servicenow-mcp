@@ -84,7 +84,7 @@ export const resultMetadataSchema = z
   })
   .strict();
 
-export function withStructuredResultEnvelope<TSchema extends z.ZodTypeAny>(
+export function withStructuredResultEnvelope<TSchema extends z.ZodType>(
   dataSchema: TSchema
 ) {
   return withResolvedProfileOutput(
@@ -97,7 +97,7 @@ export function withStructuredResultEnvelope<TSchema extends z.ZodTypeAny>(
   );
 }
 
-const dynamicRecordSchema = z.record(z.unknown());
+const dynamicRecordSchema = z.record(z.string(), z.unknown());
 const canonicalSysIdSchema = z.string().regex(/^[0-9a-f]{32}$/u);
 const dynamicArraySchema = z.array(z.unknown());
 const dynamicJsonRootSchema = z.union([
@@ -156,7 +156,7 @@ const atfResultEnvelopeSchema = z
 const atfRecordIdSchema = z.string().regex(/^[a-f0-9]{32}$/);
 const atfAuthorResultSchema = z.object({
   action: z.enum(["create_test", "create_suite", "add_tests_to_suite", "add_steps", "list_step_types"]),
-  step_types: z.array(z.record(z.unknown())).optional(),
+  step_types: z.array(z.record(z.string(), z.unknown())).optional(),
   outcome: z.enum(["created", "failed", "catalog"]),
   results: z.array(z.object({
     table: z.enum(["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_atf_step"]),

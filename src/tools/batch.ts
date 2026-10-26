@@ -9,7 +9,7 @@ import type { ExecutionContext } from "../execution-context.js";
 import { uncachedOperations } from "../metadata-cache.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
 import {
-  ENCODED_QUERY_MIGRATION_MESSAGE,
+  ENCODED_QUERY_STRICT_OBJECT_PARAMS,
   EncodedQueryPolicyError,
   rejectRawEncodedWrite,
 } from "../encoded-query-policy.js";
@@ -53,7 +53,7 @@ export const definition = {
 };
 
 export const schema = z
-  .object({
+  .strictObject({
     table: z.string().describe("ServiceNow table name"),
     structured_query: structuredWriteQuerySchema.describe(
       "Required policy-authorized structured filter selecting records. Raw encoded queries are prohibited."
@@ -62,7 +62,7 @@ export const schema = z
       .enum(["update", "delete"])
       .describe("Operation to perform: update or delete"),
     fields: z
-      .record(z.unknown())
+      .record(z.string(), z.unknown())
       .optional()
       .describe(
         'JSON fields to set on each record (required for update action). e.g. {"state":"7","close_notes":"Bulk closed"}'
@@ -80,8 +80,7 @@ export const schema = z
       .optional()
       .default(false)
       .describe("Set to true to actually execute. Default is dry-run."),
-  })
-  .strict(ENCODED_QUERY_MIGRATION_MESSAGE);
+  }, ENCODED_QUERY_STRICT_OBJECT_PARAMS);
 
 export async function handler(
   args: z.infer<typeof schema>,
