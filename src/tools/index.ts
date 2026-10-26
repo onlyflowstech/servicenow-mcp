@@ -254,11 +254,16 @@ type ToolRegistrationPlan = Readonly<{
 /**
  * Validator factory for the preflight client only. It compiles nothing; a
  * validator it returns rejects every input, so it cannot silently accept
- * tool output if the preflight ever started calling tools. Schema
- * well-formedness is still checked structurally in
- * validateDiscoveredToolConfigurations.
+ * tool output if the preflight ever started calling tools.
+ *
+ * Output schemas are therefore no longer compiled at preflight, so a
+ * malformed one (bad regex, dangling $ref, wrong keyword types) is not
+ * refused here; validateDiscoveredToolConfigurations only checks the
+ * discovery shape. The strict-Ajv test in
+ * test/snsdk-50-structured-output.test.ts, which compiles every advertised
+ * schema in CI, is what guards against malformed ones.
  */
-export const PREFLIGHT_INERT_SCHEMA_VALIDATOR: jsonSchemaValidator = Object.freeze({
+const PREFLIGHT_INERT_SCHEMA_VALIDATOR: jsonSchemaValidator = Object.freeze({
   getValidator: () => () => ({
     valid: false as const,
     data: undefined,
