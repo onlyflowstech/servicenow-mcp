@@ -16,9 +16,11 @@ import {
   validateToolModuleCatalog,
   withRequiredProfile,
   withResolvedProfileOutput,
+  type AnyZodObject,
   type ToolModuleContract,
   type ToolModuleRequirements,
 } from "../src/tools/index.js";
+import { snapshotIssuedToolSchema } from "../src/tools/tool-module.js";
 
 const definition = {
   name: "sn_contract_fixture",
@@ -271,8 +273,8 @@ describe("tool-module contract", () => {
       [normalizedModule]
     );
     const config = registeredConfig as {
-      inputSchema: z.AnyZodObject;
-      outputSchema: z.AnyZodObject;
+      inputSchema: AnyZodObject;
+      outputSchema: AnyZodObject;
     };
     expect(
       config.inputSchema.safeParse({ profile: "prod", table: "incident" }).success
@@ -287,14 +289,25 @@ describe("tool-module contract", () => {
 
   it("makes the full nested schema graph parse-stable before and after SDK preflight", async () => {
     const field = z.string().min(2);
-    const sourceDefinition = field._def;
+    const sourceInternals = field._zod;
+    const sourceDefinition = field._zod.def as { coerce?: boolean; checks: unknown[] };
     const sourceChecks = sourceDefinition.checks;
-    const sourceMinimumCheck = sourceChecks[0];
+    const sourceMinimumCheck = field._zod.def.checks?.[0] as z.core.$ZodCheckMinLength;
     const sourceUnion = z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("first"), value: z.string() }),
       z.object({ kind: z.literal("second"), count: z.number() }),
     ]);
-    const sourceOptionsMap = sourceUnion._def.optionsMap;
+    const sourceUnionOptions = sourceUnion._zod.def.options as unknown[];
+    // zod 4 definitions hold no Map of their own, so one is planted to prove
+    // that hardening iterates collections through intrinsics, never through
+    // methods a source shadowed.
+    const sourceOptionsMap = new Map<unknown, unknown>([["first", sourceUnion.options[0]]]);
+    Object.defineProperty(sourceUnion._zod.def, "optionsMap", {
+      value: sourceOptionsMap,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
     const shadowedEntries = vi.fn(() =>
       Array.from({ length: 3_000 }, (_, index) => [
         `spoofed-${index}`,
@@ -312,6 +325,7 @@ describe("tool-module contract", () => {
       configurable: true,
     });
     const sourceEnum = z.enum(["open", "closed"]);
+    const sourceEnumValues = sourceEnum._zod.values as Set<unknown>;
     const normalizedInput = withRequiredProfile(
       z.object({ field, choice: sourceUnion, state: sourceEnum })
     );
@@ -320,47 +334,62 @@ describe("tool-module contract", () => {
     const hardenedField = normalizedInput.shape.field as typeof field;
     const hardenedUnion = normalizedInput.shape.choice as typeof sourceUnion;
     const hardenedEnum = normalizedInput.shape.state as typeof sourceEnum;
-    const hardenedChecks = hardenedField._def.checks;
-    const hardenedMinimumCheck = hardenedChecks[0];
-    const hardenedOptionsMap = hardenedUnion._def.optionsMap;
-    const hardenedEnumCache = (
-      hardenedEnum as unknown as { readonly _cache: Set<string> }
-    )._cache;
+    const hardenedChecks = hardenedField._zod.def.checks as unknown[];
+    const hardenedMinimumCheck = hardenedChecks[0] as z.core.$ZodCheckMinLength;
+    const hardenedOptionsMap = (
+      hardenedUnion._zod.def as unknown as { optionsMap: Map<unknown, unknown> }
+    ).optionsMap;
+    const hardenedEnumValues = hardenedEnum._zod.values as Set<unknown>;
     const originalFieldPrototype = Object.getPrototypeOf(hardenedField);
 
+    // Every node is rebuilt from a contract-owned definition, so the source
+    // graph shares no parse state with the issued one.
+    expect(hardenedField).not.toBe(field);
+    expect(hardenedMinimumCheck).not.toBe(sourceMinimumCheck);
     expect(Object.isFrozen(hardenedField)).toBe(true);
-    expect(Object.isFrozen(hardenedField._def)).toBe(true);
+    expect(Object.isFrozen(hardenedField._zod)).toBe(true);
+    expect(Object.isFrozen(hardenedField._zod.def)).toBe(true);
     expect(Object.isFrozen(hardenedChecks)).toBe(true);
     expect(Object.isFrozen(hardenedMinimumCheck)).toBe(true);
-    expect(Object.getOwnPropertyDescriptor(hardenedField, "_def")).toMatchObject({
+    expect(Object.isFrozen(hardenedMinimumCheck._zod.def)).toBe(true);
+    expect(Object.isFrozen(hardenedUnion._zod.def.options)).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(hardenedField, "_zod")).toMatchObject({
       configurable: false,
       writable: false,
     });
     expect(hardenedOptionsMap).not.toBe(sourceOptionsMap);
     expect(hardenedOptionsMap).not.toBeInstanceOf(Map);
-    expect(hardenedEnumCache).not.toBeInstanceOf(Set);
+    expect(hardenedEnumValues).not.toBe(sourceEnumValues);
+    expect(hardenedEnumValues).not.toBeInstanceOf(Set);
     expect(shadowedEntries).not.toHaveBeenCalled();
 
     // References retained before contract issuance are no longer parse-active.
     sourceDefinition.coerce = true;
-    sourceChecks.push({ kind: "max", value: 1 });
-    if (sourceMinimumCheck.kind === "min") sourceMinimumCheck.value = 100;
+    sourceChecks.push(z.string().max(1)._zod.def.checks?.[0]);
+    (sourceMinimumCheck._zod.def as { minimum: number }).minimum = 100;
+    sourceEnumValues.add("spoofed");
+    sourceUnionOptions.push(
+      z.object({ kind: z.literal("third"), bypass: z.boolean() })
+    );
     sourceOptionsMap.set(
       "third",
       z.object({ kind: z.literal("third"), bypass: z.boolean() })
     );
 
     expect(() => {
-      (hardenedField as unknown as { _def: unknown })._def = sourceDefinition;
+      (hardenedField as unknown as { _zod: unknown })._zod = sourceInternals;
     }).toThrow(TypeError);
     expect(() => {
-      (hardenedField._def as { coerce: boolean }).coerce = true;
+      (hardenedField._zod.def as { coerce?: boolean }).coerce = true;
     }).toThrow(TypeError);
     expect(() => {
-      hardenedChecks.push({ kind: "max", value: 1 });
+      hardenedChecks.push(sourceMinimumCheck);
     }).toThrow(TypeError);
     expect(() => {
-      if (hardenedMinimumCheck.kind === "min") hardenedMinimumCheck.value = 100;
+      (hardenedMinimumCheck._zod.def as { minimum: number }).minimum = 100;
+    }).toThrow(TypeError);
+    expect(() => {
+      (hardenedField._zod as { run: unknown }).run = () => ({ value: "ok", issues: [] });
     }).toThrow(TypeError);
     expect(() => {
       (hardenedField as unknown as { safeParse: unknown }).safeParse = () => ({
@@ -372,8 +401,8 @@ describe("tool-module contract", () => {
       /disabled/u
     );
     expect(() => hardenedOptionsMap.delete("first")).toThrow(/disabled/u);
-    expect(() => hardenedEnumCache.add("spoofed")).toThrow(/disabled/u);
-    expect(() => hardenedEnumCache.clear()).toThrow(/disabled/u);
+    expect(() => hardenedEnumValues.add("spoofed")).toThrow(/disabled/u);
+    expect(() => hardenedEnumValues.clear()).toThrow(/disabled/u);
     expect(() =>
       Map.prototype.set.call(
         hardenedOptionsMap,
@@ -381,7 +410,7 @@ describe("tool-module contract", () => {
         sourceUnion.options[0]
       )
     ).toThrow(TypeError);
-    expect(() => Set.prototype.add.call(hardenedEnumCache, "spoofed")).toThrow(
+    expect(() => Set.prototype.add.call(hardenedEnumValues, "spoofed")).toThrow(
       TypeError
     );
 
@@ -391,8 +420,8 @@ describe("tool-module contract", () => {
       "value",
       "target[key] = value; return target[key];"
     ) as (target: object, key: string, value: unknown) => unknown;
-    expect(sloppyAssign(hardenedField._def, "coerce", true)).toBe(false);
-    expect(sloppyAssign(hardenedMinimumCheck, "value", 100)).toBe(2);
+    expect(sloppyAssign(hardenedField._zod.def, "coerce", true)).toBeUndefined();
+    expect(sloppyAssign(hardenedMinimumCheck._zod.def, "minimum", 100)).toBe(2);
     expect(sloppyAssign(hardenedField, "safeParse", null)).toBe(
       hardenedField.safeParse
     );
@@ -407,6 +436,12 @@ describe("tool-module contract", () => {
     expect(normalizedInput.safeParse(validInput).success).toBe(true);
     expect(
       normalizedInput.safeParse({ ...validInput, field: 42 }).success
+    ).toBe(false);
+    expect(
+      normalizedInput.safeParse({ ...validInput, field: "x" }).success
+    ).toBe(false);
+    expect(
+      normalizedInput.safeParse({ ...validInput, state: "spoofed" }).success
     ).toBe(false);
     expect(
       normalizedInput.safeParse({
@@ -442,13 +477,13 @@ describe("tool-module contract", () => {
       [module]
     );
     const config = registeredConfig as {
-      inputSchema: z.AnyZodObject;
-      outputSchema: z.AnyZodObject;
+      inputSchema: AnyZodObject;
+      outputSchema: AnyZodObject;
     };
-    const registeredField = config.inputSchema.shape.field;
+    const registeredField = config.inputSchema.shape.field as typeof field;
     expect(registeredField).toBe(hardenedField);
     expect(() => {
-      (registeredField._def as { coerce?: boolean }).coerce = true;
+      (registeredField._zod.def as { coerce?: boolean }).coerce = true;
     }).toThrow(TypeError);
     expect(() => Object.setPrototypeOf(registeredField, null)).toThrow(TypeError);
     expect(config.inputSchema.safeParse(validInput).success).toBe(true);
@@ -459,10 +494,9 @@ describe("tool-module contract", () => {
       true
     );
     expect(() =>
-      Map.prototype.set.call(
-        (config.inputSchema.shape.choice as typeof sourceUnion)._def.optionsMap,
-        "third",
-        sourceUnion.options[0]
+      Set.prototype.add.call(
+        (config.inputSchema.shape.state as typeof sourceEnum)._zod.values,
+        "spoofed"
       )
     ).toThrow(TypeError);
   });
@@ -472,15 +506,316 @@ describe("tool-module contract", () => {
       z.object({ kind: z.literal("first") }),
       z.object({ kind: z.literal("second") }),
     ]);
-    const oversizedOptions = new Map<unknown, z.AnyZodObject>();
+    const oversizedOptions = new Map<unknown, AnyZodObject>();
     for (let index = 0; index <= 2_048; index += 1) {
       oversizedOptions.set(index, oversized.options[0]);
     }
-    oversized._def.optionsMap = oversizedOptions;
+    // zod 4 definitions hold no Map of their own; one is planted to reach
+    // the collection bound.
+    Object.defineProperty(oversized._zod.def, "optionsMap", {
+      value: oversizedOptions,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
 
     expect(() =>
       withRequiredProfile(z.object({ choice: oversized }))
     ).toThrow(/map is too large/u);
+  });
+
+  it("refuses lazy (recursive) schemas, which a frozen zod 4 graph cannot resolve", () => {
+    const node = z.lazy(() => z.object({ name: z.string() }));
+    expect(() => withRequiredProfile(z.object({ tree: node }))).toThrow(
+      /does not support lazy/u
+    );
+  });
+
+  it("freezes a bare refinement check in place and keeps enforcing it", () => {
+    const refined = z.string().superRefine((value, context) => {
+      if (value === "blocked") context.addIssue({ code: "custom", message: "blocked value" });
+    });
+    const sourceCheck = refined._zod.def.checks?.[0] as z.core.$ZodCheck;
+    const issued = withRequiredProfile(z.object({ value: refined }));
+    const issuedCheck = (issued.shape.value as typeof refined)._zod.def.checks?.[0];
+
+    // Its behaviour is assigned after construction, so it is not rebuilt.
+    expect(issuedCheck).toBe(sourceCheck);
+    expect(Object.isFrozen(sourceCheck)).toBe(true);
+    expect(Object.isFrozen(sourceCheck._zod)).toBe(true);
+    expect(Object.isFrozen(sourceCheck._zod.def)).toBe(true);
+    expect(() => {
+      (sourceCheck._zod as { check: unknown }).check = () => {};
+    }).toThrow(TypeError);
+    expect(issued.safeParse({ profile: "prod", value: "fine" }).success).toBe(true);
+    expect(issued.safeParse({ profile: "prod", value: "blocked" }).error?.issues).toEqual([
+      expect.objectContaining({ code: "custom", message: "blocked value", path: ["value"] }),
+    ]);
+  });
+
+  describe("process-wide reuse of hardened subgraphs", () => {
+    // Each case builds its own source nodes: the reuse map is process-wide,
+    // so sharing sources across cases would make them depend on order.
+    const wide = (fields: number) =>
+      z.object(
+        Object.fromEntries(
+          Array.from({ length: fields }, (_, index) => [`f${index}`, z.string().max(index + 1)])
+        )
+      );
+    const nest = (inner: z.ZodType, levels: number): z.ZodType => {
+      let schema = inner;
+      for (let level = 0; level < levels; level += 1) schema = z.object({ inner: schema });
+      return schema;
+    };
+    // About 13 budget nodes per field: one 450-field object fits the 10,000
+    // node budget, two do not. 30 nested levels fit the depth budget, 50 do
+    // not (calibrated against fresh traversals of the same shapes).
+    const HALF_BUDGET_FIELDS = 450;
+
+    it("reuses the first hardened copy of a shared source node", () => {
+      const shared = wide(3);
+      const first = withRequiredProfile(z.object({ a: shared }));
+      const second = withRequiredProfile(z.object({ b: shared }));
+      expect(second.shape.b).toBe(first.shape.a);
+      expect(Object.isFrozen(first.shape.a)).toBe(true);
+    });
+
+    it("first issuance wins: mutating a source schema reaches no issued schema", () => {
+      const shared = z.string().min(3);
+      const minimum = shared._zod.def.checks?.[0] as z.core.$ZodCheckMinLength;
+      const setMinimum = (value: number) => {
+        (minimum._zod.def as { minimum: number }).minimum = value;
+      };
+      const first = withRequiredProfile(z.object({ a: shared }));
+
+      // Mutated between two issuances: the source itself changes, and the
+      // second issuance gets the copy made before the change.
+      setMinimum(0);
+      expect(shared.safeParse("ab").success).toBe(true);
+      const second = withRequiredProfile(z.object({ b: shared }));
+      expect(second.shape.b).toBe(first.shape.a);
+      expect(first.safeParse({ profile: "p", a: "ab" }).success).toBe(false);
+      expect(second.safeParse({ profile: "p", b: "ab" }).success).toBe(false);
+
+      // Mutated after both: neither issued schema moves.
+      setMinimum(100);
+      expect(shared.safeParse("abcd").success).toBe(false);
+      expect(first.safeParse({ profile: "p", a: "abcd" }).success).toBe(true);
+      expect(second.safeParse({ profile: "p", b: "abcd" }).success).toBe(true);
+    });
+
+    it("charges reused subgraphs against the node budget of the graph reusing them", () => {
+      const left = wide(HALF_BUDGET_FIELDS);
+      const right = wide(HALF_BUDGET_FIELDS);
+      // Each half fits on its own and is hardened, and cached, here.
+      withRequiredProfile(z.object({ left }));
+      withRequiredProfile(z.object({ right }));
+      // Reusing both costs no rebuild, but the graph is charged for every
+      // node in both, exactly as a fresh traversal would have been.
+      expect(() => withRequiredProfile(z.object({ left, right }))).toThrow(
+        /traversal budget exceeded/u
+      );
+      // The same control without reuse: fresh halves fail the same way.
+      expect(() =>
+        withRequiredProfile(
+          z.object({ left: wide(HALF_BUDGET_FIELDS), right: wide(HALF_BUDGET_FIELDS) })
+        )
+      ).toThrow(/traversal budget exceeded/u);
+    });
+
+    it("counts a subgraph reused twice in one graph once, as a fresh traversal does", () => {
+      const half = wide(HALF_BUDGET_FIELDS);
+      const first = withRequiredProfile(z.object({ half }));
+      const twice = withRequiredProfile(z.object({ one: half, two: half }));
+      expect(twice.shape.one).toBe(first.shape.half);
+      expect(twice.shape.two).toBe(first.shape.half);
+    });
+
+    // Metadata is attached after a node is built, so it can close a cycle:
+    // the ancestor's metadata holds `value`, `value` holds the closing node,
+    // and the closing node's metadata points back at `value` while `value` is
+    // still being built. Recording the closing node then would leave out
+    // everything `value` holds, and a later graph reusing it would be
+    // charged too little.
+    const metadataCycle = (hidden: z.ZodType) => {
+      const value: Record<string, unknown> = {};
+      const closing = z.string().meta({ value });
+      value.closing = closing;
+      value.hidden = hidden;
+      const ancestor = z.number().meta({ value });
+      return { ancestor, closing };
+    };
+
+    it("refuses a cycle closed through metadata, so no under-charged node is cached", () => {
+      const parts = [metadataCycle(wide(HALF_BUDGET_FIELDS)), metadataCycle(wide(HALF_BUDGET_FIELDS))];
+      for (const { ancestor } of parts) {
+        expect(() => withRequiredProfile(z.object({ ancestor }))).toThrow(/contains a cycle/u);
+      }
+      // Each closing node reaches its hidden half through its own metadata,
+      // so a graph holding both closing nodes is charged for both halves.
+      expect(() =>
+        withRequiredProfile(z.object({ c0: parts[0]!.closing, c1: parts[1]!.closing }))
+      ).toThrow(/traversal budget exceeded/u);
+      // Fresh control: the same shape, never issued before.
+      const fresh = [metadataCycle(wide(HALF_BUDGET_FIELDS)), metadataCycle(wide(HALF_BUDGET_FIELDS))];
+      expect(() =>
+        withRequiredProfile(z.object({ c0: fresh[0]!.closing, c1: fresh[1]!.closing }))
+      ).toThrow(/traversal budget exceeded/u);
+    });
+
+    it("refuses a cycle closed through metadata between two zod nodes", () => {
+      const backToAncestor: Record<string, unknown> = {};
+      const closing = z.string().meta(backToAncestor);
+      const ancestor = z.number().meta({ closing });
+      backToAncestor.ancestor = ancestor;
+      expect(() => withRequiredProfile(z.object({ ancestor }))).toThrow(/contains a cycle/u);
+    });
+
+    it("refuses the depth form of a metadata cycle, as a fresh build does", () => {
+      const { ancestor, closing } = metadataCycle(nest(z.string(), 30));
+      expect(() => withRequiredProfile(z.object({ ancestor }))).toThrow(/contains a cycle/u);
+      expect(() => withRequiredProfile(z.object({ deeper: nest(closing, 30) }))).toThrow(
+        /traversal budget exceeded/u
+      );
+      const control = metadataCycle(nest(z.string(), 30));
+      expect(() => withRequiredProfile(z.object({ deeper: nest(control.closing, 30) }))).toThrow(
+        /traversal budget exceeded/u
+      );
+    });
+
+    // Graph-size refusal for a reused shape: either message is a refusal, and
+    // which one depends on whether the cycle or the budget is met first.
+    const REFUSED = /contains a cycle|traversal budget exceeded/u;
+
+    // X's metadata holds W and Y; W points back at X; Y's metadata holds W.
+    const selfBoundValue = (hidden: z.ZodType) => {
+      const value: Record<string, unknown> = {};
+      const reacher = z.string().meta({ value });
+      const node = z.number().meta({ value, reacher, hidden });
+      value.node = node;
+      return { node, reacher };
+    };
+
+    it("refuses another node reaching a value bound to its node's cycle, issued first", () => {
+      const parts = [selfBoundValue(wide(HALF_BUDGET_FIELDS)), selfBoundValue(wide(HALF_BUDGET_FIELDS))];
+      for (const { node } of parts) {
+        expect(() => withRequiredProfile(z.object({ node }))).toThrow(/contains a cycle/u);
+      }
+      expect(() =>
+        withRequiredProfile(z.object({ r0: parts[0]!.reacher, r1: parts[1]!.reacher }))
+      ).toThrow(REFUSED);
+      const fresh = [selfBoundValue(wide(HALF_BUDGET_FIELDS)), selfBoundValue(wide(HALF_BUDGET_FIELDS))];
+      expect(() =>
+        withRequiredProfile(z.object({ r0: fresh[0]!.reacher, r1: fresh[1]!.reacher }))
+      ).toThrow(REFUSED);
+    });
+
+    it("refuses the depth form of a value bound to its node's cycle", () => {
+      const { node, reacher } = selfBoundValue(nest(z.string(), 30));
+      expect(() => withRequiredProfile(z.object({ node }))).toThrow(/contains a cycle/u);
+      expect(() => withRequiredProfile(z.object({ deeper: nest(reacher, 30) }))).toThrow(REFUSED);
+      const control = selfBoundValue(nest(z.string(), 30));
+      expect(() => withRequiredProfile(z.object({ deeper: nest(control.reacher, 30) }))).toThrow(
+        REFUSED
+      );
+    });
+
+    it("refuses a later sibling reaching a value bound to a finished node's cycle", () => {
+      const sibling = (hidden: z.ZodType) => {
+        const value: Record<string, unknown> = {};
+        const node = z.number().meta({ value, hidden });
+        value.node = node;
+        return { node, later: z.string().meta({ value }) };
+      };
+      const parts = [sibling(wide(HALF_BUDGET_FIELDS)), sibling(wide(HALF_BUDGET_FIELDS))];
+      for (const { node, later } of parts) {
+        expect(() => withRequiredProfile(z.object({ node, later }))).toThrow(/contains a cycle/u);
+      }
+      expect(() =>
+        withRequiredProfile(z.object({ l0: parts[0]!.later, l1: parts[1]!.later }))
+      ).toThrow(REFUSED);
+      const fresh = [sibling(wide(HALF_BUDGET_FIELDS)), sibling(wide(HALF_BUDGET_FIELDS))];
+      expect(() =>
+        withRequiredProfile(z.object({ l0: fresh[0]!.later, l1: fresh[1]!.later }))
+      ).toThrow(REFUSED);
+    });
+
+    it("charges a node for a shared value whose contents another node reached first", () => {
+      // No cycle: X's metadata holds U and V, and V holds U, so U is reached
+      // twice within X's build. Y, in the same graph, holds V. Y's record must
+      // still include U and what U holds.
+      const shared = (hidden: z.ZodType) => {
+        const inner = { hidden };
+        const outer = { inner };
+        return {
+          first: z.number().meta({ inner, outer }),
+          second: z.string().meta({ outer }),
+        };
+      };
+      const parts = [shared(wide(HALF_BUDGET_FIELDS)), shared(wide(HALF_BUDGET_FIELDS))];
+      for (const { first, second } of parts) {
+        // A legitimate DAG: accepted.
+        withRequiredProfile(z.object({ first, second }));
+      }
+      expect(() =>
+        withRequiredProfile(z.object({ s0: parts[0]!.second, s1: parts[1]!.second }))
+      ).toThrow(/traversal budget exceeded/u);
+      const fresh = [shared(wide(HALF_BUDGET_FIELDS)), shared(wide(HALF_BUDGET_FIELDS))];
+      expect(() =>
+        withRequiredProfile(z.object({ s0: fresh[0]!.second, s1: fresh[1]!.second }))
+      ).toThrow(/traversal budget exceeded/u);
+    });
+
+    it("accepts legitimate shared metadata values and shared nodes, issued twice", () => {
+      // A DAG through metadata: X holds W and Y, Y holds W, nothing points back.
+      const value = { note: "shared" };
+      const reacher = z.string().meta({ value });
+      const node = z.number().meta({ value, reacher });
+      expect(() => withRequiredProfile(z.object({ node }))).not.toThrow();
+      expect(() => withRequiredProfile(z.object({ node, reacher }))).not.toThrow();
+      // A node reached both directly and through a sibling's metadata.
+      const a = z.string();
+      const parent = z.object({ a, b: z.number().meta({ a }) });
+      expect(() => withRequiredProfile(z.object({ parent }))).not.toThrow();
+      expect(() => withRequiredProfile(z.object({ again: parent }))).not.toThrow();
+    });
+
+    it("lets a node reach itself through its own metadata and charges what it holds", () => {
+      expect(() =>
+        withRequiredProfile(z.object({ small: metadataCycle(wide(3)).closing }))
+      ).not.toThrow();
+      expect(() =>
+        withRequiredProfile(z.object({ large: metadataCycle(wide(800)).closing }))
+      ).toThrow(/traversal budget exceeded/u);
+    });
+
+    it("re-issues every production schema at registration within the budgets", () => {
+      for (const tool of toolModules) {
+        expect(() => snapshotIssuedToolSchema(tool.inputSchema, "input")).not.toThrow();
+        expect(() => snapshotIssuedToolSchema(tool.outputSchema, "output")).not.toThrow();
+      }
+    });
+
+    it("re-issues a graph near the node budget at registration", () => {
+      // Registration re-issues each schema from its records, which can charge
+      // up to about one node per field more than a fresh issue (about 7%). A
+      // graph at about 85% of the node budget still re-issues; the largest
+      // production graph is about 12%.
+      const issued = withRequiredProfile(z.object({ near: wide(600) }));
+      expect(() => snapshotIssuedToolSchema(issued, "input")).not.toThrow();
+    });
+
+    it("checks a reused subgraph's height at the depth it is reached", () => {
+      const deep = nest(z.string(), 30);
+      withRequiredProfile(z.object({ deep }));
+      expect(() => withRequiredProfile(z.object({ deeper: nest(deep, 20) }))).toThrow(
+        /traversal budget exceeded/u
+      );
+      // The same total depth built fresh fails the same way.
+      expect(() =>
+        withRequiredProfile(z.object({ deeper: nest(nest(z.string(), 30), 20) }))
+      ).toThrow(/traversal budget exceeded/u);
+    });
   });
 
   it("rejects accessor-based invalid source shapes with zero target side effects", async () => {
@@ -510,15 +845,19 @@ describe("tool-module contract", () => {
   });
 
   it("rejects the exact forged ZodObject-prototype replay with no partial target registration", async () => {
-    const forged = Object.create(z.ZodObject.prototype) as z.AnyZodObject;
-    Object.defineProperty(forged, "_def", {
+    // zod 4 keeps a node's state in `_zod`, and instanceof reads its traits.
+    const forged = Object.create(z.ZodObject.prototype) as AnyZodObject;
+    Object.defineProperty(forged, "_zod", {
       value: {
-        typeName: z.ZodFirstPartyTypeKind.ZodObject,
-        unknownKeys: "strict",
-        catchall: z.never(),
-        shape: () => ({ profile: profileNameSchema, table: z.string() }),
+        def: {
+          type: "object",
+          catchall: z.never(),
+          shape: { profile: profileNameSchema, table: z.string() },
+        },
+        constr: z.ZodObject,
+        traits: new Set(["$ZodType", "ZodType", "$ZodObject", "ZodObject"]),
       },
-      enumerable: true,
+      enumerable: false,
       configurable: true,
       writable: true,
     });
@@ -724,9 +1063,10 @@ describe("tool-module contract", () => {
         "metadata",
         "profile",
       ]);
-      expect(module.outputSchema._def.unknownKeys, module.definition.name).toBe(
-        "strict"
-      );
+      expect(
+        module.outputSchema._zod.def.catchall?._zod.def.type,
+        module.definition.name
+      ).toBe("never");
     }
   });
 });

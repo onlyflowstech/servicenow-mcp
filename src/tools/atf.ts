@@ -5,7 +5,7 @@ import type { ExecutionContext } from "../execution-context.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
 import {
   authorizeRawEncodedRead,
-  ENCODED_QUERY_MIGRATION_MESSAGE,
+  ENCODED_QUERY_STRICT_OBJECT_PARAMS,
 } from "../encoded-query-policy.js";
 import {
   fieldSelectionToSysparmFields,
@@ -36,7 +36,7 @@ export const definition = {
   },
 };
 
-export const schema = z.object({
+export const schema = z.strictObject({
   action: z.enum(["list", "suites", "run", "run-suite", "results"]).describe("ATF operation: list tests, list suites, run a test, run a suite, or get results"),
   test_sys_id: serviceNowSysIdSchema.optional().describe("32-hex test sys_id (required for run)"),
   suite_sys_id: serviceNowSysIdSchema.optional().describe("32-hex suite sys_id (required for run-suite)"),
@@ -47,7 +47,7 @@ export const schema = z.object({
   offset: z.number().int().min(0).max(10000).optional().default(0).describe("Deterministic result offset (default 0)"),
   wait: z.boolean().optional().default(true).describe("Wait for test/suite completion (default true)"),
   timeout: z.number().optional().describe("Max wait time in seconds (default 120 for tests, 300 for suites)"),
-}).strict(ENCODED_QUERY_MIGRATION_MESSAGE);
+}, ENCODED_QUERY_STRICT_OBJECT_PARAMS);
 
 function pagedResult(
   records: readonly unknown[],

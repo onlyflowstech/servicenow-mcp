@@ -3,7 +3,7 @@ import type { ServiceNowOperations } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
 import {
-  ENCODED_QUERY_MIGRATION_MESSAGE,
+  ENCODED_QUERY_STRICT_OBJECT_PARAMS,
   rejectRawEncodedWrite,
 } from "../encoded-query-policy.js";
 import { ok, err } from "../utils.js";
@@ -28,7 +28,7 @@ export const definition = {
 };
 
 export const schema = z
-  .object({
+  .strictObject({
     table: z.string().describe("ServiceNow table name (e.g. incident)"),
     sys_id: serviceNowSysIdSchema.describe(
       "The 32-hex sys_id of the record to delete"
@@ -38,8 +38,7 @@ export const schema = z
       .describe(
         "Must be true to execute the deletion. Safety measure to prevent accidental deletes."
       ),
-  })
-  .strict(ENCODED_QUERY_MIGRATION_MESSAGE);
+  }, ENCODED_QUERY_STRICT_OBJECT_PARAMS);
 
 export async function handler(
   args: z.infer<typeof schema>,
