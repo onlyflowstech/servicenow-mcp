@@ -36,7 +36,7 @@ export function display(candidate: unknown): string {
   return candidate && typeof candidate === "object" && "display_value" in candidate ? value(candidate.display_value) : value(candidate);
 }
 export function record(candidate: unknown): Record<string, unknown> {
-  return z.record(z.unknown()).parse(candidate);
+  return z.record(z.string(), z.unknown()).parse(candidate);
 }
 export async function readAtfRows(services: ServiceNowToolHandlerServices, args: Record<string, unknown>, table: string, query: string, limit = 1000): Promise<Record<string, unknown>[]> {
   const fields = preparedReadableFields(args, table);
@@ -45,7 +45,7 @@ export async function readAtfRows(services: ServiceNowToolHandlerServices, args:
     sysparm_query: `${query}${query ? "^" : ""}ORDERBYsys_id`, sysparm_fields: fieldSelectionToSysparmFields(fields)!,
     sysparm_display_value: (table === "var_dictionary" || table === "sys_atf_step_config" || table === "sys_atf_test_result_step") ? "all" : "false", sysparm_limit: String(limit + 1),
   });
-  const rows = z.array(z.record(z.unknown())).parse(filterReadableRecord(response?.result, fields));
+  const rows = z.array(z.record(z.string(), z.unknown())).parse(filterReadableRecord(response?.result, fields));
   if (rows.length > limit) throw createToolError("upstream", "retry_after_correction");
   return rows;
 }

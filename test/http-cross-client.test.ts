@@ -26,6 +26,13 @@ import {
   createHttpRuntime,
   type HttpRuntime,
 } from "../src/http-runtime.js";
+import {
+  JSON_SHAPE_REJECTION_CODE,
+  JSON_SHAPE_REJECTION_MESSAGE,
+  MAX_JSON_MESSAGE_ARRAY_LENGTH,
+  MAX_JSON_MESSAGE_DEPTH,
+  MAX_JSON_MESSAGE_ELEMENTS,
+} from "../src/json-shape-limits.js";
 import type { Profile, ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import {
@@ -2060,6 +2067,76 @@ describe("SNSDK-27 authentication and malformed protocol", () => {
     expect(harness.createServer).not.toHaveBeenCalled();
     expect(harness.getProfile).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [
+      "an initialize array past the array bound",
+      () => ({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: {
+            name: "x",
+            version: "1",
+            icons: new Array(MAX_JSON_MESSAGE_ARRAY_LENGTH + 1).fill(0),
+          },
+        },
+      }),
+    ],
+    [
+      "tool arguments past the element bound",
+      () => ({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "sn_profile",
+          arguments: {
+            profile: PROFILE_NAME,
+            extra: Array.from(
+              { length: Math.ceil(MAX_JSON_MESSAGE_ELEMENTS / MAX_JSON_MESSAGE_ARRAY_LENGTH) + 1 },
+              () => new Array(MAX_JSON_MESSAGE_ARRAY_LENGTH).fill(0)
+            ),
+          },
+        },
+      }),
+    ],
+    [
+      "a message nested past the depth bound",
+      () => {
+        let nested: unknown = 0;
+        for (let level = 0; level < MAX_JSON_MESSAGE_DEPTH; level += 1) nested = [nested];
+        return {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "sn_profile", arguments: { profile: PROFILE_NAME, extra: nested } },
+        };
+      },
+    ],
+  ])(
+    "rejects %s with a fixed error before server or schema dispatch",
+    async (_label, build) => {
+      const harness = await createHarness();
+      const response = await fetch(harness.url, {
+        method: "POST",
+        headers: mcpHeaders(undefined, LATEST_PROTOCOL_VERSION),
+        body: JSON.stringify(build()),
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: JSON_SHAPE_REJECTION_CODE, message: JSON_SHAPE_REJECTION_MESSAGE },
+      });
+      expect(harness.createServer).not.toHaveBeenCalled();
+      expect(harness.getProfile).not.toHaveBeenCalled();
+    }
+  );
 });
 
 describe("SNSDK-27 health and lifecycle transitions", () => {

@@ -41,12 +41,13 @@ import {
   defineContextOnlyToolModule,
   defineServiceNowToolModule,
   withRequiredProfile,
+  type AnyZodObject,
   type ServiceNowToolHandlerServices,
   type ToolDefinition,
   type ToolModuleRequirements,
 } from "./tool-module.js";
 
-interface ExistingServiceNowTool<TSchema extends z.AnyZodObject> {
+interface ExistingServiceNowTool<TSchema extends AnyZodObject> {
   readonly definition: ToolDefinition;
   readonly schema: TSchema;
   readonly handler: (
@@ -61,7 +62,7 @@ interface ExistingServiceNowTool<TSchema extends z.AnyZodObject> {
  * Adapt the existing handler functions without exposing their positional
  * compatibility signature to the registry or to future module authors.
  */
-function existingToolModule<TSchema extends z.AnyZodObject>(
+function existingToolModule<TSchema extends AnyZodObject>(
   tool: ExistingServiceNowTool<TSchema>,
   requirements: ToolModuleRequirements
 ) {
@@ -87,7 +88,10 @@ function existingToolModule<TSchema extends z.AnyZodObject>(
         toolName,
         args,
         await tool.handler(
-          args,
+          // The issued schema is the tool's own schema plus `profile`, so its
+          // output is the tool's output; zod 4 cannot infer that through the
+          // open index signature the issued shape carries.
+          args as z.output<TSchema>,
           services.serviceNow,
           services.settings,
           services.context
