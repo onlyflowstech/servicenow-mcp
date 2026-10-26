@@ -20,7 +20,7 @@ import type { ServiceNowOperations } from "../client.js";
 import type { AtfResultStore } from "../atf-result-cache.js";
 import type { AtfHandlerSettings } from "../atf-config.js";
 import type { ServiceNowConfig } from "../config.js";
-import { ENCODED_QUERY_MIGRATION_MESSAGE } from "../encoded-query-policy.js";
+import { ENCODED_QUERY_STRICT_OBJECT_PARAMS } from "../encoded-query-policy.js";
 import type {
   ExecutionContext,
   ResolvedEffectivePolicyReference,
@@ -37,21 +37,17 @@ export interface ToolDefinition {
 }
 
 /**
- * Required on every published tool. Trimming makes whitespace-only selectors
- * invalid and ensures profile lookup uses the exact value clients discover.
+ * Any zod object schema. zod 4 removed `AnyZodObject`; this is its
+ * replacement in the shape every tool contract accepts.
  */
-export const profileNameSchema = z
-  .string()
-  .trim()
-  .min(1, "profile must not be empty")
-  .max(128, "profile must not exceed 128 characters")
-  .describe("Configured ServiceNow profile name (required; no default fallback).");
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type AnyZodObject = z.ZodObject<{ [key: string]: z.ZodType<any, any> }, z.core.$ZodObjectConfig>;
 
 interface IssuedSchemaSnapshot {
-  readonly definition: z.ZodObjectDef;
-  readonly shape: Readonly<Record<string, z.ZodTypeAny>>;
-  readonly parse: z.AnyZodObject["parse"];
-  readonly safeParse: z.AnyZodObject["safeParse"];
+  readonly definition: object;
+  readonly shape: Readonly<Record<string, z.ZodType>>;
+  readonly parse: AnyZodObject["parse"];
+  readonly safeParse: AnyZodObject["safeParse"];
   readonly unknownKeys: "strip" | "strict";
 }
 
@@ -59,6 +55,86 @@ const ISSUED_INPUT_SCHEMAS = new WeakSet<object>();
 const ISSUED_OUTPUT_SCHEMAS = new WeakSet<object>();
 const ISSUED_SCHEMA_SNAPSHOTS = new WeakMap<object, IssuedSchemaSnapshot>();
 const HARDENED_SCHEMA_NODES = new WeakSet<object>();
+/**
+ * Process-wide: each source zod node maps to the one hardened rebuild made
+ * from it. Tools share source schemas (every output envelope embeds the same
+ * result metadata), and without this every tool rebuilt and froze its own
+ * copy. Two consequences, both intended:
+ *
+ * - The first issuance wins. A source schema changed after it was first
+ *   hardened is not read again, so no issued schema, earlier or later, sees
+ *   the change; issued graphs stay inert to their sources.
+ * - Reuse skips the rebuild but not the budgets. A graph that reuses a
+ *   hardened subgraph is charged for every value in it that the graph has not
+ *   already counted, exactly as a fresh traversal would have counted it, and
+ *   the subgraph's height is checked at the depth it is reached (see
+ *   {@link HARDENED_SUBGRAPHS} and `chargeReusedSubgraph`).
+ */
+const HARDENED_FROM_SOURCE = new WeakMap<object, object>();
+
+/**
+ * What hardening one zod node charged to the budgets, complete by
+ * construction. `nodes` and `ownKeys` cover the node itself and every non-zod
+ * value (definition, container, regex, function) reachable from it without
+ * passing through another zod node: its whole value closure, walked when the
+ * node is finished, whoever cloned each value first. `children` are the zod
+ * nodes that closure reaches. A value shared by two nodes is in both closures,
+ * so a graph holding both is charged for it twice, which only makes the
+ * budgets stricter; nothing reachable is ever left out.
+ */
+interface SubgraphRecord {
+  /** Traversal nodes for the node and its value closure, excluding child zod nodes. */
+  readonly nodes: number;
+  /** Own-key charges for the node and its value closure, excluding child zod nodes. */
+  readonly ownKeys: number;
+  /** Deepest level below the node's parent reached through any path. */
+  readonly height: number;
+  /** Every zod node the node's value closure reaches. */
+  readonly children: readonly object[];
+}
+
+/**
+ * Budget records for every hardened zod node, so the nodes reachable from a
+ * reused subgraph, and what a fresh traversal would have charged for each,
+ * can be recovered without traversing it again.
+ */
+const HARDENED_SUBGRAPHS = new WeakMap<object, SubgraphRecord>();
+
+/** What one value's build reached and charged, collected while it is built. */
+interface SubgraphFrame {
+  /** The nearest frame building a zod node: itself, or an enclosing one. */
+  zodFrame: SubgraphFrame | undefined;
+  /** On a zod frame, the node being built, once it exists. */
+  node: object | undefined;
+  /** Charged by the values and zod nodes built or reused below this value. */
+  childNodes: number;
+  childOwnKeys: number;
+  /** Non-zod values reached directly: built, or already built in this graph. */
+  readonly values: object[];
+  /** Zod nodes reached directly. */
+  readonly zods: object[];
+  /** On a non-zod frame: the node still being built that this value reached. */
+  boundTo: object | undefined;
+}
+
+/**
+ * A cloned non-zod value's own charge and direct links, kept for the current
+ * graph only. Zod node records are computed from these.
+ */
+interface LocalSubgraphRecord {
+  /** Traversal nodes charged for the value itself, excluding what it reaches. */
+  readonly nodes: number;
+  /** Own-key charges for the value itself, excluding what it reaches. */
+  readonly ownKeys: number;
+  readonly height: number;
+  readonly values: readonly object[];
+  readonly zods: readonly object[];
+  /**
+   * The node this value reached while that node was still being built: the
+   * value is part of a cycle through that node. Only that node may hold it.
+   */
+  readonly boundTo: object | undefined;
+}
 const MAX_TOOL_SCHEMA_FIELDS = 128;
 const MAX_SCHEMA_GRAPH_DEPTH = 128;
 const MAX_SCHEMA_GRAPH_NODES = 10_000;
@@ -81,44 +157,138 @@ const INTRINSIC_SET_ITERATOR_NEXT = Object.getPrototypeOf(
   new Set().values()
 ).next as () => IteratorResult<unknown>;
 
+/**
+ * The zod constructors a schema graph may be rebuilt with: every classic
+ * schema class and every core check class. A node whose internals name any
+ * other constructor is refused, so hardening never runs a constructor that a
+ * caller supplied.
+ */
+const ZOD_NODE_CONSTRUCTORS: ReadonlySet<unknown> = new Set(
+  [...Object.values(z), ...Object.values(z.core)].filter(
+    (candidate) =>
+      typeof candidate === "function" &&
+      Object.hasOwn(candidate, "init") &&
+      typeof (candidate as { readonly name?: unknown }).name === "string"
+  )
+);
+
+/**
+ * The definition keys zod itself installs as getters: an object's `shape`
+ * (built on first read) and a default's `defaultValue` (a fresh copy per
+ * parse). Any other accessor in a definition is refused.
+ */
+const ZOD_DEFINITION_ACCESSOR_KEYS: ReadonlySet<PropertyKey> = new Set([
+  "shape",
+  "defaultValue",
+]);
+const NO_ACCESSORS: ReadonlySet<PropertyKey> = new Set();
+
+/**
+ * Container types whose parse zod's memoizer wraps at construction. On its
+ * first call the wrapper checks whether the schema can recurse and, when it
+ * cannot, writes the unwrapped parse back onto the node's internals. That
+ * write is made before freezing (see `settleMemoizedParse`).
+ */
+const MEMOIZED_CONTAINER_TYPES: ReadonlySet<unknown> = new Set([
+  "array",
+  "object",
+  "tuple",
+  "record",
+  "map",
+  "set",
+]);
+
 interface SchemaGraphState {
   readonly seen: WeakMap<object, unknown>;
   depth: number;
+  /** Deepest level reached within the value being measured. */
+  maxDepth: number;
+  /** One frame per value being built, innermost last. */
+  readonly frames: SubgraphFrame[];
+  /** Folded charges of this graph's cloned non-zod values. */
+  readonly local: WeakMap<object, LocalSubgraphRecord>;
+  /** Source non-zod values whose clone is still being built, and its frame. */
+  readonly building: WeakMap<object, SubgraphFrame>;
   nodes: number;
   ownKeys: number;
 }
 
+/**
+ * Required on every published tool. Trimming makes whitespace-only selectors
+ * invalid and ensures profile lookup uses the exact value clients discover.
+ * Hardened once here, so every issued schema shares this exact node.
+ */
+export const profileNameSchema = hardenSchemaGraph(
+  z
+    .string()
+    .trim()
+    .min(1, "profile must not be empty")
+    .max(128, "profile must not exceed 128 characters")
+    .describe("Configured ServiceNow profile name (required; no default fallback).")
+);
+
+/**
+ * The issued shape: the tool-local fields plus the shared profile selector.
+ * The open index signature keeps zod 3's typing of handler arguments, where
+ * an access resolver may add prepared fields beyond the declared schema.
+ */
+type WithProfile<TShape> = Omit<TShape, "profile"> & {
+  profile: typeof profileNameSchema;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+} & { [key: string]: z.ZodType<any, any> };
+
 /** Compose tool-local fields with the exact shared profile selector. */
-export function withRequiredProfile<TSchema extends z.AnyZodObject>(
-  toolSchema: TSchema
-) {
+export function withRequiredProfile<TShape extends z.ZodRawShape, TConfig extends z.core.$ZodObjectConfig>(
+  toolSchema: z.ZodObject<TShape, TConfig>
+): z.ZodObject<WithProfile<TShape>, TConfig> {
   const source = snapshotUntrustedObjectSchema(toolSchema, "tool-local input schema");
-  const normalized = z.object({
-    ...source.shape,
-    profile: profileNameSchema,
-  });
+  const shape = { ...source.shape, profile: profileNameSchema };
   const composed =
     source.unknownKeys === "strict"
-      ? normalized.strict(ENCODED_QUERY_MIGRATION_MESSAGE)
-      : normalized.strip();
-  return issueSchema(composed, "input") as ReturnType<TSchema["extend"]>;
+      ? strictInputObject(shape)
+      : stripInputObject(shape);
+  return issueSchema(composed, "input") as unknown as z.ZodObject<
+    WithProfile<TShape>,
+    TConfig
+  >;
 }
 
 /** Compose module output fields with the coordinator-owned profile envelope. */
-export function withResolvedProfileOutput<TSchema extends z.AnyZodObject>(
-  outputSchema: TSchema
-) {
+export function withResolvedProfileOutput<TShape extends z.ZodRawShape, TConfig extends z.core.$ZodObjectConfig>(
+  outputSchema: z.ZodObject<TShape, TConfig>
+): z.ZodObject<WithProfile<TShape>, z.core.$strict> {
   const source = snapshotUntrustedObjectSchema(
     outputSchema,
     "tool-local output schema"
   );
-  const normalized = z
-    .object({
-      ...source.shape,
-      profile: profileNameSchema,
-    })
-    .strict();
-  return issueSchema(normalized, "output") as ReturnType<TSchema["extend"]>;
+  const normalized = z.strictObject({ ...source.shape, profile: profileNameSchema });
+  return issueSchema(normalized, "output") as unknown as z.ZodObject<
+    WithProfile<TShape>,
+    z.core.$strict
+  >;
+}
+
+/**
+ * A strict input object whose unknown-key issue carries the encoded-query
+ * migration hint, as zod 3's `.strict(message)` did. Every other issue keeps
+ * zod's own message: the map answers only `unrecognized_keys`.
+ */
+function strictInputObject(shape: AnyZodObject["shape"]): AnyZodObject {
+  return z.strictObject(shape, ENCODED_QUERY_STRICT_OBJECT_PARAMS);
+}
+
+/**
+ * A stripping input object that still tells clients it takes no other keys.
+ *
+ * Unknown keys are dropped, not rejected, at parse; clients have always been
+ * told `additionalProperties: false` for these tools, which the registration
+ * preflight requires. zod 3's converter emitted that for a stripping object;
+ * zod 4's emits it only for a strict one, and copies a node's metadata into
+ * its JSON Schema, so the keyword is carried as metadata. Parsing is
+ * unaffected.
+ */
+function stripInputObject(shape: AnyZodObject["shape"]): AnyZodObject {
+  return z.object(shape).meta({ additionalProperties: false });
 }
 
 /** Base output envelope used until a module declares additional structured data. */
@@ -225,8 +395,8 @@ type ToolAccessResolver = (
 
 interface ToolModuleContractBase {
   readonly definition: ToolDefinition;
-  readonly inputSchema: z.AnyZodObject;
-  readonly outputSchema: z.AnyZodObject;
+  readonly inputSchema: AnyZodObject;
+  readonly outputSchema: AnyZodObject;
   readonly requirements: ToolModuleRequirements;
   readonly resolveAccess: ToolAccessResolver;
 }
@@ -255,7 +425,7 @@ const ISSUED_TOOL_MODULES = new WeakSet<object>();
 const MAX_TOOL_MODULES = 128;
 
 interface UntrustedObjectSchemaSnapshot {
-  readonly shape: Readonly<Record<string, z.ZodTypeAny>>;
+  readonly shape: Readonly<Record<string, z.ZodType>>;
   readonly unknownKeys: "strip" | "strict";
 }
 
@@ -275,11 +445,15 @@ function snapshotUntrustedObjectSchema(
   ) {
     throw new TypeError(`${label} must provide a non-proxy object shape`);
   }
-  const definitionDescriptor = Object.getOwnPropertyDescriptor(candidate, "_def");
-  if (!definitionDescriptor || !("value" in definitionDescriptor)) {
+  const internals = ownDataValue(candidate, "_zod");
+  if (
+    typeof internals !== "object" ||
+    internals === null ||
+    nodeUtilTypes.isProxy(internals)
+  ) {
     throw new TypeError(`${label} definition must be a data property`);
   }
-  const definition = definitionDescriptor.value;
+  const definition = ownDataValue(internals, "def");
   if (
     typeof definition !== "object" ||
     definition === null ||
@@ -288,35 +462,27 @@ function snapshotUntrustedObjectSchema(
   ) {
     throw new TypeError(`${label} definition must be a plain data object`);
   }
-  const typeDescriptor = Object.getOwnPropertyDescriptor(definition, "typeName");
-  const shapeDescriptor = Object.getOwnPropertyDescriptor(definition, "shape");
-  const unknownKeysDescriptor = Object.getOwnPropertyDescriptor(
-    definition,
-    "unknownKeys"
-  );
+  const typeDescriptor = Object.getOwnPropertyDescriptor(definition, "type");
   const catchallDescriptor = Object.getOwnPropertyDescriptor(definition, "catchall");
+  const catchall =
+    catchallDescriptor && "value" in catchallDescriptor
+      ? (catchallDescriptor.value as unknown)
+      : undefined;
   if (
+    ownDataValue(internals, "constr") !== z.ZodObject ||
     !typeDescriptor ||
     !("value" in typeDescriptor) ||
-    typeDescriptor.value !== z.ZodFirstPartyTypeKind.ZodObject ||
-    !shapeDescriptor ||
-    !("value" in shapeDescriptor) ||
-    typeof shapeDescriptor.value !== "function" ||
-    !unknownKeysDescriptor ||
-    !("value" in unknownKeysDescriptor) ||
-    (unknownKeysDescriptor.value !== "strip" &&
-      unknownKeysDescriptor.value !== "strict") ||
-    !catchallDescriptor ||
-    !("value" in catchallDescriptor) ||
-    !(catchallDescriptor.value instanceof z.ZodNever) ||
-    nodeUtilTypes.isProxy(catchallDescriptor.value)
+    typeDescriptor.value !== "object" ||
+    (catchallDescriptor !== undefined && !("value" in catchallDescriptor)) ||
+    (catchall !== undefined && !isZodNeverNode(catchall))
   ) {
     throw new TypeError(`${label} definition is unsupported`);
   }
+  const unknownKeys = catchall === undefined ? "strip" : "strict";
 
   let shapeCandidate: unknown;
   try {
-    shapeCandidate = Reflect.apply(shapeDescriptor.value, undefined, []);
+    shapeCandidate = readDefinitionShape(definition);
   } catch {
     throw new TypeError(`${label} shape could not be materialized`);
   }
@@ -334,7 +500,7 @@ function snapshotUntrustedObjectSchema(
   if (keys.length > MAX_TOOL_SCHEMA_FIELDS) {
     throw new TypeError(`${label} has too many fields`);
   }
-  const shape: Record<string, z.ZodTypeAny> = Object.create(null);
+  const shape: Record<string, z.ZodType> = Object.create(null);
   for (const key of keys) {
     if (
       typeof key !== "string" ||
@@ -349,15 +515,11 @@ function snapshotUntrustedObjectSchema(
     if (!descriptor || !("value" in descriptor)) {
       throw new TypeError(`${label} shape must contain only data fields`);
     }
-    const field = descriptor.value;
-    if (
-      typeof field !== "object" ||
-      field === null ||
-      nodeUtilTypes.isProxy(field)
-    ) {
+    const field = descriptor.value as unknown;
+    if (!isZodSchemaNode(field)) {
       throw new TypeError(`${label} contains an invalid field schema`);
     }
-    shape[key] = field as z.ZodTypeAny;
+    shape[key] = field;
   }
 
   const shapeSnapshot = Object.freeze({ ...shape });
@@ -369,35 +531,62 @@ function snapshotUntrustedObjectSchema(
   } catch {
     throw new TypeError(`${label} fields could not be safely validated`);
   }
-  return Object.freeze({
-    shape: shapeSnapshot,
-    unknownKeys: unknownKeysDescriptor.value,
-  });
+  return Object.freeze({ shape: shapeSnapshot, unknownKeys });
 }
 
-function issueSchema<TSchema extends z.AnyZodObject>(
-  schema: TSchema,
+/** The value of an own data property, or undefined for an accessor or absence. */
+function ownDataValue(target: object, key: PropertyKey): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(target, key);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
+}
+
+/**
+ * Read an object definition's shape. zod 4 installs `shape` as a getter that
+ * builds the shape on first read, so that getter (and only that key's getter)
+ * is run once here; a data property is read directly.
+ */
+function readDefinitionShape(definition: object): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(definition, "shape");
+  if (!descriptor) throw new TypeError("object definition has no shape");
+  if ("value" in descriptor) return descriptor.value;
+  if (typeof descriptor.get !== "function") {
+    throw new TypeError("object definition shape is not readable");
+  }
+  return Reflect.apply(descriptor.get, definition, []);
+}
+
+function isZodNeverNode(value: unknown): boolean {
+  if (!isZodSchemaNode(value)) return false;
+  const internals = ownDataValue(value, "_zod");
+  if (typeof internals !== "object" || internals === null) return false;
+  const definition = ownDataValue(internals, "def");
+  return (
+    typeof definition === "object" &&
+    definition !== null &&
+    ownDataValue(definition, "type") === "never"
+  );
+}
+
+function issueSchema<TSchema extends AnyZodObject>(
+  source: TSchema,
   kind: "input" | "output"
 ): TSchema {
-  hardenSchemaGraph(schema);
-  const shape = Object.freeze({ ...schema.shape });
-  const snapshot = Object.freeze({
-    definition: schema._def,
-    shape,
+  const schema = hardenSchemaGraph(source);
+  const definition = schema._zod.def;
+  const snapshot: IssuedSchemaSnapshot = Object.freeze({
+    definition,
+    shape: Object.freeze({ ...(schema.shape as Record<string, z.ZodType>) }),
     parse: schema.parse,
     safeParse: schema.safeParse,
-    unknownKeys: schema._def.unknownKeys as "strip" | "strict",
+    unknownKeys: isZodNeverNode(definition.catchall) ? "strict" : "strip",
   });
-  ISSUED_SCHEMA_SNAPSHOTS.set(
-    schema,
-    snapshot
-  );
+  ISSUED_SCHEMA_SNAPSHOTS.set(schema, snapshot);
   (kind === "input" ? ISSUED_INPUT_SCHEMAS : ISSUED_OUTPUT_SCHEMAS).add(schema);
   return schema;
 }
 
 function issuedSchemaSnapshot(
-  schema: z.AnyZodObject,
+  schema: AnyZodObject,
   kind: "input" | "output"
 ): IssuedSchemaSnapshot {
   const issued =
@@ -407,13 +596,13 @@ function issuedSchemaSnapshot(
     nodeUtilTypes.isProxy(schema) ||
     !issued.has(schema) ||
     !snapshot ||
-    schema._def !== snapshot.definition ||
+    schema._zod.def !== snapshot.definition ||
     schema.parse !== snapshot.parse ||
     schema.safeParse !== snapshot.safeParse
   ) {
     throw new TypeError(`tool ${kind} schema is not an issued contract-normalized schema`);
   }
-  const currentShape = schema.shape;
+  const currentShape = schema.shape as Readonly<Record<string, unknown>>;
   const expectedKeys = Object.keys(snapshot.shape);
   const currentKeys = Object.keys(currentShape);
   if (
@@ -430,152 +619,544 @@ function issuedSchemaSnapshot(
 
 /** Clone an issued top-level schema so later source-catalog mutation is inert. */
 export function snapshotIssuedToolSchema(
-  schema: z.AnyZodObject,
+  schema: AnyZodObject,
   kind: "input" | "output"
-): z.AnyZodObject {
+): AnyZodObject {
   const snapshot = issuedSchemaSnapshot(schema, kind);
-  const normalized = z.object({ ...snapshot.shape });
-  const cloned = snapshot.unknownKeys === "strict"
-    ? normalized.strict(
-        kind === "input" ? ENCODED_QUERY_MIGRATION_MESSAGE : undefined
-      )
-    : normalized.strip();
-  hardenSchemaGraph(cloned);
-  return cloned;
+  const shape = { ...snapshot.shape };
+  const cloned =
+    snapshot.unknownKeys === "strip"
+      ? stripInputObject(shape)
+      : kind === "input"
+        ? strictInputObject(shape)
+        : z.strictObject(shape);
+  return hardenSchemaGraph(cloned);
 }
 
 /**
- * Make every parse-relevant value reachable from a normalized schema stable.
- * Zod definitions are replaced with contract-owned copies before the schema
- * node is frozen, so references to an earlier definition become inert. The
- * traversal is deliberately bounded and rejects accessors, proxies, and
- * mutable exotic containers rather than attempting to execute them.
+ * Rebuild a schema graph from contract-owned, frozen definitions and return
+ * the rebuilt root.
+ *
+ * zod 4 parses through closures that each node's constructor creates over the
+ * definition it was given, so swapping a definition after construction would
+ * not reach parsing. Instead every node, checks included, is constructed anew
+ * from a frozen copy of its definition, and that copy is the only state its
+ * closures can see. References a caller kept to the source graph (its
+ * definitions, checks, regexes or collections) are therefore inert. Each
+ * rebuilt node then has its lazily derived state computed and its prototype
+ * members pinned as own values, and is frozen. The traversal is deliberately
+ * bounded and rejects accessors, proxies, foreign constructors, lazy
+ * (recursive) nodes and mutable exotic containers rather than attempting to
+ * execute them.
  */
-function hardenSchemaGraph(schema: z.ZodTypeAny): void {
+function hardenSchemaGraph<TSchema extends z.ZodType>(schema: TSchema): TSchema {
   const state: SchemaGraphState = {
     seen: new WeakMap<object, unknown>(),
     depth: 0,
+    maxDepth: 0,
+    frames: [],
+    local: new WeakMap<object, LocalSubgraphRecord>(),
+    building: new WeakMap<object, SubgraphFrame>(),
     nodes: 0,
     ownKeys: 0,
   };
-  hardenZodSchemaNode(schema, state);
-}
-
-function hardenZodSchemaNode<TSchema extends z.ZodTypeAny>(
-  schema: TSchema,
-  state: SchemaGraphState
-): TSchema {
-  if (nodeUtilTypes.isProxy(schema)) {
-    throw new TypeError("tool schema graph must not contain a Proxy");
-  }
-  if (HARDENED_SCHEMA_NODES.has(schema)) return schema;
-  const seen = state.seen.get(schema);
-  if (seen) return seen as TSchema;
-  enterSchemaGraphValue(state, schema);
-  state.seen.set(schema, schema);
-
-  const definitionDescriptor = Object.getOwnPropertyDescriptor(schema, "_def");
-  if (
-    !definitionDescriptor ||
-    !("value" in definitionDescriptor) ||
-    (!definitionDescriptor.configurable && !definitionDescriptor.writable)
-  ) {
-    leaveSchemaGraphValue(state);
-    throw new TypeError("tool schema graph contains an immutable foreign definition");
-  }
-
   try {
-    const definition = cloneSchemaDefinition(
-      schema,
-      definitionDescriptor.value,
-      state
-    );
-    Object.defineProperty(schema, "_def", {
-      value: definition,
-      enumerable: definitionDescriptor.enumerable,
-      writable: false,
-      configurable: false,
-    });
-
-    initializeZodParseCaches(schema);
-    hardenSchemaOwnProperties(schema, state);
-    shadowZodPrototypeBehavior(schema);
-    Object.freeze(schema);
-    HARDENED_SCHEMA_NODES.add(schema);
-    return schema;
+    return hardenZodNode(schema, state) as TSchema;
   } catch (error) {
     throw error instanceof TypeError
       ? error
       : new TypeError("tool schema graph could not be hardened");
+  }
+}
+
+type ZodNodeConstructor = new (definition: object) => object;
+
+/** The allowlisted constructor a genuine zod node was built by, or undefined. */
+function zodNodeConstructor(value: unknown): ZodNodeConstructor | undefined {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    nodeUtilTypes.isProxy(value)
+  ) {
+    return undefined;
+  }
+  const internals = ownDataValue(value, "_zod");
+  if (
+    typeof internals !== "object" ||
+    internals === null ||
+    nodeUtilTypes.isProxy(internals)
+  ) {
+    return undefined;
+  }
+  const constructor = ownDataValue(internals, "constr");
+  if (!ZOD_NODE_CONSTRUCTORS.has(constructor)) return undefined;
+  return value instanceof (constructor as ZodNodeConstructor)
+    ? (constructor as ZodNodeConstructor)
+    : undefined;
+}
+
+function hardenZodNode(node: object, state: SchemaGraphState): object {
+  if (nodeUtilTypes.isProxy(node)) {
+    throw new TypeError("tool schema graph must not contain a Proxy");
+  }
+  const reused = HARDENED_SCHEMA_NODES.has(node)
+    ? node
+    : (HARDENED_FROM_SOURCE.get(node) ?? (state.seen.get(node) as object | undefined));
+  if (reused !== undefined) {
+    // Already counted in this graph, or built by an earlier one.
+    if (state.seen.has(reused)) noteSeenSubgraph(state, reused);
+    else chargeReusedSubgraph(state, reused);
+    if (reused !== node) state.seen.set(node, reused);
+    return reused;
+  }
+  const constructor = zodNodeConstructor(node);
+  if (!constructor) {
+    throw new TypeError("tool schema graph contains an unsupported schema node");
+  }
+  return measureSubgraph(state, () => rebuildZodNode(node, constructor, state), true);
+}
+
+function rebuildZodNode(
+  node: object,
+  constructor: ZodNodeConstructor,
+  state: SchemaGraphState
+): object {
+  const internals = ownDataValue(node, "_zod") as object;
+  const definitionDescriptor = Object.getOwnPropertyDescriptor(internals, "def");
+  if (
+    !definitionDescriptor ||
+    !("value" in definitionDescriptor) ||
+    typeof definitionDescriptor.value !== "object" ||
+    definitionDescriptor.value === null
+  ) {
+    throw new TypeError("tool schema graph definition must be a data property");
+  }
+  const sourceDefinition = definitionDescriptor.value as object;
+  // measureSubgraph pushed this node's frame; the only in-progress node a
+  // build may reach again is the one recorded here (see noteSeenSubgraph).
+  const frame = state.frames.at(-1) as SubgraphFrame;
+
+  enterSchemaGraphValue(state, node);
+  try {
+    if (constructor === z.core.$ZodCheck) {
+      // A bare check (from .superRefine() or .check(fn)) gets its behaviour
+      // assigned after construction, and its closure refers to the check
+      // itself, so it cannot be rebuilt from its definition. It is frozen in
+      // place instead: a reference kept to it, or to its definition, can no
+      // longer change it.
+      state.seen.set(node, node);
+      frame.node = node;
+      sealCheckDefinitionInPlace(sourceDefinition, state);
+      sealRebuiltZodNode(node, state);
+      HARDENED_SCHEMA_NODES.add(node);
+      return node;
+    }
+    if (ownDataValue(sourceDefinition, "type") === "lazy") {
+      // zod 4 resolves a lazy target by writing it onto the definition and
+      // the node on first use, which a frozen graph cannot allow. A lazy node
+      // is also the way to build a recursive schema (shape getters are
+      // refused as accessors; a cycle closed through metadata is refused by
+      // noteSeenSubgraph and noteSeenValue). No tool schema is recursive, so
+      // lazy nodes are refused rather than half supported.
+      throw new TypeError("tool schema graph does not support lazy (recursive) schemas");
+    }
+    const definition = cloneSchemaDefinition(sourceDefinition, state);
+    const assigned = new Map(
+      Reflect.ownKeys(definition).map((key) => [key, definition[key]] as const)
+    );
+    const rebuilt = new constructor(definition);
+    state.seen.set(node, rebuilt);
+    // A rebuilt node reached again through its own members is itself.
+    state.seen.set(rebuilt, rebuilt);
+    frame.node = rebuilt;
+    sealSchemaDefinition(definition, assigned, state);
+    copySchemaMetadata(node, rebuilt, state);
+    sealRebuiltZodNode(rebuilt, state);
+    HARDENED_SCHEMA_NODES.add(rebuilt);
+    // Only a completely sealed rebuild is shared; a failure above leaves
+    // nothing behind for the next graph.
+    HARDENED_FROM_SOURCE.set(node, rebuilt);
+    return rebuilt;
   } finally {
     leaveSchemaGraphValue(state);
   }
 }
 
+/**
+ * Build a hardened value and record what it charged and reached. A non-zod
+ * value gets a per-graph record of its own charge and its direct links. A zod
+ * node's process-wide record (see {@link HARDENED_SUBGRAPHS}) is computed from
+ * those when the node is finished, by walking its whole value closure.
+ */
+function measureSubgraph<T extends object>(
+  state: SchemaGraphState,
+  build: () => T,
+  isZodNode: boolean,
+  /** For a non-zod value, the source being cloned (tracked while in progress). */
+  source?: object
+): T {
+  const startNodes = state.nodes;
+  const startOwnKeys = state.ownKeys;
+  const startDepth = state.depth;
+  const outerMaxDepth = state.maxDepth;
+  const parent = state.frames.at(-1);
+  const frame: SubgraphFrame = {
+    zodFrame: parent?.zodFrame,
+    node: undefined,
+    childNodes: 0,
+    childOwnKeys: 0,
+    values: [],
+    zods: [],
+    boundTo: undefined,
+  };
+  if (isZodNode) frame.zodFrame = frame;
+  state.maxDepth = startDepth;
+  state.frames.push(frame);
+  if (source !== undefined) state.building.set(source, frame);
+  let hardened: T;
+  let height: number;
+  try {
+    hardened = build();
+    height = state.maxDepth - startDepth;
+  } finally {
+    if (source !== undefined) state.building.delete(source);
+    state.frames.pop();
+    state.maxDepth = Math.max(outerMaxDepth, state.maxDepth);
+  }
+  const nodes = state.nodes - startNodes;
+  const ownKeys = state.ownKeys - startOwnKeys;
+  const ownNodes = nodes - frame.childNodes;
+  const ownOwnKeys = ownKeys - frame.childOwnKeys;
+  if (isZodNode) {
+    if (!HARDENED_SUBGRAPHS.has(hardened)) {
+      HARDENED_SUBGRAPHS.set(
+        hardened,
+        zodNodeRecord(state, hardened, frame, ownNodes, ownOwnKeys, height)
+      );
+    }
+    if (parent) {
+      parent.childNodes += nodes;
+      parent.childOwnKeys += ownKeys;
+      parent.zods.push(hardened);
+    }
+    return hardened;
+  }
+  if (!state.local.has(hardened)) {
+    state.local.set(hardened, {
+      nodes: ownNodes,
+      ownKeys: ownOwnKeys,
+      height,
+      values: frame.values,
+      zods: frame.zods,
+      boundTo: frame.boundTo,
+    });
+  }
+  if (parent) {
+    parent.childNodes += nodes;
+    parent.childOwnKeys += ownKeys;
+    parent.values.push(hardened);
+    if (parent.zodFrame !== parent) parent.boundTo ??= frame.boundTo;
+  }
+  return hardened;
+}
+
+/**
+ * A finished zod node's record: its own charge plus that of every non-zod
+ * value in its closure (the values reachable from it without passing through
+ * another zod node), and the zod nodes that closure reaches. Every value in
+ * the closure has a record by now, because it was built in this graph and
+ * finished before this node did; one that has not is still being built by an
+ * enclosing node and closes a cycle. A value bound to a cycle through another
+ * node, or another node still being built, likewise means a cycle. Either
+ * case is refused, so a finished record never leaves anything out.
+ */
+function zodNodeRecord(
+  state: SchemaGraphState,
+  hardened: object,
+  frame: SubgraphFrame,
+  ownNodes: number,
+  ownOwnKeys: number,
+  height: number
+): SubgraphRecord {
+  let nodes = ownNodes;
+  let ownKeys = ownOwnKeys;
+  const children = new Set<object>(frame.zods);
+  const visited = new Set<object>();
+  const pending: object[] = [...frame.values];
+  while (pending.length > 0) {
+    const value = pending.pop() as object;
+    if (visited.has(value)) continue;
+    visited.add(value);
+    const record = state.local.get(value);
+    if (record === undefined) throw schemaGraphCycle();
+    if (record.boundTo !== undefined && record.boundTo !== hardened) throw schemaGraphCycle();
+    nodes += record.nodes;
+    ownKeys += record.ownKeys;
+    for (const child of record.zods) children.add(child);
+    for (const next of record.values) pending.push(next);
+  }
+  children.delete(hardened);
+  for (const child of children) {
+    if (!HARDENED_SUBGRAPHS.has(child)) throw schemaGraphCycle();
+  }
+  return Object.freeze({
+    nodes,
+    ownKeys,
+    height,
+    children: Object.freeze([...children]),
+  });
+}
+
+/** Record a depth reached through a subgraph, failing past the bound. */
+function reachSchemaGraphDepth(state: SchemaGraphState, depth: number): void {
+  if (depth > state.maxDepth) state.maxDepth = depth;
+  if (depth > MAX_SCHEMA_GRAPH_DEPTH) {
+    throw new TypeError("tool schema graph traversal budget exceeded");
+  }
+}
+
+/**
+ * The error for a graph with a cycle that runs through more than one node.
+ * Metadata and check parameters are attached after a node is constructed, so
+ * they can point back at an enclosing value or node even though lazy nodes
+ * are refused and accessors are not followed. A node reaching itself is
+ * allowed, and charged in full; any other cycle is refused, because a node
+ * inside it could not be given a complete record.
+ */
+function schemaGraphCycle(): TypeError {
+  return new TypeError("tool schema graph contains a cycle");
+}
+
+/** The node the innermost zod frame is building, if it exists yet. */
+function nodeBeingBuilt(state: SchemaGraphState): object | undefined {
+  return state.frames.at(-1)?.zodFrame?.node;
+}
+
+/**
+ * Bind the value being built (and so every value enclosing it up to its zod
+ * node) to that node: it reached the node while the node was being built.
+ */
+function bindToNodeBeingBuilt(state: SchemaGraphState): void {
+  const frame = state.frames.at(-1);
+  if (frame !== undefined && frame.zodFrame !== frame) frame.boundTo ??= frame.zodFrame?.node;
+}
+
+/**
+ * A zod node reached again within the graph that already counted it: no new
+ * charge, as before, but its height is checked at this depth too and it is
+ * linked from the value or node being built. A node with no record is still
+ * being built; reaching it is allowed only from within its own build, and
+ * binds the reaching values to it. Reaching any other node still being built
+ * is a cycle and is refused.
+ */
+function noteSeenSubgraph(state: SchemaGraphState, hardened: object): void {
+  const record = HARDENED_SUBGRAPHS.get(hardened);
+  if (record === undefined) {
+    if (hardened !== nodeBeingBuilt(state)) throw schemaGraphCycle();
+    bindToNodeBeingBuilt(state);
+    return;
+  }
+  reachSchemaGraphDepth(state, state.depth + record.height);
+  state.frames.at(-1)?.zods.push(hardened);
+}
+
+/**
+ * A cloned non-zod value reached again within this graph: no new charge to
+ * the graph, its height is checked at this depth, and it is linked from the
+ * value or node being built, whose record will then include it. A value bound
+ * to a cycle through another node may not be reached from this one. A value
+ * still being built may be reached again only from within the same zod
+ * node's build, which binds the reaching values to that node; from another
+ * node it is a cycle. Both are refused.
+ */
+function noteSeenValue(state: SchemaGraphState, source: object, hardened: object): void {
+  const frame = state.frames.at(-1);
+  const record = state.local.get(hardened);
+  if (record === undefined) {
+    const building = state.building.get(source);
+    if (building === undefined) {
+      throw new TypeError("tool schema graph reuses a value with no recorded budget");
+    }
+    if (building.zodFrame !== frame?.zodFrame) throw schemaGraphCycle();
+    bindToNodeBeingBuilt(state);
+    frame?.values.push(hardened);
+    return;
+  }
+  if (record.boundTo !== undefined) {
+    if (record.boundTo !== nodeBeingBuilt(state)) throw schemaGraphCycle();
+    bindToNodeBeingBuilt(state);
+  }
+  reachSchemaGraphDepth(state, state.depth + record.height);
+  frame?.values.push(hardened);
+}
+
+/**
+ * A hardened subgraph built by an earlier graph. Every node in it that this
+ * graph has not counted yet is charged its recorded nodes and own keys,
+ * which covers everything a fresh traversal of it would have charged, and its
+ * height is checked at the depth it is reached. The walk follows the recorded
+ * links only; it does not touch the frozen nodes.
+ */
+function chargeReusedSubgraph(state: SchemaGraphState, hardened: object): void {
+  const record = HARDENED_SUBGRAPHS.get(hardened);
+  if (record === undefined) {
+    throw new TypeError("tool schema graph reuses a node with no recorded budget");
+  }
+  reachSchemaGraphDepth(state, state.depth + record.height);
+  let nodes = 0;
+  let ownKeys = 0;
+  const pending: object[] = [hardened];
+  while (pending.length > 0) {
+    const value = pending.pop() as object;
+    if (state.seen.has(value)) continue;
+    const valueRecord = HARDENED_SUBGRAPHS.get(value);
+    if (valueRecord === undefined) {
+      throw new TypeError("tool schema graph reuses a node with no recorded budget");
+    }
+    state.seen.set(value, value);
+    nodes += valueRecord.nodes;
+    ownKeys += valueRecord.ownKeys;
+    for (const child of valueRecord.children) pending.push(child);
+  }
+  state.nodes += nodes;
+  state.ownKeys += ownKeys;
+  if (state.nodes > MAX_SCHEMA_GRAPH_NODES) {
+    throw new TypeError("tool schema graph traversal budget exceeded");
+  }
+  if (state.ownKeys > MAX_SCHEMA_GRAPH_OWN_KEYS) {
+    throw new TypeError("tool schema graph property budget exceeded");
+  }
+  const parent = state.frames.at(-1);
+  if (parent) {
+    parent.childNodes += nodes;
+    parent.childOwnKeys += ownKeys;
+    parent.zods.push(hardened);
+  }
+}
+
 function cloneSchemaDefinition(
-  schema: z.ZodTypeAny,
-  candidate: unknown,
+  candidate: object,
   state: SchemaGraphState
-): Readonly<Record<PropertyKey, unknown>> {
+): Record<PropertyKey, unknown> {
   if (
-    typeof candidate !== "object" ||
-    candidate === null ||
     nodeUtilTypes.isProxy(candidate) ||
     (Object.getPrototypeOf(candidate) !== Object.prototype &&
       Object.getPrototypeOf(candidate) !== null)
   ) {
     throw new TypeError("tool schema graph definitions must be plain data objects");
   }
-  const existing = state.seen.get(candidate);
-  if (existing) return existing as Readonly<Record<PropertyKey, unknown>>;
   enterSchemaGraphValue(state, candidate);
-  const descriptors = boundedDataDescriptors(candidate, state, "definition");
-  const clone: Record<PropertyKey, unknown> = Object.create(
-    Object.getPrototypeOf(candidate)
-  ) as Record<PropertyKey, unknown>;
-  state.seen.set(candidate, clone);
-
   try {
+    const descriptors = boundedDataDescriptors(
+      candidate,
+      state,
+      "definition",
+      ZOD_DEFINITION_ACCESSOR_KEYS
+    );
+    const clone: Record<PropertyKey, unknown> = Object.create(
+      Object.getPrototypeOf(candidate)
+    ) as Record<PropertyKey, unknown>;
     for (const key of Reflect.ownKeys(descriptors)) {
       const descriptor = descriptors[key] as PropertyDescriptor;
-      let value = descriptor.value;
-      if (schema instanceof z.ZodObject && key === "shape") {
-        if (typeof value !== "function") {
-          throw new TypeError("tool schema graph has an invalid object shape");
-        }
-        const shape = materializeZodShape(value, state);
-        value = Object.freeze(() => shape);
-      } else if (schema instanceof z.ZodLazy && key === "getter") {
-        if (typeof value !== "function") {
-          throw new TypeError("tool schema graph has an invalid lazy getter");
-        }
-        const lazyTarget = Reflect.apply(value, undefined, []) as unknown;
-        if (!isZodSchemaNode(lazyTarget)) {
-          throw new TypeError("tool schema graph lazy getter returned an invalid schema");
-        }
-        const stableTarget = hardenZodSchemaNode(lazyTarget, state);
-        value = Object.freeze(() => stableTarget);
+      let value: unknown;
+      if ("value" in descriptor) {
+        value = descriptor.value;
       } else {
-        value = cloneAndHardenGraphValue(value, state);
+        try {
+          value = Reflect.apply(descriptor.get as () => unknown, candidate, []);
+        } catch {
+          throw new TypeError("tool schema graph definition getter could not be read");
+        }
       }
-      Object.defineProperty(clone, key, immutableDataDescriptor(descriptor, value));
+      value =
+        key === "shape"
+          ? materializeZodShape(value, state)
+          : cloneAndHardenGraphValue(value, state);
+      // Left writable until the node is constructed: zod constructors fill
+      // in definition defaults (a number format, a format's pattern) and an
+      // object's constructor reinstalls `shape` as its own getter. The
+      // definition is sealed right after construction.
+      Object.defineProperty(clone, key, {
+        value,
+        enumerable: descriptor.enumerable ?? true,
+        writable: true,
+        configurable: true,
+      });
     }
-    return Object.freeze(clone);
+    return clone;
   } finally {
     leaveSchemaGraphValue(state);
   }
 }
 
-function materializeZodShape(
-  shapeFactory: (...args: never[]) => unknown,
-  state: SchemaGraphState
-): Readonly<Record<string, z.ZodTypeAny>> {
-  let candidate: unknown;
-  try {
-    candidate = Reflect.apply(shapeFactory, undefined, []);
-  } catch {
-    throw new TypeError("tool schema graph object shape could not be materialized");
+/** Freeze a bare check's own definition where it is, hardening its values. */
+function sealCheckDefinitionInPlace(definition: object, state: SchemaGraphState): void {
+  if (
+    nodeUtilTypes.isProxy(definition) ||
+    Object.getPrototypeOf(definition) !== Object.prototype
+  ) {
+    throw new TypeError("tool schema graph definitions must be plain data objects");
   }
+  enterSchemaGraphValue(state, definition);
+  try {
+    boundedDataDescriptors(definition, state, "definition");
+    sealSchemaDefinition(definition as Record<PropertyKey, unknown>, new Map(), state);
+  } finally {
+    leaveSchemaGraphValue(state);
+  }
+}
+
+/**
+ * Freeze a rebuilt definition once its node is constructed. Any getter the
+ * constructor installed (an object's `shape`, which copies the frozen shape
+ * on first read) is read once so it settles as data, and the copy is frozen.
+ * A value the constructor added or replaced (a format's default pattern) is
+ * hardened like any other; the values cloned in are already hardened.
+ */
+function sealSchemaDefinition(
+  definition: Record<PropertyKey, unknown>,
+  assigned: ReadonlyMap<PropertyKey, unknown>,
+  state: SchemaGraphState
+): void {
+  for (const key of Reflect.ownKeys(definition)) {
+    const descriptor = Object.getOwnPropertyDescriptor(definition, key);
+    if (!descriptor) continue;
+    let value: unknown;
+    if ("value" in descriptor) {
+      value = descriptor.value;
+    } else {
+      value = Reflect.get(definition, key);
+      if (key !== "shape") {
+        throw new TypeError("tool schema graph definition gained an unexpected accessor");
+      }
+    }
+    if (key === "shape") {
+      if (
+        typeof value !== "object" ||
+        value === null ||
+        nodeUtilTypes.isProxy(value) ||
+        Object.getPrototypeOf(value) !== Object.prototype
+      ) {
+        throw new TypeError("tool schema graph object shape must be a plain data object");
+      }
+      Object.freeze(value);
+    } else if (!assigned.has(key) || assigned.get(key) !== value) {
+      value = cloneAndHardenGraphValue(value, state);
+    }
+    Object.defineProperty(definition, key, {
+      value,
+      enumerable: descriptor.enumerable ?? true,
+      writable: false,
+      configurable: false,
+    });
+  }
+  Object.freeze(definition);
+}
+
+function materializeZodShape(
+  candidate: unknown,
+  state: SchemaGraphState
+): Readonly<Record<string, z.ZodType>> {
   if (
     typeof candidate !== "object" ||
     candidate === null ||
@@ -587,12 +1168,9 @@ function materializeZodShape(
     throw new TypeError("tool schema graph object shape must be a plain data object");
   }
   enterSchemaGraphValue(state, candidate);
-  const descriptors = boundedDataDescriptors(candidate, state, "object shape");
-  const shape: Record<string, z.ZodTypeAny> = Object.create(null) as Record<
-    string,
-    z.ZodTypeAny
-  >;
   try {
+    const descriptors = boundedDataDescriptors(candidate, state, "object shape");
+    const shape: Record<string, z.ZodType> = {};
     for (const key of Reflect.ownKeys(descriptors)) {
       if (typeof key !== "string") {
         throw new TypeError("tool schema graph object shape has a symbol field");
@@ -601,71 +1179,133 @@ function materializeZodShape(
       if (!isZodSchemaNode(field)) {
         throw new TypeError("tool schema graph object shape has an invalid field");
       }
-      shape[key] = hardenZodSchemaNode(field, state);
+      Object.defineProperty(shape, key, {
+        value: hardenZodNode(field, state),
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      });
     }
-    return Object.freeze({ ...shape });
+    return Object.freeze(shape);
   } finally {
     leaveSchemaGraphValue(state);
   }
 }
 
-function initializeZodParseCaches(schema: z.ZodTypeAny): void {
-  if (schema instanceof z.ZodObject) {
-    const shape = schema._def.shape();
-    Object.defineProperty(schema, "_cached", {
-      value: { shape, keys: Object.keys(shape) },
-      enumerable: false,
-      writable: true,
-      configurable: true,
-    });
-    return;
-  }
-  if (schema instanceof z.ZodEnum) {
-    Object.defineProperty(schema, "_cache", {
-      value: new Set(schema._def.values),
-      enumerable: false,
-      writable: true,
-      configurable: true,
-    });
-    return;
-  }
-  if (schema instanceof z.ZodNativeEnum) {
-    const values = schema._def.values as Record<string, string | number>;
-    const validValues = Object.keys(values)
-      .filter((key) => typeof values[String(values[key])] !== "number")
-      .map((key) => values[key]);
-    Object.defineProperty(schema, "_cache", {
-      value: new Set(validValues),
-      enumerable: false,
-      writable: true,
-      configurable: true,
-    });
-  }
-}
-
-function hardenSchemaOwnProperties(
-  schema: z.ZodTypeAny,
+/**
+ * zod 4 keeps a description in its global metadata registry, keyed by node,
+ * so the rebuilt node is registered with a frozen copy of the source's.
+ */
+function copySchemaMetadata(
+  source: object,
+  rebuilt: object,
   state: SchemaGraphState
 ): void {
-  const descriptors = boundedDataDescriptors(schema, state, "schema node");
-  for (const key of Reflect.ownKeys(descriptors)) {
-    if (key === "_def") continue;
-    const descriptor = descriptors[key] as PropertyDescriptor;
-    const value = cloneAndHardenGraphValue(descriptor.value, state);
-    if (
-      !descriptor.configurable &&
-      !descriptor.writable &&
-      value !== descriptor.value
-    ) {
-      throw new TypeError("tool schema graph contains immutable foreign state");
+  const metadata = z.globalRegistry.get(source as z.ZodType) as unknown;
+  if (metadata === undefined) return;
+  z.globalRegistry.add(
+    rebuilt as z.ZodType,
+    cloneAndHardenGraphValue(metadata, state) as z.core.GlobalMeta
+  );
+}
+
+/**
+ * Make a freshly rebuilt node immutable without breaking zod's own lazy
+ * state. zod 4 derives some internals on first read and binds prototype
+ * methods to the instance on first access, writing each onto the object, so
+ * freezing first would turn that write into a TypeError mid-parse. Every
+ * derived internal is therefore computed and every prototype member
+ * materialized first, Set/Map state is swapped for immutable facades, and only
+ * then is the node frozen. Prototype members stay pinned as own properties, so
+ * a later change to a zod prototype cannot reach an issued node.
+ */
+function sealRebuiltZodNode(node: object, state: SchemaGraphState): void {
+  const internals = ownDataValue(node, "_zod") as object;
+  settleMemoizedParse(internals);
+  materializeDerivedMembers(internals, true);
+  hardenOwnMembers(internals, state, new Set<PropertyKey>(["constr", "version"]));
+  Object.freeze(internals);
+
+  materializeDerivedMembers(node);
+  hardenOwnMembers(node, state, new Set<PropertyKey>(["_zod"]));
+  Object.freeze(node);
+}
+
+/**
+ * Let zod's memoizer settle a container's parse before the node is frozen.
+ * The wrapper decides on its first call whether the schema can recurse and,
+ * if not, restores the plain parse onto the internals; on a frozen node that
+ * write would throw mid-parse. Each memoized container rejects a non-object
+ * input before reaching any child or user function, so parsing `undefined`
+ * here only makes that decision.
+ */
+function settleMemoizedParse(internals: object): void {
+  const definition = ownDataValue(internals, "def") as object;
+  if (!MEMOIZED_CONTAINER_TYPES.has(ownDataValue(definition, "type"))) return;
+  const parse = ownDataValue(internals, "parse");
+  if (typeof parse !== "function") {
+    throw new TypeError("tool schema graph container has no parse function");
+  }
+  Reflect.apply(parse, internals, [{ value: undefined, issues: [] }, {}]);
+}
+
+/**
+ * Harden every own member of a rebuilt node or its internals before the
+ * caller freezes it (freezing pins each member non-writable and
+ * non-configurable). Object data is replaced by its frozen clone or facade
+ * and functions are frozen; an accessor (a live zod getter pinned from the
+ * prototype) keeps its frozen functions. Members named in `shared` are zod
+ * module values every schema points at, and are left as they are. Only the
+ * members traversed count toward the property budget: the rest were created
+ * by zod's constructors from the bounded, cloned definition.
+ */
+function hardenOwnMembers(
+  target: object,
+  state: SchemaGraphState,
+  shared: ReadonlySet<PropertyKey>
+): void {
+  for (const key of Reflect.ownKeys(target)) {
+    const descriptor = Object.getOwnPropertyDescriptor(target, key);
+    if (!descriptor) continue;
+    if (!("value" in descriptor)) {
+      if (descriptor.get) Object.freeze(descriptor.get);
+      if (descriptor.set) Object.freeze(descriptor.set);
+      continue;
     }
-    Object.defineProperty(schema, key, immutableDataDescriptor(descriptor, value));
+    const value: unknown = descriptor.value;
+    if (shared.has(key) || value === null) continue;
+    if (typeof value === "function") {
+      Object.freeze(value);
+      continue;
+    }
+    if (typeof value !== "object") continue;
+    state.ownKeys += 1;
+    if (state.ownKeys > MAX_SCHEMA_GRAPH_OWN_KEYS) {
+      throw new TypeError("tool schema graph property budget exceeded");
+    }
+    const hardened = cloneAndHardenGraphValue(value, state);
+    if (hardened !== value) {
+      if (!descriptor.configurable && !descriptor.writable) {
+        throw new TypeError("tool schema graph contains immutable foreign state");
+      }
+      Object.defineProperty(target, key, { value: hardened });
+    }
   }
 }
 
-/** Shadow parse-relevant prototype behavior before freezing the node. */
-function shadowZodPrototypeBehavior(schema: z.ZodTypeAny): void {
-  let prototype = Object.getPrototypeOf(schema) as object | null;
+/**
+ * Read every prototype getter of `target` once, so zod's lazily derived
+ * members land as own data, then pin any member still inherited (a method
+ * value, or a getter that stays live, such as `description`, which reads the
+ * registry on each access) as an own property.
+ *
+ * On a node's internals every prototype getter is a memoizing derivation, and
+ * one that resolved through a recursion break stays unmemoized (zod retries
+ * it later by writing to the internals). There the value read now, with the
+ * graph complete, is pinned as data instead, so no later read writes.
+ */
+function materializeDerivedMembers(target: object, pinGettersAsData = false): void {
+  let prototype = Object.getPrototypeOf(target) as object | null;
   let levels = 0;
   while (prototype && prototype !== Object.prototype) {
     levels += 1;
@@ -673,28 +1313,42 @@ function shadowZodPrototypeBehavior(schema: z.ZodTypeAny): void {
       throw new TypeError("tool schema graph has an unsupported prototype chain");
     }
     for (const key of Reflect.ownKeys(prototype)) {
-      if (key === "constructor" || Object.hasOwn(schema, key)) continue;
+      if (key === "constructor" || Object.hasOwn(target, key)) continue;
       const descriptor = Object.getOwnPropertyDescriptor(prototype, key);
       if (!descriptor) continue;
       if ("value" in descriptor) {
         if (typeof descriptor.value !== "function") continue;
-        Object.freeze(descriptor.value);
-        Object.defineProperty(schema, key, {
+        Object.defineProperty(target, key, {
           value: descriptor.value,
           enumerable: descriptor.enumerable,
           writable: false,
-          configurable: false,
+          configurable: true,
         });
-      } else {
-        if (descriptor.get) Object.freeze(descriptor.get);
-        if (descriptor.set) Object.freeze(descriptor.set);
-        Object.defineProperty(schema, key, {
-          get: descriptor.get,
-          set: descriptor.set,
-          enumerable: descriptor.enumerable,
-          configurable: false,
-        });
+        continue;
       }
+      if (pinGettersAsData) {
+        const value: unknown = Reflect.get(target, key);
+        if (Object.hasOwn(target, key)) continue;
+        Object.defineProperty(target, key, {
+          value,
+          enumerable: descriptor.enumerable,
+          writable: false,
+          configurable: true,
+        });
+        continue;
+      }
+      try {
+        Reflect.get(target, key);
+      } catch {
+        // A getter that cannot run for this node is pinned unread below.
+      }
+      if (Object.hasOwn(target, key)) continue;
+      Object.defineProperty(target, key, {
+        get: descriptor.get,
+        set: descriptor.set,
+        enumerable: descriptor.enumerable,
+        configurable: true,
+      });
     }
     prototype = Object.getPrototypeOf(prototype) as object | null;
   }
@@ -713,9 +1367,17 @@ function cloneAndHardenGraphValue(
   if (nodeUtilTypes.isProxy(value)) {
     throw new TypeError("tool schema graph must not contain a Proxy");
   }
-  if (isZodSchemaNode(value)) return hardenZodSchemaNode(value, state);
+  if (zodNodeConstructor(value)) return hardenZodNode(value as object, state);
   const existing = state.seen.get(value);
-  if (existing) return existing;
+  if (existing) {
+    noteSeenValue(state, value as object, existing as object);
+    return existing;
+  }
+  return measureSubgraph(state, () => cloneFreshGraphValue(value as object, state), false, value as object);
+}
+
+/** Clone and freeze one non-zod value not yet seen in this graph. */
+function cloneFreshGraphValue(value: object, state: SchemaGraphState): object {
   if (typeof value === "function") {
     Object.freeze(value);
     state.seen.set(value, value);
@@ -883,7 +1545,9 @@ function cloneAndFreezeSet(
 }
 
 function intrinsicMapSize(value: object): number | undefined {
-  if (!INTRINSIC_MAP_SIZE) return undefined;
+  // isMap reads the internal slot, so it cannot be spoofed and, unlike the
+  // intrinsic getter on a non-Map, does not throw for every plain object.
+  if (!INTRINSIC_MAP_SIZE || !nodeUtilTypes.isMap(value)) return undefined;
   try {
     const size = Reflect.apply(INTRINSIC_MAP_SIZE, value, []) as unknown;
     return Number.isSafeInteger(size) && (size as number) >= 0
@@ -895,7 +1559,7 @@ function intrinsicMapSize(value: object): number | undefined {
 }
 
 function intrinsicSetSize(value: object): number | undefined {
-  if (!INTRINSIC_SET_SIZE) return undefined;
+  if (!INTRINSIC_SET_SIZE || !nodeUtilTypes.isSet(value)) return undefined;
   try {
     const size = Reflect.apply(INTRINSIC_SET_SIZE, value, []) as unknown;
     return Number.isSafeInteger(size) && (size as number) >= 0
@@ -1093,7 +1757,8 @@ function immutableBoundMethod<T extends (...args: never[]) => unknown>(
 function boundedDataDescriptors(
   value: object,
   state: SchemaGraphState,
-  label: string
+  label: string,
+  allowedAccessors: ReadonlySet<PropertyKey> = NO_ACCESSORS
 ): Record<PropertyKey, PropertyDescriptor> {
   const descriptors = Object.getOwnPropertyDescriptors(value) as Record<
     PropertyKey,
@@ -1108,7 +1773,13 @@ function boundedDataDescriptors(
     throw new TypeError("tool schema graph property budget exceeded");
   }
   for (const key of keys) {
-    if (!("value" in (descriptors[key] as PropertyDescriptor))) {
+    const descriptor = descriptors[key] as PropertyDescriptor;
+    if (
+      !("value" in descriptor) &&
+      (!allowedAccessors.has(key) ||
+        typeof descriptor.get !== "function" ||
+        nodeUtilTypes.isProxy(descriptor.get))
+    ) {
       throw new TypeError(`tool schema graph ${label} must not contain accessors`);
     }
   }
@@ -1133,6 +1804,7 @@ function enterSchemaGraphValue(state: SchemaGraphState, value: object): void {
   }
   state.depth += 1;
   state.nodes += 1;
+  if (state.depth > state.maxDepth) state.maxDepth = state.depth;
   if (
     state.depth > MAX_SCHEMA_GRAPH_DEPTH ||
     state.nodes > MAX_SCHEMA_GRAPH_NODES
@@ -1146,18 +1818,13 @@ function leaveSchemaGraphValue(state: SchemaGraphState): void {
   state.depth -= 1;
 }
 
-function isZodSchemaNode(value: unknown): value is z.ZodTypeAny {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !nodeUtilTypes.isProxy(value) &&
-    value instanceof z.ZodType
-  );
+function isZodSchemaNode(value: unknown): value is z.ZodType {
+  return zodNodeConstructor(value) !== undefined && value instanceof z.ZodType;
 }
 
 interface DefineToolModuleBase<
-  TInput extends z.AnyZodObject,
-  TOutput extends z.AnyZodObject,
+  TInput extends AnyZodObject,
+  TOutput extends AnyZodObject,
 > {
   readonly definition: ToolDefinition;
   readonly inputSchema: TInput;
@@ -1167,8 +1834,8 @@ interface DefineToolModuleBase<
 }
 
 export type DefineServiceNowToolModule<
-  TInput extends z.AnyZodObject,
-  TOutput extends z.AnyZodObject,
+  TInput extends AnyZodObject,
+  TOutput extends AnyZodObject,
 > = DefineToolModuleBase<TInput, TOutput> & {
   readonly runtime: "servicenow";
   readonly handler: (
@@ -1178,8 +1845,8 @@ export type DefineServiceNowToolModule<
 };
 
 export type DefineContextOnlyToolModule<
-  TInput extends z.AnyZodObject,
-  TOutput extends z.AnyZodObject,
+  TInput extends AnyZodObject,
+  TOutput extends AnyZodObject,
 > = DefineToolModuleBase<TInput, TOutput> & {
   readonly runtime: "context-only";
   readonly handler: (
@@ -1190,8 +1857,8 @@ export type DefineContextOnlyToolModule<
 
 /** Define, validate, snapshot, and freeze a profile-resolved tool module. */
 export function defineServiceNowToolModule<
-  TInput extends z.AnyZodObject,
-  TOutput extends z.AnyZodObject,
+  TInput extends AnyZodObject,
+  TOutput extends AnyZodObject,
 >(
   candidate: DefineServiceNowToolModule<TInput, TOutput>
 ): ServiceNowToolModuleContract {
@@ -1209,8 +1876,8 @@ export function defineServiceNowToolModule<
 
 /** Define, validate, snapshot, and freeze a client-free diagnostic module. */
 export function defineContextOnlyToolModule<
-  TInput extends z.AnyZodObject,
-  TOutput extends z.AnyZodObject,
+  TInput extends AnyZodObject,
+  TOutput extends AnyZodObject,
 >(
   candidate: DefineContextOnlyToolModule<TInput, TOutput>
 ): ContextOnlyToolModuleContract {
@@ -1268,8 +1935,8 @@ export function snapshotToolModuleCatalog(
 
 type ToolModuleCandidate = {
   readonly definition?: ToolDefinition;
-  readonly inputSchema?: z.AnyZodObject;
-  readonly outputSchema?: z.AnyZodObject;
+  readonly inputSchema?: AnyZodObject;
+  readonly outputSchema?: AnyZodObject;
   readonly requirements?: ToolModuleRequirements;
   readonly resolveAccess?: ToolAccessResolver;
   readonly runtime?: string;
@@ -1358,7 +2025,7 @@ function validateAnnotations(
 function validateProfileSchema(
   name: string,
   kind: "input" | "output",
-  schema: z.AnyZodObject | undefined,
+  schema: AnyZodObject | undefined,
   requireStrict: boolean
 ): void {
   let issued: IssuedSchemaSnapshot | undefined;
@@ -1371,7 +2038,7 @@ function validateProfileSchema(
     !schema ||
     !issued ||
     schema.shape.profile !== profileNameSchema ||
-    (requireStrict && schema._def.unknownKeys !== "strict")
+    (requireStrict && issued.unknownKeys !== "strict")
   ) {
     throw new TypeError(
       `${name}: ${kind} schema must use the shared required profile schema and be an issued contract-normalized Zod object${requireStrict ? " in strict mode" : ""}`
