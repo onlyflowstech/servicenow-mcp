@@ -107,6 +107,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Building a server no longer compiles output-schema validators it never
+  uses.**
+  The tool-catalog check at startup lists tools through an in-process client
+  that never calls any, but the SDK compiled a validator for every output
+  schema each time. The HTTP transport builds a server per request, so this
+  trims a few milliseconds from each request and about 6 MB of idle memory
+  from a stdio server. The server's own input and output validation is
+  unchanged.
 - **`sn_batch` never re-sends a batch request that may have reached the
   instance.**
   Confirmed updates and deletes go through the ServiceNow REST Batch API, up
