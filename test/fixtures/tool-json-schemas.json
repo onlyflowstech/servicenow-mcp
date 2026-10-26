@@ -5058,6 +5058,1297 @@
       "additionalProperties": false
     }
   },
+  "sn_flow_view": {
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "flow": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Flow or subflow sys_id (32 hex characters), or its exact, case-sensitive name"
+        },
+        "depth": {
+          "description": "1 = this flow only (default); 2-3 also expand the subflows it calls",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "include_inputs": {
+          "description": "Show step input values (default true); false reads no value fields at all",
+          "type": "boolean"
+        },
+        "format": {
+          "description": "Text format: both (default), mermaid or outline; structuredContent is always the full graph",
+          "type": "string",
+          "enum": [
+            "both",
+            "mermaid",
+            "outline"
+          ]
+        },
+        "max_nodes": {
+          "description": "Most graph nodes returned, including the trigger (default 150)",
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 300
+        },
+        "max_response_bytes": {
+          "description": "Byte budget for the whole result (default 100000)",
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 1000000
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Configured ServiceNow profile name (required; no default fallback)."
+        }
+      },
+      "required": [
+        "flow",
+        "profile"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "type": "number",
+              "const": 1
+            },
+            "source": {
+              "type": "string",
+              "enum": [
+                "table"
+              ]
+            },
+            "flows": {
+              "maxItems": 9,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8
+                  },
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "table"
+                    ]
+                  },
+                  "sys_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  "name": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2000
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "redacted": {
+                        "type": "string",
+                        "enum": [
+                          "field_policy",
+                          "sensitive_name",
+                          "sensitive_type",
+                          "not_requested",
+                          "decode_failed",
+                          "limit"
+                        ]
+                      },
+                      "original_length": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000000000
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "description": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2000
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "redacted": {
+                        "type": "string",
+                        "enum": [
+                          "field_policy",
+                          "sensitive_name",
+                          "sensitive_type",
+                          "not_requested",
+                          "decode_failed",
+                          "limit"
+                        ]
+                      },
+                      "original_length": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000000000
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "type": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "flow",
+                          "subflow"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "active": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "status": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "version": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "scope": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "called_from": {
+                    "type": "string",
+                    "maxLength": 5,
+                    "pattern": "^n\\d{1,4}$"
+                  }
+                },
+                "required": [
+                  "index",
+                  "source",
+                  "sys_id",
+                  "name",
+                  "description",
+                  "type",
+                  "active",
+                  "status",
+                  "version",
+                  "scope"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "trigger": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "node_id": {
+                      "type": "string",
+                      "const": "n0"
+                    },
+                    "type": {
+                      "type": "object",
+                      "properties": {
+                        "text": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "redacted": {
+                          "type": "string",
+                          "enum": [
+                            "field_policy",
+                            "sensitive_name",
+                            "sensitive_type",
+                            "not_requested",
+                            "decode_failed",
+                            "limit"
+                          ]
+                        },
+                        "original_length": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1000000000
+                        }
+                      },
+                      "required": [
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "table": {
+                      "type": "object",
+                      "properties": {
+                        "text": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "redacted": {
+                          "type": "string",
+                          "enum": [
+                            "field_policy",
+                            "sensitive_name",
+                            "sensitive_type",
+                            "not_requested",
+                            "decode_failed",
+                            "limit"
+                          ]
+                        },
+                        "original_length": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1000000000
+                        }
+                      },
+                      "required": [
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "condition": {
+                      "type": "object",
+                      "properties": {
+                        "text": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "redacted": {
+                          "type": "string",
+                          "enum": [
+                            "field_policy",
+                            "sensitive_name",
+                            "sensitive_type",
+                            "not_requested",
+                            "decode_failed",
+                            "limit"
+                          ]
+                        },
+                        "original_length": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1000000000
+                        }
+                      },
+                      "required": [
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "schedule": {
+                      "type": "object",
+                      "properties": {
+                        "text": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "redacted": {
+                          "type": "string",
+                          "enum": [
+                            "field_policy",
+                            "sensitive_name",
+                            "sensitive_type",
+                            "not_requested",
+                            "decode_failed",
+                            "limit"
+                          ]
+                        },
+                        "original_length": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1000000000
+                        }
+                      },
+                      "required": [
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "inputs": {
+                      "maxItems": 40,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "maxLength": 100
+                          },
+                          "label": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "type": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 100
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "value": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 2000
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "redacted": {
+                            "type": "string",
+                            "enum": [
+                              "field_policy",
+                              "sensitive_name",
+                              "sensitive_type",
+                              "not_requested",
+                              "decode_failed",
+                              "limit"
+                            ]
+                          },
+                          "original_length": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 1000000000
+                          },
+                          "script": {
+                            "type": "boolean"
+                          },
+                          "pills": {
+                            "maxItems": 200,
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 199
+                            }
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "label",
+                          "type",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "node_id",
+                    "type",
+                    "table",
+                    "condition",
+                    "schedule"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "nodes": {
+              "maxItems": 302,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "maxLength": 5,
+                    "pattern": "^n\\d{1,4}$"
+                  },
+                  "flow_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "trigger",
+                      "action",
+                      "logic",
+                      "subflow",
+                      "more"
+                    ]
+                  },
+                  "logic_kind": {
+                    "type": "string",
+                    "enum": [
+                      "if",
+                      "else_if",
+                      "else",
+                      "for_each",
+                      "do_until",
+                      "parallel",
+                      "try",
+                      "catch",
+                      "wait",
+                      "set_flow_variables",
+                      "assign_subflow_outputs",
+                      "end_flow",
+                      "go_back_to",
+                      "skip_iteration",
+                      "exit_loop",
+                      "decision",
+                      "other",
+                      "parallel_branch",
+                      "top_level_try",
+                      "top_level_catch",
+                      "decision_branch",
+                      "append_flow_variables",
+                      "get_flow_outputs",
+                      "dynamic_flow",
+                      "call_workflow",
+                      "placeholder",
+                      "update_flow_template"
+                    ]
+                  },
+                  "step": {
+                    "type": "string",
+                    "maxLength": 160,
+                    "pattern": "^[0-9.]*$"
+                  },
+                  "depth": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 51
+                  },
+                  "parent": {
+                    "type": "string",
+                    "maxLength": 5,
+                    "pattern": "^n\\d{1,4}$"
+                  },
+                  "order": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2000
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "redacted": {
+                        "type": "string",
+                        "enum": [
+                          "field_policy",
+                          "sensitive_name",
+                          "sensitive_type",
+                          "not_requested",
+                          "decode_failed",
+                          "limit"
+                        ]
+                      },
+                      "original_length": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000000000
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "annotation": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2000
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "redacted": {
+                        "type": "string",
+                        "enum": [
+                          "field_policy",
+                          "sensitive_name",
+                          "sensitive_type",
+                          "not_requested",
+                          "decode_failed",
+                          "limit"
+                        ]
+                      },
+                      "original_length": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000000000
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "condition": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2000
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "redacted": {
+                        "type": "string",
+                        "enum": [
+                          "field_policy",
+                          "sensitive_name",
+                          "sensitive_type",
+                          "not_requested",
+                          "decode_failed",
+                          "limit"
+                        ]
+                      },
+                      "original_length": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000000000
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "inputs": {
+                    "maxItems": 40,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "maxLength": 100
+                        },
+                        "label": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 100
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "value": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "redacted": {
+                          "type": "string",
+                          "enum": [
+                            "field_policy",
+                            "sensitive_name",
+                            "sensitive_type",
+                            "not_requested",
+                            "decode_failed",
+                            "limit"
+                          ]
+                        },
+                        "original_length": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1000000000
+                        },
+                        "script": {
+                          "type": "boolean"
+                        },
+                        "pills": {
+                          "maxItems": 200,
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 199
+                          }
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "label",
+                        "type",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "subflow": {
+                    "type": "object",
+                    "properties": {
+                      "flow_sys_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{32}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "name": {
+                        "type": "object",
+                        "properties": {
+                          "text": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 2000
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "redacted": {
+                            "type": "string",
+                            "enum": [
+                              "field_policy",
+                              "sensitive_name",
+                              "sensitive_type",
+                              "not_requested",
+                              "decode_failed",
+                              "limit"
+                            ]
+                          },
+                          "original_length": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 1000000000
+                          }
+                        },
+                        "required": [
+                          "text"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "expanded_index": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 8
+                      },
+                      "not_expanded": {
+                        "type": "string",
+                        "enum": [
+                          "depth",
+                          "cycle",
+                          "limit",
+                          "denied",
+                          "not_found",
+                          "too_large",
+                          "timeout"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "flow_sys_id",
+                      "name"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "ref": {
+                    "type": "object",
+                    "properties": {
+                      "table": {
+                        "type": "string",
+                        "enum": [
+                          "sys_hub_flow",
+                          "sys_hub_flow_snapshot",
+                          "sys_hub_trigger_instance",
+                          "sys_hub_trigger_instance_v2",
+                          "sys_hub_action_instance",
+                          "sys_hub_action_instance_v2",
+                          "sys_hub_flow_logic",
+                          "sys_hub_flow_logic_instance_v2",
+                          "sys_hub_sub_flow_instance",
+                          "sys_hub_sub_flow_instance_v2",
+                          "sys_hub_flow_variable",
+                          "sys_hub_flow_input",
+                          "sys_hub_flow_output",
+                          "sys_variable_value",
+                          "var_dictionary"
+                        ]
+                      },
+                      "sys_id": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{32}$"
+                      }
+                    },
+                    "required": [
+                      "table",
+                      "sys_id"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "omitted_steps": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000
+                  }
+                },
+                "required": [
+                  "id",
+                  "flow_index",
+                  "kind",
+                  "step",
+                  "depth",
+                  "order",
+                  "title",
+                  "annotation"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "edges": {
+              "maxItems": 600,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "maxLength": 5,
+                    "pattern": "^n\\d{1,4}$"
+                  },
+                  "to": {
+                    "type": "string",
+                    "maxLength": 5,
+                    "pattern": "^n\\d{1,4}$"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "next",
+                      "true",
+                      "false",
+                      "loop_body",
+                      "loop_back",
+                      "parallel",
+                      "error",
+                      "subflow"
+                    ]
+                  }
+                },
+                "required": [
+                  "from",
+                  "to",
+                  "kind"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "pills": {
+              "maxItems": 200,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "maxLength": 512
+                  },
+                  "label": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 160
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "token",
+                  "label"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "variables": {
+              "maxItems": 13500,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "input",
+                      "output",
+                      "variable"
+                    ]
+                  },
+                  "flow_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8
+                  },
+                  "name": {
+                    "type": "string",
+                    "maxLength": 100
+                  },
+                  "label": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "type": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 100
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "scope",
+                  "flow_index",
+                  "name",
+                  "label",
+                  "type"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "depth": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3
+                },
+                "include_inputs": {
+                  "type": "boolean"
+                },
+                "max_nodes": {
+                  "type": "integer",
+                  "minimum": 10,
+                  "maximum": 300
+                },
+                "format": {
+                  "type": "string",
+                  "enum": [
+                    "both",
+                    "mermaid",
+                    "outline"
+                  ]
+                }
+              },
+              "required": [
+                "depth",
+                "include_inputs",
+                "max_nodes",
+                "format"
+              ],
+              "additionalProperties": false
+            },
+            "limits_hit": {
+              "maxItems": 11,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "max_nodes",
+                  "max_nesting",
+                  "max_depth",
+                  "max_subflow_expansions",
+                  "upstream_scopes",
+                  "rows_per_table",
+                  "inputs_per_node",
+                  "input_value_chars",
+                  "pills",
+                  "edges",
+                  "response_bytes"
+                ]
+              }
+            },
+            "warnings": {
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "subflow_cycle",
+                  "subflow_not_found",
+                  "subflow_denied",
+                  "orphan_steps",
+                  "unknown_logic_type",
+                  "items_dropped_invalid",
+                  "gzip_decode_failed",
+                  "label_cache_unavailable",
+                  "flow_version_unknown",
+                  "subflow_too_large",
+                  "inputs_omitted_too_large",
+                  "flow_too_large",
+                  "input_values_incomplete",
+                  "subflow_timeout"
+                ]
+              }
+            },
+            "counts": {
+              "type": "object",
+              "properties": {
+                "steps_seen": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                },
+                "nodes_returned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                },
+                "inputs_redacted": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                },
+                "inputs_truncated": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                },
+                "items_dropped": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                }
+              },
+              "required": [
+                "steps_seen",
+                "nodes_returned",
+                "inputs_redacted",
+                "inputs_truncated",
+                "items_dropped"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "schema_version",
+            "source",
+            "flows",
+            "trigger",
+            "nodes",
+            "edges",
+            "pills",
+            "variables",
+            "options",
+            "limits_hit",
+            "warnings",
+            "counts"
+          ],
+          "additionalProperties": false
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "single",
+                "collection",
+                "operation"
+              ]
+            },
+            "record_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "max_records": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "max_bytes": {
+                  "type": "integer",
+                  "minimum": 1000,
+                  "maximum": 14680064
+                }
+              },
+              "required": [
+                "max_records",
+                "max_bytes"
+              ],
+              "additionalProperties": false
+            },
+            "pagination": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "const": "none"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "const": "offset"
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "returned": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "has_more": {
+                      "type": "boolean"
+                    },
+                    "next_offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "recovery": {
+                      "type": "string",
+                      "const": "adjust_request_and_retry_same_offset"
+                    },
+                    "order_by": {
+                      "minItems": 1,
+                      "maxItems": 8,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "limit",
+                    "offset",
+                    "returned",
+                    "has_more",
+                    "order_by"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "truncation": {
+              "type": "object",
+              "properties": {
+                "truncated": {
+                  "type": "boolean"
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "record_limit",
+                    "byte_limit"
+                  ]
+                },
+                "dropped_records": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "truncated"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "kind",
+            "record_count",
+            "limits",
+            "pagination",
+            "truncation"
+          ],
+          "additionalProperties": false
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Configured ServiceNow profile name (required; no default fallback)."
+        }
+      },
+      "required": [
+        "data",
+        "metadata",
+        "profile"
+      ],
+      "additionalProperties": false
+    }
+  },
   "sn_get": {
     "inputSchema": {
       "type": "object",
