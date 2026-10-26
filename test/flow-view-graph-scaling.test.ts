@@ -189,34 +189,41 @@ describe("graph builder scaling", () => {
     };
   }
 
+  /** CPU time (user + system) this process has used, in microseconds. */
+  function cpuMicros(): number {
+    const { user, system } = process.cpuUsage();
+    return user + system;
+  }
+
   /**
-   * Best time of each input over `runs` interleaved rounds, in ms. The best
-   * run is the one least disturbed by other work on the host, and
-   * interleaving exposes both inputs to the same load.
+   * Least CPU time of each input over `runs` interleaved rounds, in
+   * microseconds. CPU time, unlike wall time, does not count time the
+   * process spends preempted on a busy host; the best run and interleaving
+   * damp what noise remains.
    */
   function bestBuilds(inputs: readonly FlowGraphBuildInput[], runs = 7): number[] {
     const best = inputs.map(() => Number.POSITIVE_INFINITY);
     for (let run = 0; run < runs; run += 1) {
       inputs.forEach((input, index) => {
-        const started = performance.now();
+        const started = cpuMicros();
         buildFlowGraph(input);
-        best[index] = Math.min(best[index]!, performance.now() - started);
+        best[index] = Math.min(best[index]!, cpuMicros() - started);
       });
     }
     return best;
   }
 
-  it("grows linearly with flat siblings: 10x the steps takes well under 30x the time", () => {
+  it("grows linearly with flat siblings: 10x the steps takes well under 30x the CPU time", () => {
     const small = nineFlows(300);
     const large = nineFlows(3_000);
     expect(buildFlowGraph(large).counts.steps_seen).toBe(9 * 3_000 + 8);
     buildFlowGraph(small); // warm up
-    // A ratio holds up on a busy host, where absolute times do not. Measured
-    // (best of 7, interleaved): linear grouping 11x idle and up to 18x with
-    // every core busy; the quadratic grouping it replaced 65x idle. A 3x
-    // spread separated them too little (linear 3.6-7x against quadratic 8x).
-    const [smallMs, largeMs] = bestBuilds([small, large]);
-    expect(largeMs! / smallMs!).toBeLessThan(30);
+    // A CPU-time ratio holds up on a busy host, where wall times do not.
+    // Reviewed under 20 busy loops (2x core oversubscription): linear
+    // grouping 14-22x; the quadratic grouping it replaced 87-105x. Wall time
+    // flaked there (up to 35x), as the large build was preempted.
+    const [small_us, large_us] = bestBuilds([small, large]);
+    expect(large_us! / Math.max(small_us!, 1)).toBeLessThan(30);
   });
 });
 
