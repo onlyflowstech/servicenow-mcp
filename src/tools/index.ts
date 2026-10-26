@@ -11,6 +11,7 @@ import { atfResultStore } from "../atf-result-cache.js";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { jsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/types.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { types as utilTypes } from "node:util";
@@ -250,6 +251,21 @@ type ToolRegistrationPlan = Readonly<{
   config: ReturnType<typeof toolRegistrationConfig>;
 }>;
 
+/**
+ * Validator factory for the preflight client only. It compiles nothing; a
+ * validator it returns rejects every input, so it cannot silently accept
+ * tool output if the preflight ever started calling tools. Schema
+ * well-formedness is still checked structurally in
+ * validateDiscoveredToolConfigurations.
+ */
+export const PREFLIGHT_INERT_SCHEMA_VALIDATOR: jsonSchemaValidator = Object.freeze({
+  getValidator: () => () => ({
+    valid: false as const,
+    data: undefined,
+    errorMessage: "preflight client does not validate tool output",
+  }),
+});
+
 /** Materialize and discover every frozen config before target writes. */
 async function preflightSdkToolConfigurations(
   plans: readonly ToolRegistrationPlan[]
@@ -264,10 +280,17 @@ async function preflightSdkToolConfigurations(
       structuredContent: { profile: "registration-preflight" },
     }));
   }
-  const client = new Client({
-    name: "servicenow-tool-catalog-preflight-client",
-    version: "0.0.0",
-  });
+  // The preflight never calls a tool, so the client's output-schema
+  // validators would be compiled by Ajv on listTools() and never used. Hand
+  // it an inert validator factory instead. This client is private to the
+  // preflight; the server's own input/output validation is unaffected.
+  const client = new Client(
+    {
+      name: "servicenow-tool-catalog-preflight-client",
+      version: "0.0.0",
+    },
+    { jsonSchemaValidator: PREFLIGHT_INERT_SCHEMA_VALIDATOR }
+  );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   try {
     await preflight.connect(serverTransport);
