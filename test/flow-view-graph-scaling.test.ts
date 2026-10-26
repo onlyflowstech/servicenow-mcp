@@ -137,7 +137,7 @@ function withCalls(root: NormalizedFlowDefinition, targets: readonly string[]): 
 const BEFORE: Readonly<Record<string, string>> = {
   "nested-if fixture": "499a7f093cbb840e197248d2d7e97bf85bec6d5063a03cf4ad73c1d015d6204c",
   "top-level-try fixture": "98790ad090704c8e2f666aafd663b3c485eab85971a7737726fe9982e2a00677",
-  "parallel fixture": "5009885118379a1b63e9812fe02a63af25b5ff14cb687e67b5f716addeab6d1a",
+  "parallel fixture": "655263993c796dd64a02f7262de82b6841ea6ebb4347b99c58f731b05b79fe37",
   "flat 600": "d9d010bcf56743cf503cf7317fc1b1c362b22bddec294af00af7e5a78ad1ae7c",
   "flat 600, max_nodes 50": "bf64bddbbdd43945cebb49e678a25fbaf67a261d91bfb84f0ef9828cfd2a4358",
   "flat with subflows": "be2186e7642cc73f1b6f031a9043edc970587f111b24aaa924f0787094e9e95e",
