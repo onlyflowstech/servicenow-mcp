@@ -1267,6 +1267,37 @@ describe("loadFlowFromTables policy", () => {
 // ---------------------------------------------------------------------------
 
 describe("loadFlowFromTables bounded decoding", () => {
+  const deep = `${"[".repeat(10_000)}${"]".repeat(10_000)}`;
+
+  it("withholds a deeply nested value in a V2 blob without failing the load", async () => {
+    const blob = gz([{ name: "payload", value: deep, displayValue: deep }, { name: "other", value: "kept" }]);
+    // The whole blob is tiny: the nesting is inside one string value.
+    expect(blob.length).toBeLessThan(300);
+    const fake = fakeInstance(handCapture({ sys_hub_action_instance_v2: [actionRow(1, { values: cell(blob) })] }));
+    const definition = await loadFlowFromTables(fake.ops, HAND_HEADER, OPEN, { include_inputs: true });
+    expect(definition.steps[0]!.inputs).toEqual([
+      { name: "payload", label: null, type: null, value: null, redacted: "limit" },
+      { name: "other", label: null, type: null, value: "kept" },
+    ]);
+  });
+
+  it("withholds a deeply nested V1 value without failing the load", async () => {
+    const action = actionRow(1);
+    const value = {
+      sys_id: cell(hid("9", 1)),
+      document: cell("sys_hub_action_instance"),
+      document_key: cell(action.sys_id!.value),
+      variable: cell(hid("7", 1), "Payload"),
+      order: cell("1"),
+      value: cell(deep),
+    };
+    const fake = fakeInstance(handCapture({ sys_hub_action_instance: [action] }, [value]));
+    const definition = await loadFlowFromTables(fake.ops, HAND_HEADER, OPEN, { include_inputs: true });
+    expect(definition.steps[0]!.inputs).toEqual([
+      { name: "payload", label: "Payload", type: "string", value: null, redacted: "limit" },
+    ]);
+  });
+
   it("marks undecodable blobs decode_failed and never throws", async () => {
     const rows = [
       actionRow(1, { values: cell(BLOBS.bomb_8mib!) }),

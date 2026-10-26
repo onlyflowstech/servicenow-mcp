@@ -437,6 +437,48 @@ describe("policyInput", () => {
   });
 });
 
+describe("policyInput on deeply nested JSON text", () => {
+  const deepArray = (depth: number) => `${"[".repeat(depth)}${"]".repeat(depth)}`;
+  const deepObject = (depth: number) => `${'{"a":'.repeat(depth)}1${"}".repeat(depth)}`;
+
+  it.each([
+    ["a 10,000-deep array", deepArray(10_000)],
+    ["a 131,072-deep array", deepArray(131_072)],
+    ["a 40,000-deep object", deepObject(40_000)],
+    ["nesting one past the decoder's bound", deepArray(25)],
+  ])("withholds %s as limit, never shown raw and never throwing", (_name, text) => {
+    for (const raw of [{ value: text }, { value: "x", displayValue: text }]) {
+      expect(policyInput(OPEN, "action_inputs", { name: "payload", ...raw })).toEqual({
+        name: "payload",
+        label: null,
+        type: null,
+        value: null,
+        redacted: "limit",
+      });
+    }
+  });
+
+  it("withholds JSON-looking text too long to parse within bounds", () => {
+    const long = `[${"1,".repeat(140_000)}1]`;
+    expect(policyInput(OPEN, "action_inputs", { name: "payload", value: long })).toMatchObject({
+      value: null,
+      redacted: "limit",
+    });
+  });
+
+  it("still scrubs nested JSON within the bounds and shows other text as is", () => {
+    expect(policyInput(OPEN, "action_inputs", { name: "payload", value: deepArray(24) })).toMatchObject({
+      value: deepArray(24),
+    });
+    expect(
+      policyInput(OPEN, "action_inputs", { name: "payload", value: '{"user":"a","password":"p","n":[1]}' })
+    ).toMatchObject({ value: '{"user":"a","n":[1]}' });
+    expect(policyInput(OPEN, "action_inputs", { name: "payload", value: "[Draft] notes {" })).toMatchObject({
+      value: "[Draft] notes {",
+    });
+  });
+});
+
 describe("scrubNestedKeys", () => {
   it("drops sensitive keys at any depth and keeps the rest", () => {
     expect(

@@ -37,6 +37,7 @@ import {
   type FlowValueElementKey,
   type RedactionReason,
 } from "./flow-view-contracts.js";
+import { parseBoundedJson } from "./flow-view-gzip.js";
 
 export interface FlowFieldPlan {
   readonly readable: ReadonlyMap<FlowTableName, ReadonlySet<string>>;
@@ -326,24 +327,28 @@ function optionalLine(raw: unknown, max: number): string | null {
   return clean === "" ? null : clean;
 }
 
-/** Serialize an input value; JSON text and objects pass through scrubNestedKeys. */
-function inputValueText(raw: unknown): string | null {
+/** An input value that looks like JSON but cannot be scrubbed safely: withheld. */
+const UNSCRUBBABLE: unique symbol = Symbol("unscrubbable");
+
+/**
+ * Serialize an input value; JSON text and objects pass through
+ * scrubNestedKeys. JSON text is parsed only within the decoder's bounds
+ * (MAX_DECODED_JSON_DEPTH, MAX_DECODED_JSON_NODES, MAX_GZIP_OUTPUT_BYTES):
+ * deeper, larger or longer JSON-looking text cannot be scrubbed, so it is
+ * withheld (UNSCRUBBABLE) rather than shown raw, and never parsed or
+ * serialized unbounded.
+ */
+function inputValueText(raw: unknown): string | null | typeof UNSCRUBBABLE {
   if (raw === undefined || raw === null) return null;
   const scalar = scalarText(raw);
   if (scalar !== null) {
     const trimmed = scalar.trim();
-    if (
-      (trimmed.startsWith("{") || trimmed.startsWith("[")) &&
-      scalar.length <= FLOW_VIEW_LIMITS.MAX_GZIP_OUTPUT_BYTES
-    ) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(scalar);
-      } catch {
-        return scalar;
-      }
-      const scrubbed = scrubNestedKeys(parsed);
-      const original = JSON.stringify(parsed);
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      if (scalar.length > FLOW_VIEW_LIMITS.MAX_GZIP_OUTPUT_BYTES) return UNSCRUBBABLE;
+      const parsed = parseBoundedJson(scalar);
+      if (!parsed.ok) return parsed.reason === "invalid_json" ? scalar : UNSCRUBBABLE;
+      const scrubbed = scrubNestedKeys(parsed.value);
+      const original = JSON.stringify(parsed.value);
       const cleaned = JSON.stringify(scrubbed);
       return original === cleaned ? scalar : (cleaned ?? null);
     }
@@ -392,7 +397,13 @@ export function policyInput(
     return output;
   }
   const display = inputValueText(raw.displayValue);
-  const text = display !== null && display.trim() !== "" ? display : inputValueText(raw.value);
+  const text =
+    display === UNSCRUBBABLE || (display !== null && display.trim() !== "") ? display : inputValueText(raw.value);
+  if (text === UNSCRUBBABLE) {
+    // Nested JSON past the decoder's bounds: shown as withheld, never raw.
+    output.redacted = "limit";
+    return output;
+  }
   if (text === null) return output;
   const bounded = boundedText(text, FLOW_VIEW_LIMITS.MAX_INPUT_VALUE_CHARS);
   output.value = bounded.text;
