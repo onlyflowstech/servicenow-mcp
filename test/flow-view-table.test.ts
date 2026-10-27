@@ -1,11 +1,18 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { gunzipSync, gzipSync } from "node:zlib";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ServiceNowOperations } from "../src/client.js";
+import { ServiceNowClient, type ServiceNowOperations } from "../src/client.js";
 import { createCachedServiceNowOperations } from "../src/metadata-cache.js";
-import { createToolError } from "../src/tool-error.js";
+import {
+  createHtmlResponseError,
+  createInstanceHibernatingError,
+  createInvalidResponseError,
+  createRedirectedError,
+  createToolError,
+  trustedToolErrorDescriptor,
+} from "../src/tool-error.js";
 import {
   FLOW_TABLE_FIELDS,
   FLOW_VIEW_LIMITS,
@@ -745,6 +752,99 @@ describe("loadFlowFromTables reads", () => {
       const fake = fakeInstance(source, { snapshots: snapshotsOf(source), errors: { [table]: error } });
       await expect(loadFlowFromTables(fake.ops, header, OPEN, { include_inputs: true }), table).rejects.toBe(error);
     }
+  });
+
+  // Each _v2 table, in a capture where it has rows, so treating the error as
+  // a missing table would silently drop those steps.
+  const V2_WITH_ROWS = [
+    ["sys_hub_trigger_instance_v2", "tables-F1.json"],
+    ["sys_hub_action_instance_v2", "tables-F1.json"],
+    ["sys_hub_flow_logic_instance_v2", "tables-F1.json"],
+    ["sys_hub_sub_flow_instance_v2", "tables-F2F3p.json"],
+  ] as const;
+
+  it("fails the call when a _v2 table answers with a non-JSON, HTML, redirect or hibernation response", async () => {
+    const errors = [
+      createInvalidResponseError(),
+      createHtmlResponseError(),
+      createRedirectedError(),
+      createInstanceHibernatingError("dev12345.service-now.com"),
+    ];
+    for (const [table, file] of V2_WITH_ROWS) {
+      const source = capture(file);
+      expect(source[table]!.rows.length, table).toBeGreaterThan(0);
+      const header = await headerOf(source);
+      for (const error of errors) {
+        const fake = fakeInstance(source, { snapshots: snapshotsOf(source), errors: { [table]: error } });
+        await expect(
+          loadFlowFromTables(fake.ops, header, OPEN, { include_inputs: true }),
+          `${table} ${trustedToolErrorDescriptor(error)!.reason}`
+        ).rejects.toBe(error);
+      }
+    }
+  });
+
+  describe("through the real client on a _v2 table", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    const INSTANCE = "https://dev12345.service-now.com";
+
+    /** The fake instance, except that `table` is read by a real client whose fetch answers `respond()`. */
+    function withRealClientFor(source: Capture, table: string, respond: () => Response) {
+      const fetch = vi.fn(async () => respond());
+      vi.stubGlobal("fetch", fetch);
+      const client = new ServiceNowClient(
+        { instance: INSTANCE, user: "tester", password: "placeholder-not-a-real-credential", displayValue: "true", relDepth: 3 },
+        { baseRetryDelayMs: 1, sleep: async () => {} }
+      );
+      const fake = fakeInstance(source, { snapshots: snapshotsOf(source) });
+      const ops = Object.freeze({
+        ...fake.ops,
+        get(path: string, params: Record<string, string> = {}) {
+          return path === `/api/now/table/${table}` ? client.get(path, params) : fake.ops.get(path, params);
+        },
+      }) as unknown as ServiceNowOperations;
+      return { ops, fetch };
+    }
+
+    it.each([
+      ["a 200 with a non-JSON body", "invalid_response", () => new Response("not json", { status: 200, headers: { "Content-Type": "text/plain" } })],
+      ["a 200 HTML page", "html_response", () => new Response("<html><body>Sign in</body></html>", { status: 200, headers: { "Content-Type": "text/html" } })],
+      ["a hibernation page", "instance_hibernating", () => new Response("<!DOCTYPE html><html><head><title>Instance Hibernating</title></head><body></body></html>", { status: 200, headers: { "Content-Type": "text/html" } })],
+      ["a redirect", "redirected", () => new Response(null, { status: 302, headers: { Location: "https://elsewhere.example/" } })],
+    ] as const)("fails the call on %s instead of dropping steps", async (_label, reason, respond) => {
+      for (const [table, file] of V2_WITH_ROWS) {
+        const source = capture(file);
+        const header = await headerOf(source);
+        const { ops, fetch } = withRealClientFor(source, table, respond);
+        const error = await loadFlowFromTables(ops, header, OPEN, { include_inputs: true }).then(
+          () => undefined,
+          (caught: unknown) => caught
+        );
+        expect(fetch, table).toHaveBeenCalled();
+        expect(trustedToolErrorDescriptor(error)?.reason, table).toBe(reason);
+      }
+    });
+
+    it("still reads a genuine missing table (HTTP 400) as zero rows", async () => {
+      const source = capture("tables-F6a.json");
+      const header = await headerOf(source);
+      const { ops, fetch } = withRealClientFor(
+        source,
+        "sys_hub_action_instance_v2",
+        () =>
+          new Response(JSON.stringify({ error: { message: "Invalid table sys_hub_action_instance_v2" }, status: "failure" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          })
+      );
+      const definition = await loadFlowFromTables(ops, header, OPEN, { include_inputs: true });
+      expect(fetch).toHaveBeenCalled();
+      expect(definition.steps).toHaveLength(10);
+      expect(definition.warnings).toEqual([]);
+    });
   });
 
   it("rejects a malformed response and an invalid header sys_id", async () => {

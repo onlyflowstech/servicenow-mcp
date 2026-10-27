@@ -573,11 +573,18 @@ function fieldsFor(
  * A trusted upstream rejection that is neither a 5xx nor one of the mapped
  * 4xx statuses: what the Table API returns (HTTP 400) for a table that does
  * not exist. The client exposes only the category, so this is the narrowest
- * test available without the status.
+ * test available without the status. An error with a `reason` (a 200 body
+ * that is not JSON, an HTML page, a redirect, a hibernating instance) is a
+ * bad response, not a missing table: it fails the call instead of silently
+ * dropping that table's steps.
  */
 function isMissingTableError(error: unknown): boolean {
   const descriptor = trustedToolErrorDescriptor(error);
-  return descriptor?.category === "upstream" && descriptor.retry === "do_not_retry";
+  return (
+    descriptor?.category === "upstream" &&
+    descriptor.retry === "do_not_retry" &&
+    descriptor.reason === undefined
+  );
 }
 
 interface ReadResult {
