@@ -2759,3 +2759,293 @@ describe("stdio has no authentication boundary to configure", () => {
     expect(text).toMatch(/^ok\s+server env:/mu);
   });
 });
+
+describe("risky grant warning", () => {
+  let home: string;
+  let manager: ProfileManager;
+
+  beforeEach(() => {
+    home = newHome("sn-mcp-risky-");
+    mkdirSync(join(home, ".servicenow-mcp"), { recursive: true, mode: 0o700 });
+    manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "integration.user",
+      credential: "env:SN_PASSWORD",
+    });
+  });
+
+  async function grantOutput(argv: readonly string[]): Promise<string> {
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv: ["grant", "--profile", "dev", ...argv],
+      profileManager: manager,
+      writeStdout: (value) => io.out.push(value),
+    });
+    return io.out.join("");
+  }
+
+  async function wizard(script: readonly string[]) {
+    const prompter = scriptedPrompter(script);
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: true,
+      prompter,
+      profileManager: manager,
+      keyProvider: FIXED_KEY,
+      verifyCredential: ACCEPTS,
+      resolveParentTable: async () => undefined,
+      commandExists: () => false,
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: (value) => io.err.push(value),
+    });
+    return { notes: prompter.notes.join("\n"), out: io.out.join("") };
+  }
+
+  it.each([
+    "sys_user_has_role",
+    "sys_user_grmember",
+    "sys_group_has_role",
+    "sys_user_role",
+    "sysapproval_approver",
+  ])("warns on a write grant on %s and still grants it", async (table) => {
+    const out = await grantOutput(["--read", table, "--write", table]);
+    expect(out).toContain("WARNING: this grant gives write access on privilege-sensitive tables");
+    expect(out).toContain(table);
+    expect(out).toContain("The grant is still allowed");
+    expect(out).toContain("Granted table access on profile dev.");
+    // Not blocked: the profile really holds the write grant.
+    expect(manager.getProfile("dev").tableAccess?.writeTables).toEqual([table]);
+  });
+
+  it("warns on a dry run and in --json output, without blocking either", async () => {
+    const dry = await grantOutput(["--write", "sys_user_has_role", "--dry-run"]);
+    expect(dry).toContain("WARNING");
+    expect(manager.getProfile("dev").tableAccess).toBeUndefined();
+
+    const json = JSON.parse(
+      await grantOutput(["--write", "sysapproval_approver", "--json"])
+    ) as { status: string; warnings?: string[] };
+    expect(json.status).toBe("granted");
+    expect(json.warnings?.[0]).toContain("sysapproval_approver");
+  });
+
+  it("does not warn for ordinary tables or for a read-only grant on a role table", async () => {
+    const ordinary = await grantOutput(["--read", "incident", "--write", "incident"]);
+    expect(ordinary).not.toContain("WARNING");
+    const readOnly = await grantOutput(["--read", "sys_user_has_role"]);
+    expect(readOnly).not.toContain("WARNING");
+    const json = JSON.parse(await grantOutput(["--read", "problem", "--json"])) as {
+      warnings?: string[];
+    };
+    expect(json.warnings).toBeUndefined();
+  });
+
+  it("warns in the wizard, in the notes and the summary, and the profile is still written", async () => {
+    const { notes, out } = await wizard([
+      "profile",
+      "dev2",
+      "dev00002.service-now.com",
+      "basic",
+      "encrypted",
+      "integration.user",
+      "Just incident",
+      "Enter a custom list",
+      "sys_user_has_role",
+    ]);
+    expect(notes).toContain("WARNING: this grant gives write access");
+    expect(out).toContain("WARNING: this grant gives write access");
+    expect(manager.getProfile("dev2").tableAccess?.writeTables).toEqual(["sys_user_has_role"]);
+  });
+
+  it("does not warn in the wizard for an ordinary write grant", async () => {
+    const { notes, out } = await wizard([
+      "profile",
+      "dev3",
+      "dev00003.service-now.com",
+      "basic",
+      "encrypted",
+      "integration.user",
+      "Just incident",
+      "Just incident",
+    ]);
+    expect(notes).not.toContain("WARNING");
+    expect(out).not.toContain("WARNING");
+  });
+});
+
+describe("setup policy show", () => {
+  let home: string;
+  let manager: ProfileManager;
+
+  beforeEach(() => {
+    home = newHome("sn-mcp-policy-");
+    mkdirSync(join(home, ".servicenow-mcp"), { recursive: true, mode: 0o700 });
+    manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "oauth",
+      grantType: "client_credentials",
+      clientId: "client-id-canary",
+      clientSecret: "env:SN_CLIENT_SECRET_REF_CANARY",
+      credential: "env:SN_PASSWORD_REF_CANARY",
+      fieldPolicy: { incident: { readable: ["sys_id", "number"], writable: ["short_description"] } },
+      tableAccess: {
+        readTables: ["incident"],
+        writeTables: ["incident"],
+        targets: [
+          {
+            table: "incident",
+            kind: "canonical",
+            tools: ["sn_query", "sn_update"],
+            closureComplete: true,
+            relatedTables: ["incident"],
+          },
+        ],
+      },
+    });
+  });
+
+  async function show(argv: readonly string[]): Promise<string> {
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv: ["policy", "show", ...argv],
+      env: { HOME: home },
+      profileManager: manager,
+      writeStdout: (value) => io.out.push(value),
+    });
+    return io.out.join("");
+  }
+
+  it("prints the effective policy as one table, matching the enforced field sets", async () => {
+    const out = await show(["--profile", "dev"]);
+    expect(out).toContain("Policy card: dev (https://dev00001.service-now.com)");
+    expect(out).toContain("Auth: oauth (client_credentials)");
+    expect(out).toMatch(/incident\s+yes\s+yes\s+sn_query,sn_update\s+number,sys_id\s+short_description/u);
+    expect(out).toContain("Batch: dry run by default");
+  });
+
+  it("never prints a secret, a key, a client id, or a credential reference", async () => {
+    const out = await show(["--profile", "dev"]);
+    const json = await show(["--profile", "dev", "--json"]);
+    for (const text of [out, json]) {
+      expect(text).not.toContain("SN_CLIENT_SECRET_REF_CANARY");
+      expect(text).not.toContain("SN_PASSWORD_REF_CANARY");
+      expect(text).not.toContain("client-id-canary");
+      expect(text).not.toMatch(/secret_ref|"credential"|clientSecret/iu);
+    }
+    expect((JSON.parse(json) as { policy: { profile: string } }).policy.profile).toBe("dev");
+  });
+
+  it("requires --profile and a known profile", async () => {
+    await expect(show([])).rejects.toThrow(/--profile is required/u);
+    await expect(show(["--profile", "nope"])).rejects.toThrow();
+  });
+});
+
+describe("security review fixes in setup", () => {
+  let home: string;
+  let manager: ProfileManager;
+
+  beforeEach(() => {
+    home = newHome("sn-mcp-secfix-");
+    mkdirSync(join(home, ".servicenow-mcp"), { recursive: true, mode: 0o700 });
+    manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+  });
+
+  async function run(argv: readonly string[]): Promise<string> {
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv,
+      env: { HOME: home },
+      profileManager: manager,
+      writeStdout: (value) => io.out.push(value),
+    });
+    return io.out.join("");
+  }
+
+  const target = (table: string, tools: string[]) => ({
+    table,
+    kind: "canonical" as const,
+    tools,
+    closureComplete: true as const,
+    relatedTables: [table],
+  });
+
+  it("policy show sees a late-sorting write grant behind more than 100 read-only tables", async () => {
+    const readOnly = Array.from({ length: 120 }, (_, i) => `a_tbl_${String(i).padStart(3, "0")}`);
+    manager.addProfile("big", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+      tableAccess: {
+        readTables: [...readOnly, "sys_user_has_role"],
+        writeTables: ["sys_user_has_role"],
+        targets: [
+          ...readOnly.map((table) => target(table, ["sn_query"])),
+          target("sys_user_has_role", ["sn_query", "sn_create"]),
+        ],
+      },
+    });
+    const text = await run(["policy", "show", "--profile", "big"]);
+    expect(text).not.toContain("cannot write");
+    expect(text).toContain("WARNING: write access on privilege-sensitive tables: sys_user_has_role");
+    const json = JSON.parse(await run(["policy", "show", "--profile", "big", "--json"])) as {
+      policy: { can_write_anything: boolean; risky_write_tables: string[] };
+    };
+    expect(json.policy.can_write_anything).toBe(true);
+    expect(json.policy.risky_write_tables).toEqual(["sys_user_has_role"]);
+  });
+
+  it("policy show prints a bare origin, never a password in the configured URL", async () => {
+    // addProfile refuses such a URL, so write the file by hand, as an
+    // operator editing config.json could.
+    writeFileSync(
+      profileConfigPath(home),
+      JSON.stringify({
+        version: 2,
+        profiles: {
+          p: {
+            instance: "https://admin:canary-pw-123@dev00001.service-now.com",
+            authType: "basic",
+            username: "u",
+            credential: "env:SN_PASSWORD",
+            tableAccess: { readTables: ["incident"], targets: [target("incident", ["sn_query"])] },
+          },
+        },
+      }),
+      { mode: 0o600 }
+    );
+    manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+    const text = await run(["policy", "show", "--profile", "p"]);
+    const json = await run(["policy", "show", "--profile", "p", "--json"]);
+    for (const out of [text, json]) {
+      expect(out).not.toContain("canary-pw-123");
+      expect(out).toContain("https://dev00001.service-now.com");
+    }
+  });
+
+  it.each(["sys_script", "sysauto_script", "sys_properties", "sys_user"])(
+    "warns on a write grant on %s, and names the real profile, not a placeholder",
+    async (table) => {
+      manager.addProfile("dev", {
+        instance: "https://dev00001.service-now.com",
+        authType: "basic",
+        username: "u",
+        credential: "env:SN_PASSWORD",
+      });
+      const out = await run(["grant", "--profile", "dev", "--write", table, "--dry-run"]);
+      expect(out).toContain("WARNING: this grant gives write access on privilege-sensitive tables");
+      expect(out).toContain("policy show --profile dev");
+      expect(out).not.toContain("<name>");
+    }
+  );
+});

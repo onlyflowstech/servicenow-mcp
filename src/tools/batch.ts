@@ -4,6 +4,7 @@ import {
   runWithServiceNowRequestSignal,
   type ServiceNowOperations,
 } from "../client.js";
+import { BATCH_LIMITS } from "../batch-limits.js";
 import type { ExecutionContext } from "../execution-context.js";
 import { uncachedOperations } from "../metadata-cache.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
@@ -14,6 +15,7 @@ import {
 } from "../encoded-query-policy.js";
 import {
   filterReadableRecord,
+  isAllFieldSelection,
   preparedReadableFields,
   resolveReadableFields,
 } from "../field-policy.js";
@@ -69,9 +71,9 @@ export const schema = z
       .number()
       .int()
       .min(1)
-      .max(10_000)
+      .max(BATCH_LIMITS.maxLimit)
       .optional()
-      .default(200)
+      .default(BATCH_LIMITS.defaultLimit)
       .describe("Max records to affect (default 200, safety cap 10000)"),
     confirm: z
       .boolean()
@@ -112,7 +114,7 @@ export async function handler(
       throw new EncodedQueryPolicyError("encoded_write_prohibited");
     }
 
-    const limit = Math.min(args.limit, 10000);
+    const limit = Math.min(args.limit, BATCH_LIMITS.maxLimit);
 
     // Step 1: Query matching records (sys_id only). These are the records the
     // run will change, so they come from the instance on every run, never
@@ -137,12 +139,25 @@ export async function handler(
 
     // Step 2: Dry-run?
     if (!args.confirm) {
+      const sample = await dryRunSample(
+        client,
+        args.table,
+        targets.sysIds,
+        resolveReadableFields(args.table, { fields: "all" }),
+        context?.signal
+      );
       return ok({
         action: args.action,
         table: args.table,
         matched,
         dry_run: true,
         message: "Dry run — no changes made. Set confirm to true to execute.",
+        ...(sample.length === 0 ? {} : { sample }),
+        // Names only, never values: the values are the caller's own input.
+        ...(writableFields === undefined
+          ? {}
+          : { fields_to_write: Object.keys(writableFields) }),
+        note: DRY_RUN_NOTE,
       });
     }
 
@@ -184,7 +199,116 @@ export async function handler(
   }
 }
 
-const REST_BATCH_CHUNK_SIZE = 50;
+/** Records a dry run shows. */
+const DRY_RUN_SAMPLE_SIZE = BATCH_LIMITS.dryRunSampleSize;
+/** Longest display value a sample row carries. */
+const DRY_RUN_DISPLAY_MAX_CHARS = 120;
+/** Readable fields that identify a record to a person, in order of preference. */
+const DRY_RUN_DISPLAY_FIELDS: readonly string[] = Object.freeze([
+  "number",
+  "name",
+  "short_description",
+  "title",
+]);
+const DRY_RUN_SAMPLE_DEADLINE_MS = 5_000;
+const DRY_RUN_NOTE =
+  "The sample is a preview of the first matches, not a list of what will change. " +
+  "Running again with confirm true re-runs the query, so it can match different " +
+  "records than this dry run did.";
+
+interface DryRunSampleRow {
+  sys_id: string;
+  display?: string;
+}
+
+/**
+ * The one extra read a dry run makes: at most DRY_RUN_SAMPLE_SIZE records,
+ * addressed by the sys_ids the lookup already returned, so the preview shows
+ * rows from that same result rather than a second evaluation of the filter.
+ * It asks only for sys_id and one display field the profile may read, and the
+ * rows pass the same readable-field filter as the lookup. It is skipped when
+ * nothing matched, and a failed response yields no sample rather than failing
+ * the dry run: the count is already in hand.
+ */
+async function dryRunSample(
+  client: ServiceNowOperations,
+  table: string,
+  sysIds: readonly string[],
+  readable: readonly string[],
+  signal: AbortSignal | undefined
+): Promise<DryRunSampleRow[]> {
+  const ids = sysIds.slice(0, DRY_RUN_SAMPLE_SIZE);
+  if (ids.length === 0) return [];
+  const readableAll = isAllFieldSelection(readable);
+  const allows = (field: string): boolean => readableAll || readable.includes(field);
+  if (!allows("sys_id")) return [];
+  const displayField = DRY_RUN_DISPLAY_FIELDS.find(allows);
+  const selection = Object.freeze(
+    displayField === undefined ? ["sys_id"] : ["sys_id", displayField]
+  );
+  let response: { result?: unknown } | null;
+  try {
+    // A short deadline: the count is already in hand, so a slow instance
+    // costs the preview, never the dry run.
+    const deadline = AbortSignal.timeout(DRY_RUN_SAMPLE_DEADLINE_MS);
+    response = await inOwnResponseBudget(
+      signal === undefined ? deadline : AbortSignal.any([signal, deadline]),
+      () =>
+      uncachedOperations(client).get(`/api/now/table/${table}`, {
+        sysparm_fields: selection.join(","),
+        sysparm_limit: String(DRY_RUN_SAMPLE_SIZE),
+        sysparm_query: `sys_idIN${ids.join(",")}`,
+      })
+    );
+  } catch (error) {
+    // A cancelled call stays cancelled; any other failure only drops the preview.
+    if (signal?.aborted) throw error;
+    return [];
+  }
+  const filtered = filterReadableRecord(
+    Array.isArray(response?.result) ? response.result : [],
+    selection
+  );
+  const rows: DryRunSampleRow[] = [];
+  // Only rows for the sys_ids asked for, each once: the sample must come from
+  // the matched set, whatever the instance answers.
+  const requested = new Set(ids);
+  const shown = new Set<string>();
+  for (const record of Array.isArray(filtered) ? filtered : []) {
+    const item = plainRecord(record);
+    if (item === undefined) continue;
+    let sysId: string;
+    try {
+      sysId = serviceNowSysIdPathSegment(item.sys_id);
+    } catch {
+      continue;
+    }
+    if (!requested.has(sysId) || shown.has(sysId)) continue;
+    shown.add(sysId);
+    const display =
+      displayField === undefined ? undefined : displayText(item[displayField]);
+    rows.push(display === undefined ? { sys_id: sysId } : { sys_id: sysId, display });
+    if (rows.length === DRY_RUN_SAMPLE_SIZE) break;
+  }
+  return rows;
+}
+
+/** A display value is text; a reference object contributes its own display text. */
+function displayText(candidate: unknown): string | undefined {
+  const reference = plainRecord(candidate);
+  const value =
+    typeof candidate === "string"
+      ? candidate
+      : typeof reference?.display_value === "string"
+        ? reference.display_value
+        : undefined;
+  if (value === undefined || value === "") return undefined;
+  return value.length > DRY_RUN_DISPLAY_MAX_CHARS
+    ? `${value.slice(0, DRY_RUN_DISPLAY_MAX_CHARS)}…`
+    : value;
+}
+
+const REST_BATCH_CHUNK_SIZE = BATCH_LIMITS.restBatchChunkSize;
 const REST_BATCH_PATH = "/api/now/v1/batch";
 
 /**

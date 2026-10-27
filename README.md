@@ -211,7 +211,13 @@ servicenow-mcp-setup grant --profile dev --read incident,problem --write inciden
 | `servicenow-mcp-setup` | Generate local auth material and register supported clients |
 | `servicenow-mcp-setup client --client <name>` | Print copy-pasteable config for a client |
 | `servicenow-mcp-setup grant --profile <name> --read <tables>` | Add table access rules to a profile |
+| `servicenow-mcp-setup policy show --profile <name>` | Print the profile's effective policy as one table (tables, tools, fields, batch limits); never prints a secret |
 | `servicenow-mcp-setup doctor` | Diagnose the install and print remedies |
+
+`grant` and the wizard print a warning, and still grant, when write access
+lands on a privilege-sensitive table: role, group, approval, script,
+property, user or authentication tables such as `sys_user_has_role`,
+`sysapproval_approver` or `sys_script`.
 
 `--force` regenerates the owner/client identifiers but deliberately preserves
 `SN_PROFILE_ENCRYPTION_KEY`, which decrypts every credential envelope in
@@ -693,7 +699,7 @@ in this section is needed to use this server.
 | `sn_incident_add_comment` | Append one bounded customer-visible comment to an incident; repeated calls append again |
 | `sn_incident_add_work_note` | Append one bounded internal work note to an incident; repeated calls append again |
 | `sn_delete` | Delete a record on an approved write table (requires `confirm: true`) |
-| `sn_batch` | Bulk update/delete using a required structured filter and dry-run safety (raw encoded selectors are prohibited; requires `confirm: true` to execute). Values get the same policy as `sn_update`; execution uses the ServiceNow REST Batch API and never re-sends a batch |
+| `sn_batch` | Bulk update/delete using a required structured filter and dry-run safety (raw encoded selectors are prohibited; requires `confirm: true` to execute; a dry run returns the count, up to 5 sample records the profile may read, and the field names it would write). Values get the same policy as `sn_update`; execution uses the ServiceNow REST Batch API and never re-sends a batch |
 
 ### Analytics & Schema
 
@@ -732,7 +738,7 @@ stub and is **not published in 2.0** — it does not appear in `tools/list`. Use
 
 | Tool | Description |
 |------|-------------|
-| `sn_profile` | Inspect non-secret metadata for one explicitly named profile; profile configuration is operator-managed out of band |
+| `sn_profile` | Inspect non-secret metadata and the effective policy card for one explicitly named profile; profile configuration is operator-managed out of band |
 
 ---
 
@@ -1400,7 +1406,7 @@ exact `profile`; no prior call creates default, active, or switch-profile state.
 This server is designed for production use with multiple safety layers:
 
 - **Delete operations** require explicit `confirm: true`
-- **Batch operations** run in dry-run mode by default — shows match count without making changes
+- **Batch operations** run in dry-run mode by default — shows the match count, a sample of up to 5 records and the fields it would write, without making changes (`confirm` re-runs the query and can match different records)
 - **Bulk operations** require `confirm: true` to leave dry-run mode
 - **Unclassified composition is denied** — `sn_nl` requires a complete typed access plan; ATF suite execution requires a separate explicit `atf.execute` grant
 - **Table access is deny-by-default** with independent exact read/write allowlists; sensitive field names are denied and no configuration can grant them

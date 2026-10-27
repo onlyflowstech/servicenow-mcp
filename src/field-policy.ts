@@ -1301,6 +1301,36 @@ export function isSensitiveFieldName(candidate: unknown): boolean {
   );
 }
 
+/**
+ * Read-only view of the field sets the policy enforces for one table in the
+ * current field-policy scope. `"*"` means any field not blocked by name: the
+ * sensitive-name blocklist applies on top of every set, and a writable `"*"`
+ * never covers the EXPLICIT_WRITE_FIELDS. `explicitWritable` is the part of
+ * those a profile has listed by name. It is derived from the same resolved
+ * policy the request path reads and changes nothing in it.
+ */
+export interface FieldPolicySummary {
+  readonly readable: readonly string[] | "*";
+  readonly writable: readonly string[] | "*";
+  readonly explicitWritable: readonly string[];
+}
+
+/** Names the writable wildcard never covers; a profile must list each one. */
+export const EXPLICIT_WRITE_FIELD_NAMES: readonly string[] = Object.freeze([
+  ...EXPLICIT_WRITE_FIELDS,
+]);
+
+export function describeFieldPolicy(tableCandidate: unknown): FieldPolicySummary {
+  const policy = requirePolicy(tableCandidate);
+  return Object.freeze({
+    readable: policy.allowAnyReadable ? "*" : Object.freeze([...policy.readable]),
+    writable: policy.allowAnyWritable ? "*" : Object.freeze([...policy.writable]),
+    explicitWritable: Object.freeze(
+      EXPLICIT_WRITE_FIELD_NAMES.filter((field) => policy.writable.includes(field))
+    ),
+  });
+}
+
 function requirePolicy(tableCandidate: unknown): TableFieldPolicy {
   const table = normalizeTableName(tableCandidate);
   const policies = currentTableFieldPolicies();

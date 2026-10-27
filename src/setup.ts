@@ -64,12 +64,18 @@ import {
   profileNameProblem,
   type Profile,
 } from "./profile-manager.js";
+import { buildPolicyCard, renderPolicyCard } from "./policy-card.js";
+import { riskyGrantWarning } from "./risky-grants.js";
 import { trustedToolErrorDescriptor } from "./tool-error.js";
 import {
   createTableAccessPolicy,
   type TableAccessPolicyInput,
   type TableAccessTargetInput,
 } from "./table-policy.js";
+import {
+  createEncodedQueryAccessPolicy,
+  encodedQueryAccessPolicyFromEnvironment,
+} from "./encoded-query-policy.js";
 import { resolveTableHierarchy } from "./tools/table-hierarchy.js";
 
 export interface SetupCliDependencies {
@@ -159,7 +165,7 @@ interface CommandResult {
   readonly error?: Error;
 }
 
-type Subcommand = "init" | "client" | "grant" | "doctor";
+type Subcommand = "init" | "client" | "grant" | "doctor" | "policy";
 
 type ClientTarget =
   | "codex"
@@ -312,6 +318,9 @@ export async function runSetupCli(
       return;
     case "grant":
       runGrant(parseGrantArguments(args), home, dependencies, out);
+      return;
+    case "policy":
+      runPolicy(parsePolicyArguments(args), home, env, dependencies, out);
       return;
     case "doctor":
       await runDoctor(parseDoctorArguments(args), home, env, dependencies, out);
@@ -491,6 +500,10 @@ async function runWizard(
 
     // 5. Table access. A profile without rules denies every call.
     const tableAccess = await askTableAccess(prompter, config, dependencies);
+    // Allowed, never blocked: privilege-sensitive tables are controlled by the
+    // profile's own configuration. The operator just has to see it said.
+    const riskWarning = riskyGrantWarning(tableAccess.writeTables ?? [], name);
+    if (riskWarning !== undefined) prompter.note(`\n${riskWarning}`);
 
     // 6. One write, with the rules already attached — never a rules-less window.
     //
@@ -1055,6 +1068,7 @@ function renderWizardSummary(
   checks: readonly Check[]
 ): string {
   const failed = checks.filter((check) => !check.ok).length;
+  const riskWarning = riskyGrantWarning(tableAccess.writeTables ?? [], profile);
   const lines = [
     "",
     "Setup complete.",
@@ -1062,6 +1076,7 @@ function renderWizardSummary(
     `Profile   ${profile}`,
     `Reads     ${(tableAccess.readTables ?? []).join(", ") || "(none)"}`,
     `Writes    ${(tableAccess.writeTables ?? []).join(", ") || "(none)"}`,
+    ...(riskWarning === undefined ? [] : ["", riskWarning.trimEnd(), ""]),
     `Transport stdio (each client spawns its own ${SERVER_COMMAND})`,
     `Clients   ${registered.length > 0 ? registered.join(", ") : "(none registered)"}`,
     "",
@@ -1633,11 +1648,25 @@ function runGrant(
     ? buildTableAccess(ordinary, { ...options, read: ["sys_atf_test_suite", "sys_atf_test", "sys_atf_step", "sys_atf_step_config", "var_dictionary", "sys_variable_value", "sys_element_mapping"], write: ATF_AUTHOR_TABLES, tools: ["sn_atf_author"] })
     : ordinary;
 
+  // What this grant adds to the write allowlist, including related tables
+  // that buildTableAccess pulls in. A re-run that adds nothing new still
+  // names the tables it was asked for.
+  const alreadyWritable = new Set(existing.writeTables ?? []);
+  const grantedWrites = [
+    ...new Set([
+      ...options.write,
+      ...(tableAccess.writeTables ?? []).filter((table) => !alreadyWritable.has(table)),
+    ]),
+  ];
+  const riskWarning = riskyGrantWarning(grantedWrites, options.profile);
+  const warnings = riskWarning === undefined ? {} : { warnings: [riskWarning.trim()] };
+
   if (options.dryRun) {
     out(
       options.json
-        ? `${JSON.stringify({ status: "dry-run", profile: options.profile, tableAccess }, null, 2)}\n`
-        : `Would write to profile ${options.profile}:\n${indent(JSON.stringify(tableAccess, null, 2))}\n`
+        ? `${JSON.stringify({ status: "dry-run", profile: options.profile, tableAccess, ...warnings }, null, 2)}\n`
+        : `Would write to profile ${options.profile}:\n${indent(JSON.stringify(tableAccess, null, 2))}\n` +
+          (riskWarning === undefined ? "" : `\n${riskWarning}`)
     );
     return;
   }
@@ -1645,12 +1674,13 @@ function runGrant(
   manager.addProfile(options.profile, { ...current, tableAccess });
 
   if (options.json) {
-    out(`${JSON.stringify({ status: "granted", profile: options.profile, tableAccess }, null, 2)}\n`);
+    out(`${JSON.stringify({ status: "granted", profile: options.profile, tableAccess, ...warnings }, null, 2)}\n`);
     return;
   }
   out(
     `Granted table access on profile ${options.profile}.\n\n` +
       `${indent(JSON.stringify(tableAccess, null, 2))}\n\n` +
+      (riskWarning === undefined ? "" : `${riskWarning}\n`) +
       `relatedTables is a declaration the loader checks: each related table must\n` +
       `be allowed for every operation its target has, so --related adds it to the\n` +
       `allowlist of each of those operations, including one a later grant adds.\n` +
@@ -1750,6 +1780,66 @@ function mergeTargets(
     );
   }
   return Object.freeze([...byTable.values()]);
+}
+
+// ── policy ─────────────────────────────────────────────────────────
+
+interface PolicyOptions {
+  readonly profile: string;
+  readonly json: boolean;
+}
+
+/**
+ * `policy show`: the profile's effective policy as one table. It is built from
+ * the same loaders the server uses (profile snapshot, table-access policy,
+ * field-policy resolver), and reads no credential: the profile is loaded
+ * without resolving any secret.
+ */
+function runPolicy(
+  options: PolicyOptions,
+  home: string,
+  env: NodeJS.ProcessEnv,
+  dependencies: SetupCliDependencies,
+  out: (value: string) => void
+): void {
+  const manager = dependencies.profileManager ?? profileManagerFor(home);
+  const profile = manager.getProfile(options.profile);
+  // Raw encoded-query reads are configured in the server's environment, which
+  // this shell may not share. Say so rather than guess.
+  let encodedQueryAccess = createEncodedQueryAccessPolicy();
+  let encodedNote =
+    "Raw encoded read queries and ATF grants shown are those of this shell's environment; " +
+    "the server reads its own.";
+  try {
+    encodedQueryAccess = encodedQueryAccessPolicyFromEnvironment(env);
+  } catch {
+    encodedNote = "The encoded-query read policy in this shell's environment is invalid; shown as denied.";
+  }
+  const card = buildPolicyCard({
+    profile: options.profile,
+    instance: profile.instance,
+    authType: profile.authType ?? "basic",
+    ...(profile.grantType === undefined || profile.authType !== "oauth"
+      ? {}
+      : { grantType: profile.grantType }),
+    tableAccess: createTableAccessPolicy(profile.tableAccess ?? Object.freeze({})),
+    fieldPolicy: {
+      ...(profile.fieldPolicy === undefined ? {} : { fieldPolicy: profile.fieldPolicy }),
+      ...(profile.readableTableFields === undefined
+        ? {}
+        : { readableTableFields: profile.readableTableFields }),
+      ...(profile.writableTableFields === undefined
+        ? {}
+        : { writableTableFields: profile.writableTableFields }),
+    },
+    encodedQueryAccess,
+    atf: manager.getAtfConfig(options.profile),
+  });
+  out(
+    options.json
+      ? `${JSON.stringify({ policy: card, note: encodedNote }, null, 2)}\n`
+      : `${renderPolicyCard(card)}\n${encodedNote}\n`
+  );
 }
 
 // ── doctor ─────────────────────────────────────────────────────────
@@ -2191,7 +2281,12 @@ function splitSubcommand(argv: readonly string[]): {
   args: readonly string[];
 } {
   const first = argv[0];
-  if (first === "client" || first === "grant" || first === "doctor") {
+  if (
+    first === "client" ||
+    first === "grant" ||
+    first === "doctor" ||
+    first === "policy"
+  ) {
     return { subcommand: first, args: Object.freeze(argv.slice(1)) };
   }
   if (first === "init") return { subcommand: "init", args: Object.freeze(argv.slice(1)) };
@@ -2328,6 +2423,22 @@ function parseGrantArguments(args: readonly string[]): GrantOptions {
     dryRun: parsed.flags.has("--dry-run"),
     json: parsed.flags.has("--json"),
   });
+}
+
+function parsePolicyArguments(args: readonly string[]): PolicyOptions {
+  const usage = renderPolicyHelp();
+  if (args[0] !== "show") {
+    if (args[0] === "--help" || args[0] === "-h") throw new SetupHelp(usage);
+    throw new Error(`Usage: servicenow-mcp-setup policy show --profile NAME\n\n${usage}`);
+  }
+  const parsed = parseFlags(
+    args.slice(1),
+    { boolean: new Set(["--json"]), value: new Set(["--profile"]) },
+    usage
+  );
+  const profile = parsed.values.get("--profile");
+  if (!profile) throw new Error(`--profile is required.\n\n${usage}`);
+  return Object.freeze({ profile, json: parsed.flags.has("--json") });
 }
 
 function parseDoctorArguments(args: readonly string[]): DoctorOptions {
@@ -2721,6 +2832,7 @@ function renderSetupHelp(): string {
     "             instance, table access, and client registration.",
     "  client     Print copy-pasteable configuration for one or more MCP clients.",
     "  grant      Add least-privilege table access rules to an existing profile.",
+    "  policy     Show a profile's effective policy as one table (policy show).",
     "  doctor     Diagnose a local install and print the remedy for each failure.",
     "",
     "Run any command with --help for its options.",
@@ -2794,6 +2906,23 @@ function renderGrantHelp(): string {
     "Wildcards are refused here. A '*' allowlist skips the per-tool binding and the",
     "related-table closure check; configure it deliberately after reading",
     "docs/PRODUCTION-SECURITY.md.",
+  ].join("\n");
+}
+
+function renderPolicyHelp(): string {
+  return [
+    "Usage: servicenow-mcp-setup policy show --profile NAME [--json]",
+    "",
+    "Prints what the profile may do, from the same policy the server enforces:",
+    "tables readable and writable with their tools, readable and writable fields,",
+    "the explicit-listing fields, auth type, raw encoded-query reads, ATF grants,",
+    "and the sn_batch limits. Warns when write access reaches privilege-sensitive",
+    "tables (roles, approvals, scripts, users). Never prints a secret, a key, or a credential reference, and never",
+    "touches the network.",
+    "",
+    "Options:",
+    "  --profile NAME    Profile to show (required)",
+    "  --json            Machine-readable output",
   ].join("\n");
 }
 

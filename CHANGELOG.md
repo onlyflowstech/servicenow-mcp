@@ -90,6 +90,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Policy card.** `sn_profile` returns the profile's effective policy, as data
+  (`policy`) and as one text table (`policy_card`), and the new
+  `servicenow-mcp-setup policy show --profile <name> [--json]` prints the same
+  card. It lists the tables readable and writable with their tools, the
+  readable and writable fields (a `"*"` field entry covers ITSM and custom
+  tables, never the 23 system tables), the class and domain fields that need
+  explicit listing, the auth type, raw encoded-query reads, ATF grants and the
+  `sn_batch` limits. It is built from the policy the server enforces and never
+  prints a secret, key or credential reference. It enforces nothing new.
+  `sn_profile` keeps its answer small: the structured `policy` is held to
+  40,000 bytes and the text `policy_card` to 24,000. When either is cut,
+  `policy.truncated` says what (`tables_omitted`, `field_lists_narrowed`,
+  `text_omitted`) and names `servicenow-mcp-setup policy show --profile <name>
+  --json`, so `policy_card` is optional. The card is built once per loaded
+  profile.
+- **`sn_batch` dry run shows its work.** A dry run now also returns a `sample`
+  of up to 5 matched records (`sys_id` plus a `number`, `name`,
+  `short_description` or `title` the profile may read), `fields_to_write` (field
+  names, never values) and a `note` that `confirm` re-runs the query and can
+  match different records. The sample costs one extra read of at most 5
+  records, addressed by the `sys_id`s the lookup already returned; if it
+  fails or takes more than 5 seconds, the dry run still returns the count.
+  A target granted only `sn_batch` can now see up to 5 display values
+  (`number`, `name`, `short_description` or `title`, if readable) in a dry
+  run, where before it saw a count.
+- **Warning on risky grants.** `servicenow-mcp-setup grant` and the setup
+  wizard print a warning when a grant gives write access on a
+  privilege-sensitive table: role, group, delegation, ACL and approval tables
+  (`sys_user_has_role`, `sys_user_grmember`, `sys_group_has_role`,
+  `sys_user_role`, `sysapproval_approver`, ...), script tables (`sys_script`,
+  `sys_script_include`, `sysauto_script`, ...), `sys_properties`, `sys_user`,
+  `sys_user_group` and authentication tables. The wizard also warns when you
+  choose the `"*"` write wildcard; `grant` rejects `"*"`. The grant is still
+  allowed; `grant --json` carries the text in `warnings`.
 - **Journal fields through the generic write tools, on every table.**
   `sn_create`, `sn_update` and `sn_batch` accept `comments` and `work_notes` on
   every table granted for writes. This reverses the 2.0 rule that rejected
