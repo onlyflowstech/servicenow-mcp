@@ -90,6 +90,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Policy card.** `sn_profile` returns the profile's effective policy, as data
+  (`policy`) and as one text table (`policy_card`), and the new
+  `servicenow-mcp-setup policy show --profile <name> [--json]` prints the same
+  card. It lists the tables readable and writable with their tools, the
+  readable and writable fields (a `"*"` field entry covers ITSM and custom
+  tables, never the 23 system tables), the class and domain fields that need
+  explicit listing, the auth type, raw encoded-query reads, ATF grants and the
+  `sn_batch` limits. It is built from the policy the server enforces and never
+  prints a secret, key or credential reference. It enforces nothing new.
+  `sn_profile` keeps its answer small: the structured `policy` is held to
+  40,000 bytes and the text `policy_card` to 24,000. When either is cut,
+  `policy.truncated` says what (`tables_omitted`, `field_lists_narrowed`,
+  `text_omitted`) and names `servicenow-mcp-setup policy show --profile <name>
+  --json`, so `policy_card` is optional. The card is built once per loaded
+  profile.
+- **`sn_batch` dry run shows its work.** A dry run now also returns a `sample`
+  of up to 5 matched records (`sys_id` plus a `number`, `name`,
+  `short_description` or `title` the profile may read), `fields_to_write` (field
+  names, never values) and a `note` that `confirm` re-runs the query and can
+  match different records. The sample costs one extra read of at most 5
+  records, addressed by the `sys_id`s the lookup already returned; if it
+  fails or takes more than 5 seconds, the dry run still returns the count.
+  A target granted only `sn_batch` can now see up to 5 display values
+  (`number`, `name`, `short_description` or `title`, if readable) in a dry
+  run, where before it saw a count.
+- **Warning on risky grants.** `servicenow-mcp-setup grant` and the setup
+  wizard print a warning when a grant gives write access on a
+  privilege-sensitive table: role, group, delegation, ACL and approval tables
+  (`sys_user_has_role`, `sys_user_grmember`, `sys_group_has_role`,
+  `sys_user_role`, `sysapproval_approver`, ...), script tables (`sys_script`,
+  `sys_script_include`, `sysauto_script`, ...), `sys_properties`, `sys_user`,
+  `sys_user_group` and authentication tables. The wizard also warns when you
+  choose the `"*"` write wildcard; `grant` rejects `"*"`. The grant is still
+  allowed; `grant --json` carries the text in `warnings`.
 - **Journal fields through the generic write tools, on every table.**
   `sn_create`, `sn_update` and `sn_batch` accept `comments` and `work_notes` on
   every table granted for writes. This reverses the 2.0 rule that rejected
@@ -121,6 +155,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Building a server no longer compiles output-schema validators it never
+  uses.**
+  The tool-catalog check at startup lists tools through an in-process client
+  that never calls any, but the SDK compiled a validator for every output
+  schema each time. The HTTP transport builds a server per request, so this
+  trims a few milliseconds from each request and about 6 MB of idle memory
+  from a stdio server. The server's own input and output validation is
+  unchanged. Startup no longer compiles output schemas, so a malformed one is
+  caught by the strict-Ajv test in CI rather than when the server starts.
 - **`sn_batch` never re-sends a batch request that may have reached the
   instance.**
   Confirmed updates and deletes go through the ServiceNow REST Batch API, up
@@ -283,6 +326,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A hibernating developer instance, and any other HTML page returned in place
+  of an API response (single sign-on, maintenance, proxy), now produces a
+  clear error instead of a generic upstream failure. The OAuth token fetch and
+  every API call report "The ServiceNow instance <host> appears to be
+  hibernating ... wake it at https://developer.servicenow.com" (retry later,
+  never retried automatically), or a fixed "returned an HTML page" message for
+  any other HTML page. The hibernation page is recognised by its
+  `Instance Hibernating` title. A 200 body that is not valid JSON also gets a
+  fixed message. None of these repeats response text, and the setup wizard and
+  `servicenow-mcp-setup doctor --live` (one authenticated read per profile,
+  run concurrently with a 10 s timeout) no longer print raw error messages.
+- The server no longer follows HTTP redirects on API calls or the OAuth token
+  request. A cross-origin redirect used to forward an API-key header, and a 307
+  re-sent the token request body, which holds the client secret. Any 3xx now
+  fails with "The instance redirected the request to another location" and
+  does not echo the `Location`.
 - `incident` fields outside the 14 with typed checks are writable. Task fields
   such as `cmdb_ci`, `business_service`, `watch_list` and `hold_reason`, and
   every `u_`/`x_` custom field, were rejected whatever the field policy said.

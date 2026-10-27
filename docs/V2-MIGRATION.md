@@ -27,7 +27,7 @@ upgrade.
 | 4 | Attachments | host `file_path` / `output_path` | inline base64 both directions; no host filesystem access, and no flag restores it |
 | 5 | Queries | raw ServiceNow encoded queries | structured filters; raw reads are opt-in per tool/table |
 | 6 | Incident journals | `sn_update` accepted `comments` / `work_notes` | dedicated `sn_incident_add_comment` / `sn_incident_add_work_note`; from the [next release](#upgrading-to-the-next-release) the generic write tools accept both fields again, on every table, under field policy |
-| 7 | Tool surface | 17 tools, one `bin` | 19 tools, three `bin` entries; `sn_script` withdrawn |
+| 7 | Tool surface | 17 tools, one `bin` | 19 tools, three `bin` entries; `sn_script` withdrawn (the 2.2.0 development line later adds four ATF tools, for 23) |
 | 8 | Field selection limit | `MAX_FIELDS_PER_OPERATION` was `32`; over-selection raised `excessive_field_selection` | limit is `10_000`; `excessive_field_selection` is removed from the exported `FieldPolicyFailureReason` union |
 | 9 | Capabilities | `tools` only | adds `prompts` (`servicenow-mcp.add-profile`) |
 
@@ -278,6 +278,8 @@ through either route. The dedicated tools remain. See
 `sn_profile` are added, and `sn_script` is removed. `sn_script` never executed
 anything in 1.0.0 — it returned an explanatory error — so removing it changes
 `tools/list` but no working behavior. Use `sn_query` and `sn_batch` instead.
+The 2.0.0 and 2.1.0 releases list 19 tools; the 2.2.0 development line adds
+`sn_atf_author`, `sn_atf_run`, `sn_atf_results` and `sn_atf_readiness`, for 23.
 
 One `bin` becomes three:
 

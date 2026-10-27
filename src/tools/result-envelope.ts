@@ -5,6 +5,8 @@ import { FLOW_VIEW_LIMITS, flowGraphSchema } from "./flow-view-contracts.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
+import { BATCH_LIMITS } from "../batch-limits.js";
+import { MAX_FIELD_OBJECT_OWN_KEYS } from "../field-policy.js";
 import {
   MAX_RESPONSE_BYTES_DEFAULT,
   MAX_RESPONSE_BYTES_MAX,
@@ -224,6 +226,14 @@ const batchResultSchema = z
     matched: nonNegativeInteger,
     dry_run: z.boolean().optional(),
     message: z.string().optional(),
+    sample: z
+      .array(
+        z.object({ sys_id: z.string(), display: z.string().optional() }).strict()
+      )
+      .max(BATCH_LIMITS.dryRunSampleSize)
+      .optional(),
+    fields_to_write: z.array(z.string()).max(MAX_FIELD_OBJECT_OWN_KEYS).optional(),
+    note: z.string().optional(),
     processed: nonNegativeInteger.optional(),
     failed: nonNegativeInteger.optional(),
   })
@@ -243,6 +253,9 @@ const profileResultSchema = z
     name: z.string(),
     instance: z.string(),
     auth_type: z.enum(["apikey", "basic", "oauth"]),
+    /** The effective policy as data, and the same card as text. */
+    policy: dynamicRecordSchema,
+    policy_card: z.string().optional(),
   })
   .strict();
 

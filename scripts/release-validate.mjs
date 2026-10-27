@@ -50,6 +50,7 @@ export function validateReleaseContract(options = {}) {
     packageLock.packages?.[""]?.version === packageJson.version,
     "root lock package version differs from package version"
   );
+  validateServerJson(JSON.parse(read("server.json")), packageJson);
   const tag = options.tag ?? releaseTagFromEnvironment(options.environment ?? process.env);
   if (tag !== undefined) {
     assert(tag === `v${packageJson.version}`, "release tag must exactly match package version");
@@ -81,6 +82,7 @@ export function validateReleaseContract(options = {}) {
     "scripts/inspector.mjs",
     "scripts/release-validate.mjs",
     "scripts/smoke-test.mjs",
+    "server.json",
     "docs/RELEASE-VALIDATION.md",
     "tools/inspector/package.json",
     "tools/inspector/package-lock.json",
@@ -164,6 +166,60 @@ export function validateReleaseContract(options = {}) {
     providerNeutral: true,
     publicTunnelCreated: false,
   });
+}
+
+/**
+ * Fail closed on the official-registry manifest: it must describe exactly one
+ * stdio npm package that is this package at this version, with nothing that
+ * could add a remote endpoint, environment, or launch arguments.
+ */
+export function validateServerJson(serverJson, packageJson) {
+  const keys = (value) => Object.keys(value ?? {});
+  const allowedTop = new Set([
+    "$schema", "name", "title", "description", "repository", "version", "packages",
+  ]);
+  for (const key of keys(serverJson)) {
+    assert(allowedTop.has(key), `server.json has unexpected field ${key}`);
+  }
+  assert(
+    typeof packageJson.mcpName === "string" &&
+      typeof serverJson?.name === "string" &&
+      serverJson.name === packageJson.mcpName &&
+      serverJson.name.startsWith("io.github.onlyflowstech/"),
+    "server.json name and package.json mcpName must match and start with io.github.onlyflowstech/"
+  );
+  assert(
+    serverJson.version === packageJson.version,
+    "server.json version differs from package.json"
+  );
+  assert(
+    Array.isArray(serverJson.packages) && serverJson.packages.length === 1,
+    "server.json must list exactly one package"
+  );
+  const [entry] = serverJson.packages;
+  const allowedPackage = new Set([
+    "registryType", "identifier", "version", "runtimeHint", "transport",
+  ]);
+  for (const key of keys(entry)) {
+    assert(allowedPackage.has(key), `server.json package has unexpected field ${key}`);
+  }
+  assert(entry.runtimeHint === "npx", 'server.json runtimeHint must be "npx"');
+  const repo = serverJson.repository;
+  assert(
+    repo?.url === "https://github.com/onlyflowstech/servicenow-mcp" &&
+      repo.source === "github" &&
+      keys(repo).length === 2,
+    "server.json repository must be exactly the onlyflowstech/servicenow-mcp GitHub URL"
+  );
+  assert(entry.registryType === "npm", "server.json package must be registryType npm");
+  assert(
+    entry.identifier === packageJson.name && entry.version === packageJson.version,
+    "server.json package identifier or version differs from package.json"
+  );
+  assert(
+    entry.transport?.type === "stdio" && keys(entry.transport).length === 1,
+    "server.json package transport must be exactly stdio"
+  );
 }
 
 /** Only reviewed stable and dev channels can be published. */

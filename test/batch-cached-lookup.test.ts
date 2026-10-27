@@ -238,18 +238,30 @@ describe("sn_batch target lookup on a cached metadata table", () => {
       expect(second.data).toMatchObject({ matched: 1, processed: 1, failed: 0 });
 
       // Straight to the instance every time: one lookup and no watermark per
-      // run, and the cache's own parameter never reaches ServiceNow.
+      // run, and the cache's own parameter never reaches ServiceNow. A dry run
+      // adds exactly one bounded sample read of the sys_ids it just found.
       expect([first.kinds, preview.kinds, second.kinds]).toEqual([
         ["lookup", "batch"],
-        ["lookup"],
+        ["lookup", "lookup"],
         ["lookup", "batch"],
       ]);
-      for (const lookup of [...first.lookups, ...preview.lookups, ...second.lookups]) {
+      for (const lookup of [
+        ...first.lookups,
+        preview.lookups[0]!,
+        ...second.lookups,
+      ]) {
         expect(lookup.params).toEqual({
           sysparm_fields: "sys_id",
           sysparm_limit: "200",
           sysparm_query: "state=waiting",
         });
+      }
+      expect(preview.lookups[1]!.params).toEqual({
+        sysparm_fields: "sys_id,number",
+        sysparm_limit: "5",
+        sysparm_query: `sys_idIN${C}`,
+      });
+      for (const lookup of [...first.lookups, ...preview.lookups, ...second.lookups]) {
         expect(lookup.params).not.toHaveProperty(FORCE_RECACHE_PARAM);
       }
     }

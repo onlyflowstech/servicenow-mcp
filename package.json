@@ -1,7 +1,8 @@
 {
   "name": "@onlyflows/servicenow-mcp",
+  "mcpName": "io.github.onlyflowstech/servicenow-mcp",
   "version": "2.2.0-dev.6",
-  "description": "stdio ServiceNow MCP server with 24 tools for CRUD, CMDB traversal, ATF testing, Flow Designer flow views, and explicit multi-instance profiles.",
+  "description": "Governed stdio ServiceNow MCP server for production: 24 tools with per-profile table and field policy, dry-run bulk changes, activity events, multi-instance profiles, CMDB traversal, ATF testing and read-only Flow Designer flow views.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -35,12 +36,23 @@
   },
   "keywords": [
     "servicenow",
+    "servicenow-mcp",
     "mcp",
+    "mcp-server",
     "model-context-protocol",
     "stdio",
+    "claude",
+    "claude-code",
+    "cursor",
+    "codex",
+    "vscode",
     "itsm",
     "itom",
     "cmdb",
+    "now-platform",
+    "atf",
+    "governance",
+    "security",
     "ai-tools"
   ],
   "author": "OnlyFlows <support@onlyflows.tech> (https://onlyflows.tech)",
@@ -98,6 +110,7 @@
     "scripts/smoke-test.mjs",
     "tools/inspector/package.json",
     "tools/inspector/package-lock.json",
+    "server.json",
     "CHANGELOG.md",
     "README.md",
     "LICENSE"

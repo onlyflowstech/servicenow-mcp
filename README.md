@@ -1,17 +1,92 @@
 # @onlyflows/servicenow-mcp
 
-<!-- Logo placeholder -->
-<!-- ![ServiceNow MCP Server](banner.png) -->
+A governed ServiceNow MCP server: it lets an AI client read and change records on your instances, within limits you set per connection.
 
-**The most comprehensive ServiceNow MCP server.** 24 tools for full CRUD, append-only incident journals, CMDB graph traversal, ATF testing, Flow Designer flow views, multi-instance profiles, and more.
-
-Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](https://github.com/onlyflowstech)
+<!-- DEMO GIF PLACEHOLDER: add a short screen recording here (asking a question, then a denied write and a dry-run batch). Not recorded yet. -->
 
 [![npm version](https://img.shields.io/npm/v/@onlyflows/servicenow-mcp)](https://www.npmjs.com/package/@onlyflows/servicenow-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
----
+Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](https://github.com/onlyflowstech)
 
+## Governed and safe for production
+
+The server exposes 23 tools over stdio. Every call runs inside controls that
+you configure and that no tool of this server can change:
+
+- **Per-profile table and field policy.** Each profile (a named ServiceNow
+  connection) has its own read and write table allowlists. Access is
+  deny-by-default: a profile with no rules denies every ServiceNow call. Field
+  policy decides which fields can be read or written; sensitive field names
+  are refused.
+- **Confirmation flag on destructive tools.** `sn_delete` and `sn_batch`
+  change nothing unless the call carries `confirm: true`. The model sets that
+  flag itself, so it is a guard against accidents, not an approval. A person
+  approves through the client's own tool-approval prompt, and many clients let
+  you "always allow" a tool. `sn_create` and `sn_update` take no confirm flag;
+  keep write grants narrow.
+- **Safe batching.** `sn_batch` takes a structured filter (no raw encoded
+  queries), runs as a dry run by default, caps a run at 10,000 records, and
+  never re-sends a batch.
+- **Activity events.** Each completed tool call writes one JSON line to
+  stderr with the tool, profile, instance and outcome, plus hashed owner and
+  client labels. It records no table, record or fields. Delivery is
+  best-effort through stderr, and events are dropped above 256 pending lines.
+  Use ServiceNow's own audit history for record changes.
+- **Explicit profile on every call.** There is no default or "active"
+  instance. Each call names its profile, so nothing reaches an instance the
+  call didn't name. Keep write grants on production profiles narrow.
+- **Credentials stay out of clients.** Secrets are entered at a hidden prompt,
+  verified against the instance before anything is saved, and stored
+  encrypted in an owner-only `~/.servicenow-mcp` directory.
+
+> **Limits of these controls.** They hold against the model's tool calls. A
+> client that gives the model a shell or file access (Claude Code and Codex
+> can) could run `servicenow-mcp-setup grant` or read
+> `~/.servicenow-mcp/server.env`. The encryption key sits in the same
+> owner-only folder as the encrypted profiles, so it protects against other
+> users and stray copies of the files, not against your own account. Run
+> production profiles from a client or account without shell access where you
+> can.
+
+Details: [Table access policy](#table-access-policy),
+[Safety Features](#safety-features) and [docs/PRODUCTION-SECURITY.md](docs/PRODUCTION-SECURITY.md).
+
+## Works with
+
+Any MCP client that can launch a stdio server. Setup registers **Claude Code**
+and **Codex** automatically; **Claude Desktop**, **Cursor**, **VS Code** and
+**Windsurf** are configured with `servicenow-mcp-setup client --client <name>`
+(see [Connecting a client](#connecting-a-client)). Requires Node.js 20 or newer.
+
+## Quick start
+
+1. **Install:** `npm install -g @onlyflows/servicenow-mcp`
+2. **Set up a connection:** `servicenow-mcp-setup`. It asks for your instance
+   and credential, checks them against the instance, asks which tables to
+   allow, and registers Claude Code and Codex if their CLIs are installed.
+   Choose **OAuth** when the wizard asks for the authentication type; Basic
+   is the wizard's default but is [deprecated by ServiceNow](#basic-default-deprecated-by-servicenow).
+3. **Open your client and ask.** There is no server to start; the client
+   launches `servicenow-mcp` itself.
+
+The default read grant in the wizard is **just `incident`**, and writes default
+to **none**. Grant more later with `servicenow-mcp-setup grant`.
+
+## Try asking
+
+These work with the default read grant (profile named `dev`):
+
+1. "On dev, list the 10 most recent open P1 incidents."
+2. "On dev, how many incidents are there, grouped by priority?"
+3. "On dev, which assignment groups have the most incidents?"
+4. "On dev, which open incidents have no assignee, oldest first?"
+5. "On dev, show incident INC0010001 and summarize where it stands."
+
+Your client sends `profile: "dev"` with each call. Asking about other tables
+(for example `change_request`) is denied until you grant them.
+
+---
 
 ## Installation
 
@@ -136,7 +211,13 @@ servicenow-mcp-setup grant --profile dev --read incident,problem --write inciden
 | `servicenow-mcp-setup` | Generate local auth material and register supported clients |
 | `servicenow-mcp-setup client --client <name>` | Print copy-pasteable config for a client |
 | `servicenow-mcp-setup grant --profile <name> --read <tables>` | Add table access rules to a profile |
+| `servicenow-mcp-setup policy show --profile <name>` | Print the profile's effective policy as one table (tables, tools, fields, batch limits); never prints a secret |
 | `servicenow-mcp-setup doctor` | Diagnose the install and print remedies |
+
+`grant` and the wizard print a warning, and still grant, when write access
+lands on a privilege-sensitive table: role, group, approval, script,
+property, user or authentication tables such as `sys_user_has_role`,
+`sysapproval_approver` or `sys_script`.
 
 `--force` regenerates the owner/client identifiers but deliberately preserves
 `SN_PROFILE_ENCRYPTION_KEY`, which decrypts every credential envelope in
@@ -492,36 +573,28 @@ ServiceNow upstream can return HTTP 429 with an empty body, while this server's 
 
 ---
 
-## Why This MCP Server?
+## What the tools cover
 
-Most ServiceNow MCP integrations are **read-only** and support a handful of
-tables. This service offers a broader tool catalog behind explicit,
-deny-by-default table and tool policy:
+The registered catalog has 24 tools (see [Tools Reference](#tools-reference)):
 
-| Feature | Others | @onlyflows/servicenow-mcp |
-|---------|--------|--------------------------|
-| Query records | ✅ | ✅ |
-| Create records | ❌ | ✅ |
-| Update records | ❌ | ✅ |
-| Delete records | ❌ | ✅ (with safety confirm) |
-| Bulk operations | ❌ | ✅ (dry-run by default) |
-| Aggregations (COUNT/AVG/MIN/MAX/SUM) | ❌ | ✅ |
-| Table schema introspection | ❌ | ✅ |
-| CMDB relationship traversal | ❌ | ✅ (recursive, configurable depth) |
-| Instance health monitoring | ❌ | ✅ (version, nodes, jobs, stats) |
-| Attachment management | ❌ | ✅ (list, upload, download; inline base64, no host filesystem) |
-| System log queries | ❌ | ✅ |
-| Code search across artifacts | ❌ | ✅ |
-| Table/app/plugin discovery | ❌ | ✅ |
-| ATF test execution | ❌ | ✅ suite execution with explicit profile grant |
-| Natural language interface | ❌ | 🚧 currently policy-denied pending a typed access plan |
-| Background scripts | ❌ | 🚧 on the [roadmap](#roadmap) (SNS-39) |
-| Multi-instance profiles | ❌ | ✅ (named profiles, per-call override) |
-| **Total tools** | **1–3** | **24** |
+| Area | Tools |
+|------|-------|
+| Records | `sn_query`, `sn_get`, `sn_create`, `sn_update`, `sn_delete`, `sn_batch` |
+| Incident journals (append-only) | `sn_incident_add_comment`, `sn_incident_add_work_note` |
+| Analytics and schema | `sn_aggregate`, `sn_schema`, `sn_health` |
+| CMDB and operations | `sn_relationships`, `sn_attach`, `sn_syslog`, `sn_codesearch`, `sn_discover` |
+| ATF | `sn_atf_author`, `sn_atf_run`, `sn_atf_results`, `sn_atf_readiness`, `sn_atf` |
+| Flow Designer (read-only) | `sn_flow_view` |
+| Profiles | `sn_profile` |
+| Natural language | `sn_nl` (currently policy-denied pending a typed access plan) |
+
+Every tool requires a `profile`, and every tool is subject to the profile's
+table and field policy. `sn_script` (background scripts) is not registered; see
+the [Roadmap](#roadmap).
 
 ---
 
-## Quick Start
+## Manual environment setup
 
 The server speaks stdio and requires Node.js 20 or newer. The shortest path is
 the bootstrap described under [Installation](#installation):
@@ -627,7 +700,7 @@ in this section is needed to use this server.
 | `sn_incident_add_comment` | Append one bounded customer-visible comment to an incident; repeated calls append again |
 | `sn_incident_add_work_note` | Append one bounded internal work note to an incident; repeated calls append again |
 | `sn_delete` | Delete a record on an approved write table (requires `confirm: true`) |
-| `sn_batch` | Bulk update/delete using a required structured filter and dry-run safety (raw encoded selectors are prohibited; requires `confirm: true` to execute). Values get the same policy as `sn_update`; execution uses the ServiceNow REST Batch API and never re-sends a batch |
+| `sn_batch` | Bulk update/delete using a required structured filter and dry-run safety (raw encoded selectors are prohibited; requires `confirm: true` to execute; a dry run returns the count, up to 5 sample records the profile may read, and the field names it would write). Values get the same policy as `sn_update`; execution uses the ServiceNow REST Batch API and never re-sends a batch |
 
 ### Analytics & Schema
 
@@ -672,7 +745,7 @@ stub and is **not published in 2.0** — it does not appear in `tools/list`. Use
 
 | Tool | Description |
 |------|-------------|
-| `sn_profile` | Inspect non-secret metadata for one explicitly named profile; profile configuration is operator-managed out of band |
+| `sn_profile` | Inspect non-secret metadata and the effective policy card for one explicitly named profile; profile configuration is operator-managed out of band |
 
 ---
 
@@ -1341,7 +1414,7 @@ exact `profile`; no prior call creates default, active, or switch-profile state.
 This server is designed for production use with multiple safety layers:
 
 - **Delete operations** require explicit `confirm: true`
-- **Batch operations** run in dry-run mode by default — shows match count without making changes
+- **Batch operations** run in dry-run mode by default — shows the match count, a sample of up to 5 records and the fields it would write, without making changes (`confirm` re-runs the query and can match different records)
 - **Bulk operations** require `confirm: true` to leave dry-run mode
 - **Unclassified composition is denied** — `sn_nl` requires a complete typed access plan; ATF suite execution requires a separate explicit `atf.execute` grant
 - **Table access is deny-by-default** with independent exact read/write allowlists; sensitive field names are denied and no configuration can grant them

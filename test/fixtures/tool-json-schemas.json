@@ -4006,6 +4006,35 @@
             "message": {
               "type": "string"
             },
+            "sample": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "sys_id": {
+                    "type": "string"
+                  },
+                  "display": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "sys_id"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "fields_to_write": {
+              "maxItems": 256,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "note": {
+              "type": "string"
+            },
             "processed": {
               "type": "integer",
               "minimum": 0,
@@ -7483,12 +7512,23 @@
                 "basic",
                 "oauth"
               ]
+            },
+            "policy": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "policy_card": {
+              "type": "string"
             }
           },
           "required": [
             "name",
             "instance",
-            "auth_type"
+            "auth_type",
+            "policy"
           ],
           "additionalProperties": false
         },

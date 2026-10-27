@@ -12,10 +12,10 @@
 > Sections about profiles, credentials, table access, field policy, and tool
 > behavior are transport-independent and remain accurate.
 
-This is the shortest complete path from a clean install to two
-provider-neutral clients using the same ServiceNow MCP V2 service. The server
-exposes Streamable HTTP at `/mcp`; it does not expose stdio and it does not
-select a default or active ServiceNow profile.
+This is the shortest complete path from a clean install to a working
+connection. The shipped server speaks stdio only; the Streamable HTTP
+runtime that the later sections describe is dormant. In both cases the server
+does not select a default or active ServiceNow profile.
 
 ## Quickstart: zero to a working connection
 
@@ -42,10 +42,10 @@ Three properties are worth knowing:
 - **The profile and its table-access rules are written together**, so there is
   never a window in which a profile exists that denies every call.
 
-Then start the service and verify end to end:
+There is nothing to start. Each registered client spawns its own
+`servicenow-mcp` over stdio. Verify end to end with the same checks setup runs:
 
 ```sh
-set -a; source ~/.servicenow-mcp/server.env; set +a; servicenow-mcp &
 servicenow-mcp-setup doctor --profile dev
 ```
 
@@ -79,6 +79,25 @@ proof is an `sn_profile` call followed by a bounded `sn_query`.
 completeness, credential resolution, table-access rules, and the live endpoint,
 and prints the exact remedy for anything it finds. It never prints a secret and
 exits non-zero when a check fails.
+
+`doctor` never touches the network by default. `doctor --live` also makes one
+bounded authenticated read per profile, so it can tell you whether ServiceNow
+accepts the credential and whether the instance is awake.
+
+### Troubleshooting: "appears to be hibernating"
+
+A personal developer instance sleeps when idle and answers every request,
+including the OAuth token request, with an HTML "Instance Hibernating" page and
+HTTP 200. The server reports `The ServiceNow instance <host> appears to be
+hibernating.` with the retry decision "retry later". Wake the instance at
+https://developer.servicenow.com, wait a few minutes, then retry; the server
+does not retry on its own. `servicenow-mcp-setup doctor --live` shows the same
+condition as `Instance hibernating`.
+
+If the message instead says `The instance returned an HTML page instead of an
+API response`, the instance may be asleep, behind single sign-on, or under
+maintenance: open the instance URL in a browser to see which. The detection
+inspects only the first 16 K characters of the page and never repeats any of it.
 
 ### What the bootstrap writes
 
