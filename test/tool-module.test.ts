@@ -1,6 +1,10 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv-provider.js";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -969,6 +973,66 @@ describe("tool-module contract", () => {
         profileManager,
         contextDependencies,
         [module, incomplete]
+      )
+    ).rejects.toThrow();
+    expect(registerTool).not.toHaveBeenCalled();
+  });
+
+  it("does not compile output-schema validators during the registration preflight", async () => {
+    const compile = vi.spyOn(AjvJsonSchemaValidator.prototype, "getValidator");
+    try {
+      const registerTool = vi.fn();
+      await registerServiceNowToolModules(
+        { registerTool } as unknown as Parameters<
+          typeof registerServiceNowToolModules
+        >[0],
+        {} as ProfileManager,
+        {} as ExecutionContextDependencies,
+        [fixtureModule("sn_contract_fixture_a"), fixtureModule("sn_contract_fixture_b")]
+      );
+      expect(registerTool).toHaveBeenCalledTimes(2);
+      expect(compile).not.toHaveBeenCalled();
+
+      // Control: a default SDK client does compile one validator per
+      // output schema when listing the same catalog, so the spy is live.
+      const server = new McpServer(
+        { name: "control", version: "0.0.0" },
+        { capabilities: { tools: {} } }
+      );
+      server.registerTool(
+        "sn_contract_fixture_a",
+        { outputSchema: snapshotIssuedToolSchema(outputSchema, "output") },
+        async () => ({ content: [], structuredContent: { count: 0, profile: "x" } })
+      );
+      const client = new Client({ name: "control-client", version: "0.0.0" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      try {
+        await client.listTools();
+      } finally {
+        await client.close();
+      }
+      expect(compile).toHaveBeenCalledTimes(1);
+    } finally {
+      compile.mockRestore();
+    }
+  });
+
+  it("still rejects an output schema the SDK cannot advertise as JSON Schema", async () => {
+    const unrepresentable = {
+      ...fixtureModule(),
+      outputSchema: withResolvedProfileOutput(z.object({ at: z.date() })),
+    } as unknown as ToolModuleContract;
+    const registerTool = vi.fn();
+    await expect(
+      registerServiceNowToolModules(
+        { registerTool } as unknown as Parameters<
+          typeof registerServiceNowToolModules
+        >[0],
+        {} as ProfileManager,
+        {} as ExecutionContextDependencies,
+        [unrepresentable]
       )
     ).rejects.toThrow();
     expect(registerTool).not.toHaveBeenCalled();
