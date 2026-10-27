@@ -21,10 +21,13 @@ import { atfFormInputSchema, prepareAtfForm, atfFormCookies, type AtfFormInput }
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { ServiceNowConfig } from "./config.js";
+import { configuredHost, htmlResponseError, sniffPrefix } from "./html-response.js";
 import { AuthProvider, createAuthProvider } from "./auth.js";
 import { isJournalFieldName } from "./incident-journal-policy.js";
 import {
   boundedRetryAfterSeconds,
+  createInvalidResponseError,
+  createRedirectedError,
   createToolError,
   type ToolErrorCategory,
   type ToolErrorRetry,
@@ -152,11 +155,13 @@ export class ServiceNowClient {
   readonly #timeoutMs: number;
   readonly #maxRetries: number;
   readonly #baseRetryDelayMs: number;
+  readonly #host: string | undefined;
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #limiter: UpstreamConcurrencyLimiter;
 
   constructor(config: ServiceNowConfig, options: ClientOptions = {}) {
     this.#baseUrl = config.instance;
+    this.#host = configuredHost(config.instance);
     this.#auth = options.auth ?? createAuthProvider(config);
     this.#timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
@@ -266,7 +271,7 @@ export class ServiceNowClient {
       );
     }
 
-    return readJsonResponse<T>(response, currentRequestSignal());
+    return this.readJson<T>(response);
   }
 
   /**
@@ -347,10 +352,36 @@ export class ServiceNowClient {
     }
 
     return {
-      data: await readJsonResponse<T>(response, currentRequestSignal()),
+      data: await this.readJson<T>(response),
       status: response.status,
       headers: response.headers,
     };
+  }
+
+  /**
+   * Read a successful JSON body. A 200 HTML page (hibernating instance, SSO,
+   * maintenance, proxy) becomes a fixed trusted error that never echoes the
+   * body; only a bounded prefix is inspected.
+   */
+  private async readJson<T>(response: Response): Promise<T> {
+    const text = await readBoundedResponseText(
+      response,
+      DEFAULT_MAX_JSON_RESPONSE_BYTES,
+      currentRequestSignal(),
+      currentUpstreamByteBudget()
+    );
+    const htmlError = htmlResponseError(
+      response.headers.get("content-type"),
+      sniffPrefix(text),
+      this.#host
+    );
+    if (htmlError !== undefined) throw htmlError;
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      // A V8 SyntaxError quotes the body; never let it escape.
+      throw createInvalidResponseError();
+    }
   }
 
   // ── Internal helpers ───────────────────────────────────────────
@@ -412,7 +443,9 @@ export class ServiceNowClient {
             headers: { ...authHeaders, ...headers },
             body,
             signal: attemptSignal,
-            ...(nativeForm ? { redirect: "manual" as const } : {}),
+            // Never follow a redirect: fetch would forward custom auth
+            // headers cross-origin, and re-send a 307 body.
+            redirect: "manual" as const,
           })
         );
       } catch {
@@ -433,6 +466,11 @@ export class ServiceNowClient {
           continue;
         }
         throw requestPolicyError("upstream", method);
+      }
+
+      if (!nativeForm && response.status >= 300 && response.status < 400) {
+        drainBody(response);
+        throw createRedirectedError();
       }
 
       // 401: give the auth provider one chance to refresh and retry.
@@ -747,18 +785,6 @@ function waitForRequestCancellation<T>(
       }
     );
   });
-}
-
-function readJsonResponse<T>(
-  response: Response,
-  signal: AbortSignal | undefined
-): Promise<T> {
-  return readBoundedResponseText(
-    response,
-    DEFAULT_MAX_JSON_RESPONSE_BYTES,
-    signal,
-    currentUpstreamByteBudget()
-  ).then((text) => JSON.parse(text) as T);
 }
 
 async function readBoundedResponseText(

@@ -24,7 +24,11 @@ import {
   type TableAccessPolicy,
   type TableAccessPolicyInput,
 } from "../src/table-policy.js";
-import { createToolError } from "../src/tool-error.js";
+import {
+  createHtmlResponseError,
+  createInstanceHibernatingError,
+  createToolError,
+} from "../src/tool-error.js";
 import { resolveToolTableAccess } from "../src/tool-table-access.js";
 import {
   classifyVerificationFailure,
@@ -865,6 +869,163 @@ describe("setup doctor", () => {
     });
     return JSON.parse(io.out.join(""));
   }
+
+  it("doctor --live reports a hibernating instance with the wake hint", async () => {
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+    });
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const verifyCredential = vi.fn(async (config: { instance: string }) =>
+      classifyVerificationFailure(
+        createInstanceHibernatingError("dev00001.service-now.com"),
+        config as never
+      )
+    );
+
+    const report = await doctor(
+      ["doctor", "--profile", "dev", "--live", "--json"],
+      { HOME: home },
+      undefined,
+      () => true,
+      { verifyCredential }
+    );
+    const live = report.checks.find((check) => check.name === "profile dev: live instance");
+    expect(verifyCredential).toHaveBeenCalledTimes(1);
+    expect(live?.ok).toBe(false);
+    expect(live?.detail).toContain("Instance hibernating");
+    expect(live?.remedy).toContain("https://developer.servicenow.com");
+    expect(JSON.stringify(report)).not.toContain("not-a-real-value");
+  });
+
+  it("doctor --live probes profiles concurrently, with a short timeout, in name order", async () => {
+    for (const name of ["zeta", "alpha"]) {
+      manager.addProfile(name, {
+        instance: "https://dev00001.service-now.com",
+        authType: "basic",
+        username: "u",
+        credential: "env:SN_PASSWORD",
+      });
+    }
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const timeouts: Array<number | undefined> = [];
+    const verifyCredential = vi.fn(async (config: { timeoutMs?: number }) => {
+      timeouts.push(config.timeoutMs);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return { ok: false, detail: "no answer", remedy: "wait" };
+    });
+
+    const started = Date.now();
+    const report = await doctor(
+      ["doctor", "--live", "--json"],
+      { HOME: home },
+      undefined,
+      () => true,
+      { verifyCredential }
+    );
+    const elapsed = Date.now() - started;
+    const live = report.checks.filter((check) => check.name.endsWith(": live instance"));
+    expect(live.map((check) => check.name)).toEqual([
+      "profile alpha: live instance",
+      "profile zeta: live instance",
+    ]);
+    expect(timeouts).toEqual([10_000, 10_000]);
+    expect(elapsed).toBeLessThan(750); // one 400 ms wait, not two
+  });
+
+  async function liveText(argv: readonly string[]): Promise<{ text: string; json: string }> {
+    const textIo = capture();
+    await runSetupCli({
+      home, argv: [...argv], env: { HOME: home }, profileManager: manager,
+      commandExists: () => true, platform: "linux",
+      writeStdout: (value) => textIo.out.push(value),
+    });
+    const jsonIo = capture();
+    await runSetupCli({
+      home, argv: [...argv, "--json"], env: { HOME: home }, profileManager: manager,
+      commandExists: () => true, platform: "linux",
+      writeStdout: (value) => jsonIo.out.push(value),
+    });
+    return { text: textIo.out.join(""), json: jsonIo.out.join("") };
+  }
+
+  it("doctor --live runs the real probe and echoes no response bytes", async () => {
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+    });
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const bodies: Array<[string, string]> = [
+      ["text/plain", "\u001b[8m\u001b[2J LEAKED-TEXT"],
+      ["application/json", "\u001b[2J LEAKED-TEXT"],
+      ["application/xml", "<?xml version='1.0'?><html>hibernating LEAKED-TEXT</html>"],
+      ["text/html", "<html><title>Sign in</title>\u001b[2J LEAKED-TEXT</html>"],
+    ];
+    for (const [type, body] of bodies) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(body, { headers: { "Content-Type": type } }))
+      );
+      const { text, json } = await liveText(["doctor", "--profile", "dev", "--live"]);
+      expect(text).toContain("live instance");
+      for (const output of [text, json]) {
+        expect(output).not.toContain("LEAKED-TEXT");
+        expect(output).not.toContain("\u001b");
+        expect(output).not.toContain("\\u001b");
+      }
+    }
+  });
+
+  it("doctor --live keeps other profiles' results when one cannot build a client", async () => {
+    manager.addProfile("a", {
+      instance: "https://deva.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+    });
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const file = profileConfigPath(home);
+    const config = JSON.parse(readFileSync(file, "utf8"));
+    config.profiles.b = {
+      instance: "https://devb.service-now.com",
+      authType: "oauth",
+      clientId: "cid",
+    };
+    writeFileSync(file, JSON.stringify(config), { mode: 0o600 });
+    manager = new ProfileManager({ configFilePath: file });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"result":[]}', { headers: { "Content-Type": "application/json" } }))
+    );
+    const { text } = await liveText(["doctor", "--live"]);
+    expect(text).toMatch(/ok\s+profile a: live instance/u);
+    expect(text).toMatch(/FAIL\s+profile b: live instance/u);
+    expect(text).toMatch(/profile b: live instance: .*credentials are incomplete, so no request was sent/u);
+    expect(text).not.toMatch(/401/u);
+    // Only profile a's probe reached fetch; profile b sent nothing.
+    const urls = vi.mocked(fetch).mock.calls.map((call) => String(call[0]));
+    expect(urls).toHaveLength(2); // profile a, once per liveText run
+    expect(urls.every((url) => url.startsWith("https://deva.service-now.com/"))).toBe(true);
+  });
+
+  it("plain doctor never probes the instance", async () => {
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+    });
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const verifyCredential = vi.fn();
+    await doctor(["doctor", "--profile", "dev", "--json"], { HOME: home }, undefined, () => true, {
+      verifyCredential,
+    });
+    expect(verifyCredential).not.toHaveBeenCalled();
+  });
 
   it("reports a profile with no table access as denying every call", async () => {
     manager.addProfile("dev", {
@@ -2096,6 +2257,21 @@ describe("credential verification diagnosis", () => {
   const diagnose = (error: unknown, overrides: Record<string, unknown> = {}) =>
     classifyVerificationFailure(error, { ...config, ...overrides } as never);
 
+  it("names a hibernating instance and gives the wake hint", () => {
+    const result = diagnose(createInstanceHibernatingError("dev00001.service-now.com"));
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("Instance hibernating");
+    expect(result.detail).toContain("dev00001.service-now.com");
+    expect(result.remedy).toContain("https://developer.servicenow.com");
+  });
+
+  it("explains a generic HTML response", () => {
+    const result = diagnose(createHtmlResponseError());
+    expect(result.ok).toBe(false);
+    expect(result.detail).toMatch(/HTML page/u);
+    expect(result.remedy).toMatch(/single sign-on/u);
+  });
+
   it("names a rejected credential and keeps the host, not the secret", () => {
     const result = diagnose(createToolError("authentication", "retry_after_correction"));
     expect(result.ok).toBe(false);
@@ -2143,10 +2319,12 @@ describe("credential verification diagnosis", () => {
     expect(result.remedy).not.toMatch(/NODE_TLS_REJECT_UNAUTHORIZED|rejectUnauthorized/u);
   });
 
-  it("falls back to the raw reason when nothing matches", () => {
-    const result = diagnose(new Error("something unusual"));
+  it("never prints the raw reason when nothing matches", () => {
+    const result = diagnose(new Error("something unusual \u001b[2J"));
     expect(result.ok).toBe(false);
-    expect(result.detail).toContain("something unusual");
+    expect(result.detail).toContain("could not be reached");
+    expect(result.detail).not.toContain("something unusual");
+    expect(result.detail).not.toContain("\u001b");
     expect(result.remedy).toBeTruthy();
   });
 });
