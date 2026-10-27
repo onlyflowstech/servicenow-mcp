@@ -15,6 +15,7 @@ import {
   CONTAINER_RELEASE_GATES,
   PORTABLE_RELEASE_GATES,
   validateReleaseContract,
+  validateServerJson,
   releaseChannel,
 } from "../scripts/release-validate.mjs";
 import {
@@ -499,5 +500,86 @@ describe("SNSDK-57 deterministic CI and release contract", () => {
     expect(release).toContain("container validation and scan");
     expect(release).toContain("rollback");
     expect(migration).toContain("no release, inspector, smoke, environment, or migration escape hatch");
+  });
+});
+
+describe("server.json registry guard", () => {
+  const pkg = JSON.parse(read("package.json")) as Record<string, unknown>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const good = () => JSON.parse(read("server.json")) as Record<string, any>;
+  const withPackage = (patch: Record<string, unknown>) => {
+    const s = good();
+    s.packages = [{ ...s.packages[0], ...patch }];
+    return s;
+  };
+
+  it("accepts the committed manifest and lists it in files", () => {
+    expect(() => validateServerJson(good(), pkg)).not.toThrow();
+    expect(pkg.files).toContain("server.json");
+  });
+
+  const mutations: Record<string, () => unknown> = {
+    "empty packages": () => ({ ...good(), packages: [] }),
+    "missing packages": () => {
+      const s = good();
+      delete s.packages;
+      return s;
+    },
+    "remotes with an external URL": () => ({
+      ...good(),
+      remotes: [{ type: "streamable-http", url: "https://evil.example/mcp" }],
+    }),
+    "injected NODE_OPTIONS": () =>
+      withPackage({
+        environmentVariables: [{ name: "NODE_OPTIONS", default: "--require /tmp/x.js" }],
+      }),
+    "injected package arguments": () =>
+      withPackage({ packageArguments: [{ type: "positional", value: "--evil" }] }),
+    "injected runtime arguments": () =>
+      withPackage({ runtimeArguments: [{ type: "positional", value: "--registry=https://evil.example" }] }),
+    "pypi registry type": () =>
+      withPackage({ registryType: "pypi", registryBaseUrl: "https://evil.example" }),
+    "second HTTP package": () => {
+      const s = good();
+      s.packages = [
+        s.packages[0],
+        { ...s.packages[0], transport: { type: "streamable-http", url: "https://evil.example" } },
+      ];
+      return s;
+    },
+    "HTTP transport": () => withPackage({ transport: { type: "streamable-http", url: "https://evil.example" } }),
+    "runtimeHint docker": () => withPackage({ runtimeHint: "docker" }),
+    "runtimeHint with registry flag": () =>
+      withPackage({ runtimeHint: "npx --registry=https://evil.example" }),
+    "lookalike repository URL": () => ({
+      ...good(),
+      repository: { url: "https://github.com/onlyflowstech/servicenow-mcp-x", source: "github" },
+    }),
+    "repository subfolder": () => ({
+      ...good(),
+      repository: { ...good().repository, subfolder: "evil" },
+    }),
+    "identifier drift": () => withPackage({ identifier: "@evil/pkg" }),
+    "version drift": () => ({ ...good(), version: "9.9.9" }),
+    "package version drift": () => withPackage({ version: "9.9.9" }),
+    "foreign namespace": () => ({ ...good(), name: "io.github.other/x" }),
+    "missing server name": () => {
+      const s = good();
+      delete s.name;
+      return s;
+    },
+  };
+  for (const [label, mutate] of Object.entries(mutations)) {
+    it(`rejects: ${label}`, () => {
+      expect(() => validateServerJson(mutate(), pkg)).toThrow();
+    });
+  }
+
+  it("rejects when both names are missing", () => {
+    const noMcpName = { ...pkg };
+    delete noMcpName.mcpName;
+    const s = good();
+    delete s.name;
+    expect(() => validateServerJson(s, noMcpName)).toThrow();
   });
 });
