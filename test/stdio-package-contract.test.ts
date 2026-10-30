@@ -109,8 +109,8 @@ describe("stdio-only package contract", () => {
     expect(packageJson.dependencies?.["@modelcontextprotocol/sdk"]).toBe("1.32.2");
     // Exact: tool-schema hardening (src/tools/tool-module.ts) depends on zod 4.6 internals.
     expect(packageJson.dependencies?.zod).toBe("4.6.7");
-    expect(packageJson.dependencies?.["@hono/node-server"]).toBe("2.0.12");
-    expect(packageJson.overrides?.["@hono/node-server"]).toBe("2.0.12");
+    expect(packageJson.dependencies?.["@hono/node-server"]).toBe("2.1.3");
+    expect(packageJson.overrides?.["@hono/node-server"]).toBe("2.1.3");
     expect(packageJson.files).toContain("docs/V2-MIGRATION.md");
     expect(packageJson.files).toContain("docs/PROFILE-CREDENTIALS.md");
     expect(packageJson.files).toContain("docs/CONTAINER-DEPLOYMENT.md");
