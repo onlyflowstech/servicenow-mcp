@@ -29,6 +29,7 @@ import {
   createInstanceHibernatingError,
   createToolError,
 } from "../src/tool-error.js";
+import { FLOW_VIEW_TABLES } from "../src/tools/flow-view-contracts.js";
 import { resolveToolTableAccess } from "../src/tool-table-access.js";
 import {
   classifyVerificationFailure,
@@ -484,6 +485,35 @@ describe("setup grant", () => {
     expect(targets.find(target => target.table === "incident")!.tools).not.toContain("sn_atf_author");
     expect(profile.atf?.execute).not.toBe(true);
     expect(profile.atf?.allowScriptSteps).not.toBe(true);
+  });
+
+  it("grants the flow-view preset read-only and only to sn_flow_view", async () => {
+    await runSetupCli({ home, argv: ["grant", "--profile", "dev", "--flows", "--read", "incident"], profileManager: manager, writeStdout: () => undefined });
+    const access = manager.getProfile("dev").tableAccess!;
+    expect(access.readTables).toEqual(["incident", ...FLOW_VIEW_TABLES].sort());
+    expect(access.writeTables).toEqual([]);
+    for (const table of FLOW_VIEW_TABLES) {
+      expect(access.targets!.find(target => target.table === table)!.tools).toEqual(["sn_flow_view"]);
+    }
+    expect(access.targets!.find(target => target.table === "incident")!.tools).not.toContain("sn_flow_view");
+  });
+
+  it("adds sn_flow_view to tables the ATF preset already binds", async () => {
+    await runSetupCli({ home, argv: ["grant", "--profile", "dev", "--atf", "--flows"], profileManager: manager, writeStdout: () => undefined });
+    const access = manager.getProfile("dev").tableAccess!;
+    for (const table of ["sys_variable_value", "var_dictionary"]) {
+      expect([...access.targets!.find(target => target.table === table)!.tools].sort()).toEqual(["sn_atf_author", "sn_flow_view"]);
+    }
+    expect(access.writeTables).not.toContain("sys_hub_flow");
+  });
+
+  it("accepts --flows on its own", async () => {
+    const out: string[] = [];
+    await runSetupCli({ home, argv: ["grant", "--profile", "dev", "--flows", "--dry-run", "--json"], profileManager: manager, writeStdout: (value) => out.push(value) });
+    const report = JSON.parse(out.join("")) as { status: string; tableAccess: { readTables: string[] } };
+    expect(report.status).toBe("dry-run");
+    expect(report.tableAccess.readTables).toEqual([...FLOW_VIEW_TABLES].sort());
+    expect(manager.getProfile("dev").tableAccess).toBeUndefined();
   });
 
   it("writes validated table access rules onto an existing profile", async () => {

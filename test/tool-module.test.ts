@@ -85,7 +85,7 @@ describe("tool-module contract", () => {
     // Single source of truth for the published tool count. Every other
     // suite derives from REGISTERED_TOOL_COUNT, so this is the one literal
     // to update when a tool is added or removed.
-    expect(REGISTERED_TOOL_COUNT).toBe(23);
+    expect(REGISTERED_TOOL_COUNT).toBe(24);
     expect(() => validateToolModuleCatalog(toolModules)).not.toThrow();
 
     for (const module of toolModules) {

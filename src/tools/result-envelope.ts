@@ -1,4 +1,5 @@
 import { atfExecutionResultSchema, atfResultsSchema, atfReadinessSchema } from "./atf-contracts.js";
+import { FLOW_VIEW_LIMITS, flowGraphSchema } from "./flow-view-contracts.js";
 /** Shared SNSDK-33 structured-result contracts and compatibility adapter. */
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -280,6 +281,7 @@ const productionDataSchemas = Object.freeze({
   sn_atf_results: atfResultsSchema,
   sn_atf_readiness: atfReadinessSchema,
   sn_atf_author: atfAuthorResultSchema,
+  sn_flow_view: flowGraphSchema,
   sn_nl: naturalLanguageResultSchema,
   sn_profile: profileResultSchema,
 });
@@ -314,6 +316,7 @@ export const productionToolOutputSchemas = Object.freeze({
   sn_atf_results: withStructuredResultEnvelope(productionDataSchemas.sn_atf_results),
   sn_atf_readiness: withStructuredResultEnvelope(productionDataSchemas.sn_atf_readiness),
   sn_atf_author: withStructuredResultEnvelope(productionDataSchemas.sn_atf_author),
+  sn_flow_view: withStructuredResultEnvelope(productionDataSchemas.sn_flow_view),
   sn_nl: withStructuredResultEnvelope(productionDataSchemas.sn_nl),
   sn_profile: withStructuredResultEnvelope(productionDataSchemas.sn_profile),
 });
@@ -587,6 +590,17 @@ function byteLimit(
       Math.max(args.max_response_bytes, MAX_RESPONSE_BYTES_MIN),
       MAX_RESPONSE_BYTES_MAX
     );
+  }
+  if (name === "sn_flow_view") {
+    // Canonical arguments always carry max_response_bytes; the clamp is
+    // defense in depth behind the input schema.
+    const requested = args.max_response_bytes;
+    return typeof requested === "number" && Number.isSafeInteger(requested)
+      ? Math.min(
+          Math.max(requested, FLOW_VIEW_LIMITS.MIN_MAX_RESPONSE_BYTES),
+          FLOW_VIEW_LIMITS.MAX_MAX_RESPONSE_BYTES
+        )
+      : FLOW_VIEW_LIMITS.DEFAULT_MAX_RESPONSE_BYTES;
   }
   return DEFAULT_RESULT_BYTE_LIMIT;
 }

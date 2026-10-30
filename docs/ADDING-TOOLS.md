@@ -168,7 +168,7 @@ Every module must declare all of the following:
 - input composed with `withRequiredProfile` and output composed with
   `withResolvedProfileOutput`—local schemas cannot redefine `profile`;
 - explicit read/write permissions;
-- every ServiceNow API family (`table`, `aggregate`, `attachment`, or `atf`),
+- every ServiceNow API family (`table`, `aggregate`, `attachment`, `atf` or `cicd`),
   including an explicit empty list when none is used;
 - read/write field-policy dependencies and at least one reviewable capability;
 - an access resolver that canonicalizes inputs and returns the complete table
@@ -229,8 +229,8 @@ Run the focused module tests, then `npm run typecheck`, `npm run lint`,
 
 ## Registration performance evidence
 
-`test/tool-module.test.ts` validates the complete 20-module production catalog
-2,000 times (40,000 module validations) under a one-second bound. This guards
+`test/tool-module.test.ts` validates the complete production catalog (24 modules)
+2,000 times (48,000 module validations) under a one-second bound. This guards
 against accidental network, credential, client, or other super-linear work in
 startup preflight. The bound is deliberately much wider than local execution
 for shared CI hosts.

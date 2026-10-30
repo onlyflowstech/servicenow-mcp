@@ -364,7 +364,7 @@ function normalizeToolManifest(tools, label) {
   // Independent external check of the built container: deliberately a literal,
   // not an import of the local registry. Source of truth is
   // REGISTERED_TOOL_COUNT in src/tools/index.ts (derived from catalog.ts).
-  assert(Array.isArray(tools) && tools.length === 23, `${label} did not discover 23 tools`);
+  assert(Array.isArray(tools) && tools.length === 24, `${label} did not discover 24 tools`);
   const names = new Set();
   const manifest = tools.map((tool) => {
     assert(typeof tool?.name === "string" && tool.name.length > 0, `${label} exposed an invalid tool name`);

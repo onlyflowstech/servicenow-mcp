@@ -1,0 +1,25 @@
+{
+  "note": "Shape of capture F1 (Fixture Approval Flow): an outer If whose first child is an inner If; the inner If's Else If / Else rows share the outer If as parent and point connected_to at the inner If; End rows close branches.",
+  "header": { "sys_id": "1111111111111111111111111111aaaa", "name": "Fixture Approval Flow", "type": "flow", "active": true, "status": "Published", "version": "3", "scope": "global" },
+  "trigger": { "type": "Created", "table": "x_fixture_record", "condition": "state=draft" },
+  "label_cache": [
+    ["Created_1.current", "Trigger - Record Created > Fixture Record"],
+    ["flow_variable.isfixtureflagset", "Flow Variables > isFixtureFlagSet"]
+  ],
+  "variables": [{ "scope": "variable", "name": "isFixtureFlagSet", "label": "isFixtureFlagSet", "type": "boolean" }],
+  "steps": [
+    { "uid": "u01", "parent_uid": null, "order": 1, "kind": "action", "title": "Update Record", "inputs": [{ "name": "record", "value": "{{Created_1.current}}" }, { "name": "table", "value": "x_fixture_record" }] },
+    { "uid": "u02", "parent_uid": null, "order": 2, "kind": "logic", "logic_kind": "if", "title": "If", "condition": "record expired" },
+    { "uid": "u03", "parent_uid": "u02", "order": 1, "kind": "logic", "logic_kind": "if", "title": "If", "condition": "fixture flag set" },
+    { "uid": "u04", "parent_uid": "u03", "order": 1, "kind": "logic", "logic_kind": "set_flow_variables", "title": "Set Flow Variables", "inputs": [{ "name": "isFixtureFlagSet", "value": "{{flow_variable.isFixtureFlagSet}}" }] },
+    { "uid": "u05", "parent_uid": "u03", "order": 2, "kind": "logic", "logic_kind": "end_flow", "title": "End" },
+    { "uid": "u06", "parent_uid": "u02", "order": 2, "connected_uid": "u03", "kind": "logic", "logic_kind": "else_if", "title": "Else If", "condition": "state is review" },
+    { "uid": "u07", "parent_uid": "u06", "order": 1, "kind": "action", "title": "Update Record 2" },
+    { "uid": "u08", "parent_uid": "u06", "order": 2, "kind": "logic", "logic_kind": "end_flow", "title": "End 2" },
+    { "uid": "u09", "parent_uid": "u02", "order": 3, "connected_uid": "u03", "kind": "logic", "logic_kind": "else_if", "title": "Else If 2", "condition": "state is approved" },
+    { "uid": "u10", "parent_uid": "u09", "order": 1, "kind": "action", "title": "Update Record 3" },
+    { "uid": "u11", "parent_uid": "u02", "order": 4, "connected_uid": "u03", "kind": "logic", "logic_kind": "else", "title": "Else" },
+    { "uid": "u12", "parent_uid": "u11", "order": 1, "kind": "action", "title": "Log" },
+    { "uid": "u13", "parent_uid": null, "order": 3, "kind": "action", "title": "Send Email" }
+  ]
+}

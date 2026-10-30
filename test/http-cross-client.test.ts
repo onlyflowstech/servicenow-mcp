@@ -77,6 +77,7 @@ const expectedInputs: Record<string, readonly string[]> = {
   sn_create: ["fields", "profile", "table"],
   sn_delete: ["confirm", "profile", "sys_id", "table"],
   sn_discover: ["active", "limit", "offset", "profile", "query", "type"],
+  sn_flow_view: ["depth", "flow", "format", "include_inputs", "max_nodes", "max_response_bytes", "profile"],
   sn_get: ["display_value", "fields", "force_recache", "identifier", "max_response_bytes", "profile", "response_format", "sys_id", "table"],
   sn_health: ["check", "profile"],
   sn_incident_add_comment: ["content", "profile", "sys_id"],
@@ -103,6 +104,7 @@ const expectedRequired: Record<string, readonly string[]> = {
   sn_create: ["fields", "profile", "table"],
   sn_delete: ["confirm", "profile", "sys_id", "table"],
   sn_discover: ["profile", "type"],
+  sn_flow_view: ["flow", "profile"],
   sn_get: ["profile", "table"],
   sn_health: ["profile"],
   sn_incident_add_comment: ["content", "profile", "sys_id"],
@@ -141,6 +143,7 @@ const validProfileBoundaryArguments: Readonly<
     confirm: false,
   },
   sn_discover: { type: "tables" },
+  sn_flow_view: { flow: "Example flow" },
   sn_get: {
     table: "incident",
     sys_id: "11111111111111111111111111111111",
@@ -182,6 +185,7 @@ const expectedAnnotations: Record<string, CompleteAnnotations> = {
   sn_create: { title: "Create record", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   sn_delete: { title: "Delete record", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   sn_discover: { title: "Discover tables, apps, and plugins", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  sn_flow_view: { title: "View Flow Designer flow", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_get: { title: "Get record", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_health: { title: "Check instance health", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_incident_add_comment: { title: "Add incident comment", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -736,7 +740,7 @@ const leakProbeModule = defineServiceNowToolModule({
 });
 
 describe.each(clientFactories)("SNSDK-27 %s contract", (_label, createClient) => {
-  it("initializes and discovers the exact 23-tool schema and annotation contract", async () => {
+  it("initializes and discovers the exact 24-tool schema and annotation contract", async () => {
     const harness = await createHarness();
     const client = createClient(harness.url);
     try {

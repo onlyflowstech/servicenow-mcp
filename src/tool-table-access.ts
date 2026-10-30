@@ -43,6 +43,11 @@ import {
   isWriteValuePolicyError,
   prepareWriteFieldValues,
 } from "./write-value-policy.js";
+import {
+  FLOW_VIEW_TABLES,
+  canonicalFlowViewArgs,
+} from "./tools/flow-view-contracts.js";
+import { flowViewFieldSelection } from "./tools/flow-view-policy.js";
 
 export interface ToolTableAccessResolution {
   readonly args: Record<string, unknown>;
@@ -214,6 +219,8 @@ export function resolveToolTableAccess(
         return discoveryResolution(args);
       case "sn_atf":
         return atfResolution(args, encodedQueryAccess);
+      case "sn_flow_view":
+        return flowViewResolution(args);
       case "sn_nl":
         // Natural-language composition can select reads or writes only after
         // parsing inside the handler. Until that parser emits a typed access
@@ -425,6 +432,26 @@ function atfResolution(
     default:
       throw new TablePolicyError();
   }
+}
+
+/**
+ * Read on the whole flow closure, all or nothing. sn_flow_view reads only
+ * these tables through the Table API (never Flow Designer's internal API),
+ * and every value it returns is projected through its source (table, field).
+ */
+function flowViewResolution(
+  args: Record<string, unknown>
+): ToolTableAccessResolution {
+  const canonical = canonicalFlowViewArgs(args);
+  let prepared = withFieldPolicyArgumentValues(args, { ...canonical });
+  for (const table of FLOW_VIEW_TABLES) {
+    prepared = prepareAdditionalReadFieldArguments(
+      prepared,
+      table,
+      flowViewFieldSelection(table, canonical.include_inputs).join(",")
+    );
+  }
+  return resolution(prepared, FLOW_VIEW_TABLES.map(read));
 }
 
 function aggregateResolution(

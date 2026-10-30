@@ -30,6 +30,7 @@ const EXPECTED_TOOL_NAMES = [
   "sn_create",
   "sn_delete",
   "sn_discover",
+  "sn_flow_view",
   "sn_get",
   "sn_health",
   "sn_incident_add_comment",

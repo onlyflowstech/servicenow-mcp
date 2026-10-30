@@ -575,7 +575,7 @@ ServiceNow upstream can return HTTP 429 with an empty body, while this server's 
 
 ## What the tools cover
 
-The registered catalog has 23 tools (see [Tools Reference](#tools-reference)):
+The registered catalog has 24 tools (see [Tools Reference](#tools-reference)):
 
 | Area | Tools |
 |------|-------|
@@ -584,6 +584,7 @@ The registered catalog has 23 tools (see [Tools Reference](#tools-reference)):
 | Analytics and schema | `sn_aggregate`, `sn_schema`, `sn_health` |
 | CMDB and operations | `sn_relationships`, `sn_attach`, `sn_syslog`, `sn_codesearch`, `sn_discover` |
 | ATF | `sn_atf_author`, `sn_atf_run`, `sn_atf_results`, `sn_atf_readiness`, `sn_atf` |
+| Flow Designer (read-only) | `sn_flow_view` |
 | Profiles | `sn_profile` |
 | Natural language | `sn_nl` (currently policy-denied pending a typed access plan) |
 
@@ -733,6 +734,12 @@ in this section is needed to use this server.
 `sn_script` (background script execution) shipped in 1.0.0 as an unimplemented
 stub and is **not published in 2.0** — it does not appear in `tools/list`. Use
 `sn_query` and `sn_batch` instead. See [Roadmap](#roadmap).
+
+### Flow Designer
+
+| Tool | Description |
+|------|-------------|
+| `sn_flow_view` | Show a flow or subflow as a Mermaid diagram, an outline and a structured graph: trigger, steps, branches, loops, error handling, input values under field policy, and called subflows to depth 3. Read-only through the Table API; never calls Flow Designer's internal API. See [docs/FLOW-VIEW.md](docs/FLOW-VIEW.md) |
 
 ### Profile Management
 
@@ -977,6 +984,7 @@ the same loader the server uses at request time:
 servicenow-mcp-setup grant --profile dev --read incident,problem --write incident
 servicenow-mcp-setup grant --profile dev --read cmdb_ci --tools sn_query,sn_relationships
 servicenow-mcp-setup grant --profile dev --read change_request --related change_request=task
+servicenow-mcp-setup grant --profile dev --flows   # sn_flow_view's 15 tables, bound to sn_flow_view only
 ```
 
 Allowlist entries may be exact table names or the literal `*` to allow every

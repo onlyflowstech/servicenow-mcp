@@ -9,12 +9,18 @@ import {
   headline,
   inline,
   isMarkdownFragment,
+  isMermaidDiagram,
+  isValidMermaidSource,
+  issueMermaidDiagram,
+  MAX_MERMAID_SOURCE_LENGTH,
+  mermaidBlock,
   recordLink,
   renderMarkdown,
   table,
   text,
   untrustedBlock,
   type MarkdownFragment,
+  type MermaidDiagram,
 } from "../src/tools/markdown.js";
 
 const SYS_ID = "0123456789abcdef0123456789abcdef";
@@ -283,5 +289,148 @@ describe("renderMarkdown", () => {
       </div><a href=https://evil.example>click</a>
       \`\`\`\`"
     `);
+  });
+});
+
+describe("mermaid diagrams", () => {
+  const VALID = [
+    "flowchart TD",
+    'n1(["Trigger: Created"])',
+    'n2{"If: a #61; b"}',
+    'n3{{"For Each"}}',
+    'n4[["Call #8221;sub#8221;"]]',
+    'n5(("End"))',
+    'n6["Plain (x) a/b +c ?d -e _f .g ,h :i"]',
+    'subgraph sg1 ["Child"]',
+    '    n7["Inside"]',
+    "end",
+    'nMore(("... 3 more steps (see outline)"))',
+    "n1 --> n2",
+    "n2 -->|true| n3",
+    "n2 -->|false| n4",
+    "n3 -->|each| n5",
+    "n5 -.->|repeat| n3",
+    "n4 -->|calls| n7",
+    "n6 -->|branch| n7",
+    "n6 -->|catch| n7",
+    "n7 --> nMore",
+  ].join("\n");
+
+  it("issues frozen diagrams only for sources in the closed grammar", () => {
+    expect(isValidMermaidSource(VALID)).toBe(true);
+    const diagram = issueMermaidDiagram(VALID);
+    expect(diagram).toBeDefined();
+    expect(Object.isFrozen(diagram)).toBe(true);
+    expect(isMermaidDiagram(diagram)).toBe(true);
+    const block = mermaidBlock(diagram!);
+    expect(block.markdown).toBe(`\`\`\`mermaid\n${VALID}\n\`\`\``);
+    expect(isMarkdownFragment(block)).toBe(true);
+    // A diagram block is a block fragment and cannot be used inline.
+    expect(() => inline(block)).toThrow(TypeError);
+  });
+
+  it("rejects every line outside the grammar", () => {
+    const hostile = [
+      "%%{init: {'securityLevel':'loose'}}%%",
+      "%% comment",
+      'click n1 href "javascript:alert(1)"',
+      "click n1 call alert()",
+      "click n1 callback",
+      "style n1 fill:#f00",
+      "classDef evil fill:#f00",
+      "class n1 evil",
+      "linkStyle 0 stroke:red",
+      "n1:::cls",
+      'n1["x"]:::cls',
+      "n1@{ shape: rect }",
+      'n1["x"]@{ shape: rect }',
+      "accTitle: x",
+      "accDescr: x",
+      "---",
+      'n1["a"b"]',
+      'n1["<b>x</b>"]',
+      'n1["&lt;"]',
+      'n1["`md`"]',
+      'n1["#60"]',
+      'n1["x;y"]',
+      'n1["x"] --> n2',
+      "n1 -->|evil| n2",
+      "n1 --> |true| n2",
+      "n1 --- n2",
+      "n1 ==> n2",
+      "n1 -->|true| n2 --> n3",
+      'n0["zero id"]',
+      'n01["leading zero"]',
+      'end1["x"]',
+      "n1[x]",
+      'n1>"flag"]',
+      "subgraph sg1",
+      "subgraph sg1 [x]",
+      'subgraph sg0 ["x"]',
+      "end ",
+      "",
+      "flowchart TD",
+      "flowchart LR",
+      "graph TD",
+    ];
+    for (const line of hostile) {
+      expect(isValidMermaidSource(`flowchart TD\n${line}`), line).toBe(false);
+      expect(issueMermaidDiagram(`flowchart TD\n${line}`), line).toBeUndefined();
+    }
+  });
+
+  it("rejects structural violations and oversize sources", () => {
+    const node = (index: number): string => `n${index}["x"]`;
+    const cases = [
+      'n1["x"]\nflowchart TD',
+      'flowchart TD\r\nn1["x"]',
+      'flowchart TD\nn1["x"]\n',
+      'flowchart TD \nn1["x"]',
+      "---\ntitle: x\n---\nflowchart TD",
+      'flowchart TD\nsubgraph sg1 ["a"]\n    n1["x"]',
+      'flowchart TD\nsubgraph sg1 ["a"]\nsubgraph sg2 ["b"]\nend\nend',
+      "flowchart TD\nend",
+      'flowchart TD\nsubgraph sg1 ["a"]\nn1["x"]\nend',
+      'flowchart TD\n    n1["x"]',
+      'flowchart TD\nsubgraph sg1 ["a"]\n    n1["x"]\nn1 --> n1\nend',
+      ["flowchart TD", ...Array.from({ length: 151 }, (_, index) => node(index + 1))].join("\n"),
+      ["flowchart TD", ...Array.from({ length: 301 }, () => "n1 --> n2")].join("\n"),
+      `flowchart TD\nn1["${"x".repeat(MAX_MERMAID_SOURCE_LENGTH)}"]`,
+    ];
+    for (const source of cases) {
+      expect(isValidMermaidSource(source), source.slice(0, 60)).toBe(false);
+    }
+    for (const value of [undefined, null, 42, {}, ["flowchart TD"]]) {
+      expect(isValidMermaidSource(value)).toBe(false);
+      expect(issueMermaidDiagram(value)).toBeUndefined();
+    }
+    expect(
+      isValidMermaidSource(
+        ["flowchart TD", ...Array.from({ length: 150 }, (_, index) => node(index + 1))].join("\n")
+      )
+    ).toBe(true);
+  });
+
+  it("refuses forged, look-alike, and unissued diagrams", () => {
+    const forged: MermaidDiagram = { source: VALID };
+    expect(isMermaidDiagram(forged)).toBe(false);
+    expect(() => mermaidBlock(forged)).toThrow(TypeError);
+    expect(() => mermaidBlock(Object.freeze({ source: VALID }))).toThrow(TypeError);
+    expect(() =>
+      mermaidBlock({ source: 'flowchart TD\nclick n1 href "javascript:alert(1)"' })
+    ).toThrow(TypeError);
+    expect(() => mermaidBlock(null as unknown as MermaidDiagram)).toThrow(TypeError);
+    // An issued markdown fragment is not a diagram either.
+    expect(() => mermaidBlock(text("flowchart TD") as unknown as MermaidDiagram)).toThrow(
+      TypeError
+    );
+    const issued = issueMermaidDiagram(VALID)!;
+    // A proxy around an issued diagram is a different object.
+    expect(() => mermaidBlock(new Proxy(issued, {}))).toThrow(TypeError);
+    // An issued diagram cannot be altered after the fact.
+    expect(() => {
+      (issued as { source: string }).source = "flowchart TD\n%%{init}%%";
+    }).toThrow(TypeError);
+    expect(mermaidBlock(issued).markdown).toContain(VALID);
   });
 });

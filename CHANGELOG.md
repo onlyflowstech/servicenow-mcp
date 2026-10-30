@@ -138,6 +138,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The README documents per-profile field policy: `fieldPolicy`, the
   `readableTableFields` / `writableTableFields` lists, the `"*"` entry, and the
   fields that need explicit listing.
+- **`sn_flow_view`, the 24th tool.** It shows one Flow Designer flow or
+  subflow as a Mermaid diagram, a numbered outline and a structured graph:
+  trigger, steps, If / Else If / Else, loops, parallel branches, Try / Catch,
+  input values and data pill labels, and the subflows it calls to depth 3.
+  It is read-only and reads 15 `sys_hub_*` and variable tables through the
+  Table API under the profile's table and field policy; it never calls Flow
+  Designer's internal API, whose flow read writes a history record. Input
+  values are shown by default, with sensitive names and password types
+  redacted; `include_inputs: false` reads no values. The result fits
+  `max_response_bytes` (default 100,000). See
+  [docs/FLOW-VIEW.md](docs/FLOW-VIEW.md). Thanks to Jace Benson's `jsn` CLI,
+  whose flow inspection informed the approach; no `jsn` code is used.
+- `servicenow-mcp-setup grant --flows` grants read on the `sn_flow_view`
+  tables, bound to `sn_flow_view` only.
 
 ### Changed
 
@@ -207,6 +221,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`sn_flow_view` reads `sys_variable_value` and `var_dictionary`.**
+  `sys_variable_value` is a system table, so a profile's `"*"` field-policy
+  entry does not narrow it; name it to hide older flows' input values. Grant
+  the flow tables with `tools: ["sn_flow_view"]` (as `grant --flows` does) to
+  keep the generic read tools off them. See
+  [docs/FLOW-VIEW.md](docs/FLOW-VIEW.md#field-policy).
 - **Omitting the journal tools no longer withholds journals.** A profile that
   grants `sn_create`, `sn_update` or `sn_batch` on a table can now append
   `comments` and `work_notes` there, including a profile whose incident target
