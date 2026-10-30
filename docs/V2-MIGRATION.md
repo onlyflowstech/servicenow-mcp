@@ -11,10 +11,10 @@ running: every call names a profile, and table access is granted rather than
 inherited from the credential. Those two are the migration; the rest apply only
 if you used the affected surface.
 
-**Already on 2.x?** The release after 2.2.0-dev.6 changes how field policy
+**Already on 2.x?** 2.2.0 changes how field policy
 loads and who may write journal fields, and it can refuse to start on a
 configuration that loads today. Read
-[Upgrading to the next release](#upgrading-to-the-next-release) before you
+[Upgrading to 2.2.0](#upgrading-to-220) before you
 upgrade.
 
 ## Breaking changes at a glance
@@ -26,8 +26,8 @@ upgrade.
 | 3 | Table access | any table the credential could reach | deny-by-default per profile; explicit allowlist plus target entries |
 | 4 | Attachments | host `file_path` / `output_path` | inline base64 both directions; no host filesystem access, and no flag restores it |
 | 5 | Queries | raw ServiceNow encoded queries | structured filters; raw reads are opt-in per tool/table |
-| 6 | Incident journals | `sn_update` accepted `comments` / `work_notes` | dedicated `sn_incident_add_comment` / `sn_incident_add_work_note`; from the [next release](#upgrading-to-the-next-release) the generic write tools accept both fields again, on every table, under field policy |
-| 7 | Tool surface | 17 tools, one `bin` | 19 tools, three `bin` entries; `sn_script` withdrawn (the 2.2.0 development line later adds four ATF tools, for 23) |
+| 6 | Incident journals | `sn_update` accepted `comments` / `work_notes` | dedicated `sn_incident_add_comment` / `sn_incident_add_work_note`; from [2.2.0](#upgrading-to-220) the generic write tools accept both fields again, on every table, under field policy |
+| 7 | Tool surface | 17 tools, one `bin` | 19 tools, three `bin` entries; `sn_script` withdrawn (2.2.0 adds four ATF tools and `sn_flow_view`, for 24) |
 | 8 | Field selection limit | `MAX_FIELDS_PER_OPERATION` was `32`; over-selection raised `excessive_field_selection` | limit is `10_000`; `excessive_field_selection` is removed from the exported `FieldPolicyFailureReason` union |
 | 9 | Capabilities | `tools` only | adds `prompts` (`servicenow-mcp.add-profile`) |
 
@@ -265,7 +265,7 @@ end of this document.
 `sn_incident_add_work_note` for an internal note. `sn_update` rejects both
 fields before credentials are resolved.
 
-**After (the [next release](#upgrading-to-the-next-release)):** both shapes
+**After ([2.2.0](#upgrading-to-220)):** both shapes
 work. `sn_create`, `sn_update` and `sn_batch` accept `comments` and
 `work_notes` again, on `incident` and every other table granted for writes,
 and the configured field policy decides whether a profile may write them,
@@ -278,8 +278,8 @@ through either route. The dedicated tools remain. See
 `sn_profile` are added, and `sn_script` is removed. `sn_script` never executed
 anything in 1.0.0 — it returned an explanatory error — so removing it changes
 `tools/list` but no working behavior. Use `sn_query` and `sn_batch` instead.
-The 2.0.0 and 2.1.0 releases list 19 tools; the 2.2.0 development line adds
-`sn_atf_author`, `sn_atf_run`, `sn_atf_results` and `sn_atf_readiness`, for 23.
+The 2.0.0 and 2.1.0 releases list 19 tools; 2.2.0 adds `sn_atf_author`,
+`sn_atf_run`, `sn_atf_results`, `sn_atf_readiness` and `sn_flow_view`, for 24.
 
 One `bin` becomes three:
 
@@ -485,11 +485,11 @@ side-effect plan. Legacy ATF execution actions return migration guidance; use
 
 ### Incident journal migration
 
-**The [next release](#upgrading-to-the-next-release) reverses the
+**[2.2.0](#upgrading-to-220) reverses the
 generic-write rule below.** From 2.0.0 through 2.2.0-dev.6 the generic write
 tools rejected `comments` and `work_notes` by name, on every table, ahead of
 field policy, and no configuration could lift the rejection. Tables other than
-`incident` had no journal route at all. From the next release:
+`incident` had no journal route at all. From 2.2.0:
 
 - `sn_create`, `sn_update` and `sn_batch` write `comments` and `work_notes`
   on any table granted for writes. A Table API write to a journal field
@@ -543,12 +543,11 @@ control tokens, JavaScript values, unsupported fields/operators, malformed
 Unicode, and any request exceeding the rule. Policy errors never echo the raw
 query value. There is no stdio or transport-specific exception.
 
-## Upgrading to the next release
+## Upgrading to 2.2.0
 
 This section is for installs already on 2.x, from 2.0.0 through
-2.2.0-dev.6. "The next release" means the first release after 2.2.0-dev.6;
-until it ships, its notes are under `[Unreleased]` in the
-[CHANGELOG](../CHANGELOG.md).
+2.2.0-dev.6, that upgrade to 2.2.0. Its release notes are under `[2.2.0]` in
+the [CHANGELOG](../CHANGELOG.md).
 
 Check this table before you upgrade. The first two rows can stop the server
 from starting.

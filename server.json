@@ -7,12 +7,12 @@
     "url": "https://github.com/onlyflowstech/servicenow-mcp",
     "source": "github"
   },
-  "version": "2.2.0-dev.6",
+  "version": "2.2.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@onlyflows/servicenow-mcp",
-      "version": "2.2.0-dev.6",
+      "version": "2.2.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

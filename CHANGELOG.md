@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> **Read this before upgrading.** This release can stop a working install from
+## [2.2.0] — 2026-10-30
+
+2.2.0 is the first stable release since 2.1.0. It contains everything
+published on the `dev` channel as 2.2.0-dev.1 through 2.2.0-dev.6 (listed
+under those versions below) plus the changes in this section. Numbers in
+parentheses are the pull requests that made each change.
+
+> **Upgrade every install: this release fixes a denial-of-service
+> vulnerability.** A single oversized or deeply nested request could make the
+> server exhaust its memory and stop. See **Security** below.
+>
+> **Read this before upgrading.** 2.2.0 can stop a working install from
 > starting, and it changes what some profiles may write:
 >
 > - The server refuses to start while `SN_FIELD_POLICY_DEFINITIONS` is set and
@@ -23,382 +34,262 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 >   `watch_list`, can now be written.
 > - `["*"]` in a field set now means every field. A profile that used it, and
 >   so failed every call, becomes fully open.
+> - `readable: []` no longer blocks writes to its table. Add `writable: []` to
+>   keep writes blocked.
 >
-> [Upgrading to the next release](docs/V2-MIGRATION.md#upgrading-to-the-next-release)
-> lists every case with its remedy.
-
-### Breaking
-
-- **`SN_FIELD_POLICY_DEFINITIONS` configures only the `SN_PROFILE_NAME`
-  environment profile.** Through 2.2.0-dev.6 it also narrowed every
-  `config.json` profile that stated no field policy of its own. Ignoring it
-  there would silently widen those profiles, so while the variable is set to
-  a non-blank value and a config file supplies the profiles, the server
-  refuses to start with: `SN_FIELD_POLICY_DEFINITIONS is set, but profiles are
-  loaded from the config file; it now applies only to the SN_PROFILE_NAME
-  environment profile. Move the policy into each profile's fieldPolicy, or
-  unset the variable.` The setup and profile CLIs refuse the same way when
-  the variable is set in their environment. On the environment profile the
-  variable is now read once, at startup, and a malformed value stops startup
-  instead of denying every request.
-- **Field policy is validated when profiles load.** A malformed `fieldPolicy`,
-  `readableTableFields` or `writableTableFields` used to deny every call on its
-  profile, and some mistakes loaded and narrowed nothing. Each of these now
-  stops startup, with the profile, key path and table named and no configured
-  value repeated:
-  - a pattern such as `"u_*"`, a name that is not a field name, or `"*"` mixed
-    with field names;
-  - the same field listed twice in one set;
-  - `defaults` outside `readable`, including `defaults: "*"` beside a narrowed
-    `readable`;
-  - `fieldPolicy` stated together with `readableTableFields` or
-    `writableTableFields` (the request path used to drop `fieldPolicy`
-    silently);
-  - an unknown key in a table entry or a `{ table, fields }` entry, such as
-    the typo `writeable` or a comment key such as `_comment`;
-  - two `fieldPolicy` table keys that differ only in case, or one table listed
-    twice in the same list;
-  - in `SN_FIELD_POLICY_DEFINITIONS`, table keys mixed with the profile keys,
-    or a value that is not a JSON object.
-
-  One bad profile stops the whole file from loading, and the CLIs refuse the
-  file too, so edit `~/.servicenow-mcp/config.json` by hand.
-- **A profile's `"*"` field-policy entry reaches the ITSM tables and every
-  custom table.** On `incident`, `change_request`, `problem`, `sc_request`,
-  `sc_req_item`, `sc_task`, `task`, `cmdb_ci`, `cmdb_ci_server`,
-  `cmdb_ci_computer` and `kb_knowledge`, and on every table without a built-in
-  entry, named in the profile or not, `readable` and `writable` now resolve
-  from the table's own entry, then the `"*"` entry, then the open default.
-  `{"*": {"writable": []}}` used to leave those ITSM tables, and any custom
-  table the profile named without stating `writable`, writable; it now denies
-  writes to them. To keep a key open on one table, state it on that table,
-  such as `"u_x": {"writable": "*"}`. The 23 built-in system tables (scripts,
-  users and groups, ATF, application and dictionary metadata, `syslog`) still
-  never take the `"*"` entry; narrow one by naming it.
-- **`sys_class_name`, `sys_class_path`, `sys_domain` and `sys_domain_path` are
-  written only where a profile lists them.** They move a record to another
-  class or domain, so no writable wildcard covers them, including the open
-  default of a profile with no field policy. List each one by name in the
-  table's `writable`; listing `sys_domain` does not list `sys_domain_path`.
-  The denial reason is the new `explicit_field_required`.
-- **The dedicated journal tools follow field policy.**
-  `sn_incident_add_comment` and `sn_incident_add_work_note` are denied when the
-  incident's effective `writable` set leaves out `comments` or `work_notes`,
-  the same way `sn_update` is. A profile that already narrows
-  `fieldPolicy.incident.writable`, or a `"*"` entry's `writable`, without those
-  fields loses the matching tool.
-
-### Added
-
-- **Policy card.** `sn_profile` returns the profile's effective policy, as data
-  (`policy`) and as one text table (`policy_card`), and the new
-  `servicenow-mcp-setup policy show --profile <name> [--json]` prints the same
-  card. It lists the tables readable and writable with their tools, the
-  readable and writable fields (a `"*"` field entry covers ITSM and custom
-  tables, never the 23 system tables), the class and domain fields that need
-  explicit listing, the auth type, raw encoded-query reads, ATF grants and the
-  `sn_batch` limits. It is built from the policy the server enforces and never
-  prints a secret, key or credential reference. It enforces nothing new.
-  `sn_profile` keeps its answer small: the structured `policy` is held to
-  40,000 bytes and the text `policy_card` to 24,000. When either is cut,
-  `policy.truncated` says what (`tables_omitted`, `field_lists_narrowed`,
-  `text_omitted`) and names `servicenow-mcp-setup policy show --profile <name>
-  --json`, so `policy_card` is optional. The card is built once per loaded
-  profile.
-- **`sn_batch` dry run shows its work.** A dry run now also returns a `sample`
-  of up to 5 matched records (`sys_id` plus a `number`, `name`,
-  `short_description` or `title` the profile may read), `fields_to_write` (field
-  names, never values) and a `note` that `confirm` re-runs the query and can
-  match different records. The sample costs one extra read of at most 5
-  records, addressed by the `sys_id`s the lookup already returned; if it
-  fails or takes more than 5 seconds, the dry run still returns the count.
-  A target granted only `sn_batch` can now see up to 5 display values
-  (`number`, `name`, `short_description` or `title`, if readable) in a dry
-  run, where before it saw a count.
-- **Warning on risky grants.** `servicenow-mcp-setup grant` and the setup
-  wizard print a warning when a grant gives write access on a
-  privilege-sensitive table: role, group, delegation, ACL and approval tables
-  (`sys_user_has_role`, `sys_user_grmember`, `sys_group_has_role`,
-  `sys_user_role`, `sysapproval_approver`, ...), script tables (`sys_script`,
-  `sys_script_include`, `sysauto_script`, ...), `sys_properties`, `sys_user`,
-  `sys_user_group` and authentication tables. The wizard also warns when you
-  choose the `"*"` write wildcard; `grant` rejects `"*"`. The grant is still
-  allowed; `grant --json` carries the text in `warnings`.
-- **Journal fields through the generic write tools, on every table.**
-  `sn_create`, `sn_update` and `sn_batch` accept `comments` and `work_notes` on
-  every table granted for writes. This reverses the 2.0 rule that rejected
-  both names on every table ahead of field policy, which no configuration
-  could lift and which left tables other than `incident` with no journal
-  route. Each entry gets the bounds of the dedicated tools (1-8,000
-  characters, 16,384 UTF-8 bytes, no control or format characters other than
-  newline, carriage return and tab), and field policy decides permission. The
-  dedicated tools remain.
-- `sn_batch` results carry a `message` when records were not confirmed or not
-  sent, saying how many and why the run stopped.
-- The README documents per-profile field policy: `fieldPolicy`, the
-  `readableTableFields` / `writableTableFields` lists, the `"*"` entry, and the
-  fields that need explicit listing.
-- **`sn_flow_view`, the 24th tool.** It shows one Flow Designer flow or
-  subflow as a Mermaid diagram, a numbered outline and a structured graph:
-  trigger, steps, If / Else If / Else, loops, parallel branches, Try / Catch,
-  input values and data pill labels, and the subflows it calls to depth 3.
-  It is read-only and reads 15 `sys_hub_*` and variable tables through the
-  Table API under the profile's table and field policy; it never calls Flow
-  Designer's internal API, whose flow read writes a history record. Input
-  values are shown by default, with sensitive names and password types
-  redacted; `include_inputs: false` reads no values. The result fits
-  `max_response_bytes` (default 100,000). See
-  [docs/FLOW-VIEW.md](docs/FLOW-VIEW.md). Thanks to Jace Benson's `jsn` CLI,
-  whose flow inspection informed the approach; no `jsn` code is used.
-- `servicenow-mcp-setup grant --flows` grants read on the `sn_flow_view`
-  tables, bound to `sn_flow_view` only.
-
-### Changed
-
-- **Building a server no longer compiles output-schema validators it never
-  uses.**
-  The tool-catalog check at startup lists tools through an in-process client
-  that never calls any, but the SDK compiled a validator for every output
-  schema each time. The HTTP transport builds a server per request, so this
-  trims a few milliseconds from each request and about 6 MB of idle memory
-  from a stdio server. The server's own input and output validation is
-  unchanged. Startup no longer compiles output schemas, so a malformed one is
-  caught by the strict-Ajv test in CI rather than when the server starts.
-- **`sn_batch` never re-sends a batch request that may have reached the
-  instance.**
-  Confirmed updates and deletes go through the ServiceNow REST Batch API, up
-  to 50 records per request and fewer when values are large, so a request
-  body stays under 4 MiB unless one record's fields alone exceed about 3 MiB
-  of JSON; such a record is sent one per request. Each request gets its own
-  1 MiB response budget.
-  - Serial Table API calls replace the batch only when the instance refuses
-    it outright (401, 403 or 404), and only for the records not yet sent.
-  - A rate limit (429) stops the run with the `Retry-After` hint instead.
-  - A record whose sub-request returns a server error (5xx or 408) is
-    unconfirmed: it is reported, never retried, and the run continues. The
-    run stops, reporting the rest as not sent, when a batch request fails or
-    its response cannot be read or matched to the records sent, when every
-    serviced record in one batch returns a server error, or when more than 10
-    records in the run are unconfirmed.
-  - The serial fallback stops at the first outcome it cannot confirm, at a
-    429, and at a 401. It follows the HTTP client's retry rules: a journal
-    write is never re-sent, and an ordinary (non-journal) `PATCH` is retried
-    up to twice after a 502, 503, 504 or connection error.
-  - Unconfirmed records count as neither processed nor failed. Records not
-    sent count as failed.
-- `servicenow-mcp-setup grant --write incident` also binds
-  `sn_incident_add_comment` and `sn_incident_add_work_note` to the incident
-  target. Comments are customer-visible and can notify the caller. An
-  explicit `--tools` list withholds them; on a profile that already has them,
-  use `--replace` with `--tools`. Re-run the grant to add them to an existing
-  profile; existing profiles are not changed on upgrade.
-- `sn_update` advertises `idempotentHint: false`, because a journal field
-  appends an entry on every call.
-- `["*"]` in a field set means `"*"`, in that exact form only. It used to fail
-  every call on the profile.
-- `readable: []` no longer blocks writes as a side effect. Writes to such a
-  table return only `sys_id`; reads stay denied. Add `writable: []` to block
-  writes.
-- A dot-walked or `variables.*` write key, such as `caller_id.email`, is
-  denied with a message saying why, under the new reason
-  `unsupported_field_path`. Such keys were already denied.
-- A write-value denial names the field and table it rejected, never the
-  value.
-- **Metadata caching works in every auth mode.** Freshness is checked against
-  a server watermark: the cached table's row count (`X-Total-Count`) and its
-  newest row by `sys_updated_on`, as the instance stores it. No time-zone,
-  `sys_user` or `sys_properties` lookup is made, so OAuth `client_credentials`
-  and API-key profiles, where the cache used to turn itself off, now cache
-  like Basic and OAuth password profiles. A tool call reads each table's
-  watermark once, however many times it reads the table. A table whose
-  watermark cannot be used is read straight through for up to 15 minutes, or
-  30 seconds after a transient failure. Empty tables cache. See
-  [Upgrading](docs/V2-MIGRATION.md#metadata-caching-in-every-auth-mode).
-- `sn_schema` results are reused across tool calls for 5 minutes, partitioned
-  by profile, credential identity and effective policy. `schemaCacheTtlMs` /
-  `SN_SCHEMA_CACHE_TTL_MS` (up to 1 hour) is honoured, and
-  `force_recache: true` refreshes a result. The cache never hit before.
+> [Upgrading to 2.2.0](docs/V2-MIGRATION.md#upgrading-to-220) lists every case
+> with its remedy.
 
 ### Security
 
-- **`sn_flow_view` reads `sys_variable_value` and `var_dictionary`.**
-  `sys_variable_value` is a system table, so a profile's `"*"` field-policy
-  entry does not narrow it; name it to hide older flows' input values. Grant
-  the flow tables with `tools: ["sn_flow_view"]` (as `grant --flows` does) to
-  keep the generic read tools off them. See
-  [docs/FLOW-VIEW.md](docs/FLOW-VIEW.md#field-policy).
+- **Denial-of-service fix: oversized requests are rejected before
+  validation.** A single very large or deeply nested request could make
+  the server use far more memory and time than its size suggests, until it
+  stopped responding. Every
+  incoming message, over stdio and HTTP, now passes plain structural checks
+  before any schema runs, and one outside the limits is rejected with a short,
+  fixed error. The limits admit the largest call any tool accepts, so
+  legitimate calls are not affected. (#16)
+  - Messages: arrays of at most 10,000 elements, at most 52,176 array
+    elements and object members in total, and at most 32 levels of nesting.
+    Over HTTP such a message gets a 400 with JSON-RPC error `-32600`
+    `Request exceeds structural limits.`; over stdio a request with a usable
+    id gets the same error, and anything else is dropped.
+  - Tool arguments: at most 52,112 array elements and object members.
+  - `structured_query`: at most 2,048 values, 12 levels deep, arrays of 32,
+    objects of 8 keys, 64 conditions and 65 groups. Any query the compiler
+    accepts is within these.
+  - Existing collection limits (`sn_atf_author` `steps` and `test_sys_ids`,
+    `structured_query` `order_by`, group `conditions`, set `values`, ATF
+    name-value inputs) are checked before any element is parsed.
+- **Dependency advisories.** `zod` moves to 4.6.7, pinned exactly
+  (GHSA-mrhx-c7xc-m3w5, CVE-2023-54404; no 3.x release is fixed).
+  `@modelcontextprotocol/sdk` moves to 1.32.2 (GHSA-22jm-h49p-29qw,
+  GHSA-6prh-2h8m-c8cw, GHSA-46jr-4wx8-v453, GHSA-rvq5-wwqv-78pq, and
+  GHSA-6qxp-vccf-f47h in the SDK's client-side OAuth flow, which this server
+  does not use). `body-parser` (GHSA-27r3-jxmh-p828), `fast-uri`
+  (GHSA-w74x-v6f9-j3xg), `hono`, `iconv-lite`, `ip-address`, `proxy-addr`
+  (GHSA-jqcg-44mw-7w3h, critical) and `qs` take their fixed releases, and `npm audit --omit=dev` reports nothing. The
+  container's runtime base, `gcr.io/distroless/nodejs22-debian13:nonroot`, is
+  pinned to a digest with `libssl3t64` 3.5.7-1~deb13u3 (CVE-2026-84782) and
+  Node 22.23.3. (#10, #16)
+  - *`@hono/node-server` 2.1.3* (GHSA-rmxm-3fg6-px4f, medium). Its
+    `serveStatic` decoded the request path twice, so a crafted path could skip
+    middleware mounted on a static prefix. This server never uses
+    `serveStatic`: the SDK's HTTP transport uses only the adapter's request
+    listener, and the stdio server does not load the adapter at all. The
+    upgrade keeps `npm audit` clean. The developer-only inspector's lockfile
+    moves to 2.1.5.
+- **Redirects are no longer followed.** API calls and the OAuth token request
+  used to follow HTTP redirects: a cross-origin redirect forwarded an API-key
+  header, and a 307 re-sent the token request body, which holds the client
+  secret. Any 3xx now fails with "The instance redirected the request to
+  another location", without echoing the `Location`. (#15)
 - **Omitting the journal tools no longer withholds journals.** A profile that
   grants `sn_create`, `sn_update` or `sn_batch` on a table can now append
-  `comments` and `work_notes` there, including a profile whose incident target
-  leaves out the dedicated journal tools. `sn_batch` can post one
-  customer-visible comment per matched record, and each can trigger a
-  notification. To withhold comments, set `fieldPolicy.<table>.writable` to
-  an explicit list without `comments`; the default is every field. Narrow
-  parent tables such as `task` the same way, because field policy is
-  evaluated against the table each call names.
+  `comments` and `work_notes` there, and `sn_batch` can post one
+  customer-visible comment per matched record, each of which can send a
+  notification. To withhold comments, set `fieldPolicy.<table>.writable` to an
+  explicit list without `comments`, and narrow parent tables such as `task`
+  the same way. (#11)
 - **Journal writes are never re-sent.** The HTTP client no longer retries a
   `PATCH` or `PUT` that sets `comments` or `work_notes` after a 502, 503, 504
   or connection error, because the first attempt may already have appended
-  the entry. It still retries a 429 and refreshes once after a 401, since
-  neither was processed. This covers `sn_update`, the dedicated tools and the
-  `sn_batch` serial fallback. Detection is by field name; see
-  [Production security boundaries](docs/PRODUCTION-SECURITY.md#journal-content).
+  the entry. A 429 is still retried and a 401 still refreshes once. Detection is by field
+  name (`comments`, `work_notes`); see
+  [Production security boundaries](docs/PRODUCTION-SECURITY.md#journal-content). (#11)
 - `servicenow-mcp-setup grant` applies its default tools only to the tables,
-  and the operations, named in that command. A read-only re-grant could add
-  `sn_create` and `sn_update` to a target narrowed with `--tools`, and a
-  re-grant could make a table that was reachable only as another target's
-  related table directly writable or readable.
-- `sn_batch` targets each matched record once per run, even when the lookup
-  names a record twice, and `matched` counts it once. The serial
-  fallback stops at a 401 instead of retrying every remaining record with
-  credentials ServiceNow has rejected.
-- **Read grants made for the old metadata cache can go.** The cache no longer
-  reads `sys_user` or `sys_properties`. Remove any read grant on either table,
-  in `tableAccess`, `SN_ALLOWED_READ_TABLES` or on the instance, that was
-  added only for it; `sys_properties` rows can hold integration secrets.
-- **Cache entries are partitioned by credential, not by the ServiceNow user
-  it runs as.** A cache hit re-reads only the table's watermark, so tightening
-  that user's ServiceNow row- or field-level ACLs is not seen until the entry
-  is refetched: by default up to 24 hours for metadata (configurable to 7
-  days) and 5 minutes for `sn_schema` (up to 1 hour).
-  After re-mapping a client_credentials application or API key to another
-  user, or restricting that user, restart the server or rotate the secret;
-  `force_recache: true` refreshes only the read it is passed on. A profile's
-  `tableAccess` and `fieldPolicy` apply on every call, cached or not.
-- `sn_batch` looks up the records it will update or delete on the instance on
-  every run, never in the metadata cache. On a cached table (`sys_flow*` and
-  `sys_metadata*` by default), a repeat run could be served an earlier run's
-  matches, and so update or delete records that no longer matched its filter.
-- `sn_schema` returns `inherited_from` only where the profile can read
-  `super_class` on `sys_db_object`.
-- **Dependency and base-image advisories.** `@modelcontextprotocol/sdk` is
-  1.31.0 (GHSA-6qxp-vccf-f47h, in the SDK's client-side OAuth flow, which
-  this server does not use). `proxy-addr` 2.0.8 (GHSA-jqcg-44mw-7w3h,
-  critical), `fast-uri` 3.1.8, `hono` 4.13.13 and `ip-address` 10.7.4 close
-  the remaining production advisories. The container's runtime base,
-  `gcr.io/distroless/nodejs22-debian13:nonroot`, is pinned to a digest that
-  carries `libssl3t64` 3.5.7-1~deb13u3 (CVE-2026-84782) and Node 22.23.3. The
-  developer-only inspector toolchain, which is not shipped, takes the same
-  fixes plus `undici` and `source-map-js`.
-- **October dependency advisories, request-size bounds and zod 4.**
-  - *Dependencies.* `@modelcontextprotocol/sdk` moves to 1.32.2
-    (GHSA-22jm-h49p-29qw, GHSA-6prh-2h8m-c8cw, GHSA-46jr-4wx8-v453,
-    GHSA-rvq5-wwqv-78pq). `body-parser` 2.4.0 (GHSA-27r3-jxmh-p828),
-    `fast-uri` 3.1.9 (GHSA-w74x-v6f9-j3xg), `iconv-lite` 0.7.3 and `qs`
-    6.16.1 clear the remaining production advisories, and the developer-only
-    inspector's lockfile takes the matching fixes. Tool schemas are still
-    served without a `$schema` dialect declaration on SDK 1.32.
-  - *Input-size hardening.* Validating an oversized or deeply nested request
-    could cost far more memory and time than the request's size suggests, so
-    plain structural checks now run before any schema does, and each rejects
-    with one short, fixed error:
-    - Every incoming message, over stdio and HTTP: arrays of at most 10,000
-      elements, at most 52,176 array elements and object members in total,
-      and at most 32 levels of nesting. Over HTTP a message outside these
-      bounds gets a 400 with JSON-RPC error `-32600` `Request exceeds
-      structural limits.` and no server is created. Over stdio a request with
-      a usable id gets the same error. Notifications, responses and requests
-      without a usable id are dropped.
-    - Tool arguments: at most 52,112 array elements and object members, the
-      size of the largest legitimate call (a 50,000-node field write together
-      with a structured query).
-    - `structured_query`: at most 2,048 values, 12 levels deep, arrays of 32,
-      objects of 8 keys, 64 leaf conditions and 65 groups. A query the
-      compiler accepts is never outside these bounds.
-    - Collection limits that already existed (`sn_atf_author` `steps` 50 and
-      `test_sys_ids` 100, `structured_query` `order_by` 4, group `conditions`
-      32, set `values` 20, ATF name-value inputs 50 entries) are now checked
-      before any element is parsed.
-  - *zod 4.* `zod` moves from 3.25.76 to 4.6.7, pinned exactly
-    (GHSA-mrhx-c7xc-m3w5, CVE-2023-54404; no 3.x release is fixed). The MCP
-    SDK uses the same copy. Tool validation accepts and rejects the same input
-    as before. Clients can see three changes:
-    - Input validation errors reported by the SDK use zod 4's wording, for
-      example `Invalid input: expected string, received undefined` instead of
-      `Required`, and `Too big: expected array to have <=50 items` for an
-      over-long array. The server's own messages are unchanged.
-    - Tool schemas are served inline instead of with internal `$ref`s, so
-      `tools/list` is about 18 KB larger (about 108 KB). The `sn_query` and
-      `sn_batch` inputs each grow by about 6 KB.
-    - Integer fields in output schemas state the safe-integer range.
+  and the operations, named in that command. A re-grant could widen a target
+  narrowed with `--tools`, or make a table reachable only as a related table
+  directly readable or writable. (#11)
+- `sn_batch` targets each matched record once per run and stops at a 401
+  instead of retrying every remaining record with rejected credentials. It
+  always looks up its records on the instance, never in the metadata cache, so
+  a repeat run cannot act on an earlier run's matches. (#9, #11)
+- **Metadata cache.** The cache no longer reads `sys_user` or
+  `sys_properties`; remove any read grant on either table that you added only
+  for it, because `sys_properties` rows can hold integration secrets. Cache
+  entries are partitioned by credential, not by the ServiceNow user it runs
+  as: after re-mapping a client-credentials application or API key to another
+  user, or restricting that user, restart the server or rotate the secret.
+  Table and field policy still apply on every call, cached or not. Until an
+  entry is refetched, a tightened ServiceNow ACL is not seen: by default up to
+  24 hours for metadata (configurable to 7 days) and 5 minutes for
+  `sn_schema`. `sn_schema`
+  returns `inherited_from` only where the profile can read `super_class` on
+  `sys_db_object`. (#9)
+- **`sn_flow_view` reads `sys_variable_value` and `var_dictionary`.**
+  `sys_variable_value` is a system table, so a profile's `"*"` field-policy
+  entry does not narrow it; name it to hide older flows' input values. Grant
+  the flow tables with `tools: ["sn_flow_view"]`, as `grant --flows` does, to
+  keep the generic read tools off them. See
+  [docs/FLOW-VIEW.md](docs/FLOW-VIEW.md#field-policy). (#18)
 
-    Recursive (`z.lazy`) tool schemas are refused at registration.
+### Added
+
+- **`sn_flow_view`, the 24th tool.** It shows one Flow Designer flow or
+  subflow as a Mermaid diagram, a numbered outline and a structured graph:
+  trigger, steps, If / Else If / Else, loops, parallel branches, Try / Catch,
+  input values and data pill labels, and the subflows it calls to depth 3. It
+  is read-only, reads 15 `sys_hub_*` and variable tables through the Table API
+  under the profile's table and field policy, and never calls Flow Designer's
+  internal API. Input values are shown by default, with sensitive names and
+  password types redacted; `include_inputs: false` reads no values. The
+  result fits `max_response_bytes` (default 100,000). See
+  [docs/FLOW-VIEW.md](docs/FLOW-VIEW.md). Thanks to Jace Benson's `jsn` CLI,
+  whose flow inspection informed the approach; no `jsn` code is used. (#18)
+- `servicenow-mcp-setup grant --flows` grants read on the `sn_flow_view`
+  tables, bound to `sn_flow_view` only. (#18)
+- **Policy card.** `sn_profile` returns the profile's effective policy as data
+  (`policy`) and as a text table (`policy_card`), and
+  `servicenow-mcp-setup policy show --profile <name> [--json]` prints the same
+  card: readable and writable tables with their tools, field rules, class and
+  domain fields that need explicit listing, auth type, raw encoded-query
+  reads, ATF grants and `sn_batch` limits. It never prints a secret, key or
+  credential reference, and it enforces nothing new. The data is held to
+  40,000 bytes and the text to 24,000; `policy.truncated` says what was cut.
+  (#17)
+- **`sn_batch` dry runs show a sample.** A dry run also returns up to 5
+  matched records (`sys_id` plus a `number`, `name`, `short_description` or
+  `title` the profile may read), `fields_to_write` (names, never values) and a
+  note that `confirm` re-runs the query. The sample costs one extra read; if
+  it fails or takes more than 5 seconds, the dry run still returns the count.
+  A target granted only `sn_batch` can therefore now see up to 5 display
+  values in a dry run, where before it saw a count. (#17)
+- **Warnings on risky grants.** `servicenow-mcp-setup grant` and the setup
+  wizard warn when a grant gives write access to a privilege-sensitive table:
+  roles, groups, delegation, ACLs, approvals, scripts, `sys_properties`,
+  `sys_user`, `sys_user_group` and authentication tables. The wizard also
+  warns on the `"*"` write wildcard, which `grant` rejects. The grant still
+  goes ahead; `grant --json` carries the text in `warnings`. (#17)
+- **Journal fields through the generic write tools, on every table.**
+  `sn_create`, `sn_update` and `sn_batch` accept `comments` and `work_notes`
+  on every table granted for writes, with the dedicated tools' bounds, and
+  field policy decides permission. The dedicated tools remain. (#11)
+- `sn_batch` results carry a `message` saying how many records were not
+  confirmed or not sent, and why the run stopped. (#11)
+- **MCP Registry metadata.** `package.json` declares `mcpName`
+  `io.github.onlyflowstech/servicenow-mcp`, and the package ships the
+  `server.json` manifest for the official MCP Registry. (#14)
+- The README leads with what the server controls and what it does not, lists
+  the tools by area, and documents per-profile field policy. `AGENTS.md`
+  describes how contributors' AI agents work in this repository. (#11, #13,
+  #14)
+- From the 2.2.0 dev builds: the ATF tools `sn_atf_author`, `sn_atf_run`,
+  `sn_atf_results` and `sn_atf_readiness`, with `setup grant --atf`;
+  Windows support in `servicenow-mcp-setup`; and the npm `dev` channel for
+  prereleases (`npm install -g @onlyflows/servicenow-mcp@dev`). Details are
+  under 2.2.0-dev.1 through 2.2.0-dev.6 below.
+
+### Changed
+
+- **Field policy and journal rules (breaking for some profiles).** Each item
+  below has its remedy in
+  [Upgrading to 2.2.0](docs/V2-MIGRATION.md#upgrading-to-220). (#11)
+  - `SN_FIELD_POLICY_DEFINITIONS` configures only the `SN_PROFILE_NAME`
+    environment profile. While it is set and a config file supplies the
+    profiles, the server, `servicenow-mcp-setup` and `servicenow-mcp-profile`
+    refuse to start and say how to move the policy into each profile's
+    `fieldPolicy`.
+  - Field policy is validated when profiles load. A malformed `fieldPolicy`,
+    `readableTableFields` or `writableTableFields` used to deny every call on
+    its profile, or narrow nothing; it now stops startup with the profile, key
+    path and table named and no configured value repeated. One bad profile
+    stops the whole file from loading.
+  - A profile's `"*"` field-policy entry now reaches `incident`,
+    `change_request`, `problem`, `sc_request`, `sc_req_item`, `sc_task`,
+    `task`, `cmdb_ci`, `cmdb_ci_server`, `cmdb_ci_computer`, `kb_knowledge`
+    and every custom table, so `{"*": {"writable": []}}` now denies writes to
+    them. The 23 built-in system tables still never take it.
+  - `sys_class_name`, `sys_class_path`, `sys_domain` and `sys_domain_path`
+    are written only where a profile lists them by name; no wildcard covers
+    them.
+  - `sn_incident_add_comment` and `sn_incident_add_work_note` are denied when
+    the incident's `writable` set leaves out `comments` or `work_notes`.
+  - `incident` accepts every field the profile allows, not only the 14 typed
+    fields; those 14 keep their typed checks.
+  - `["*"]` in a field set means every field; it used to fail every call.
+    `readable: []` no longer blocks writes as a side effect; add
+    `writable: []` for that.
+  - A dot-walked or `variables.*` write key is denied with the reason
+    `unsupported_field_path`, and a write-value denial names the field and
+    table, never the value.
+- **`sn_batch` uses the ServiceNow REST Batch API and never re-sends a batch
+  that may have reached the instance.** Confirmed updates and deletes go up to
+  50 records per request, with each request kept under 4 MiB unless one
+  record alone exceeds about 3 MiB, which is then sent on its own. A batch
+  sub-request that fails with a server error is reported as unconfirmed, not
+  retried. The run falls back to one Table API call per record only when the
+  instance refuses a batch request (401, 403 or 404), and only for that
+  batch's records and the ones after it. That fallback follows the HTTP
+  client's retry rules: an ordinary update or delete is retried up to twice
+  after a 502, 503, 504 or connection error, and a journal write is re-sent
+  only after a 429 or a 401 credential refresh, when ServiceNow has not
+  processed it. A rate limit (429) that persists through the client's retries
+  stops the run with the `Retry-After` hint. Unconfirmed records count as
+  neither processed nor failed; records not sent count as failed. (#11)
+- `servicenow-mcp-setup grant --write incident` also binds the two incident
+  journal tools; comments are customer-visible. An explicit `--tools` list
+  withholds them. Existing profiles are not changed. (#11)
+- `sn_update` advertises `idempotentHint: false`, because a journal field
+  appends an entry on every call. (#11)
+- **Metadata caching works in every auth mode.** Freshness is checked against
+  the table's row count and newest `sys_updated_on`, so OAuth
+  `client_credentials` and API-key profiles, where the cache used to turn
+  itself off, now cache too. `sn_schema` results are reused for 5 minutes
+  (`schemaCacheTtlMs` / `SN_SCHEMA_CACHE_TTL_MS`, up to 1 hour), and
+  `force_recache: true` refreshes one read. (#9)
+- **zod 4 is visible to clients in three ways.** Input validation errors
+  reported by the MCP SDK use zod 4's wording (for example `Invalid input:
+  expected string, received undefined` instead of `Required`); tool schemas
+  are served inline instead of with internal `$ref`s, which adds about 18 KB
+  to `tools/list`; and integer fields in output schemas state the
+  safe-integer range. Tools accept and reject the same input as before. (#16)
+- **Less memory at startup.** The startup tool-catalog check no longer
+  compiles output-schema validators it never uses, which saves about 6 MB of
+  idle memory in a stdio server. Validation of real calls is unchanged. (#19)
 
 ### Fixed
 
-- A hibernating developer instance, and any other HTML page returned in place
-  of an API response (single sign-on, maintenance, proxy), now produces a
-  clear error instead of a generic upstream failure. The OAuth token fetch and
-  every API call report "The ServiceNow instance <host> appears to be
-  hibernating ... wake it at https://developer.servicenow.com" (retry later,
-  never retried automatically), or a fixed "returned an HTML page" message for
-  any other HTML page. The hibernation page is recognised by its
-  `Instance Hibernating` title. A 200 body that is not valid JSON also gets a
-  fixed message. None of these repeats response text, and the setup wizard and
-  `servicenow-mcp-setup doctor --live` (one authenticated read per profile,
-  run concurrently with a 10 s timeout) no longer print raw error messages.
-- The server no longer follows HTTP redirects on API calls or the OAuth token
-  request. A cross-origin redirect used to forward an API-key header, and a 307
-  re-sent the token request body, which holds the client secret. Any 3xx now
-  fails with "The instance redirected the request to another location" and
-  does not echo the `Location`.
-- `incident` fields outside the 14 with typed checks are writable. Task fields
-  such as `cmdb_ci`, `business_service`, `watch_list` and `hold_reason`, and
-  every `u_`/`x_` custom field, were rejected whatever the field policy said.
-  They now get the generic value bounds; the 14 fields keep their typed
-  checks, and the sensitive-name blocklist is unchanged.
-- Incident `description`, `close_notes`, choice fields and the reference
-  fields `caller_id`, `assignment_group` and `assigned_to` can be cleared with
-  `""` or `null`. `short_description` stays required.
-- Generic writes accept `null` (clears the field), finite decimals such as
-  `12.5`, arrays of comma-free scalars for list fields such as `watch_list`,
-  and the `{value, display_value, link}` read shape, which is written as its
-  `value`. Unsafe integers and exponent forms are still rejected.
-- `sn_batch` applies the same value policy as `sn_update`, before any
-  credential or client is used, and sends the canonical values. It used to
-  send the caller's values unchecked.
-- `sn_batch` uses the documented REST Batch API shape: per-request headers,
-  base64 bodies, and `serviced_requests`/`unserviced_requests` in the
-  response. The old request and parser did not match it, so a batch the
-  instance had already applied was replayed one record at a time.
-- A rate-limited `sn_batch` (429) no longer falls back to one request per
-  record, each retried against the same limit, and a batch request stays
-  under 4 MiB unless one record's fields alone exceed about 3 MiB of JSON;
-  such a record is sent one per request. Fifty records with large values
-  used to make a request of tens of megabytes.
-- Write responses always include the written record's `sys_id`. A readable
-  set that left it out made a successful create read as an upstream failure,
-  which invited a retry and a duplicate record. Every other field, `number`
-  included, still follows the readable set.
-- The metadata cache's freshness probe formatted its cutoff in the session
-  time zone, although ServiceNow reads query date literals as UTC, so on an
-  account east of UTC an updated record could be served stale for up to the
-  TTL. The watermark compares values the instance stores, so the session time
-  zone plays no part.
-- Deletes in a cached metadata table are detected, through the row count. A
-  table whose newest row is dated after the instance's clock is not cached,
-  because that row would stay the newest however many others changed.
-- `sn_schema` and `fields: "all"` follow a table's parents by name. They
-  followed the parent's label, so any hierarchy whose labels differ from table
-  names lost its inherited fields; `alm_hardware`, for example, lost nearly
-  all of them. The whole chain is read in one request.
-- `servicenow-mcp-setup` offers a table's parent by name. It followed the
-  parent's label, so it offered `server` for `cmdb_ci_linux_server`, a table
-  that does not exist, and nothing for a parent labelled with a space, such as
-  `cmdb_ci`. It also fetches one OAuth token for its parent lookups rather
-  than one per table.
-- The `relatedTables` documentation, the `grant` output and `--related` help
-  say what the loader and `grant` do. The loader checks that each declared
-  related table has every operation permission its target has, so
-  `grant --related` adds the table to the allowlist of each of those
-  operations, including one a later grant adds. That makes it addressable only
-  through a target of its own, or a `*` allowlist, and a target the table has
-  or later gets can then use those operations on it. A self-only list is enough
-  to read inherited fields, and a view or alias should declare every table it
-  reads. They described the list as the complete set of tables an operation
-  can reach, and the help called `--related` required for any table that
-  extends another. A target without `closureComplete: true` is now rejected
-  with an error that names the field.
+- A hibernating developer instance, and any other HTML page returned instead
+  of an API response (single sign-on, maintenance, proxy), now gives a clear
+  error instead of a generic upstream failure: "The ServiceNow instance
+  <host> appears to be hibernating ... wake it at
+  https://developer.servicenow.com", or a fixed "returned an HTML page"
+  message. A 200 response that is not valid JSON gets a fixed message too,
+  and none of these repeats response text. The setup wizard and
+  `servicenow-mcp-setup doctor --live` no longer print raw error messages, and
+  `doctor --live` checks profiles concurrently with a 10-second timeout. (#15)
+- `incident` fields outside the 14 typed ones, such as `cmdb_ci`,
+  `business_service`, `watch_list`, `hold_reason` and every `u_`/`x_` custom
+  field, are writable. Incident `description`, `close_notes`, choice fields
+  and the reference fields `caller_id`, `assignment_group` and `assigned_to`
+  can be cleared with `""` or `null`. (#11)
+- Generic writes accept `null`, finite decimals such as `12.5`, arrays for
+  list fields such as `watch_list`, and the `{value, display_value, link}`
+  read shape. (#11)
+- `sn_batch` applies the same value policy as `sn_update` and sends the
+  canonical values; it used to send the caller's values unchecked. It now
+  uses the documented REST Batch API shape, so a batch the instance had
+  already applied is no longer replayed one record at a time, and a large
+  batch no longer becomes a request of tens of megabytes. (#11)
+- Write responses always include the written record's `sys_id`, so a
+  successful create no longer reads as a failure that invites a duplicate
+  retry. (#11)
+- The metadata cache no longer serves stale rows on accounts east of UTC, and
+  it detects deletes. A table whose newest row is dated in the future is not
+  cached. (#9)
+- `sn_schema` and `fields: "all"` follow a table's parents by name instead of
+  by label, so hierarchies such as `alm_hardware` keep their inherited
+  fields. (#9)
+- `servicenow-mcp-setup` offers a table's parent by name, not by label, and
+  fetches one OAuth token for its parent lookups. The `relatedTables`
+  documentation, `grant` output and `--related` help now say what
+  `grant --related` adds. (#12)
+- From the 2.2.0 dev builds: tool schemas no longer declare JSON Schema
+  draft-07, which clients on the current MCP specification refused
+  (2.2.0-dev.6), and `servicenow-mcp-setup` finds client CLIs and registers
+  clients on native Windows (2.2.0-dev.6).
 
 ## [2.2.0-dev.6] — 2026-09-16
 
