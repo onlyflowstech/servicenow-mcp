@@ -176,7 +176,7 @@ export const toolModules = allToolModules;
 export const REGISTERED_TOOL_COUNT = toolModules.length;
 
 /**
- * Register all 23 published tools through the SDK's high-level API.
+ * Register all 24 published tools through the SDK's high-level API.
  *
  * The contract factory retains each module's inferred Zod type while this
  * dispatcher consumes its deliberately erased, runtime-validated boundary.

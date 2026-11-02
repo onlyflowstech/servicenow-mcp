@@ -11,7 +11,7 @@ Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](ht
 
 ## Governed and safe for production
 
-The server exposes 23 tools over stdio. Every call runs inside controls that
+The server exposes 24 tools over stdio. Every call runs inside controls that
 you configure and that no tool of this server can change:
 
 - **Per-profile table and field policy.** Each profile (a named ServiceNow
@@ -664,10 +664,9 @@ Those two require action on every install. The transport is stdio, as it was in
 The breaking changes from `1.0.0`, each with a before/after example, are in
 [Migrating to 2.0](docs/V2-MIGRATION.md#breaking-changes-at-a-glance).
 
-Already on 2.x? The next release changes field-policy loading and journal
-writes, and can refuse to start on a configuration that loads today. Read
-[Upgrading to the next release](docs/V2-MIGRATION.md#upgrading-to-the-next-release)
-first.
+Already on 2.x? 2.2.0 changes field-policy loading and journal writes, and
+can refuse to start on a configuration that loads today. Read
+[Upgrading to 2.2.0](docs/V2-MIGRATION.md#upgrading-to-220) first.
 
 ### Deployment guides for the dormant HTTP transport
 
