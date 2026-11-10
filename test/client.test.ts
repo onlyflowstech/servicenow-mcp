@@ -5,6 +5,7 @@ import {
   MAX_CUMULATIVE_UPSTREAM_JSON_BYTES,
   MAX_RETRY_DELAY_MS,
   ServiceNowClient,
+  isServiceNowResponseTooLarge,
   parseRetryAfterMs,
   retryDelayMs,
   runWithServiceNowRequestSignal,
@@ -464,6 +465,21 @@ describe("bounded raw responses and path confinement", () => {
     expect(cancel).toHaveBeenCalledTimes(1);
   });
 
+  it("marks byte-limit failures so callers can tell them from other RangeErrors", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(8));
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status: 200 })));
+    const error = await makeClient()
+      .getRaw("/api/now/attachment/file", { maxBytes: 10 })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(RangeError);
+    expect(isServiceNowResponseTooLarge(error)).toBe(true);
+    expect(isServiceNowResponseTooLarge(new RangeError("Maximum call stack size exceeded"))).toBe(false);
+  });
+
   it.each([
     "/api/now/table/incident/../oauth_token",
     "/api/now/table/incident/%2e%2e/oauth_token",
@@ -750,5 +766,24 @@ describe("auth headers", () => {
       "Basic " +
       Buffer.from(`${BASE_CONFIG.user}:${BASE_CONFIG.password}`).toString("base64");
     expect(headers.Authorization).toBe(expected);
+  });
+});
+
+describe("CI/CD suite submission", () => {
+  it("sends suite and browser selectors as URL parameters on one POST", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ result: { status: "0" } }));
+    vi.stubGlobal("fetch", fetch);
+    await makeClient().post("/api/sn_cicd/testsuite/run", {}, {
+      test_suite_sys_id: "11111111111111111111111111111111",
+      browser_name: "Chrome & test",
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [target, init] = fetch.mock.calls[0];
+    const url = new URL(String(target));
+    expect(url.pathname).toBe("/api/sn_cicd/testsuite/run");
+    expect(url.searchParams.get("test_suite_sys_id")).toBe("11111111111111111111111111111111");
+    expect(url.searchParams.get("browser_name")).toBe("Chrome & test");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe("{}");
   });
 });

@@ -6,6 +6,7 @@
  * @module config
  */
 
+import type { AtfConfig } from "./atf-config.js";
 import type { MetadataCacheConfigInput } from "./metadata-cache.js";
 
 export type AuthType = "basic" | "oauth" | "apikey";
@@ -37,6 +38,23 @@ export interface ServiceNowConfig {
   schemaCacheTtlMs?: number;
   /** Per-instance metadata read-through cache configuration. */
   metadataCache?: MetadataCacheConfigInput;
+  /** Resolved ATF grants and result-cache settings. */
+  atf?: AtfConfig;
+}
+
+/**
+ * Parse a boolean environment value. Accepts true/false/1/0 in any case;
+ * anything else is a configuration error rather than a silent false.
+ */
+export function parseBooleanEnv(
+  value: string | undefined,
+  name: string
+): boolean | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1") return true;
+  if (normalized === "false" || normalized === "0") return false;
+  throw new Error(`${name} must be true or false`);
 }
 
 /**

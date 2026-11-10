@@ -297,7 +297,7 @@ describe("SNSDK-29 table policy", () => {
     ).toThrow(/same operation permission/u);
   });
 
-  it("requires a complete descendant closure without making dependencies addressable", () => {
+  it("requires each declared related table to carry the operation, without making it addressable", () => {
     expect(() =>
       createTableAccessPolicy({
         readTables: ["task"],
@@ -350,7 +350,7 @@ describe("SNSDK-29 table policy", () => {
     ).toThrow(TablePolicyError);
   });
 
-  it("rejects target catalogs that do not explicitly attest closure completeness", () => {
+  it("rejects a target that does not set closureComplete: true", () => {
     expect(() =>
       createTableAccessPolicy({
         readTables: ["incident"],
@@ -363,7 +363,7 @@ describe("SNSDK-29 table policy", () => {
           } as never,
         ],
       })
-    ).toThrow(/explicitly complete/u);
+    ).toThrow(/must set closureComplete: true/u);
   });
 
   it("does not widen one tool's table grant to a generic table tool", () => {
@@ -474,12 +474,8 @@ describe("complete registered-tool table plans", () => {
       { operation: "read", table: "problem" },
     ]);
     expect(resolveToolTableAccess("sn_codesearch", {}).requests).toHaveLength(5);
-    expect(() => resolveToolTableAccess("sn_atf", { action: "run" })).toThrow(
-      TablePolicyError
-    );
-    expect(() =>
-      resolveToolTableAccess("sn_atf", { action: "run-suite" })
-    ).toThrow(TablePolicyError);
+    expect(resolveToolTableAccess("sn_atf", { action: "run" }).requests).toEqual([]);
+    expect(resolveToolTableAccess("sn_atf", { action: "run-suite" }).requests).toEqual([]);
     expect(
       resolveToolTableAccess("sn_attach", {
         action: "download",

@@ -26,6 +26,13 @@ import {
   createHttpRuntime,
   type HttpRuntime,
 } from "../src/http-runtime.js";
+import {
+  JSON_SHAPE_REJECTION_CODE,
+  JSON_SHAPE_REJECTION_MESSAGE,
+  MAX_JSON_MESSAGE_ARRAY_LENGTH,
+  MAX_JSON_MESSAGE_DEPTH,
+  MAX_JSON_MESSAGE_ELEMENTS,
+} from "../src/json-shape-limits.js";
 import type { Profile, ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import {
@@ -59,6 +66,10 @@ const SCHEMA_DICTIONARY_QUERY =
 
 const expectedInputs: Record<string, readonly string[]> = {
   sn_aggregate: ["display_value", "field", "group_by", "limit", "offset", "profile", "table", "type"],
+  sn_atf_author: ["action", "active", "application_scope", "description", "name", "profile", "start_order", "steps", "suite_sys_id", "test_sys_id", "test_sys_ids"],
+  sn_atf_run: ["browser_name", "profile", "run_in_cloud", "suite_name", "suite_sys_id", "timeout", "wait"],
+  sn_atf_results: ["action", "failures_limit", "failures_offset", "limit", "output_field", "output_limit", "output_offset", "previous_result_id", "profile", "progress_id", "regression_percent", "result_id", "step_result_id", "suite_sys_id", "test_sys_id", "tests_limit", "tests_offset"],
+  sn_atf_readiness: ["profile", "suite_name", "suite_sys_id"],
   sn_atf: ["action", "execution_id", "fields", "limit", "offset", "profile", "suite_name", "suite_sys_id", "test_sys_id", "timeout", "wait"],
   sn_attach: ["action", "attachment_sys_id", "content_base64", "content_type", "file_name", "limit", "offset", "profile", "sys_id", "table"],
   sn_batch: ["action", "confirm", "fields", "limit", "profile", "structured_query", "table"],
@@ -66,6 +77,7 @@ const expectedInputs: Record<string, readonly string[]> = {
   sn_create: ["fields", "profile", "table"],
   sn_delete: ["confirm", "profile", "sys_id", "table"],
   sn_discover: ["active", "limit", "offset", "profile", "query", "type"],
+  sn_flow_view: ["depth", "flow", "format", "include_inputs", "max_nodes", "max_response_bytes", "profile"],
   sn_get: ["display_value", "fields", "force_recache", "identifier", "max_response_bytes", "profile", "response_format", "sys_id", "table"],
   sn_health: ["check", "profile"],
   sn_incident_add_comment: ["content", "profile", "sys_id"],
@@ -81,6 +93,10 @@ const expectedInputs: Record<string, readonly string[]> = {
 
 const expectedRequired: Record<string, readonly string[]> = {
   sn_aggregate: ["profile", "table", "type"],
+  sn_atf_author: ["action", "profile"],
+  sn_atf_run: ["profile"],
+  sn_atf_results: ["action", "profile"],
+  sn_atf_readiness: ["profile"],
   sn_atf: ["action", "profile"],
   sn_attach: ["action", "profile"],
   sn_batch: ["action", "profile", "structured_query", "table"],
@@ -88,6 +104,7 @@ const expectedRequired: Record<string, readonly string[]> = {
   sn_create: ["fields", "profile", "table"],
   sn_delete: ["confirm", "profile", "sys_id", "table"],
   sn_discover: ["profile", "type"],
+  sn_flow_view: ["flow", "profile"],
   sn_get: ["profile", "table"],
   sn_health: ["profile"],
   sn_incident_add_comment: ["content", "profile", "sys_id"],
@@ -105,6 +122,10 @@ const validProfileBoundaryArguments: Readonly<
   Record<string, Readonly<Record<string, unknown>>>
 > = Object.freeze({
   sn_aggregate: { table: "incident", type: "COUNT" },
+  sn_atf_author: { action: "create_test", name: "Example" },
+  sn_atf_run: { suite_sys_id: "1".repeat(32) },
+  sn_atf_results: { action: "history", suite_sys_id: "1".repeat(32) },
+  sn_atf_readiness: {},
   sn_atf: { action: "list" },
   sn_attach: { action: "list" },
   sn_batch: {
@@ -122,6 +143,7 @@ const validProfileBoundaryArguments: Readonly<
     confirm: false,
   },
   sn_discover: { type: "tables" },
+  sn_flow_view: { flow: "Example flow" },
   sn_get: {
     table: "incident",
     sys_id: "11111111111111111111111111111111",
@@ -152,6 +174,10 @@ type CompleteAnnotations = Required<NonNullable<Tool["annotations"]>>;
 
 const expectedAnnotations: Record<string, CompleteAnnotations> = {
   sn_aggregate: { title: "Aggregate records", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  sn_atf_author: { title: "Author ATF tests and suites", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  sn_atf_run: { title: "Run an ATF suite", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  sn_atf_results: { title: "Read ATF results", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  sn_atf_readiness: { title: "Check ATF readiness", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_atf: { title: "Run ATF tests", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   sn_attach: { title: "Manage attachments", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   sn_batch: { title: "Bulk update/delete records", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -159,6 +185,7 @@ const expectedAnnotations: Record<string, CompleteAnnotations> = {
   sn_create: { title: "Create record", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   sn_delete: { title: "Delete record", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   sn_discover: { title: "Discover tables, apps, and plugins", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  sn_flow_view: { title: "View Flow Designer flow", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_get: { title: "Get record", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_health: { title: "Check instance health", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_incident_add_comment: { title: "Add incident comment", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -169,7 +196,7 @@ const expectedAnnotations: Record<string, CompleteAnnotations> = {
   sn_relationships: { title: "Traverse CI relationships", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_schema: { title: "Get table schema", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_syslog: { title: "Query system logs", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  sn_update: { title: "Update record", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  sn_update: { title: "Update record", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 };
 
 interface JsonRpcResponse {
@@ -713,7 +740,7 @@ const leakProbeModule = defineServiceNowToolModule({
 });
 
 describe.each(clientFactories)("SNSDK-27 %s contract", (_label, createClient) => {
-  it("initializes and discovers the exact 19-tool schema and annotation contract", async () => {
+  it("initializes and discovers the exact 24-tool schema and annotation contract", async () => {
     const harness = await createHarness();
     const client = createClient(harness.url);
     try {
@@ -760,6 +787,20 @@ describe.each(clientFactories)("SNSDK-27 %s contract", (_label, createClient) =>
     } finally {
       await client.close();
     }
+  });
+
+  it("creates an ATF suite with structured results and readable links", async () => {
+    const post = vi.fn(async () => ({ result: { sys_id: "1".repeat(32) } }));
+    const harness = await createHarness({ client: { post } as unknown as ServiceNowClient, writeTables: ["sys_atf_test_suite"], targetTools: ["sn_atf_author"] });
+    const client = createClient(harness.url);
+    try {
+      await client.initialize();
+      const result = await client.callTool("sn_atf_author", { profile: PROFILE_NAME, action: "create_suite", name: "Example suite" });
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent).toMatchObject({ profile: PROFILE_NAME, data: { outcome: "created", results: [{ table: "sys_atf_test_suite", sys_id: "1".repeat(32) }] } });
+      expect(JSON.stringify(result.content)).toContain(`${INSTANCE}/sys_atf_test_suite.do?sys_id=${"1".repeat(32)}`);
+      expect(post).toHaveBeenCalledWith("/api/now/table/sys_atf_test_suite", { name: "Example suite", active: "true" });
+    } finally { await client.close(); }
   });
 
   it("appends both incident journal fields through exact non-secret results", async () => {
@@ -819,8 +860,8 @@ describe.each(clientFactories)("SNSDK-27 %s contract", (_label, createClient) =>
     }
   });
 
-  it("rejects generic journal updates with exact migration guidance before clients", async () => {
-    const patch = vi.fn();
+  it("appends generic journal updates and bounds their content before clients", async () => {
+    const patch = vi.fn(async () => ({ result: { sys_id: "1".repeat(32) } }));
     const harness = await createHarness({
       client: { patch } as unknown as ServiceNowClient,
       writeTables: ["incident"],
@@ -829,25 +870,38 @@ describe.each(clientFactories)("SNSDK-27 %s contract", (_label, createClient) =>
     const client = createClient(harness.url);
     try {
       await client.initialize();
-      for (const [field, dedicatedTool] of [
-        ["comments", "sn_incident_add_comment"],
-        ["work_notes", "sn_incident_add_work_note"],
-      ] as const) {
+      for (const field of ["comments", "work_notes"] as const) {
+        const result = await client.callTool("sn_update", {
+          profile: PROFILE_NAME,
+          table: "incident",
+          sys_id: "1".repeat(32),
+          fields: { [field]: `${field} entry` },
+        });
+        expect(result.isError).toBeUndefined();
+        expect(patch).toHaveBeenLastCalledWith(
+          `/api/now/table/incident/${"1".repeat(32)}`,
+          { [field]: `${field} entry` }
+        );
+      }
+      expect(patch).toHaveBeenCalledTimes(2);
+
+      // Content outside the journal bounds never reaches config or a client.
+      harness.getConfig.mockClear();
+      harness.getClient.mockClear();
+      for (const field of ["comments", "work_notes"] as const) {
         const canary = `${field}-must-not-return`;
         const result = await client.callTool("sn_update", {
           profile: PROFILE_NAME,
           table: "incident",
           sys_id: "1".repeat(32),
-          fields: { [field]: canary },
+          fields: { [field]: `${canary}\u0000` },
         });
         expect(result.isError).toBe(true);
-        expect(JSON.stringify(result)).toContain(dedicatedTool);
         expect(JSON.stringify(result)).not.toContain(canary);
       }
-      expect(harness.getProfile).toHaveBeenCalledTimes(2);
       expect(harness.getConfig).not.toHaveBeenCalled();
       expect(harness.getClient).not.toHaveBeenCalled();
-      expect(patch).not.toHaveBeenCalled();
+      expect(patch).toHaveBeenCalledTimes(2);
     } finally {
       await client.close();
     }
@@ -1778,6 +1832,7 @@ describe.each(clientFactories)("SNSDK-45 %s module isolation", (_label, createCl
           "patch",
           "post",
           "postBinary",
+          "saveAtfStepInputs",
         ],
         profile: PROFILE_NAME,
         prototype_is_null: true,
@@ -2012,6 +2067,76 @@ describe("SNSDK-27 authentication and malformed protocol", () => {
     expect(harness.createServer).not.toHaveBeenCalled();
     expect(harness.getProfile).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [
+      "an initialize array past the array bound",
+      () => ({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: {
+            name: "x",
+            version: "1",
+            icons: new Array(MAX_JSON_MESSAGE_ARRAY_LENGTH + 1).fill(0),
+          },
+        },
+      }),
+    ],
+    [
+      "tool arguments past the element bound",
+      () => ({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "sn_profile",
+          arguments: {
+            profile: PROFILE_NAME,
+            extra: Array.from(
+              { length: Math.ceil(MAX_JSON_MESSAGE_ELEMENTS / MAX_JSON_MESSAGE_ARRAY_LENGTH) + 1 },
+              () => new Array(MAX_JSON_MESSAGE_ARRAY_LENGTH).fill(0)
+            ),
+          },
+        },
+      }),
+    ],
+    [
+      "a message nested past the depth bound",
+      () => {
+        let nested: unknown = 0;
+        for (let level = 0; level < MAX_JSON_MESSAGE_DEPTH; level += 1) nested = [nested];
+        return {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "sn_profile", arguments: { profile: PROFILE_NAME, extra: nested } },
+        };
+      },
+    ],
+  ])(
+    "rejects %s with a fixed error before server or schema dispatch",
+    async (_label, build) => {
+      const harness = await createHarness();
+      const response = await fetch(harness.url, {
+        method: "POST",
+        headers: mcpHeaders(undefined, LATEST_PROTOCOL_VERSION),
+        body: JSON.stringify(build()),
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: JSON_SHAPE_REJECTION_CODE, message: JSON_SHAPE_REJECTION_MESSAGE },
+      });
+      expect(harness.createServer).not.toHaveBeenCalled();
+      expect(harness.getProfile).not.toHaveBeenCalled();
+    }
+  );
 });
 
 describe("SNSDK-27 health and lifecycle transitions", () => {

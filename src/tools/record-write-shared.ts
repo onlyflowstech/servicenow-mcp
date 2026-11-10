@@ -4,14 +4,28 @@ import { types as nodeUtilTypes } from "node:util";
 
 import {
   filterReadableRecord,
+  isAllFieldSelection,
   preparedReadableFields,
-  resolveReadableFields,
+  resolveWriteResponseFields,
+  type FieldSelection,
 } from "../field-policy.js";
 import { normalizeServiceNowSysId } from "../servicenow-identifiers.js";
 import { createToolError, type ToolErrorRetry } from "../tool-error.js";
 import { stripEmpty } from "../utils.js";
 
 const RECORD_NUMBER = /^[A-Za-z0-9_-]{1,80}$/u;
+
+/**
+ * Handle of the record a write just touched. It is returned whatever the
+ * readable set says: without `sys_id` a create that succeeded upstream reads
+ * as an upstream failure, the caller retries, and the record is duplicated
+ * (or, for ATF authoring, orphaned because rollback has no handle).
+ *
+ * Only `sys_id`. Every other field, `number` included, follows the readable
+ * set: on an update the record already existed, so forcing `number` would
+ * disclose a field the operator excluded.
+ */
+const WRITTEN_RECORD_HANDLE_FIELD = "sys_id";
 
 export function filteredWriteRecord(
   args: Readonly<Record<string, unknown>>,
@@ -20,10 +34,10 @@ export function filteredWriteRecord(
 ): Record<string, unknown> {
   const readableFields =
     preparedReadableFields(args, args.table) ??
-    resolveReadableFields(args.table, { fields: "all" });
+    resolveWriteResponseFields(args.table);
   const candidate = filterReadableRecord(
     resultProperty(response, retry),
-    readableFields
+    withWrittenRecordHandle(readableFields)
   );
   if (
     typeof candidate !== "object" ||
@@ -33,6 +47,13 @@ export function filteredWriteRecord(
     throw createToolError("upstream", retry);
   }
   return stripEmpty(candidate as Record<string, unknown>);
+}
+
+function withWrittenRecordHandle(readable: FieldSelection): FieldSelection {
+  if (isAllFieldSelection(readable) || readable.includes(WRITTEN_RECORD_HANDLE_FIELD)) {
+    return readable;
+  }
+  return [...readable, WRITTEN_RECORD_HANDLE_FIELD];
 }
 
 export function requiredCreatedSysId(record: Record<string, unknown>): string {

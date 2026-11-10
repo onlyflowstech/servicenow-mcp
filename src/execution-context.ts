@@ -12,6 +12,11 @@
 
 import { randomUUID } from "node:crypto";
 
+import {
+  createAtfExecutionPolicy,
+  type AtfExecutionPolicy,
+  type AtfExecutionPolicyInput,
+} from "./atf-policy.js";
 import type { FieldPolicyConfigurationInput } from "./field-policy.js";
 import {
   createEncodedQueryAccessPolicy,
@@ -72,6 +77,8 @@ export interface EffectivePolicyReference {
   readonly fieldPolicy?: FieldPolicyConfigurationInput;
   /** Omission is the universal deny-all raw encoded-query policy. */
   readonly encodedQueryAccess?: EncodedQueryAccessPolicyInput;
+  /** Omission denies ATF execution and script-step authoring. */
+  readonly atf?: AtfExecutionPolicyInput;
 }
 
 export interface ResolvedEffectivePolicyReference {
@@ -80,6 +87,7 @@ export interface ResolvedEffectivePolicyReference {
   readonly tableAccess: TableAccessPolicy;
   readonly fieldPolicy?: FieldPolicyConfigurationInput;
   readonly encodedQueryAccess: EncodedQueryAccessPolicy;
+  readonly atf: AtfExecutionPolicy;
 }
 
 /** Injectable policy-selection port; it does not itself authorize a tool. */
@@ -122,6 +130,7 @@ export type ToolAuditReason =
   | "structured_query_denied"
   | "journal_update_denied"
   | "write_value_denied"
+  | "atf_execution_denied"
   | "client_initialization_failed"
   | "profile_binding_changed"
   | "request_cancelled"
@@ -186,7 +195,8 @@ export type ToolAuditRecord =
         | "encoded_query_denied"
         | "structured_query_denied"
         | "journal_update_denied"
-        | "write_value_denied";
+        | "write_value_denied"
+        | "atf_execution_denied";
     })
   | (ResolvedToolAuditRecord & ToolAuditErrorFields & {
       readonly outcome: "client_rejected";
@@ -335,6 +345,7 @@ export async function createExecutionContext(
     encodedQueryAccess: createEncodedQueryAccessPolicy(
       selectedPolicy.encodedQueryAccess
     ),
+    atf: createAtfExecutionPolicy(selectedPolicy.atf),
   });
 
   return Object.freeze({
@@ -402,7 +413,8 @@ export type ToolAuditDisposition =
         | "encoded_query_denied"
         | "structured_query_denied"
         | "journal_update_denied"
-        | "write_value_denied";
+        | "write_value_denied"
+        | "atf_execution_denied";
       readonly profile: ResolvedProfileBinding;
     }
   | {
@@ -497,7 +509,8 @@ export function createAuditRecord(input: CreateToolAuditRecordInput): ToolAuditR
         reason !== "encoded_query_denied" &&
         reason !== "structured_query_denied" &&
         reason !== "journal_update_denied" &&
-        reason !== "write_value_denied"
+        reason !== "write_value_denied" &&
+        reason !== "atf_execution_denied"
       ) {
         break;
       }
@@ -748,7 +761,8 @@ function validateAuditInvariant(
         reason === "encoded_query_denied" ||
         reason === "structured_query_denied" ||
         reason === "journal_update_denied" ||
-        reason === "write_value_denied") &&
+        reason === "write_value_denied" ||
+        reason === "atf_execution_denied") &&
       hasProfile) ||
     (outcome === "client_rejected" &&
       (reason === "client_initialization_failed" ||

@@ -10,22 +10,41 @@ import { resolveReadableFields } from "../src/field-policy.js";
 
 const INCIDENT_DEFAULTS = resolveReadableFields("incident");
 
-/** Dictionary fixture: `columns` on the table, `parent` columns inherited. */
+/**
+ * Dictionary fixture: `columns` on the queried table, and each of `ancestors`
+ * (nearest first) contributing its own columns. sys_db_object answers the
+ * dot-walked super_class.name fields by name; super_class itself carries the
+ * parent's label, which the walk must never follow.
+ */
 function client(options: {
+  readonly table?: string;
   readonly columns?: readonly string[];
   readonly parent?: { readonly name: string; readonly columns: readonly string[] };
+  readonly ancestors?: readonly { readonly name: string; readonly label: string; readonly columns: readonly string[] }[];
   readonly dictionaryThrows?: boolean;
 }) {
+  const table = options.table ?? "incident";
+  const ancestors = options.ancestors ??
+    (options.parent ? [{ ...options.parent, label: options.parent.name }] : []);
+  const columnsByTable = new Map<string, readonly string[]>([
+    [table, options.columns ?? []],
+    ...ancestors.map(({ name, columns }) => [name, columns] as const),
+  ]);
   const get = vi.fn(async (path: string, params?: Record<string, string>) => {
     if (path === "/api/now/table/sys_db_object") {
       const name = params?.sysparm_query?.replace("name=", "");
-      return name === "incident" && options.parent
-        ? { result: [{ name, super_class: { display_value: options.parent.name } }] }
-        : { result: [{ name, super_class: "" }] };
+      if (name !== table) return { result: [] };
+      const row: Record<string, string> = { name, super_class: ancestors[0]?.label ?? "" };
+      for (const field of (params?.sysparm_fields ?? "").split(",")) {
+        const depth = field.split("super_class.").length - 1;
+        if (depth > 0) row[field] = ancestors[depth - 1]?.name ?? "";
+      }
+      return { result: [row] };
     }
     if (path === "/api/now/table/sys_dictionary") {
       if (options.dictionaryThrows) throw new Error("ACL denied");
-      const all = [...(options.columns ?? []), ...(options.parent?.columns ?? [])];
+      const names = /^nameIN([^^]+)/u.exec(params?.sysparm_query ?? "")?.[1]?.split(",") ?? [];
+      const all = names.flatMap((name) => columnsByTable.get(name) ?? []);
       return { result: all.map((element) => ({ element })) };
     }
     return { result: [] };
@@ -80,6 +99,44 @@ describe("bounded all-fields projection", () => {
 
     expect(bounded.fields).toContain("u_child");
     expect(bounded.fields).toContain("u_parent");
+  });
+
+  it("includes inherited columns from every level of a six-table chain, by name", async () => {
+    // cmdb_ci_linux_server's super_class label is "Server"; following it
+    // found no table and kept only 113 of 546 columns on a live instance.
+    const { operations, get } = client({
+      table: "cmdb_ci_linux_server",
+      columns: ["kernel_release"],
+      ancestors: [
+        { name: "cmdb_ci_server", label: "Server", columns: ["classification"] },
+        { name: "cmdb_ci_computer", label: "Computer", columns: ["cpu_count"] },
+        { name: "cmdb_ci_hardware", label: "Hardware", columns: ["serial_number"] },
+        { name: "cmdb_ci", label: "Configuration Item", columns: ["name", "ip_address"] },
+        { name: "cmdb", label: "Base Configuration Item", columns: ["sys_class_name"] },
+      ],
+    });
+
+    const bounded = await boundedAllFields(operations, "cmdb_ci_linux_server", ["sys_id", "name"]);
+
+    expect([...bounded.fields].sort()).toEqual(
+      ["classification", "cpu_count", "ip_address", "kernel_release", "name", "serial_number", "sys_class_name"].sort()
+    );
+    expect(get.mock.calls.filter(([path]) => path === "/api/now/table/sys_db_object")).toHaveLength(1);
+    const dictionary = get.mock.calls.find(([path]) => path === "/api/now/table/sys_dictionary");
+    expect(dictionary?.[1]?.sysparm_query).toMatch(
+      /^nameINcmdb_ci_linux_server,cmdb_ci_server,cmdb_ci_computer,cmdb_ci_hardware,cmdb_ci,cmdb\^/u
+    );
+  });
+
+  it("falls back to the defaults for a table name that would widen nameIN", async () => {
+    // "incident,sys_user" spliced into nameIN would read sys_user's
+    // dictionary too. The walk rejects it, and no dictionary read is sent.
+    const { operations, get } = client({ columns: ["u_column"] });
+
+    const bounded = await boundedAllFields(operations, "incident,sys_user", ["sys_id", "number"]);
+
+    expect(bounded).toEqual({ fields: ["sys_id", "number"], capped: true });
+    expect(get).not.toHaveBeenCalled();
   });
 
   it("never names a sensitive column in the request", async () => {

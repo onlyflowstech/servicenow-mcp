@@ -1,0 +1,17 @@
+{
+  "note": "Shape of capture F6a (Fixture Parallel Flow): Do the following in Parallel with two Parallel Branch rows; an End closes the first branch.",
+  "header": { "sys_id": "4444444444444444444444444444dddd", "name": "Fixture Parallel Flow", "type": "flow", "active": true, "status": "Published", "version": "2", "scope": "global" },
+  "trigger": { "type": "Updated", "table": "x_fixture_record", "condition": "fixture_state=two" },
+  "label_cache": [],
+  "variables": [],
+  "steps": [
+    { "uid": "p01", "parent_uid": null, "order": 1, "kind": "action", "title": "Fixture Step A" },
+    { "uid": "p02", "parent_uid": null, "order": 2, "kind": "logic", "logic_kind": "parallel", "title": "Do the following in Parallel" },
+    { "uid": "p03", "parent_uid": "p02", "order": 1, "kind": "logic", "logic_kind": "parallel_branch", "title": "Parallel Branch" },
+    { "uid": "p04", "parent_uid": "p03", "order": 1, "kind": "action", "title": "Fixture Step B" },
+    { "uid": "p05", "parent_uid": "p03", "order": 2, "kind": "logic", "logic_kind": "end_flow", "title": "End" },
+    { "uid": "p06", "parent_uid": "p02", "order": 2, "kind": "logic", "logic_kind": "parallel_branch", "title": "Parallel Branch 2" },
+    { "uid": "p07", "parent_uid": "p06", "order": 1, "kind": "action", "title": "Fixture Step C" },
+    { "uid": "p08", "parent_uid": null, "order": 3, "kind": "action", "title": "Fixture Step D" }
+  ]
+}

@@ -23,6 +23,7 @@ import {
   preparedReadableFields,
   resolveReadableFields,
   snapshotPlainDataArguments,
+  validateWritableFields,
   withFieldPolicyArgumentValues,
 } from "./field-policy.js";
 import {
@@ -37,8 +38,16 @@ import { compileStructuredQuery, StructuredQueryError } from "./structured-query
 import {
   isIncidentJournalPolicyError,
   prepareIncidentJournalArguments,
-  rejectGenericIncidentJournalFields,
 } from "./incident-journal-policy.js";
+import {
+  isWriteValuePolicyError,
+  prepareWriteFieldValues,
+} from "./write-value-policy.js";
+import {
+  FLOW_VIEW_TABLES,
+  canonicalFlowViewArgs,
+} from "./tools/flow-view-contracts.js";
+import { flowViewFieldSelection } from "./tools/flow-view-policy.js";
 
 export interface ToolTableAccessResolution {
   readonly args: Record<string, unknown>;
@@ -147,7 +156,6 @@ export function resolveToolTableAccess(
       }
       case "sn_update": {
         rejectRawEncodedWrite(args.query);
-        rejectGenericIncidentJournalFields(args.fields);
         const table = requiredTable(args.table);
         if (!Object.hasOwn(args, "fields")) {
           return resolution(withFieldPolicyArgumentValues(args, { table }), [write(table)]);
@@ -158,6 +166,13 @@ export function resolveToolTableAccess(
       case "sn_incident_add_work_note": {
         rejectRawEncodedWrite(args.query);
         const prepared = prepareIncidentJournalArguments(args);
+        // The same field policy that decides sn_update {comments|work_notes}
+        // decides the dedicated tool, so a writable set narrowed to exclude a
+        // journal field denies both routes to it.
+        validateWritableFields("incident", {
+          [tool === "sn_incident_add_comment" ? "comments" : "work_notes"]:
+            prepared.content,
+        });
         return resolution(
           withFieldPolicyArgumentValues(args, prepared),
           [write("incident")]
@@ -204,6 +219,8 @@ export function resolveToolTableAccess(
         return discoveryResolution(args);
       case "sn_atf":
         return atfResolution(args, encodedQueryAccess);
+      case "sn_flow_view":
+        return flowViewResolution(args);
       case "sn_nl":
         // Natural-language composition can select reads or writes only after
         // parsing inside the handler. Until that parser emits a typed access
@@ -217,7 +234,10 @@ export function resolveToolTableAccess(
       error instanceof TablePolicyError ||
       isFieldPolicyError(error) ||
       isEncodedQueryPolicyError(error) ||
-      isIncidentJournalPolicyError(error)
+      isIncidentJournalPolicyError(error) ||
+      // A value denial is fixed in no table key, so it must keep its own
+      // classification instead of becoming a table denial.
+      isWriteValuePolicyError(error)
     ) {
       throw error;
     }
@@ -407,13 +427,31 @@ function atfResolution(
       );
     case "run":
     case "run-suite":
-      // ATF definitions can mutate arbitrary application tables. The static
-      // request does not carry a complete trusted side-effect manifest, so a
-      // table-only policy cannot safely authorize execution.
-      throw new TablePolicyError();
+      // Compatibility actions only return migration guidance and perform no I/O.
+      return resolution(args, []);
     default:
       throw new TablePolicyError();
   }
+}
+
+/**
+ * Read on the whole flow closure, all or nothing. sn_flow_view reads only
+ * these tables through the Table API (never Flow Designer's internal API),
+ * and every value it returns is projected through its source (table, field).
+ */
+function flowViewResolution(
+  args: Record<string, unknown>
+): ToolTableAccessResolution {
+  const canonical = canonicalFlowViewArgs(args);
+  let prepared = withFieldPolicyArgumentValues(args, { ...canonical });
+  for (const table of FLOW_VIEW_TABLES) {
+    prepared = prepareAdditionalReadFieldArguments(
+      prepared,
+      table,
+      flowViewFieldSelection(table, canonical.include_inputs).join(",")
+    );
+  }
+  return resolution(prepared, FLOW_VIEW_TABLES.map(read));
 }
 
 function aggregateResolution(
@@ -496,6 +534,10 @@ function batchResolution(
   });
   if (args.action === "update") {
     prepared = prepareWriteFieldArguments(prepared, table);
+    // The same value policy as sn_update, before any credential or client
+    // work, so the handler receives the canonical strings it sends upstream.
+    const fields = prepareWriteFieldValues("update", table, prepared.fields);
+    prepared = withFieldPolicyArgumentValues(prepared, { fields });
   }
   return resolution(
     prepared,

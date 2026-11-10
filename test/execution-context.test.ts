@@ -272,6 +272,7 @@ describe("immutable execution context", () => {
         revision: "v1",
         tableAccess: TEST_TABLE_ACCESS,
         encodedQueryAccess: { rules: [] },
+        atf: { execute: false, allowScriptSteps: false },
       },
       signal: context.signal,
     });
@@ -673,6 +674,7 @@ describe("immutable execution context", () => {
       revision: "release 1+candidate=二",
       tableAccess: TEST_TABLE_ACCESS,
       encodedQueryAccess: { rules: [] },
+      atf: { execute: false, allowScriptSteps: false },
     });
   });
 

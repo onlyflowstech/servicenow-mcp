@@ -4,8 +4,14 @@ import { join } from "node:path";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import {
+  JSON_SHAPE_REJECTION_CODE,
+  JSON_SHAPE_REJECTION_MESSAGE,
+  MAX_JSON_MESSAGE_ARRAY_LENGTH,
+} from "../src/json-shape-limits.js";
 import {
   createStdioCorrelationIdFactory,
   createStdioRequestMetadataProvider,
@@ -301,5 +307,71 @@ describe("stdio runtime lifecycle", () => {
       })
     ).rejects.toThrow(/transport unavailable/u);
     expect(server.isConnected()).toBe(false);
+  });
+});
+
+describe("stdio structural bounds", () => {
+  const identity = Object.freeze({ ownerId: "owner-a", clientId: "client-a" });
+
+  function initialize(id: unknown, icons: unknown[] = []) {
+    return {
+      jsonrpc: "2.0",
+      id,
+      method: "initialize",
+      params: {
+        protocolVersion: LATEST_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "x", version: "1", ...(icons.length > 0 ? { icons } : {}) },
+      },
+    };
+  }
+
+  async function guardedRuntime() {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const transport = recordingTransport();
+    const runtime = await startStdioRuntime({
+      identity,
+      createServer: () => new McpServer({ name: "test", version: "0.0.0" }),
+      createTransport: () => transport,
+    });
+    const deliver = (message: unknown) =>
+      transport.onmessage?.(message as Parameters<NonNullable<Transport["onmessage"]>>[0]);
+    return { transport, runtime, deliver };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("answers an oversized request with a fixed error carrying only its id", async () => {
+    const { transport, runtime, deliver } = await guardedRuntime();
+
+    deliver(initialize(7, new Array(MAX_JSON_MESSAGE_ARRAY_LENGTH + 1).fill(0)));
+    await vi.waitFor(() => expect(transport.sent).toHaveLength(1));
+    expect(transport.sent[0]).toEqual({
+      jsonrpc: "2.0",
+      id: 7,
+      error: { code: JSON_SHAPE_REJECTION_CODE, message: JSON_SHAPE_REJECTION_MESSAGE },
+    });
+
+    // The session is unaffected: a request inside the bounds is served.
+    deliver(initialize(8));
+    await vi.waitFor(() => expect(transport.sent).toHaveLength(2));
+    expect(transport.sent[1]).toMatchObject({ jsonrpc: "2.0", id: 8, result: {} });
+
+    await runtime.close();
+  });
+
+  it("drops an oversized notification, and a request whose id it will not echo", async () => {
+    const { transport, runtime, deliver } = await guardedRuntime();
+    const oversized = new Array(MAX_JSON_MESSAGE_ARRAY_LENGTH + 1).fill(0);
+
+    deliver({ jsonrpc: "2.0", method: "notifications/initialized", params: { extra: oversized } });
+    deliver(initialize("x".repeat(129), oversized));
+    deliver(initialize(9));
+    await vi.waitFor(() => expect(transport.sent).toHaveLength(1));
+    expect(transport.sent[0]).toMatchObject({ id: 9, result: {} });
+
+    await runtime.close();
   });
 });

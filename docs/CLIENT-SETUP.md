@@ -12,10 +12,10 @@
 > Sections about profiles, credentials, table access, field policy, and tool
 > behavior are transport-independent and remain accurate.
 
-This is the shortest complete path from a clean install to two
-provider-neutral clients using the same ServiceNow MCP V2 service. The server
-exposes Streamable HTTP at `/mcp`; it does not expose stdio and it does not
-select a default or active ServiceNow profile.
+This is the shortest complete path from a clean install to a working
+connection. The shipped server speaks stdio only; the Streamable HTTP
+runtime that the later sections describe is dormant. In both cases the server
+does not select a default or active ServiceNow profile.
 
 ## Quickstart: zero to a working connection
 
@@ -42,10 +42,10 @@ Three properties are worth knowing:
 - **The profile and its table-access rules are written together**, so there is
   never a window in which a profile exists that denies every call.
 
-Then start the service and verify end to end:
+There is nothing to start. Each registered client spawns its own
+`servicenow-mcp` over stdio. Verify end to end with the same checks setup runs:
 
 ```sh
-set -a; source ~/.servicenow-mcp/server.env; set +a; servicenow-mcp &
 servicenow-mcp-setup doctor --profile dev
 ```
 
@@ -79,6 +79,25 @@ proof is an `sn_profile` call followed by a bounded `sn_query`.
 completeness, credential resolution, table-access rules, and the live endpoint,
 and prints the exact remedy for anything it finds. It never prints a secret and
 exits non-zero when a check fails.
+
+`doctor` never touches the network by default. `doctor --live` also makes one
+bounded authenticated read per profile, so it can tell you whether ServiceNow
+accepts the credential and whether the instance is awake.
+
+### Troubleshooting: "appears to be hibernating"
+
+A personal developer instance sleeps when idle and answers every request,
+including the OAuth token request, with an HTML "Instance Hibernating" page and
+HTTP 200. The server reports `The ServiceNow instance <host> appears to be
+hibernating.` with the retry decision "retry later". Wake the instance at
+https://developer.servicenow.com, wait a few minutes, then retry; the server
+does not retry on its own. `servicenow-mcp-setup doctor --live` shows the same
+condition as `Instance hibernating`.
+
+If the message instead says `The instance returned an HTML page instead of an
+API response`, the instance may be asleep, behind single sign-on, or under
+maintenance: open the instance URL in a browser to see which. The detection
+inspects only the first 16 K characters of the page and never repeats any of it.
 
 ### What the bootstrap writes
 
@@ -151,7 +170,9 @@ rules. For a **file-backed profile** — anything created with
 `servicenow-mcp-profile` — those rules live in the profile itself, and
 `SN_ALLOWED_READ_TABLES` / `SN_ALLOWED_WRITE_TABLES` / `SN_TABLE_ACCESS_TARGETS`
 in the environment **do not apply**. This is the single most common reason a
-freshly installed server answers every call with a policy denial.
+freshly installed server answers every call with a policy denial. Field
+policy also lives on the profile (`fieldPolicy`); with a profile file
+present, a set `SN_FIELD_POLICY_DEFINITIONS` stops the server from starting.
 
 ```sh
 # Reads on two tables, writes on one.
@@ -160,9 +181,12 @@ servicenow-mcp-setup grant --profile dev --read incident,problem --write inciden
 # Narrow the tools permitted on a target.
 servicenow-mcp-setup grant --profile dev --read cmdb_ci --tools sn_query,sn_relationships
 
-# A table that extends another must declare the tables it reaches. Related
-# tables join the allowlist but get no target of their own, so a caller cannot
-# address them directly.
+# Optionally declare the table a target extends. --related adds it, with no
+# target, to the allowlist of every operation change_request has, including one
+# a later grant adds. On its own no tool can then address it, unless such an
+# allowlist is "*"; if it has, or later gets, a target of its own, that
+# target's tools can use those operations on it. Inherited fields are read
+# through change_request itself, so the grant works without --related too.
 servicenow-mcp-setup grant --profile dev --read change_request --related change_request=task
 
 # Inspect the result without writing it.
@@ -171,10 +195,36 @@ servicenow-mcp-setup grant --profile dev --read incident --dry-run
 
 Grants are additive; `--replace` discards the existing rules instead. Every
 grant is validated with the same loader the server uses at request time, so a
-rejected policy fails at the CLI rather than at the first tool call. Default
-tools are `sn_query,sn_get,sn_aggregate,sn_schema` for a read grant and those
-plus `sn_create,sn_update` for a write grant — `sn_delete`, `sn_batch`, and
-`sn_atf` are never granted implicitly and must be named with `--tools`.
+rejected policy fails at the CLI rather than at the first tool call.
+
+Without `--tools`, each table named with `--read` gets
+`sn_query,sn_get,sn_aggregate,sn_schema`, and each table named with `--write`
+gets `sn_create,sn_update`. A write grant on `incident` also binds
+`sn_incident_add_comment` and `sn_incident_add_work_note`. Comments are
+customer-visible, so a comment the agent appends can notify the incident's
+caller. Defaults apply only to the tables named in that command, never to
+tables the profile already allows or reaches as related tables. A re-grant adds
+the defaults to the tools already on an existing target, so re-running
+`--write incident` on a target you narrowed earlier restores `sn_create` and
+both journal tools. That includes a re-grant made only to add `--related`,
+such as `--write incident --related incident=task`: repeat `--tools` with the
+target's current list to keep it narrow. To withhold the journal tools, pass
+an explicit `--tools` list, such as `--tools sn_create,sn_update`. A grant
+never removes a tool, so on a profile that already has them, use `--replace`
+with `--tools`; `--replace` discards every rule on the profile, so grant its
+other tables again afterwards. `sn_delete`, `sn_batch`, and `sn_atf` are never
+granted implicitly and must be named with `--tools`.
+
+A grant decides which tools reach a table; the profile's field policy still
+decides which fields they may write. The journal tools follow it like
+`sn_update` does: if the incident's effective `writable` list, from
+`fieldPolicy.incident.writable` or from a `"*"` entry's `writable`, leaves
+out `comments`, `sn_incident_add_comment` is denied even though the grant
+binds it, and likewise `sn_incident_add_work_note` without `work_notes`.
+Withholding the journal tools does not withhold journals: `sn_create`,
+`sn_update` and `sn_batch` write `comments` and `work_notes` wherever field
+policy allows them. See the
+[field policy reference](../README.md#field-policy).
 
 `grant` refuses `*` and rejects anything that is not a valid table name. It
 does **not** refuse any particular table: `tableAccess` is the sole table-level
@@ -415,7 +465,7 @@ runtime and immutable image. See `CROSS-CLIENT-RELEASE-MATRIX.md`.
 
 ## 5. Profile selection, results, and audit evidence
 
-All 19 tools require a non-empty `profile`. Missing, empty, unknown, or invalid
+All 24 tools require a non-empty `profile`. Missing, empty, unknown, or invalid
 names fail before credentials or a ServiceNow client. There is no default,
 active, current, selected-session, or switch-profile operation. To work across
 instances, make separate calls and include the intended name each time:
@@ -456,8 +506,10 @@ otherwise surfaces only as a generic policy denial at call time.
 
 ### Unrestricted field selection
 
-`fields=all` and `response_format: "detailed"` resolve to a wildcard selection
-and are bounded to at most **100 columns**, resolved from `sys_dictionary`
+`fields=all` and `response_format: "detailed"` resolve to the profile's readable
+set for the table. Where the field policy narrows that set, they request exactly
+the listed fields and read no dictionary rows. Where it is every field, they
+are bounded to at most **100 columns**, resolved from `sys_dictionary`
 including fields inherited through `super_class`. Ordering is the table's
 default projection first in declared order, then the remainder alphabetically.
 `sn_query` reports truncation in its `hint` field; `sn_get` will carry the same
@@ -467,43 +519,48 @@ failed the call outright.
 
 Two consequences for callers:
 
-- **Journal fields are returned.** `comments` and `work_notes` are in the
-  resolved set for `fields=all` and `detailed`, as they are for an explicit
-  `fields=comments` and for `sn_schema`. The default projection still excludes
-  them. Journal content on real instances routinely contains customer PII, so
+- **Journal fields are returned** wherever the profile can read them.
+  `comments` and `work_notes` are in the resolved set for `fields=all` and
+  `detailed`, as they are for an explicit `fields=comments` and for
+  `sn_schema`. The default projection still excludes them. Journal content on real instances routinely contains customer PII, so
   asking for all fields on `incident` returns customer-visible commentary.
 - **Sensitive-looking names are never requested.** A field whose name matches
   the sensitive pattern is excluded from the resolved set rather than requested
   and scrubbed on arrival, so the value does not cross the wire at all.
 
-### Metadata caching prerequisites
+### Metadata caching
 
-Caching is per instance *and* credential identity, and it requires a resolvable
-session timezone: the freshness probe compares `sys_updated_on`, which
-ServiceNow evaluates in the session user's timezone rather than UTC. Resolving
-it needs the authenticating account's `user_name` to read `sys_user.time_zone`,
-falling back to the `glide.sys.default.tz` property. The profile therefore needs
-read access to `sys_user` and `sys_properties` for the lookup to work.
+Caching is per instance *and* credential identity, and it works the same in
+every auth mode, including OAuth client_credentials and API key. Freshness is
+checked against a watermark the instance reports: the table's row count and its
+newest row by `sys_updated_on`, read as its stored UTC value. No timezone,
+username, or `sys_user` / `sys_properties` read is involved. The only access it
+needs is the ServiceNow read permission of the user the credential runs as, on
+the cached table; no `tableAccess` change is needed. If a table's watermark
+cannot be used, its reads go straight upstream for a while: 15 minutes for a
+lasting cause such as a 403 or an incomplete watermark, 30 seconds for a 429,
+5xx, or network failure.
 
-When the zone cannot be resolved, **caching is disabled for that identity**
-rather than falling back to a UTC assumption — a wrong assumption would serve
-silently stale metadata for the length of the offset. Because OAuth
-client_credentials and API-key profiles carry no username, metadata caching is
-disabled for them entirely. Basic auth and the OAuth password grant are
-unaffected.
+The practical saving is payload bytes, never round trips: a hit still performs
+one watermark read, and a miss performs one extra. Within one tool call each
+table's watermark is read once.
 
-The practical cost is small and worth stating: the cache only ever saved payload
-bytes, never round trips, since a hit still performs one freshness probe. The
-loss on an affected profile is bandwidth on `sys_dictionary` reads, not latency.
+Inserts, updates, and deletes all move the watermark. An update in the same
+second as the stored watermark, to a row other than the newest, and a write that
+skips the system fields (`autoSysFields(false)`) can go unseen for up to one
+TTL — 24 hours by default. Lower the TTL or pass `force_recache: true` when a
+change must be reflected sooner.
 
-Deletions to a cached metadata table become visible within one TTL — 24 hours by
-default. The probe detects updates, not deletes, so a deleted row stays served
-until its entry expires. Lower the TTL or pass `force_recache: true` when a
-deletion must be reflected sooner.
+`sn_schema` keeps its assembled result for 5 minutes per profile, credential
+identity, and effective policy, without revalidating it. `force_recache: true`
+refreshes it.
 
-Incident `comments` and `work_notes` are append-only. Generic `sn_update`
-rejects them before credentials/client construction. After separate human
-authorization on a disposable non-production incident, use a dedicated tool:
+Incident `comments` and `work_notes` are append-only journal fields. Both
+`sn_update` and the dedicated incident tools can write them, and the
+profile's field policy decides for both routes. For a controlled validation
+write, after separate human authorization on a disposable non-production
+incident, use a dedicated tool, which can only append one entry to one
+incident:
 
 ```ts
 const writeResult = await client.callTool({
@@ -516,8 +573,9 @@ const writeResult = await client.callTool({
 });
 ```
 
-The staging policy must grant write access to `incident` and list
-`sn_incident_add_comment` on its exact target. A repeated call appends again;
+The staging policy must grant write access to `incident`, list
+`sn_incident_add_comment` on its exact target, and leave `comments` writable
+in its field policy. A repeated call appends again;
 the operation is intentionally non-idempotent. Do not substitute a generic
 journal update, production record, unrestricted query, batch, ATF execution,
 or script.
@@ -659,7 +717,7 @@ have been separately authorized. The current official OpenAI flow is:
    create a developer-mode app, choose **Tunnel** under **Connection**, and
    select the associated tunnel. Do not enter a public MCP URL or a second
    Authorization value in the app.
-4. Scan tools and compare the 19 names, schemas, and annotations with the
+4. Scan tools and compare the 24 names, schemas, and annotations with the
    frozen release manifest. Keep the app private and draft-only.
 5. On every use, name the profile in the request. For example, instruct the
    app to invoke `sn_query` with these exact non-secret arguments:

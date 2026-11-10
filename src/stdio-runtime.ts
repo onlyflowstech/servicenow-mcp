@@ -38,6 +38,11 @@ import {
   type RequestMetadataProvider,
   type ToolInvocationMetadata,
 } from "./execution-context.js";
+import {
+  inspectJsonShape,
+  JSON_SHAPE_REJECTION_CODE,
+  JSON_SHAPE_REJECTION_MESSAGE,
+} from "./json-shape-limits.js";
 
 /** Owner-only file setup writes; the only place the encryption key is stored. */
 export const SERVER_ENV_RELATIVE_PATH = ".servicenow-mcp/server.env";
@@ -263,6 +268,10 @@ export async function startStdioRuntime(
   const transport = (options.createTransport ?? defaultStdioTransport)();
   try {
     await server.connect(transport);
+    // connect() installed the protocol's handler and started reading; stdin
+    // data arrives on a later event-loop turn, so nothing is delivered
+    // unguarded.
+    installJsonShapeGuard(transport);
   } catch (error) {
     await server.close().catch(() => {});
     throw error;
@@ -279,6 +288,58 @@ export async function startStdioRuntime(
 
 function defaultStdioTransport(): Transport {
   return new StdioServerTransport();
+}
+
+/** Longest string request id echoed in a structural-limit rejection. */
+const MAX_ECHOED_REQUEST_ID_LENGTH = 128;
+
+/**
+ * Check every incoming message against the structural bounds in
+ * {@link inspectJsonShape} before the protocol layer, and so before any
+ * schema, sees it.
+ *
+ * The stdio transport has already framed and JSON-parsed the line (bounded by
+ * its buffer size) and checked only the JSON-RPC envelope. A message outside
+ * the bounds never reaches the server. A request gets a fixed JSON-RPC error
+ * carrying only its id, so the client is not left waiting; a notification or
+ * response is dropped. An id that is not a short string or a finite number is
+ * not echoed and the request is dropped.
+ *
+ * Must run after `connect()`, which installs the handler being wrapped.
+ */
+export function installJsonShapeGuard(transport: Transport): void {
+  const deliver = transport.onmessage;
+  if (typeof deliver !== "function") {
+    throw new TypeError("transport has no message handler to guard");
+  }
+  const guarded: NonNullable<Transport["onmessage"]> = (message, extra) => {
+    if (inspectJsonShape(message) === undefined) {
+      deliver.call(transport, message, extra);
+      return;
+    }
+    stderrWrite("[servicenow-mcp] rejected a message that exceeds structural limits\n");
+    const id = echoableRequestId(message);
+    if (id === undefined) return;
+    transport
+      .send({
+        jsonrpc: "2.0",
+        id,
+        error: { code: JSON_SHAPE_REJECTION_CODE, message: JSON_SHAPE_REJECTION_MESSAGE },
+      })
+      .catch(() => {
+        // A closed pipe is reported through the transport's own onerror.
+      });
+  };
+  transport.onmessage = guarded;
+}
+
+function echoableRequestId(message: unknown): string | number | undefined {
+  if (message === null || typeof message !== "object") return undefined;
+  if (!Object.hasOwn(message, "method") || !Object.hasOwn(message, "id")) return undefined;
+  const id: unknown = (message as { id?: unknown }).id;
+  if (typeof id === "number" && Number.isFinite(id)) return id;
+  if (typeof id === "string" && id.length <= MAX_ECHOED_REQUEST_ID_LENGTH) return id;
+  return undefined;
 }
 
 /** Diagnostics channel. Never stdout: stdout carries JSON-RPC frames. */

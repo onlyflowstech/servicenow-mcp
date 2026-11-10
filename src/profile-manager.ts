@@ -22,6 +22,20 @@ import {
   parsePositiveIntegerEnv,
   parseTimeoutMs,
 } from "./config.js";
+import {
+  AtfConfigurationError,
+  atfConfigFromEnvironment,
+  resolveAtfConfig,
+  validateAtfConfigInput,
+  type AtfConfig,
+  type AtfConfigInput,
+} from "./atf-config.js";
+import {
+  FieldPolicyConfigurationError,
+  fieldPolicyInputFromEnvironment,
+  validateFieldPolicyConfiguration,
+  type FieldPolicyEnvironment,
+} from "./field-policy.js";
 import { tableAccessPolicyInputFromEnvironment, type TableAccessPolicyInput } from "./table-policy.js";
 import { metadataCacheConfigFromEnvironment, type MetadataCacheConfigInput } from "./metadata-cache.js";
 import { ServiceNowClient } from "./client.js";
@@ -74,14 +88,23 @@ export interface Profile {
   schemaCacheTtlMs?: number;
   /** Per-profile table access rules. Missing rules intentionally deny all tables. */
   tableAccess?: TableAccessPolicyInput;
-  /** Per-profile legacy field policy object, matching SN_FIELD_POLICY_DEFINITIONS. */
+  /**
+   * Per-profile field policy: { table | "*": { defaults, readable, writable } }.
+   * Validated at load. On the SN_PROFILE_NAME environment profile it comes
+   * from SN_FIELD_POLICY_DEFINITIONS; no other profile reads that variable.
+   */
   fieldPolicy?: unknown;
-  /** Per-profile readable fields: [{ table, fields }]. Missing readable fields means all fields are readable. */
+  /** Per-profile readable fields: [{ table, fields }]. Missing readable fields means all fields are readable. Validated at load. */
   readableTableFields?: unknown;
-  /** Per-profile writable fields: [{ table, fields }]. Missing writable fields means all fields are writable. */
+  /** Per-profile writable fields: [{ table, fields }]. Missing writable fields means all fields are writable. Validated at load. */
   writableTableFields?: unknown;
   /** Per-instance metadata cache configuration (default TTL 24h). */
   metadataCache?: MetadataCacheConfigInput;
+  /**
+   * ATF grants and result-cache settings. The grants (`execute`,
+   * `allowScriptSteps`) come only from the profile; see atf-config.ts.
+   */
+  atf?: AtfConfigInput;
 }
 
 export interface ProfileConfig {
@@ -111,6 +134,7 @@ const PROFILE_KEYS = new Set([
   "vendor_code", "description", "authType", "clientId", "clientSecret",
   "grantType", "apiKey", "apiKeyHeader", "timeoutMs", "maxConcurrentRequests", "schemaCacheTtlMs",
   "tableAccess", "fieldPolicy", "readableTableFields", "writableTableFields", "metadataCache",
+  "atf",
 ]);
 
 export interface ProfileManagerOptions {
@@ -156,6 +180,7 @@ export class ProfileManager {
 
     const fileConfig = this.loadConfigFile();
     if (fileConfig) {
+      rejectEnvironmentFieldPolicyForFileProfiles();
       this.config = fileConfig;
     } else {
       this.config = this.buildExplicitEnvironmentProfile();
@@ -312,7 +337,17 @@ export class ProfileManager {
         profile.schemaCacheTtlMs ??
         parsePositiveIntegerEnv(process.env.SN_SCHEMA_CACHE_TTL_MS, "SN_SCHEMA_CACHE_TTL_MS", { max: 3_600_000 }),
       ...resolvedMetadataCache(profile),
+      atf: resolveAtfConfig(profile.atf, atfConfigFromEnvironment()),
     });
+  }
+
+  /**
+   * Resolved ATF grants and result-cache settings for one profile. It reads
+   * no credential material, so policy selection can call it before any
+   * client exists.
+   */
+  getAtfConfig(name: string): AtfConfig {
+    return resolveAtfConfig(this.getProfile(name).atf, atfConfigFromEnvironment());
   }
 
   /**
@@ -441,10 +476,17 @@ export class ProfileManager {
         profiles,
       };
     } catch (err) {
+      // An ATF configuration message is authored in atf-config.ts and names
+      // only the offending key, never its value, so it is safe to surface.
+      // So is a field-policy message: field-policy.ts names only the key path
+      // and identifiers that passed validation, never a rejected value.
       const reason =
-        err instanceof Error && err.message.includes("legacy plaintext")
-          ? "Legacy plaintext profile credentials are rejected; replace them through the profile administration CLI"
-          : "Profile configuration could not be loaded safely";
+        err instanceof AtfConfigurationError ||
+        err instanceof FieldPolicyConfigurationError
+          ? `Profile configuration is invalid: ${err.message}`
+          : err instanceof Error && err.message.includes("legacy plaintext")
+            ? "Legacy plaintext profile credentials are rejected; replace them through the profile administration CLI"
+            : "Profile configuration could not be loaded safely";
       throw new Error(reason);
     } finally {
       if (descriptor !== undefined) fs.closeSync(descriptor);
@@ -541,9 +583,34 @@ export class ProfileManager {
       profile.tableAccess = tableAccess;
     }
 
+    // Like SN_ALLOWED_*, SN_FIELD_POLICY_DEFINITIONS configures this profile
+    // only. It used to be a process-wide fallback for every profile that
+    // stated no field policy, so it could narrow a file-backed profile the
+    // operator had granted in full. Set alongside a config file, it now
+    // stops startup (rejectEnvironmentFieldPolicyForFileProfiles).
+    const fieldPolicy = fieldPolicyInputFromEnvironment(
+      process.env as FieldPolicyEnvironment
+    );
+    if (fieldPolicy.fieldPolicy !== undefined) {
+      profile.fieldPolicy = fieldPolicy.fieldPolicy;
+    }
+    if (fieldPolicy.readableTableFields !== undefined) {
+      profile.readableTableFields = fieldPolicy.readableTableFields;
+    }
+    if (fieldPolicy.writableTableFields !== undefined) {
+      profile.writableTableFields = fieldPolicy.writableTableFields;
+    }
+
     const metadataCache = metadataCacheConfigFromEnvironment();
     if (Object.keys(metadataCache).length > 0) {
       profile.metadataCache = metadataCache;
+    }
+
+    // The only place SN_ATF_EXECUTE and SN_ATF_ALLOW_SCRIPT_STEPS grant
+    // anything: this profile is itself defined by the environment.
+    const atf = atfConfigFromEnvironment();
+    if (Object.keys(atf).length > 0) {
+      profile.atf = atf;
     }
 
     return {
@@ -635,6 +702,27 @@ export class ProfileManager {
 
 // ── Module-level helpers ───────────────────────────────────────────
 
+/**
+ * Refuse to start when SN_FIELD_POLICY_DEFINITIONS is set but profiles come
+ * from the config file.
+ *
+ * Up to 2.1.0 the variable narrowed every profile that stated no field policy
+ * of its own, config-file profiles included. It now configures only the
+ * SN_PROFILE_NAME environment profile, which a config file replaces, so in
+ * this combination it can do nothing. Ignoring it would silently widen access
+ * for an operator who relied on it; failing names the remedy instead. The
+ * value is never repeated.
+ */
+function rejectEnvironmentFieldPolicyForFileProfiles(): void {
+  if (process.env.SN_FIELD_POLICY_DEFINITIONS?.trim()) {
+    throw new FieldPolicyConfigurationError(
+      "SN_FIELD_POLICY_DEFINITIONS is set, but profiles are loaded from the config " +
+        "file; it now applies only to the SN_PROFILE_NAME environment profile. Move " +
+        "the policy into each profile's fieldPolicy, or unset the variable."
+    );
+  }
+}
+
 function resolvedMetadataCache(profile: Profile): { readonly metadataCache?: MetadataCacheConfigInput } {
   const environmentCache = metadataCacheConfigFromEnvironment();
   const merged = Object.freeze({
@@ -689,8 +777,19 @@ function validateLoadedProfiles(value: object): Record<string, Profile> {
         throw new Error("Profile configuration contains an invalid credential source");
       }
     }
+    let canonical: Profile;
+    try {
+      canonical = canonicalizeProfile(profile);
+    } catch (error) {
+      // Name the profile: one config file holds several. The name has
+      // already passed validateProfileName.
+      if (error instanceof FieldPolicyConfigurationError) {
+        throw new FieldPolicyConfigurationError(`profile "${name}": ${error.message}`);
+      }
+      throw error;
+    }
     Object.defineProperty(profiles, name, {
-      value: canonicalizeProfile(profile),
+      value: canonical,
       writable: true,
       enumerable: true,
       configurable: true,
@@ -702,6 +801,9 @@ function validateLoadedProfiles(value: object): Record<string, Profile> {
 function canonicalizeProfile(profile: Profile): Profile {
   validateProfileKeys(profile);
   const canonical: Profile = { ...profile };
+  if (canonical.atf !== undefined) {
+    canonical.atf = validateAtfConfigInput(canonical.atf);
+  }
   for (const field of ["credential", "clientSecret", "apiKey"] as const) {
     const source = canonical[field];
     if (typeof source === "string") {
@@ -716,7 +818,20 @@ function canonicalizeProfile(profile: Profile): Profile {
       }
     }
   }
-  return immutableProfileSnapshot(canonical);
+  const snapshot = immutableProfileSnapshot(canonical);
+  // Validated on the frozen JSON copy, so a malformed field policy fails here
+  // with its table and key named, instead of denying every call on the
+  // profile at request time.
+  validateFieldPolicyConfiguration({
+    ...(snapshot.fieldPolicy === undefined ? {} : { fieldPolicy: snapshot.fieldPolicy }),
+    ...(snapshot.readableTableFields === undefined
+      ? {}
+      : { readableTableFields: snapshot.readableTableFields }),
+    ...(snapshot.writableTableFields === undefined
+      ? {}
+      : { writableTableFields: snapshot.writableTableFields }),
+  });
+  return snapshot;
 }
 
 function immutableProfileSnapshot(profile: Profile): Profile {
@@ -735,6 +850,9 @@ function immutableProfileSnapshot(profile: Profile): Profile {
   }
   if (snapshot.metadataCache !== undefined) {
     snapshot.metadataCache = deepFreezeJsonClone(snapshot.metadataCache);
+  }
+  if (snapshot.atf !== undefined) {
+    snapshot.atf = deepFreezeJsonClone(snapshot.atf);
   }
   for (const field of ["credential", "clientSecret", "apiKey"] as const) {
     const source = snapshot[field];
@@ -758,12 +876,38 @@ function deepFreeze<T>(value: T): T {
   return Object.freeze(value);
 }
 
-function validateProfileName(name: string): void {
-  if (
-    typeof name !== "string" ||
-    !/^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/u.test(name)
-  ) {
-    throw new Error("Profile name is invalid");
+const PROFILE_NAME_MAX_LENGTH = 64;
+const PROFILE_NAME_RULE =
+  "Use 1-64 letters, digits, dots, underscores, or hyphens, " +
+  "starting with a letter, digit, or underscore.";
+
+/**
+ * Why a profile name cannot be used, or undefined when it can.
+ *
+ * This is the only definition of the rule. The setup wizard and
+ * `servicenow-mcp-profile` check a name with it where the name is typed, so an
+ * unusable one is refused there rather than at the final save, after the
+ * operator has already entered and verified a credential.
+ */
+export function profileNameProblem(name: string): string | undefined {
+  if (name === "") return `A profile name is required. ${PROFILE_NAME_RULE}`;
+  if (/\s/u.test(name)) return `Spaces aren't allowed. ${PROFILE_NAME_RULE}`;
+  const invalid = /[^A-Za-z0-9._-]/u.exec(name);
+  if (invalid) return `${JSON.stringify(invalid[0])} isn't allowed. ${PROFILE_NAME_RULE}`;
+  if (name.length > PROFILE_NAME_MAX_LENGTH) {
+    return `It's ${name.length} characters; the limit is ${PROFILE_NAME_MAX_LENGTH}.`;
+  }
+  if (!/^[A-Za-z0-9_]/u.test(name)) {
+    return `It can't start with ${JSON.stringify(name[0])}. ${PROFILE_NAME_RULE}`;
+  }
+  return undefined;
+}
+
+export function validateProfileName(name: string): void {
+  const problem =
+    typeof name === "string" ? profileNameProblem(name) : "A profile name is required.";
+  if (problem !== undefined) {
+    throw new Error(`Profile name is invalid. ${problem}`);
   }
 }
 

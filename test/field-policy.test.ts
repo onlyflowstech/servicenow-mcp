@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  BUILT_IN_TABLE_CLASSES,
   FieldPolicyError,
   MAX_FIELD_ARRAY_LENGTH,
   MAX_FIELD_OBJECT_OWN_KEYS,
@@ -20,14 +21,27 @@ import {
   resolveReadableFields,
   runWithFieldPolicyConfiguration,
   snapshotPlainDataArguments,
+  validateFieldPolicyConfiguration,
   validateWritableFields,
   type FieldPolicyConfigurationInput,
 } from "../src/field-policy.js";
 import { resolveToolTableAccess } from "../src/tool-table-access.js";
+import {
+  WriteValuePolicyError,
+  prepareWriteFieldValues,
+} from "../src/write-value-policy.js";
 
 afterEach(() => {
   vi.unstubAllEnvs();
 });
+
+/**
+ * Run under a profile-scoped `fieldPolicy`, the way the dispatcher does. Field
+ * policy is configured per profile only; the process environment is not read.
+ */
+function withFieldPolicy<T>(fieldPolicy: unknown, action: () => T): T {
+  return runWithFieldPolicyConfiguration({ fieldPolicy }, action);
+}
 
 function expectPolicyReason(
   action: () => unknown,
@@ -67,14 +81,12 @@ describe("SNSDK-30 readable field policy", () => {
     expect(resolveReadableFields("incident")).toEqual(SAFE_DEFAULT_FIELDS.incident);
 
     // An explicit operator list still bounds "all" to exactly that list.
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({ incident: { readable: ["sys_id", "number"] } })
-    );
-    expect(resolveReadableFields("incident", { fields: "all" })).toEqual([
-      "sys_id",
-      "number",
-    ]);
+    withFieldPolicy({ incident: { readable: ["sys_id", "number"] } }, () => {
+      expect(resolveReadableFields("incident", { fields: "all" })).toEqual([
+        "sys_id",
+        "number",
+      ]);
+    });
   });
 
   it("normalizes approved explicit fields and rejects duplicates", () => {
@@ -92,63 +104,59 @@ describe("SNSDK-30 readable field policy", () => {
 
 
   it("supports operator-configured generic readable field fallback", () => {
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({
-        "*": { defaults: ["sys_id", "name"], readable: "*", writable: [] },
-      })
-    );
-
-    expect(resolveReadableFields("u_unclassified")).toEqual(["sys_id", "name"]);
-    expect(
-      resolveReadableFields("u_unclassified", { fields: "sys_id,u_custom_safe" })
-    ).toEqual(["sys_id", "u_custom_safe"]);
-    expectPolicyReason(
-      () => resolveReadableFields("u_unclassified", { fields: "sys_id,password" }),
-      "sensitive_field"
+    withFieldPolicy(
+      { "*": { defaults: ["sys_id", "name"], readable: "*", writable: [] } },
+      () => {
+        expect(resolveReadableFields("u_unclassified")).toEqual(["sys_id", "name"]);
+        expect(
+          resolveReadableFields("u_unclassified", { fields: "sys_id,u_custom_safe" })
+        ).toEqual(["sys_id", "u_custom_safe"]);
+        expectPolicyReason(
+          () => resolveReadableFields("u_unclassified", { fields: "sys_id,password" }),
+          "sensitive_field"
+        );
+      }
     );
   });
 
   it("supports operator-configured exact table field overrides", () => {
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({
+    withFieldPolicy(
+      {
         incident: {
           defaults: ["sys_id", "u_public"],
           readable: ["sys_id", "u_public"],
           writable: ["u_public"],
         },
-      })
-    );
-
-    expect(resolveReadableFields("incident")).toEqual(["sys_id", "u_public"]);
-    expect(validateWritableFields("incident", { u_public: "ok" })).toEqual({
-      u_public: "ok",
-    });
-    expectPolicyReason(
-      () => resolveReadableFields("incident", { fields: "number" }),
-      "unreadable_field"
+      },
+      () => {
+        expect(resolveReadableFields("incident")).toEqual(["sys_id", "u_public"]);
+        expect(validateWritableFields("incident", { u_public: "ok" })).toEqual({
+          u_public: "ok",
+        });
+        expectPolicyReason(
+          () => resolveReadableFields("incident", { fields: "number" }),
+          "unreadable_field"
+        );
+      }
     );
   });
 
   it("keeps readableTableFields wildcard selections as policy wildcards", () => {
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({
-        readableTableFields: [{ table: "incident", fields: "*" }],
-      })
-    );
-
-    expect(
-      resolveReadableFields("incident", { fields: "number,u_custom_safe" })
-    ).toEqual(["number", "u_custom_safe"]);
-    expect(resolveReadableFields("incident", { fields: "all" })).toEqual(["*"]);
-    expect(resolveReadableFields("sys_user", { fields: "user_name" })).toEqual([
-      "user_name",
-    ]);
-    expectPolicyReason(
-      () => resolveReadableFields("incident", { fields: "password" }),
-      "sensitive_field"
+    runWithFieldPolicyConfiguration(
+      { readableTableFields: [{ table: "incident", fields: "*" }] },
+      () => {
+        expect(
+          resolveReadableFields("incident", { fields: "number,u_custom_safe" })
+        ).toEqual(["number", "u_custom_safe"]);
+        expect(resolveReadableFields("incident", { fields: "all" })).toEqual(["*"]);
+        expect(resolveReadableFields("sys_user", { fields: "user_name" })).toEqual([
+          "user_name",
+        ]);
+        expectPolicyReason(
+          () => resolveReadableFields("incident", { fields: "password" }),
+          "sensitive_field"
+        );
+      }
     );
   });
 
@@ -193,17 +201,15 @@ describe("SNSDK-30 writable field policy", () => {
       { sys_id: "a".repeat(32) }
     );
 
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({ incident: { readable: ["sys_id"], writable: ["state"] } })
-    );
-    expect(resolveReadableFields("incident", { fields: "sys_id" })).toEqual([
-      "sys_id",
-    ]);
-    expectPolicyReason(
-      () => validateWritableFields("incident", { sys_id: "a".repeat(32) }),
-      "non_writable_field"
-    );
+    withFieldPolicy({ incident: { readable: ["sys_id"], writable: ["state"] } }, () => {
+      expect(resolveReadableFields("incident", { fields: "sys_id" })).toEqual([
+        "sys_id",
+      ]);
+      expectPolicyReason(
+        () => validateWritableFields("incident", { sys_id: "a".repeat(32) }),
+        "non_writable_field"
+      );
+    });
   });
 
   it("normalizes and clones approved incident fields", () => {
@@ -285,41 +291,37 @@ describe("SNSDK-30 writable field policy", () => {
 
 
   it("supports operator-configured generic writable field fallback", () => {
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({
-        "*": { defaults: ["sys_id"], readable: "*", writable: "*" },
-      })
-    );
-
-    expect(
-      validateWritableFields("u_unclassified", { u_safe_text: "ok", state: "2" })
-    ).toEqual({ u_safe_text: "ok", state: "2" });
-    expectPolicyReason(
-      () => validateWritableFields("u_unclassified", { client_secret: "no" }),
-      "sensitive_field"
+    withFieldPolicy(
+      { "*": { defaults: ["sys_id"], readable: "*", writable: "*" } },
+      () => {
+        expect(
+          validateWritableFields("u_unclassified", { u_safe_text: "ok", state: "2" })
+        ).toEqual({ u_safe_text: "ok", state: "2" });
+        expectPolicyReason(
+          () => validateWritableFields("u_unclassified", { client_secret: "no" }),
+          "sensitive_field"
+        );
+      }
     );
   });
 
   it("applies writableTableFields wildcards only to the named table", () => {
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({
-        writableTableFields: [{ table: "incident", fields: "*" }],
-      })
-    );
-
-    expect(
-      validateWritableFields("incident", { u_custom_safe: "ok", state: "2" })
-    ).toEqual({ u_custom_safe: "ok", state: "2" });
-    // sys_user is not named by the configuration, so it keeps the open base.
-    // Whether it is reachable at all is a tableAccess question, not this one.
-    expect(validateWritableFields("sys_user", { user_name: "ok" })).toEqual({
-      user_name: "ok",
-    });
-    expectPolicyReason(
-      () => validateWritableFields("incident", { client_secret: "no" }),
-      "sensitive_field"
+    runWithFieldPolicyConfiguration(
+      { writableTableFields: [{ table: "incident", fields: "*" }] },
+      () => {
+        expect(
+          validateWritableFields("incident", { u_custom_safe: "ok", state: "2" })
+        ).toEqual({ u_custom_safe: "ok", state: "2" });
+        // sys_user is not named by the configuration, so it keeps the open
+        // base. Whether it is reachable at all is a tableAccess question.
+        expect(validateWritableFields("sys_user", { user_name: "ok" })).toEqual({
+          user_name: "ok",
+        });
+        expectPolicyReason(
+          () => validateWritableFields("incident", { client_secret: "no" }),
+          "sensitive_field"
+        );
+      }
     );
   });
 
@@ -347,14 +349,12 @@ describe("SNSDK-30 writable field policy", () => {
 
     // An explicit operator narrowing still denies, which is the only thing
     // that does.
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({ incident: { writable: ["state"] } })
-    );
-    expectPolicyReason(
-      () => validateWritableFields("incident", { sys_created_on: "now" }),
-      "non_writable_field"
-    );
+    withFieldPolicy({ incident: { writable: ["state"] } }, () => {
+      expectPolicyReason(
+        () => validateWritableFields("incident", { sys_created_on: "now" }),
+        "non_writable_field"
+      );
+    });
   });
 });
 
@@ -413,13 +413,11 @@ describe("SNSDK-30 response filtering", () => {
     ]);
 
     // An operator-narrowed readable set still bounds the enumeration.
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({ incident: { readable: ["number"] } })
-    );
-    expect(
-      filterSchemaEntries(entries, resolveReadableFields("incident", { fields: "all" }))
-    ).toEqual([{ element: "number", column_label: "Number" }]);
+    withFieldPolicy({ incident: { readable: ["number"] } }, () => {
+      expect(
+        filterSchemaEntries(entries, resolveReadableFields("incident", { fields: "all" }))
+      ).toEqual([{ element: "number", column_label: "Number" }]);
+    });
   });
 
   it("handles response cycles, aliases, accessors, and prototype keys without leakage", () => {
@@ -586,14 +584,12 @@ describe("SNSDK-30 dispatcher preparation", () => {
       // what this covers, runs either way.
       expect(() => resolveToolTableAccess("sn_atf", { action, fields: "output" })).not.toThrow();
 
-      vi.stubEnv(
-        "SN_FIELD_POLICY_DEFINITIONS",
-        JSON.stringify({ [table]: { readable: ["sys_id", "name"] } })
-      );
-      expectPolicyReason(
-        () => resolveToolTableAccess("sn_atf", { action, fields: "output" }),
-        "unreadable_field"
-      );
+      withFieldPolicy({ [table]: { readable: ["sys_id", "name"] } }, () => {
+        expectPolicyReason(
+          () => resolveToolTableAccess("sn_atf", { action, fields: "output" }),
+          "unreadable_field"
+        );
+      });
     }
   );
 
@@ -1009,25 +1005,22 @@ describe("field policy narrows only where an operator says so", () => {
 
   it("still denies those tables when an operator narrows them explicitly", () => {
     // The control an operator retains: name the table, state the writable set.
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({
-        sys_script: { writable: [] },
-        sys_user_grmember: { writable: [] },
-      })
-    );
-
-    expectPolicyReason(
-      () => validateWritableFields("sys_script", { script: "gs.print('x')" }),
-      "non_writable_field"
-    );
-    expectPolicyReason(
-      () => validateWritableFields("sys_user_grmember", { user: "a".repeat(32) }),
-      "non_writable_field"
-    );
-    // Naming one table leaves every other table alone.
-    expect(validateWritableFields("sys_script_include", { script: "x" })).toEqual(
-      { script: "x" }
+    withFieldPolicy(
+      { sys_script: { writable: [] }, sys_user_grmember: { writable: [] } },
+      () => {
+        expectPolicyReason(
+          () => validateWritableFields("sys_script", { script: "gs.print('x')" }),
+          "non_writable_field"
+        );
+        expectPolicyReason(
+          () => validateWritableFields("sys_user_grmember", { user: "a".repeat(32) }),
+          "non_writable_field"
+        );
+        // Naming one table leaves every other table alone.
+        expect(validateWritableFields("sys_script_include", { script: "x" })).toEqual(
+          { script: "x" }
+        );
+      }
     );
   });
 
@@ -1035,21 +1028,18 @@ describe("field policy narrows only where an operator says so", () => {
     // An empty selection would serialize to an empty sysparm_fields, which
     // ServiceNow reads as "every field". That guard is a wire-format footgun,
     // not a policy denial, and it survives.
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({ u_write_only: { readable: [], writable: ["u_note"] } })
-    );
-
-    expectPolicyReason(
-      () => resolveReadableFields("u_write_only"),
-      "unreadable_field"
-    );
-    expectPolicyReason(
-      () => resolveReadableFields("u_write_only", { fields: "all" }),
-      "unreadable_field"
-    );
-    expect(validateWritableFields("u_write_only", { u_note: "x" })).toEqual({
-      u_note: "x",
+    withFieldPolicy({ u_write_only: { readable: [], writable: ["u_note"] } }, () => {
+      expectPolicyReason(
+        () => resolveReadableFields("u_write_only"),
+        "unreadable_field"
+      );
+      expectPolicyReason(
+        () => resolveReadableFields("u_write_only", { fields: "all" }),
+        "unreadable_field"
+      );
+      expect(validateWritableFields("u_write_only", { u_note: "x" })).toEqual({
+        u_note: "x",
+      });
     });
   });
 
@@ -1065,42 +1055,38 @@ describe("field policy narrows only where an operator says so", () => {
     expect(resolveReadableFields("u_unmapped")).toEqual(["sys_id"]);
 
     // An explicit wildcard default is still honoured as stated intent.
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({ incident: { defaults: "*" } })
-    );
-    expect(resolveReadableFields("incident")).toEqual(["*"]);
+    withFieldPolicy({ incident: { defaults: "*" } }, () => {
+      expect(resolveReadableFields("incident")).toEqual(["*"]);
+    });
   });
 
   it("narrows a built-in table without restating its defaults", () => {
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({ incident: { readable: ["number"], writable: ["number"] } })
-    );
-
-    // Pre-fix this threw a raw TypeError on every request, because the
-    // built-in default projection survived the readable override.
-    expect(resolveReadableFields("incident")).toEqual(["number"]);
-    expectPolicyReason(
-      () => resolveReadableFields("incident", { fields: "caller_id" }),
-      "unreadable_field"
-    );
-    expect(validateWritableFields("incident", { number: "INC1" })).toEqual({
-      number: "INC1",
+    withFieldPolicy({ incident: { readable: ["number"], writable: ["number"] } }, () => {
+      // Pre-fix this threw a raw TypeError on every request, because the
+      // built-in default projection survived the readable override.
+      expect(resolveReadableFields("incident")).toEqual(["number"]);
+      expectPolicyReason(
+        () => resolveReadableFields("incident", { fields: "caller_id" }),
+        "unreadable_field"
+      );
+      expect(validateWritableFields("incident", { number: "INC1" })).toEqual({
+        number: "INC1",
+      });
     });
   });
 
   it("rejects a contradictory policy as a branded denial, not a TypeError", () => {
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({
-        incident: { defaults: ["caller_id"], readable: ["number"] },
-      })
-    );
-
-    expectPolicyReason(
-      () => resolveReadableFields("incident"),
-      "invalid_argument_shape"
+    // Profile load now rejects this configuration outright
+    // (field-policy-config.test.ts). The request path still fails closed for
+    // a scope that never went through a profile load.
+    withFieldPolicy(
+      { incident: { defaults: ["caller_id"], readable: ["number"] } },
+      () => {
+        expectPolicyReason(
+          () => resolveReadableFields("incident"),
+          "invalid_argument_shape"
+        );
+      }
     );
   });
 });
@@ -1117,11 +1103,9 @@ describe("field-policy denials explain themselves to an operator", () => {
   }
 
   it("names the table, the field, and the config key for a non-writable field", () => {
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({ sys_script: { writable: [] } })
+    const error = withFieldPolicy({ sys_script: { writable: [] } }, () =>
+      denial(() => validateWritableFields("sys_script", { script: "x" }))
     );
-    const error = denial(() => validateWritableFields("sys_script", { script: "x" }));
 
     expect(error.reason).toBe("non_writable_field");
     expect(error.table).toBe("sys_script");
@@ -1135,12 +1119,8 @@ describe("field-policy denials explain themselves to an operator", () => {
   });
 
   it("names the config key for an unreadable field", () => {
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({ incident: { readable: ["number"] } })
-    );
-    const unreadable = denial(() =>
-      resolveReadableFields("incident", { fields: "u_unknown" })
+    const unreadable = withFieldPolicy({ incident: { readable: ["number"] } }, () =>
+      denial(() => resolveReadableFields("incident", { fields: "u_unknown" }))
     );
 
     expect(unreadable.reason).toBe("unreadable_field");
@@ -1163,17 +1143,554 @@ describe("field-policy denials explain themselves to an operator", () => {
   });
 
   it("never carries a field value", () => {
-    vi.stubEnv(
-      "SN_FIELD_POLICY_DEFINITIONS",
-      JSON.stringify({ sys_script: { writable: [] } })
-    );
-    const error = denial(() =>
-      validateWritableFields("sys_script", { script: "SECRET-CANARY-VALUE" })
+    const error = withFieldPolicy({ sys_script: { writable: [] } }, () =>
+      denial(() =>
+        validateWritableFields("sys_script", { script: "SECRET-CANARY-VALUE" })
+      )
     );
 
     expect(fieldPolicyDenialMessage(error)).not.toContain("SECRET-CANARY-VALUE");
     expect(JSON.stringify({ ...error, message: error.message })).not.toContain(
       "SECRET-CANARY-VALUE"
+    );
+  });
+});
+
+describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)', () => {
+  const ITSM_TABLES = [
+    "incident",
+    "change_request",
+    "problem",
+    "sc_request",
+    "sc_req_item",
+    "sc_task",
+    "task",
+    "cmdb_ci",
+    "cmdb_ci_server",
+    "cmdb_ci_computer",
+    "kb_knowledge",
+  ] as const;
+  const SYSTEM_TABLES = [
+    "sys_script",
+    "sys_script_include",
+    "sys_ui_script",
+    "sys_script_client",
+    "sys_ws_operation",
+    "sys_user",
+    "sys_user_group",
+    "sys_user_grmember",
+    "sys_atf_test",
+    "sys_atf_test_suite",
+    "sys_atf_test_suite_test",
+    "sys_atf_test_result",
+    "sys_atf_step",
+    "sys_atf_test_suite_result",
+    "sys_atf_test_result_step",
+    "sys_atf_agent",
+    "sys_variable_value",
+    "sys_db_object",
+    "sys_app",
+    "sys_store_app",
+    "v_plugin",
+    "syslog",
+    "sys_element_mapping",
+  ] as const;
+
+  function reason(action: () => unknown): string {
+    try {
+      action();
+      return "allowed";
+    } catch (error) {
+      if (error instanceof FieldPolicyError) return error.reason;
+      throw error;
+    }
+  }
+
+  /** What every built-in table resolves to with no field policy at all. */
+  const builtIn = new Map(
+    [...ITSM_TABLES, ...SYSTEM_TABLES].map((table) => [
+      table,
+      {
+        defaults: resolveReadableFields(table),
+        all: resolveReadableFields(table, { fields: "all" }),
+      },
+    ])
+  );
+
+  it("splits the 34 built-in tables into 11 ITSM and 23 system tables", () => {
+    expect(new Set([...ITSM_TABLES, ...SYSTEM_TABLES]).size).toBe(34);
+    for (const [table, resolved] of builtIn) {
+      expect(resolved.all, table).toEqual(["*"]);
+    }
+    // Each has its own built-in default projection, not the generic
+    // ["sys_id"] an unmapped table gets.
+    for (const table of ITSM_TABLES) {
+      expect(builtIn.get(table)!.defaults.length, table).toBeGreaterThan(1);
+    }
+  });
+
+  it("classifies every built-in entry as exactly one of ITSM or system (RR2)", () => {
+    // A new built-in entry must be classified on purpose. SYSTEM_TABLES is an
+    // explicit list, so an unclassified entry would escape a profile's "*"
+    // entry whenever the profile does not name it.
+    const { builtIn: entries, itsm, system } = BUILT_IN_TABLE_CLASSES;
+    for (const table of entries) {
+      expect(
+        [itsm.includes(table), system.includes(table)].filter(Boolean),
+        table
+      ).toHaveLength(1);
+    }
+    for (const table of [...itsm, ...system]) {
+      expect(entries, table).toContain(table);
+    }
+    expect(new Set(itsm).size).toBe(itsm.length);
+    expect(new Set(system).size).toBe(system.length);
+    // The classification the policy uses is the one these tests pin.
+    expect([...itsm].sort()).toEqual([...ITSM_TABLES].sort());
+    expect([...system].sort()).toEqual([...SYSTEM_TABLES].sort());
+    expect(Object.isFrozen(BUILT_IN_TABLE_CLASSES.system)).toBe(true);
+  });
+
+  it('denies ITSM writes under "*" writable [] unless the table is named', () => {
+    withFieldPolicy({ "*": { writable: [] } }, () => {
+      for (const table of ITSM_TABLES) {
+        expect(reason(() => validateWritableFields(table, { state: "2" })), table).toBe(
+          "non_writable_field"
+        );
+      }
+      // Reads are untouched: the "*" entry stated nothing about readable.
+      expect(resolveReadableFields("incident", { fields: "all" })).toEqual(["*"]);
+      expect(resolveReadableFields("incident")).toEqual(builtIn.get("incident")!.defaults);
+    });
+  });
+
+  it("restores a named ITSM table's writes, key by key", () => {
+    withFieldPolicy({ "*": { writable: [] }, incident: { writable: "*" } }, () => {
+      expect(validateWritableFields("incident", { state: "2" })).toEqual({ state: "2" });
+      expect(reason(() => validateWritableFields("problem", { state: "2" }))).toBe(
+        "non_writable_field"
+      );
+    });
+    withFieldPolicy({ "*": { writable: [] }, incident: { writable: ["state"] } }, () => {
+      expect(validateWritableFields("incident", { state: "2" })).toEqual({ state: "2" });
+      expect(
+        reason(() => validateWritableFields("incident", { short_description: "x" }))
+      ).toBe("non_writable_field");
+    });
+    // Naming the table for reads only leaves its writes to the "*" entry.
+    withFieldPolicy(
+      { "*": { writable: [] }, incident: { readable: ["sys_id", "number"] } },
+      () => {
+        expect(reason(() => validateWritableFields("incident", { state: "2" }))).toBe(
+          "non_writable_field"
+        );
+        expect(resolveReadableFields("incident")).toEqual(["sys_id", "number"]);
+      }
+    );
+  });
+
+  it('clamps ITSM default projections to a narrowed "*" readable set without error', () => {
+    const readable = ["sys_id", "number", "state", "u_custom"];
+    const narrowed = { "*": { readable } };
+    expect(() => validateFieldPolicyConfiguration({ fieldPolicy: narrowed })).not.toThrow();
+    withFieldPolicy(narrowed, () => {
+      expect(resolveReadableFields("incident")).toEqual(["sys_id", "number", "state"]);
+      for (const table of ITSM_TABLES) {
+        const defaults = resolveReadableFields(table);
+        expect(defaults[0], table).toBe("sys_id");
+        expect(defaults.every((field) => readable.includes(field)), table).toBe(true);
+        expect(reason(() => resolveReadableFields(table, { fields: "caller_id" })), table)
+          .toBe("unreadable_field");
+      }
+    });
+    // sys_id alone survives a "*" readable that shares nothing else.
+    withFieldPolicy({ "*": { readable: ["sys_id", "u_custom"] } }, () => {
+      expect(resolveReadableFields("change_request")).toEqual(["sys_id"]);
+    });
+  });
+
+  it('leaves ITSM tables unchanged with no field policy, or one without a "*" entry', () => {
+    const check = () => {
+      for (const table of ITSM_TABLES) {
+        expect(resolveReadableFields(table), table).toEqual(builtIn.get(table)!.defaults);
+        expect(resolveReadableFields(table, { fields: "all" }), table).toEqual(["*"]);
+        expect(validateWritableFields(table, { u_anything: "x" }), table).toEqual({
+          u_anything: "x",
+        });
+      }
+    };
+    check();
+    withFieldPolicy({ u_custom: { writable: [] } }, check);
+    expect(SAFE_DEFAULT_FIELDS.incident).toEqual(builtIn.get("incident")!.defaults);
+  });
+
+  it('leaves every system table untouched by a "*" entry', () => {
+    withFieldPolicy(
+      { "*": { defaults: ["sys_id"], readable: ["sys_id"], writable: [] } },
+      () => {
+        for (const table of SYSTEM_TABLES) {
+          expect(validateWritableFields(table, { u_anything: "x" }), table).toEqual({
+            u_anything: "x",
+          });
+          expect(resolveReadableFields(table, { fields: "all" }), table).toEqual(["*"]);
+          expect(resolveReadableFields(table), table).toEqual(builtIn.get(table)!.defaults);
+        }
+        // A table with no built-in entry still takes the "*" entry whole.
+        expect(reason(() => validateWritableFields("u_custom", { u_x: "1" }))).toBe(
+          "non_writable_field"
+        );
+        expect(resolveReadableFields("u_custom", { fields: "all" })).toEqual(["sys_id"]);
+      }
+    );
+    // A system table is narrowed only by naming it.
+    withFieldPolicy({ "*": { writable: [] }, sys_script: { writable: [] } }, () => {
+      expect(reason(() => validateWritableFields("sys_script", { script: "x" }))).toBe(
+        "non_writable_field"
+      );
+      expect(validateWritableFields("sys_script_include", { script: "x" })).toEqual({
+        script: "x",
+      });
+    });
+  });
+
+  it("leaves incident's typed value checks to write-value-policy", () => {
+    withFieldPolicy({ "*": { writable: [] }, incident: { writable: "*" } }, () => {
+      // Field policy admits the names; the value policy still checks values.
+      expect(validateWritableFields("incident", { caller_id: "not-a-sys-id" })).toEqual({
+        caller_id: "not-a-sys-id",
+      });
+      expect(() =>
+        prepareWriteFieldValues("update", "incident", { caller_id: "not-a-sys-id" })
+      ).toThrow(WriteValuePolicyError);
+      expect(() =>
+        prepareWriteFieldValues("update", "incident", { category: "x^ORactive=true" })
+      ).toThrow(WriteValuePolicyError);
+      expect(
+        prepareWriteFieldValues("update", "incident", { caller_id: "a".repeat(32) })
+      ).toEqual({ caller_id: "a".repeat(32) });
+    });
+  });
+});
+
+describe("sys_class_name, sys_domain and their path fields must be listed explicitly", () => {
+  const STRUCTURAL = [
+    "sys_class_name",
+    "sys_domain",
+    "sys_class_path",
+    "sys_domain_path",
+  ] as const;
+
+  function denial(action: () => unknown): FieldPolicyError | undefined {
+    try {
+      action();
+      return undefined;
+    } catch (error) {
+      if (error instanceof FieldPolicyError) return error;
+      throw error;
+    }
+  }
+
+  it.each<[string, FieldPolicyConfigurationInput | undefined]>([
+    ["the built-in fallback (no field policy)", undefined],
+    ['fieldPolicy writable "*"', { fieldPolicy: { incident: { writable: "*" }, u_custom: { writable: "*" } } }],
+    ['fieldPolicy writable ["*"]', { fieldPolicy: { incident: { writable: ["*"] }, u_custom: { writable: ["*"] } } }],
+    ['a "*" entry writable "*"', { fieldPolicy: { "*": { writable: "*" } } }],
+    [
+      'writableTableFields "*"',
+      {
+        writableTableFields: [
+          { table: "incident", fields: "*" },
+          { table: "u_custom", fields: ["*"] },
+        ],
+      },
+    ],
+  ])("are not covered by %s", (_label, configuration) => {
+    runWithFieldPolicyConfiguration(configuration, () => {
+      for (const table of ["incident", "u_custom", "change_request", "sys_user"]) {
+        for (const field of STRUCTURAL) {
+          const error = denial(() =>
+            validateWritableFields(table, { [field]: "SECRET-CANARY-VALUE" })
+          );
+          expect(error?.reason, `${table}.${field}`).toBe("explicit_field_required");
+          expect(error?.table).toBe(table);
+          expect(error?.field).toBe(field);
+          const message = fieldPolicyDenialMessage(error!);
+          expect(message).toBe(
+            `Write denied by policy: field "${field}" on "${table}" changes the record's ` +
+              "class or domain, so a writable wildcard never covers it. List it explicitly " +
+              `in fieldPolicy.${table}.writable to allow this write.`
+          );
+          expect(message).not.toContain("SECRET-CANARY-VALUE");
+        }
+        // Other system fields stay under the wildcard.
+        expect(validateWritableFields(table, { sys_created_by: "x" })).toEqual({
+          sys_created_by: "x",
+        });
+      }
+    });
+  });
+
+  it("matches the names case-insensitively", () => {
+    expect(denial(() => validateWritableFields("incident", { SYS_DOMAIN: "x" }))?.reason).toBe(
+      "explicit_field_required"
+    );
+    expect(
+      denial(() => validateWritableFields("incident", { " Sys_Class_Name ": "x" }))?.reason
+    ).toBe("explicit_field_required");
+  });
+
+  it("prefers the specific reason when a narrowed list omits them", () => {
+    withFieldPolicy({ incident: { writable: ["state"] } }, () => {
+      expect(
+        denial(() => validateWritableFields("incident", { sys_domain: "x" }))?.reason
+      ).toBe("explicit_field_required");
+      expect(
+        denial(() => validateWritableFields("incident", { short_description: "x" }))?.reason
+      ).toBe("non_writable_field");
+    });
+  });
+
+  it("allows them where a profile lists them", () => {
+    withFieldPolicy(
+      { incident: { writable: ["state", "sys_class_name", "sys_domain"] } },
+      () => {
+        expect(
+          validateWritableFields("incident", {
+            state: "2",
+            sys_class_name: "incident",
+            sys_domain: "global",
+          })
+        ).toEqual({ state: "2", sys_class_name: "incident", sys_domain: "global" });
+      }
+    );
+    runWithFieldPolicyConfiguration(
+      { writableTableFields: [{ table: "u_custom", fields: ["sys_class_name"] }] },
+      () => {
+        expect(validateWritableFields("u_custom", { sys_class_name: "u_other" })).toEqual({
+          sys_class_name: "u_other",
+        });
+        expect(
+          denial(() => validateWritableFields("u_custom", { sys_domain: "x" }))?.reason
+        ).toBe("explicit_field_required");
+      }
+    );
+    // Listed on the "*" entry, they apply wherever that entry applies.
+    withFieldPolicy({ "*": { writable: ["sys_domain"] } }, () => {
+      expect(validateWritableFields("u_custom", { sys_domain: "global" })).toEqual({
+        sys_domain: "global",
+      });
+      expect(validateWritableFields("incident", { sys_domain: "global" })).toEqual({
+        sys_domain: "global",
+      });
+    });
+  });
+
+  it("treats sys_class_path and sys_domain_path exactly like the other two", () => {
+    for (const field of ["SYS_DOMAIN_PATH", " Sys_Class_Path "]) {
+      expect(
+        denial(() => validateWritableFields("incident", { [field]: "x" }))?.reason,
+        field
+      ).toBe("explicit_field_required");
+    }
+    // The specific reason wins over a narrowed list that omits them.
+    withFieldPolicy({ incident: { writable: ["state", "sys_domain"] } }, () => {
+      for (const field of ["sys_domain_path", "sys_class_path"]) {
+        expect(
+          denial(() => validateWritableFields("incident", { [field]: "x" }))?.reason,
+          field
+        ).toBe("explicit_field_required");
+      }
+    });
+    // Listing sys_domain does not list its path, and the reverse.
+    withFieldPolicy({ u_custom: { writable: ["sys_domain_path"] } }, () => {
+      expect(validateWritableFields("u_custom", { sys_domain_path: "/!!!/" })).toEqual({
+        sys_domain_path: "/!!!/",
+      });
+      expect(
+        denial(() => validateWritableFields("u_custom", { sys_domain: "x" }))?.reason
+      ).toBe("explicit_field_required");
+    });
+    runWithFieldPolicyConfiguration(
+      { writableTableFields: [{ table: "incident", fields: ["sys_class_path"] }] },
+      () => {
+        expect(validateWritableFields("incident", { " SYS_CLASS_PATH ": "/!!!/" })).toEqual({
+          sys_class_path: "/!!!/",
+        });
+      }
+    );
+    // On the "*" entry they apply to non-system tables only; a system table
+    // must name them.
+    withFieldPolicy({ "*": { writable: ["sys_domain_path"] } }, () => {
+      expect(validateWritableFields("incident", { sys_domain_path: "/!!!/" })).toEqual({
+        sys_domain_path: "/!!!/",
+      });
+      expect(
+        denial(() => validateWritableFields("sys_user", { sys_domain_path: "x" }))?.reason
+      ).toBe("explicit_field_required");
+    });
+    // A dotted form is still a field path, not one of these fields.
+    expect(
+      denial(() => validateWritableFields("incident", { "sys_domain_path.name": "x" }))?.reason
+    ).toBe("unsupported_field_path");
+  });
+
+  it("leaves reads of all four fields unaffected", () => {
+    const fields = "sys_class_name,sys_domain,sys_class_path,sys_domain_path";
+    expect(resolveReadableFields("incident", { fields })).toEqual(fields.split(","));
+    withFieldPolicy({ u_custom: { writable: "*" } }, () => {
+      expect(resolveReadableFields("u_custom", { fields })).toEqual(fields.split(","));
+    });
+    withFieldPolicy({ incident: { readable: "*", writable: ["state"] } }, () => {
+      expect(resolveReadableFields("incident", { fields })).toEqual(fields.split(","));
+    });
+  });
+});
+
+describe('a named custom table follows the profile "*" entry key by key', () => {
+  function reason(action: () => unknown): string {
+    try {
+      action();
+      return "allowed";
+    } catch (error) {
+      if (error instanceof FieldPolicyError) return error.reason;
+      throw error;
+    }
+  }
+
+  it("cannot escape a narrowing \"*\" writable set by naming itself for reads", () => {
+    // The fail-open case: before, u_x took the open built-in writable set
+    // because its own entry said nothing about writes.
+    withFieldPolicy({ "*": { writable: [] }, u_x: { readable: ["sys_id", "u_note"] } }, () => {
+      expect(reason(() => validateWritableFields("u_x", { u_note: "x" }))).toBe(
+        "non_writable_field"
+      );
+      expect(resolveReadableFields("u_x")).toEqual(["sys_id", "u_note"]);
+      expect(reason(() => resolveReadableFields("u_x", { fields: "u_other" }))).toBe(
+        "unreadable_field"
+      );
+    });
+    // The same holds in the list form, whose "*" entry is a list entry.
+    runWithFieldPolicyConfiguration(
+      {
+        readableTableFields: [{ table: "u_x", fields: ["sys_id"] }],
+        writableTableFields: [{ table: "*", fields: [] }],
+      },
+      () => {
+        expect(reason(() => validateWritableFields("u_x", { u_note: "x" }))).toBe(
+          "non_writable_field"
+        );
+      }
+    );
+  });
+
+  it("keeps a writable set it states explicitly", () => {
+    withFieldPolicy({ "*": { writable: [] }, u_x: { writable: "*" } }, () => {
+      expect(validateWritableFields("u_x", { u_note: "x" })).toEqual({ u_note: "x" });
+      expect(reason(() => validateWritableFields("u_y", { u_note: "x" }))).toBe(
+        "non_writable_field"
+      );
+    });
+    withFieldPolicy({ "*": { writable: [] }, u_x: { writable: ["u_note"] } }, () => {
+      expect(validateWritableFields("u_x", { u_note: "x" })).toEqual({ u_note: "x" });
+      expect(reason(() => validateWritableFields("u_x", { u_other: "x" }))).toBe(
+        "non_writable_field"
+      );
+    });
+  });
+
+  it('takes its readable set from the "*" entry when it states only writable', () => {
+    withFieldPolicy(
+      { "*": { readable: ["sys_id", "name"] }, u_x: { writable: "*" } },
+      () => {
+        expect(validateWritableFields("u_x", { u_note: "x" })).toEqual({ u_note: "x" });
+        expect(resolveReadableFields("u_x", { fields: "all" })).toEqual(["sys_id", "name"]);
+        // Its concise projection is what an unnamed table gets, not the
+        // whole "*" readable list.
+        expect(resolveReadableFields("u_x")).toEqual(["sys_id"]);
+        expect(reason(() => resolveReadableFields("u_x", { fields: "u_private" }))).toBe(
+          "unreadable_field"
+        );
+      }
+    );
+  });
+
+  it('projects the "*" defaults, else sys_id, under a wide "*" readable list', () => {
+    const wide = ["sys_id", ...Array.from({ length: 299 }, (_, index) => `u_f${index}`)];
+    withFieldPolicy({ "*": { readable: wide }, u_named: { writable: ["u_f1"] } }, () => {
+      expect(resolveReadableFields("u_named")).toEqual(["sys_id"]);
+      // Named and unnamed custom tables project the same way.
+      expect(resolveReadableFields("u_unnamed")).toEqual(["sys_id"]);
+      expect(resolveReadableFields("u_named", { fields: "all" })).toHaveLength(300);
+    });
+    withFieldPolicy(
+      { "*": { defaults: ["sys_id", "u_f7"], readable: wide }, u_named: { writable: ["u_f1"] } },
+      () => {
+        expect(resolveReadableFields("u_named")).toEqual(["sys_id", "u_f7"]);
+        expect(resolveReadableFields("u_unnamed")).toEqual(["sys_id", "u_f7"]);
+      }
+    );
+    // The fallback is clamped: a "*" readable set without sys_id keeps no
+    // default the table may not read.
+    withFieldPolicy({ "*": { readable: ["u_f1", "u_f2"] }, u_named: { writable: "*" } }, () => {
+      expect(resolveReadableFields("u_named")).toEqual(["u_f1", "u_f2"]);
+      expect(resolveReadableFields("u_unnamed")).toEqual(["u_f1", "u_f2"]);
+    });
+    // ITSM and system-table defaults are unchanged by this rule.
+    withFieldPolicy({ "*": { readable: wide } }, () => {
+      expect(resolveReadableFields("incident")).toEqual(["sys_id"]);
+      expect(resolveReadableFields("sys_script")).toEqual(["sys_id", "name", "script"]);
+    });
+  });
+
+  it("keeps the defaults a named custom table states itself", () => {
+    const wide = ["sys_id", ...Array.from({ length: 299 }, (_, index) => `u_f${index}`)];
+    withFieldPolicy(
+      {
+        "*": { defaults: ["sys_id", "u_f7"], readable: wide },
+        u_named: { defaults: ["sys_id", "u_f5", "u_f6"], writable: ["u_f1"] },
+      },
+      () => {
+        expect(resolveReadableFields("u_named")).toEqual(["sys_id", "u_f5", "u_f6"]);
+      }
+    );
+    // A table that states its own readable set keeps the pre-existing
+    // behaviour: with no defaults stated, it projects that set.
+    withFieldPolicy(
+      { "*": { readable: wide }, u_named: { readable: ["sys_id", "u_f3"] } },
+      () => {
+        expect(resolveReadableFields("u_named")).toEqual(["sys_id", "u_f3"]);
+      }
+    );
+  });
+
+  it('checks a defaults-only entry against the "*" readable set', () => {
+    // Without a "*" readable set, an entry that states only defaults still
+    // reads exactly those fields.
+    withFieldPolicy({ u_x: { defaults: ["sys_id", "name"] } }, () => {
+      expect(resolveReadableFields("u_x")).toEqual(["sys_id", "name"]);
+      expect(reason(() => resolveReadableFields("u_x", { fields: "u_other" }))).toBe(
+        "unreadable_field"
+      );
+    });
+    // With one, the readable key resolves from "*", so a default outside it
+    // is a configuration error, reported at load.
+    expect(() =>
+      validateFieldPolicyConfiguration({
+        fieldPolicy: { "*": { readable: ["sys_id"] }, u_x: { defaults: ["sys_id", "name"] } },
+      })
+    ).toThrow('fieldPolicy.u_x.defaults lists "name", which fieldPolicy.u_x.readable does not allow.');
+  });
+
+  it("still never applies the \"*\" entry to a named system table", () => {
+    withFieldPolicy(
+      { "*": { writable: [] }, sys_script: { readable: ["sys_id", "name"] } },
+      () => {
+        expect(validateWritableFields("sys_script", { script: "x" })).toEqual({ script: "x" });
+        expect(resolveReadableFields("sys_script", { fields: "all" })).toEqual([
+          "sys_id",
+          "name",
+        ]);
+      }
     );
   });
 });

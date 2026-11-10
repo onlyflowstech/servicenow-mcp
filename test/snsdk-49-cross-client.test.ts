@@ -281,7 +281,7 @@ describe.each(clients)("SNSDK-49 %s incident writes", (_label, createClient) => 
         annotations: {
           readOnlyHint: false,
           destructiveHint: false,
-          idempotentHint: true,
+          idempotentHint: false,
           openWorldHint: true,
         },
       });
@@ -525,12 +525,14 @@ describe.each(clients)("SNSDK-49 %s incident writes", (_label, createClient) => 
         sys_ids: [CANONICAL_SYS_ID],
         fields: { state: "6" },
       });
+      // Journal fields are writable under the field policy; content outside
+      // the journal bounds is a value denial that never echoes the content.
       const journalCanary = "journal-secret-must-not-return";
       const journal = await client.callTool("sn_update", {
         profile: PROFILE,
         table: "incident",
         sys_id: CANONICAL_SYS_ID,
-        fields: { comments: journalCanary },
+        fields: { comments: `${journalCanary}\u0000` },
       });
 
       for (const denial of [raw, multi, journal]) {
@@ -540,7 +542,7 @@ describe.each(clients)("SNSDK-49 %s incident writes", (_label, createClient) => 
       expect(JSON.stringify([raw, multi])).toContain(
         ENCODED_QUERY_MIGRATION_MESSAGE
       );
-      expect(JSON.stringify(journal)).toContain("sn_incident_add_comment");
+      expect(JSON.stringify(journal)).toContain("rejected a field value");
       expect(JSON.stringify([raw, multi, journal])).not.toMatch(
         /raw-query-secret|journal-secret-must-not-return/u
       );
@@ -557,7 +559,7 @@ describe.each(clients)("SNSDK-49 %s incident writes", (_label, createClient) => 
         expect.objectContaining({
           tool: "sn_update",
           outcome: "policy_rejected",
-          reason: "journal_update_denied",
+          reason: "write_value_denied",
         })
       );
       expect(JSON.stringify(harness.auditWrite.mock.calls)).not.toContain(

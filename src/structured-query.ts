@@ -14,6 +14,7 @@ import { types as nodeUtilTypes } from "node:util";
 
 import { z } from "zod";
 
+import { boundedArray, withStructuralCheck } from "./bounded-input.js";
 import { isSensitiveFieldName } from "./field-policy.js";
 import { escapeQueryValue } from "./utils.js";
 
@@ -26,10 +27,41 @@ export const MAX_STRUCTURED_QUERY_CLAUSES = 16;
 export const MAX_STRUCTURED_QUERY_TERMS = 64;
 export const MAX_STRUCTURED_QUERY_BYTES = 8_192;
 
+/** Node bound of the compiler snapshot: every value, the root included. */
+export const MAX_STRUCTURED_QUERY_NODES = 2_048;
+/**
+ * Leaf conditions the schema will look at. Every leaf contributes at least one
+ * term to the compiled query, and compilation stops past
+ * {@link MAX_STRUCTURED_QUERY_TERMS} terms (and past
+ * {@link MAX_STRUCTURED_QUERY_CONDITIONS} leaves), so this bound rejects
+ * nothing that could compile.
+ */
+export const MAX_STRUCTURED_QUERY_LEAVES = MAX_STRUCTURED_QUERY_TERMS;
+/**
+ * Group conditions the schema will look at. Groups nest at most
+ * {@link MAX_STRUCTURED_QUERY_NESTING} levels and every group holds at least
+ * one condition, so below the top group each level's groups have disjoint
+ * subtrees that each hold a leaf. With at most
+ * {@link MAX_STRUCTURED_QUERY_CONDITIONS} leaves, a query that compiles has at
+ * most one top group plus that many groups on each lower level.
+ */
+export const MAX_STRUCTURED_QUERY_GROUPS =
+  1 + (MAX_STRUCTURED_QUERY_NESTING - 1) * MAX_STRUCTURED_QUERY_CONDITIONS;
+
 const MAX_SNAPSHOT_OBJECT_KEYS = 8;
 const MAX_SNAPSHOT_ARRAY_LENGTH = MAX_STRUCTURED_QUERY_CONDITIONS;
 const MAX_SNAPSHOT_DEPTH = 12;
-const MAX_SNAPSHOT_NODES = 2_048;
+const MAX_SNAPSHOT_NODES = MAX_STRUCTURED_QUERY_NODES;
+
+/** Where a value sits in the structural pass over a structured query. */
+const StructuralRole = Object.freeze({
+  Other: 0,
+  /** The filter itself, or one element of a group's conditions. */
+  Condition: 1,
+  /** A group's conditions array. */
+  Conditions: 2,
+});
+type StructuralRole = (typeof StructuralRole)[keyof typeof StructuralRole];
 const FIELD_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 const FIELD_POLICY_WILDCARD = "*";
 const FORBIDDEN_UNICODE_CATEGORY = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
@@ -87,10 +119,9 @@ const setConditionSchema = z
     type: z.literal("set"),
     field: fieldNameSchema,
     operator: z.enum(["in", "not_in"]),
-    values: z
-      .array(structuredQueryScalarSchema)
-      .min(1)
-      .max(MAX_STRUCTURED_QUERY_SET_VALUES),
+    values: boundedArray(structuredQueryScalarSchema, MAX_STRUCTURED_QUERY_SET_VALUES, {
+      min: 1,
+    }),
   })
   .strict();
 
@@ -155,17 +186,16 @@ const structuredLeafConditionSchema = z.union([
   nullConditionSchema,
 ]);
 
-function structuredQueryGroupSchema<FilterSchema extends z.ZodTypeAny>(
+function structuredQueryGroupSchema<FilterSchema extends z.ZodType>(
   filterSchema: FilterSchema
 ) {
   return z
     .object({
       type: z.literal("group"),
       operator: z.enum(["and", "or"]),
-      conditions: z
-        .array(filterSchema)
-        .min(1)
-        .max(MAX_STRUCTURED_QUERY_CONDITIONS),
+      conditions: boundedArray(filterSchema, MAX_STRUCTURED_QUERY_CONDITIONS, {
+        min: 1,
+      }),
     })
     .strict();
 }
@@ -203,14 +233,12 @@ export const structuredQueryOrderSchema = z
   })
   .strict();
 
-export const structuredQuerySchema = z
+const structuredQueryObjectSchema = z
   .object({
     filter: structuredQueryFilterSchema.optional(),
-    order_by: z
-      .array(structuredQueryOrderSchema)
-      .min(1)
-      .max(MAX_STRUCTURED_QUERY_ORDER_COUNT)
-      .optional(),
+    order_by: boundedArray(structuredQueryOrderSchema, MAX_STRUCTURED_QUERY_ORDER_COUNT, {
+      min: 1,
+    }).optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -221,6 +249,100 @@ export const structuredQuerySchema = z
       });
     }
   });
+
+/** Fixed text; it never includes any part of the rejected value. */
+export const STRUCTURED_QUERY_STRUCTURAL_LIMIT_MESSAGE =
+  "structured_query exceeds the structural limits for a query";
+
+/**
+ * The schema behind every structured-query argument.
+ *
+ * Its group and leaf unions are tried in turn for every condition, so the
+ * cost of rejecting a value grows with the number of conditions times the
+ * number of union branches. A plain structural pass runs first, with the
+ * compiler's own snapshot bounds plus a leaf-condition bound, and one fatal
+ * issue replaces the union walk for anything outside them. None of these
+ * bounds rejects a query the compiler would accept.
+ */
+export const structuredQuerySchema = withStructuralCheck(
+  structuredQueryObjectSchema,
+  (value) =>
+    structuredQueryShapeWithinLimits(value)
+      ? undefined
+      : STRUCTURED_QUERY_STRUCTURAL_LIMIT_MESSAGE
+);
+
+/**
+ * Plain structural pass over an untrusted structured query, before any schema
+ * runs. Iterative, stops at the first bound crossed, and reads only own
+ * enumerable data.
+ *
+ * Bounds: {@link MAX_STRUCTURED_QUERY_NODES} values in total (the root
+ * included), depth at most {@link MAX_SNAPSHOT_DEPTH}, arrays at most
+ * {@link MAX_SNAPSHOT_ARRAY_LENGTH} long, objects with at most
+ * {@link MAX_SNAPSHOT_OBJECT_KEYS} keys, at most
+ * {@link MAX_STRUCTURED_QUERY_LEAVES} leaf conditions and at most
+ * {@link MAX_STRUCTURED_QUERY_GROUPS} group conditions. A condition is a value
+ * in a condition position: the `filter` itself, or an element of a group's
+ * `conditions`. It is a group when it is an object whose `type` is "group",
+ * and a leaf otherwise.
+ */
+export function structuredQueryShapeWithinLimits(value: unknown): boolean {
+  const values: unknown[] = [value];
+  const depths: number[] = [0];
+  const roles: StructuralRole[] = [StructuralRole.Other];
+  let nodes = 0;
+  let leaves = 0;
+  let groups = 0;
+  try {
+    while (values.length > 0) {
+      const node = values.pop();
+      const depth = depths.pop() as number;
+      const role = roles.pop() as StructuralRole;
+      nodes += 1;
+      if (nodes > MAX_SNAPSHOT_NODES || depth > MAX_SNAPSHOT_DEPTH) return false;
+      const isGroup =
+        node !== null &&
+        typeof node === "object" &&
+        !Array.isArray(node) &&
+        Object.hasOwn(node, "type") &&
+        (node as { type?: unknown }).type === "group";
+      if (role === StructuralRole.Condition) {
+        if (isGroup ? ++groups > MAX_STRUCTURED_QUERY_GROUPS : ++leaves > MAX_STRUCTURED_QUERY_LEAVES) {
+          return false;
+        }
+      }
+      if (node === null || typeof node !== "object") continue;
+      if (Array.isArray(node)) {
+        if (node.length > MAX_SNAPSHOT_ARRAY_LENGTH) return false;
+        const childRole =
+          role === StructuralRole.Conditions ? StructuralRole.Condition : StructuralRole.Other;
+        for (let index = 0; index < node.length; index += 1) {
+          values.push(node[index]);
+          depths.push(depth + 1);
+          roles.push(childRole);
+        }
+        continue;
+      }
+      let keys = 0;
+      for (const key in node) {
+        if (!Object.hasOwn(node, key)) continue;
+        if (++keys > MAX_SNAPSHOT_OBJECT_KEYS) return false;
+        let childRole: StructuralRole = StructuralRole.Other;
+        if (depth === 0 && key === "filter") childRole = StructuralRole.Condition;
+        else if (isGroup && role === StructuralRole.Condition && key === "conditions") {
+          childRole = StructuralRole.Conditions;
+        }
+        values.push((node as Record<string, unknown>)[key]);
+        depths.push(depth + 1);
+        roles.push(childRole);
+      }
+    }
+  } catch {
+    return false;
+  }
+  return true;
+}
 
 export type StructuredQueryInput = z.output<typeof structuredQuerySchema>;
 

@@ -1,3 +1,6 @@
+import { atfRunToolModule } from "./atf-run-module.js";
+import { atfResultsToolModule } from "./atf-results-module.js";
+import { atfReadinessToolModule } from "./atf-readiness-module.js";
 /** Canonical contract catalog for all published ServiceNow MCP tools. */
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -8,12 +11,14 @@ import { resolveToolTableAccess } from "../tool-table-access.js";
 
 import * as aggregate from "./aggregate.js";
 import * as atf from "./atf.js";
+import { atfAuthorToolModule } from "./atf-author-module.js";
 import * as attach from "./attach.js";
 import * as batch from "./batch.js";
 import * as codesearch from "./codesearch.js";
 import { createToolModule } from "./create-module.js";
 import * as del from "./delete.js";
 import * as discover from "./discover.js";
+import { flowViewToolModule } from "./flow-view-module.js";
 import { getToolModule } from "./get-module.js";
 import * as health from "./health.js";
 import {
@@ -36,12 +41,13 @@ import {
   defineContextOnlyToolModule,
   defineServiceNowToolModule,
   withRequiredProfile,
+  type AnyZodObject,
   type ServiceNowToolHandlerServices,
   type ToolDefinition,
   type ToolModuleRequirements,
 } from "./tool-module.js";
 
-interface ExistingServiceNowTool<TSchema extends z.AnyZodObject> {
+interface ExistingServiceNowTool<TSchema extends AnyZodObject> {
   readonly definition: ToolDefinition;
   readonly schema: TSchema;
   readonly handler: (
@@ -56,7 +62,7 @@ interface ExistingServiceNowTool<TSchema extends z.AnyZodObject> {
  * Adapt the existing handler functions without exposing their positional
  * compatibility signature to the registry or to future module authors.
  */
-function existingToolModule<TSchema extends z.AnyZodObject>(
+function existingToolModule<TSchema extends AnyZodObject>(
   tool: ExistingServiceNowTool<TSchema>,
   requirements: ToolModuleRequirements
 ) {
@@ -82,7 +88,10 @@ function existingToolModule<TSchema extends z.AnyZodObject>(
         toolName,
         args,
         await tool.handler(
-          args,
+          // The issued schema is the tool's own schema plus `profile`, so its
+          // output is the tool's output; zod 4 cannot infer that through the
+          // open index signature the issued shape carries.
+          args as z.output<TSchema>,
           services.serviceNow,
           services.settings,
           services.context
@@ -186,14 +195,18 @@ export const serviceNowToolModules = Object.freeze([
     fieldPolicies: ["read"],
     capabilities: ["metadata:discover"],
   }),
+  flowViewToolModule,
+  atfAuthorToolModule,
+  atfRunToolModule,
+  atfResultsToolModule,
+  atfReadinessToolModule,
   existingToolModule(atf, {
     permissions: ["read", "write"],
     tables: staticTables(
       "sys_atf_test",
       "sys_atf_test_result",
       "sys_atf_test_suite",
-      "sys_atf_test_suite_test",
-      "sys_execution_tracker"
+      "sys_atf_test_suite_test"
     ),
     apis: ["atf", "table"],
     fieldPolicies: ["read"],

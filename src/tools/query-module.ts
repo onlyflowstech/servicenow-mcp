@@ -8,7 +8,7 @@ import { FORCE_RECACHE_PARAM } from "../metadata-cache.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
 import {
   authorizeRawEncodedRead,
-  ENCODED_QUERY_MIGRATION_MESSAGE,
+  ENCODED_QUERY_STRICT_OBJECT_PARAMS,
 } from "../encoded-query-policy.js";
 import {
   fieldSelectionToSysparmFields,
@@ -62,7 +62,7 @@ export const definition = Object.freeze({
 } satisfies ToolDefinition);
 
 function compatibleInputSchema() {
-  return z.object({
+  return z.strictObject({
     table: z
       .string()
       .describe(
@@ -145,7 +145,7 @@ function compatibleInputSchema() {
       .optional()
       .default(false)
       .describe("For metadata tables, bypass the per-instance metadata cache and refresh from ServiceNow."),
-  }).strict(ENCODED_QUERY_MIGRATION_MESSAGE);
+  }, ENCODED_QUERY_STRICT_OBJECT_PARAMS);
 }
 
 /** Legacy source-level schema; MCP registration uses `moduleInputSchema`. */

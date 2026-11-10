@@ -14,6 +14,7 @@ import {
 } from "./profile-credentials.js";
 import {
   ProfileManager,
+  validateProfileName,
   type Profile,
 } from "./profile-manager.js";
 import type { AuthType, GrantType } from "./config.js";
@@ -66,6 +67,9 @@ export async function runProfileAdmin(
     dependencies.keyProvider ?? new EnvironmentProfileEncryptionKeyProvider();
   const io = dependencies.io ?? createProtectedInputIO(process.stdin, process.stderr);
   const name = required(parsed.values, "--name");
+  // Before any secret is read: the store would reject the name anyway, but
+  // only after the operator had typed the credential.
+  validateProfileName(name);
 
   switch (parsed.command) {
     case "create": {

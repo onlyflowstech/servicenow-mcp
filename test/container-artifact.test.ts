@@ -65,7 +65,7 @@ describe("SNSDK-39 production OCI artifact", () => {
     const buildDigest =
       "sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c";
     const runtimeDigest =
-      "sha256:a2723a2817c5b01b8e7b98d567bc8b5a6b0e713e25bfb0a82b6ade4b9db06f50";
+      "sha256:ec2313763dd43931543bd03830466e0c409ce73a487e8d46f10db72d3b816c1c";
     expect(dockerfile).toMatch(
       new RegExp(`^FROM node:22\\.21\\.1-bookworm-slim@${buildDigest} AS build$`, "mu")
     );

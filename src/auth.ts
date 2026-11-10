@@ -19,8 +19,10 @@
  */
 
 import { GrantType, ServiceNowConfig } from "./config.js";
+import { configuredHost, htmlResponseError, sniffPrefix } from "./html-response.js";
 import {
   boundedRetryAfterSeconds,
+  createRedirectedError,
   createToolError,
 } from "./tool-error.js";
 
@@ -102,7 +104,10 @@ export class OAuthProvider implements AuthProvider {
   private expiresAt = 0;
   private refresh: OAuthRefresh | null = null;
 
+  private readonly host: string | undefined;
+
   constructor(private readonly options: OAuthProviderOptions) {
+    this.host = configuredHost(options.instance);
     const grantType = options.grantType ?? "client_credentials";
     if (grantType === "password" && (!options.username || !options.password)) {
       throw createToolError("authentication", "retry_after_correction");
@@ -239,6 +244,8 @@ export class OAuthProvider implements AuthProvider {
         },
         body: form.toString(),
         signal: tokenSignal,
+        // A 307 would re-send the client secret to the redirect target.
+        redirect: "manual",
       });
     } catch {
       if (refreshSignal.aborted) throw oauthCancellationError();
@@ -246,6 +253,11 @@ export class OAuthProvider implements AuthProvider {
         throw createToolError("timeout", "retry_if_safe_and_idempotent");
       }
       throw createToolError("upstream", "retry_if_safe_and_idempotent");
+    }
+
+    if (response.status >= 300 && response.status < 400) {
+      await cancelResponseBody(response, "OAuth redirect refused");
+      throw createRedirectedError();
     }
 
     if (!response.ok) {
@@ -262,12 +274,21 @@ export class OAuthProvider implements AuthProvider {
     }
 
     let json: Record<string, unknown>;
+    let htmlError: Error | undefined;
     try {
       const text = await readBoundedResponseText(
         response,
         MAX_TOKEN_RESPONSE_BYTES,
         tokenSignal
       );
+      // A hibernating instance (or SSO/maintenance page) answers 200 with
+      // HTML. Only a bounded prefix is inspected; nothing from it is echoed.
+      htmlError = htmlResponseError(
+        response.headers.get("content-type"),
+        sniffPrefix(text),
+        this.host
+      );
+      if (htmlError !== undefined) throw htmlError;
       const candidate: unknown = JSON.parse(text);
       if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
         throw new TypeError("OAuth token response must be a JSON object");
@@ -278,6 +299,7 @@ export class OAuthProvider implements AuthProvider {
       if (timeoutSignal.aborted) {
         throw createToolError("timeout", "retry_if_safe_and_idempotent");
       }
+      if (htmlError !== undefined) throw htmlError;
       // Never echo the raw body -- it may contain token material.
       throw createToolError("upstream", "retry_if_safe_and_idempotent");
     }

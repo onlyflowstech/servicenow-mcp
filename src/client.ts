@@ -7,6 +7,9 @@
  *     network errors (max 2 retries).
  *   - POST retries ONLY on 429 — a 429 is rejected before processing, so
  *     a retry is safe; a 5xx POST may have executed side effects.
+ *   - A PATCH or PUT whose body sets a journal field (comments, work_notes)
+ *     is treated like a POST: each send can append an entry, so it retries
+ *     only on 429.
  *   - Retry-After headers (delta-seconds and HTTP-date) are honored,
  *     capped at MAX_RETRY_DELAY_MS per wait.
  *   - A 401 triggers at most one AuthProvider refresh + retry.
@@ -14,12 +17,17 @@
  * @module client
  */
 
+import { atfFormInputSchema, prepareAtfForm, atfFormCookies, type AtfFormInput } from "./atf-form.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { ServiceNowConfig } from "./config.js";
+import { configuredHost, htmlResponseError, sniffPrefix } from "./html-response.js";
 import { AuthProvider, createAuthProvider } from "./auth.js";
+import { isJournalFieldName } from "./incident-journal-policy.js";
 import {
   boundedRetryAfterSeconds,
+  createInvalidResponseError,
+  createRedirectedError,
   createToolError,
   type ToolErrorCategory,
   type ToolErrorRetry,
@@ -46,6 +54,7 @@ export interface RequestResult<T = ParsedJson> {
  * client through `this`, own properties, or the prototype chain.
  */
 export interface ServiceNowOperations {
+  saveAtfStepInputs?(input: AtfFormInput): Promise<void>;
   get<T = ParsedJson>(
     path: string,
     params?: Record<string, string>
@@ -54,7 +63,7 @@ export interface ServiceNowOperations {
     path: string,
     params?: Record<string, string>
   ): Promise<RequestResult<T>>;
-  post<T = ParsedJson>(path: string, body?: unknown): Promise<T | null>;
+  post<T = ParsedJson>(path: string, body?: unknown, params?: Record<string, string>): Promise<T | null>;
   patch<T = ParsedJson>(path: string, body?: unknown): Promise<T | null>;
   delete(path: string): Promise<{ status: number }>;
   postBinary<T = ParsedJson>(
@@ -146,11 +155,13 @@ export class ServiceNowClient {
   readonly #timeoutMs: number;
   readonly #maxRetries: number;
   readonly #baseRetryDelayMs: number;
+  readonly #host: string | undefined;
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #limiter: UpstreamConcurrencyLimiter;
 
   constructor(config: ServiceNowConfig, options: ClientOptions = {}) {
     this.#baseUrl = config.instance;
+    this.#host = configuredHost(config.instance);
     this.#auth = options.auth ?? createAuthProvider(config);
     this.#timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
@@ -160,6 +171,27 @@ export class ServiceNowClient {
       new URL(this.#baseUrl).origin,
       config.maxConcurrentRequests ?? DEFAULT_MAX_CONCURRENT_REQUESTS
     );
+  }
+
+  /** Fixed native form endpoint; no generic form/URL capability is exposed. */
+  async saveAtfStepInputs(candidate: AtfFormInput): Promise<void> {
+    const input = atfFormInputSchema.parse(candidate);
+    const origin = new URL(this.#baseUrl).origin;
+    const endpoint = origin + "/sys_atf_step.do";
+    const deadline = AbortSignal.timeout(this.#timeoutMs);
+    const parent = currentRequestSignal();
+    const signal = parent ? AbortSignal.any([parent, deadline]) : deadline;
+    const response = await this.fetchWithPolicy("GET", endpoint + "?sys_id=" + input.stepId, { Accept: "text/html" }, undefined, true);
+    if (response.status !== 200) { drainBody(response); throw this.buildHttpError("GET", response.status, response.headers); }
+    const html = (await readBoundedResponseBody(response, 2 * 1024 * 1024, signal, currentRawByteBudget())).toString("utf8");
+    const fields = prepareAtfForm(html, origin, input);
+    const cookies = atfFormCookies(response.headers);
+    const saved = await this.fetchWithPolicy("POST", endpoint, { "Content-Type": "application/x-www-form-urlencoded", Accept: "text/html", ...(cookies ? { Cookie: cookies } : {}) }, fields, true);
+    drainBody(saved);
+    if (![200, 302, 303].includes(saved.status)) throw this.buildHttpError("POST", saved.status, saved.headers);
+    const location = saved.headers.get("location");
+    if (location && new URL(location, endpoint).origin !== origin) throw createToolError("upstream", "do_not_retry");
+    // Caller must verify stored inputs. A successful HTTP response is insufficient.
   }
 
   // ── Core HTTP methods ──────────────────────────────────────────
@@ -179,8 +211,8 @@ export class ServiceNowClient {
     return this.requestWithMeta<T>("GET", path, { params });
   }
 
-  async post<T = ParsedJson>(path: string, body?: unknown): Promise<T | null> {
-    return (await this.requestWithMeta<T>("POST", path, { body })).data;
+  async post<T = ParsedJson>(path: string, body?: unknown, params?: Record<string, string>): Promise<T | null> {
+    return (await this.requestWithMeta<T>("POST", path, { body, params })).data;
   }
 
   async patch<T = ParsedJson>(path: string, body?: unknown): Promise<T | null> {
@@ -239,7 +271,7 @@ export class ServiceNowClient {
       );
     }
 
-    return readJsonResponse<T>(response, currentRequestSignal());
+    return this.readJson<T>(response);
   }
 
   /**
@@ -284,6 +316,15 @@ export class ServiceNowClient {
     options: { params?: Record<string, string>; body?: unknown } = {}
   ): Promise<RequestResult<T>> {
     const url = this.buildUrl(path, options.params);
+    // A journal write appends an entry each time it is applied. Once such a
+    // request may have reached the instance (a 5xx or a network failure), a
+    // re-send could append a second entry, so it is not re-sent. A 429 and
+    // the one 401 refresh still retry: both mean nothing was processed.
+    // The error classification is unchanged, so the failure still reads as
+    // an unknown outcome (retry_if_safe_and_idempotent) to callers.
+    const resendAfterSend =
+      method !== "POST" &&
+      !((method === "PATCH" || method === "PUT") && setsJournalField(options.body));
     const response = await this.fetchWithPolicy(
       method,
       url,
@@ -291,7 +332,9 @@ export class ServiceNowClient {
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      options.body !== undefined ? JSON.stringify(options.body) : undefined
+      options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      false,
+      resendAfterSend
     );
 
     if (!response.ok) {
@@ -309,10 +352,36 @@ export class ServiceNowClient {
     }
 
     return {
-      data: await readJsonResponse<T>(response, currentRequestSignal()),
+      data: await this.readJson<T>(response),
       status: response.status,
       headers: response.headers,
     };
+  }
+
+  /**
+   * Read a successful JSON body. A 200 HTML page (hibernating instance, SSO,
+   * maintenance, proxy) becomes a fixed trusted error that never echoes the
+   * body; only a bounded prefix is inspected.
+   */
+  private async readJson<T>(response: Response): Promise<T> {
+    const text = await readBoundedResponseText(
+      response,
+      DEFAULT_MAX_JSON_RESPONSE_BYTES,
+      currentRequestSignal(),
+      currentUpstreamByteBudget()
+    );
+    const htmlError = htmlResponseError(
+      response.headers.get("content-type"),
+      sniffPrefix(text),
+      this.#host
+    );
+    if (htmlError !== undefined) throw htmlError;
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      // A V8 SyntaxError quotes the body; never let it escape.
+      throw createInvalidResponseError();
+    }
   }
 
   // ── Internal helpers ───────────────────────────────────────────
@@ -338,12 +407,18 @@ export class ServiceNowClient {
    * fetch() with the full request policy applied: auth headers, timeout,
    * bounded retries with backoff, Retry-After, and a single 401
    * refresh-and-retry via the AuthProvider.
+   *
+   * `resendAfterSend` says whether a request that may have reached the
+   * instance (a 5xx or a network failure) can be sent again. It defaults to
+   * false for POST and true for every other method.
    */
   private async fetchWithPolicy(
     method: HttpMethod,
     url: string,
     headers: Record<string, string>,
-    body?: BodyInit
+    body?: BodyInit,
+    nativeForm = false,
+    resendAfterSend = method !== "POST"
   ): Promise<Response> {
     let attempt = 0;
     let authRetried = false;
@@ -368,6 +443,9 @@ export class ServiceNowClient {
             headers: { ...authHeaders, ...headers },
             body,
             signal: attemptSignal,
+            // Never follow a redirect: fetch would forward custom auth
+            // headers cross-origin, and re-send a 307 body.
+            redirect: "manual" as const,
           })
         );
       } catch {
@@ -376,8 +454,9 @@ export class ServiceNowClient {
           throw requestPolicyError("timeout", method);
         }
         // Transient network error (DNS, reset, refused...). Never retry a
-        // POST -- the request may have reached the server before failing.
-        if (method !== "POST" && attempt < this.#maxRetries) {
+        // POST or a journal write -- the request may have reached the server
+        // before failing.
+        if (!nativeForm && resendAfterSend && attempt < this.#maxRetries) {
           attempt++;
           throwIfRequestCancelled(requestSignal);
           await waitForRequestCancellation(
@@ -389,8 +468,13 @@ export class ServiceNowClient {
         throw requestPolicyError("upstream", method);
       }
 
+      if (!nativeForm && response.status >= 300 && response.status < 400) {
+        drainBody(response);
+        throw createRedirectedError();
+      }
+
       // 401: give the auth provider one chance to refresh and retry.
-      if (response.status === 401 && !authRetried) {
+      if (!nativeForm && response.status === 401 && !authRetried) {
         throwIfRequestCancelled(requestSignal);
         const shouldRetry = await waitForRequestCancellation(
           this.#auth.onAuthFailure(requestSignal),
@@ -404,7 +488,7 @@ export class ServiceNowClient {
       }
 
       if (
-        isRetryableStatus(response.status, method) &&
+        !nativeForm && isRetryableStatus(response.status, resendAfterSend) &&
         attempt < this.#maxRetries
       ) {
         attempt++;
@@ -464,6 +548,7 @@ export function createServiceNowOperations(
 ): ServiceNowOperations {
   const operations = Object.create(null) as ServiceNowOperations;
   Object.defineProperties(operations, {
+    ...(client.saveAtfStepInputs ? { saveAtfStepInputs: { value: (input: AtfFormInput) => client.saveAtfStepInputs!(input) } } : {}),
     get: {
       value: <T = ParsedJson>(path: string, params?: Record<string, string>) =>
         client.get<T>(path, params),
@@ -473,8 +558,8 @@ export function createServiceNowOperations(
         client.getWithMeta<T>(path, params),
     },
     post: {
-      value: <T = ParsedJson>(path: string, body?: unknown) =>
-        client.post<T>(path, body),
+      value: <T = ParsedJson>(path: string, body?: unknown, params?: Record<string, string>) =>
+        params === undefined ? client.post<T>(path, body) : client.post<T>(path, body, params),
     },
     patch: {
       value: <T = ParsedJson>(path: string, body?: unknown) =>
@@ -585,7 +670,7 @@ async function readBoundedResponseBody(
       } catch {
         // Cancellation is best effort after the response is rejected.
       }
-      throw new RangeError("raw response exceeds configured byte limit");
+      throw new ServiceNowResponseTooLargeError("raw response exceeds configured byte limit");
     }
     if (cumulativeBudget) {
       try {
@@ -619,7 +704,7 @@ async function readBoundedResponseBody(
       total += chunk.length;
       if (total > maximum) {
         await reader.cancel("response exceeds configured byte limit");
-        throw new RangeError("raw response exceeds configured byte limit");
+        throw new ServiceNowResponseTooLargeError("raw response exceeds configured byte limit");
       }
       if (cumulativeBudget && total > reserved) {
         try {
@@ -641,11 +726,33 @@ async function readBoundedResponseBody(
   return Buffer.concat(chunks, total);
 }
 
+/**
+ * A response, or a request scope's cumulative upstream JSON, passed its byte
+ * limit. A RangeError, as before, so existing handling is unchanged; the
+ * class lets callers tell it apart from any other RangeError.
+ */
+export class ServiceNowResponseTooLargeError extends RangeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ServiceNowResponseTooLargeError";
+  }
+}
+
+/** True when a request failed because a response or its scope passed a byte limit. */
+export function isServiceNowResponseTooLarge(error: unknown): boolean {
+  return error instanceof ServiceNowResponseTooLargeError;
+}
+
 class ServiceNowRequestCancelledError extends Error {
   constructor() {
     super("ServiceNow request cancelled");
     this.name = "ServiceNowRequestCancelledError";
   }
+}
+
+/** True when a request failed because its caller cancelled it. */
+export function isServiceNowRequestCancellation(error: unknown): boolean {
+  return error instanceof ServiceNowRequestCancelledError;
 }
 
 function currentRequestSignal(): AbortSignal | undefined {
@@ -697,18 +804,6 @@ function waitForRequestCancellation<T>(
   });
 }
 
-function readJsonResponse<T>(
-  response: Response,
-  signal: AbortSignal | undefined
-): Promise<T> {
-  return readBoundedResponseText(
-    response,
-    DEFAULT_MAX_JSON_RESPONSE_BYTES,
-    signal,
-    currentUpstreamByteBudget()
-  ).then((text) => JSON.parse(text) as T);
-}
-
 async function readBoundedResponseText(
   response: Response,
   maximum: number,
@@ -735,7 +830,7 @@ class CumulativeResponseByteBudget {
       throw new TypeError("upstream byte reservation is invalid");
     }
     if (this.#consumed + bytes > this.maximum) {
-      throw new RangeError("cumulative upstream response exceeds configured byte limit");
+      throw new ServiceNowResponseTooLargeError("cumulative upstream response exceeds configured byte limit");
     }
     this.#consumed += bytes;
   }
@@ -828,11 +923,25 @@ export function retryDelayMs(
 
 // ── Module-level helpers ───────────────────────────────────────────
 
-function isRetryableStatus(status: number, method: HttpMethod): boolean {
+function isRetryableStatus(status: number, resendAfterSend: boolean): boolean {
   if (status === 429) return true;
-  // A 5xx POST may have executed side effects on the instance -- never retry.
-  if (method === "POST") return false;
+  // A 5xx POST or journal write may have executed side effects on the
+  // instance -- never retry.
+  if (!resendAfterSend) return false;
   return RETRYABLE_STATUSES.includes(status);
+}
+
+/**
+ * True when a JSON body sets a journal field. Only own enumerable keys are
+ * read, the way JSON.stringify serializes the body, and no value is read.
+ */
+function setsJournalField(body: unknown): boolean {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return false;
+  }
+  return Object.keys(body).some((key) =>
+    isJournalFieldName(key.trim().toLowerCase())
+  );
 }
 
 interface HttpFailureClassification {

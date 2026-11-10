@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -17,7 +17,20 @@ import {
   type ProfileEncryptionKeyProvider,
 } from "../src/profile-credentials.js";
 import { ProfileManager } from "../src/profile-manager.js";
-import { createToolError } from "../src/tool-error.js";
+import {
+  authorizeTableAccess,
+  authorizeTableAccessPlan,
+  createTableAccessPolicy,
+  type TableAccessPolicy,
+  type TableAccessPolicyInput,
+} from "../src/table-policy.js";
+import {
+  createHtmlResponseError,
+  createInstanceHibernatingError,
+  createToolError,
+} from "../src/tool-error.js";
+import { FLOW_VIEW_TABLES } from "../src/tools/flow-view-contracts.js";
+import { resolveToolTableAccess } from "../src/tool-table-access.js";
 import {
   classifyVerificationFailure,
   runSetupCli,
@@ -81,6 +94,8 @@ describe("setup init", () => {
       env: { HOME: home },
       writeStdout: (value) => io.out.push(value),
       writeStderr: (value) => io.err.push(value),
+      // The bare command is registered only off Windows; see the next test.
+      platform: "linux",
       commandExists: () => true,
       runCommand: (command, args) => {
         calls.push({ command, args });
@@ -153,6 +168,67 @@ describe("setup init", () => {
     });
     expect(JSON.stringify(JSON.parse(io.out.join("")))).not.toContain("endpoint");
     expect(io.err.join("")).toBe("");
+  });
+
+  it("registers node and the entrypoint on Windows, even with servicenow-mcp on PATH", async () => {
+    const home = newHome("sn-mcp-setup-windows-");
+    const entrypoint =
+      "C:\\Users\\micha\\AppData\\Roaming\\npm\\node_modules\\@onlyflows\\servicenow-mcp\\dist\\index.js";
+    const adds: Array<{ command: string; launch: readonly string[] }> = [];
+
+    await runSetupCli({
+      home,
+      argv: ["setup", "--json"],
+      env: { HOME: home },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+      platform: "win32",
+      serverEntrypoint: entrypoint,
+      // npm's servicenow-mcp.cmd resolves on PATH, but a client spawning
+      // without a shell cannot run a .cmd shim, so it must not be registered.
+      commandExists: () => true,
+      runCommand: (command, args) => {
+        if (args[1] === "add") {
+          adds.push({ command, launch: args.slice(args.indexOf("--") + 1) });
+        }
+        return args[1] === "get" ? { status: 1 } : { status: 0 };
+      },
+    });
+
+    expect(adds).toEqual([
+      { command: "codex", launch: [process.execPath, entrypoint] },
+      { command: "claude", launch: [process.execPath, entrypoint] },
+    ]);
+  });
+
+  it("registers with a Windows npm shim that is installed but not on PATH", async () => {
+    const home = newHome("sn-mcp-setup-offpath-");
+    const appData = join(home, "AppData", "Roaming");
+    const codex = join(appData, "npm", "codex.cmd");
+    mkdirSync(dirname(codex), { recursive: true });
+    writeFileSync(codex, "");
+    const commands: string[] = [];
+    const io = capture();
+
+    await runSetupCli({
+      home,
+      argv: ["--clients", "codex,claude-code", "--json"],
+      env: { HOME: home, APPDATA: appData },
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: (value) => io.err.push(value),
+      platform: "win32",
+      commandExists: () => false,
+      runCommand: (command, args) => {
+        commands.push(`${command} ${args[1]}`);
+        return args[1] === "get" ? { status: 1 } : { status: 0 };
+      },
+    });
+
+    expect(commands).toEqual([`${codex} get`, `${codex} add`]);
+    expect(JSON.parse(io.out.join(""))).toMatchObject({
+      clients: ["codex"],
+      skipped_clients: ["claude-code (claude CLI not found)"],
+    });
   });
 
   it("prints human-readable next steps by default", async () => {
@@ -399,6 +475,47 @@ describe("setup grant", () => {
     });
   });
 
+  it("grants the ATF preset only to authoring and preserves ordinary tool bindings", async () => {
+    await runSetupCli({ home, argv: ["grant", "--profile", "dev", "--atf", "--read", "incident"], profileManager: manager, writeStdout: () => undefined });
+    const profile = manager.getProfile("dev");
+    const targets = profile.tableAccess!.targets!;
+    expect(profile.tableAccess!.readTables).toEqual(["incident", "sys_atf_step", "sys_atf_step_config", "sys_atf_test", "sys_atf_test_suite", "sys_element_mapping", "sys_variable_value", "var_dictionary"]);
+    expect(profile.tableAccess!.writeTables).toEqual(["sys_atf_step", "sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_element_mapping", "sys_variable_value"]);
+    for (const target of targets.filter(target => target.table !== "incident")) expect(target.tools).toEqual(["sn_atf_author"]);
+    expect(targets.find(target => target.table === "incident")!.tools).not.toContain("sn_atf_author");
+    expect(profile.atf?.execute).not.toBe(true);
+    expect(profile.atf?.allowScriptSteps).not.toBe(true);
+  });
+
+  it("grants the flow-view preset read-only and only to sn_flow_view", async () => {
+    await runSetupCli({ home, argv: ["grant", "--profile", "dev", "--flows", "--read", "incident"], profileManager: manager, writeStdout: () => undefined });
+    const access = manager.getProfile("dev").tableAccess!;
+    expect(access.readTables).toEqual(["incident", ...FLOW_VIEW_TABLES].sort());
+    expect(access.writeTables).toEqual([]);
+    for (const table of FLOW_VIEW_TABLES) {
+      expect(access.targets!.find(target => target.table === table)!.tools).toEqual(["sn_flow_view"]);
+    }
+    expect(access.targets!.find(target => target.table === "incident")!.tools).not.toContain("sn_flow_view");
+  });
+
+  it("adds sn_flow_view to tables the ATF preset already binds", async () => {
+    await runSetupCli({ home, argv: ["grant", "--profile", "dev", "--atf", "--flows"], profileManager: manager, writeStdout: () => undefined });
+    const access = manager.getProfile("dev").tableAccess!;
+    for (const table of ["sys_variable_value", "var_dictionary"]) {
+      expect([...access.targets!.find(target => target.table === table)!.tools].sort()).toEqual(["sn_atf_author", "sn_flow_view"]);
+    }
+    expect(access.writeTables).not.toContain("sys_hub_flow");
+  });
+
+  it("accepts --flows on its own", async () => {
+    const out: string[] = [];
+    await runSetupCli({ home, argv: ["grant", "--profile", "dev", "--flows", "--dry-run", "--json"], profileManager: manager, writeStdout: (value) => out.push(value) });
+    const report = JSON.parse(out.join("")) as { status: string; tableAccess: { readTables: string[] } };
+    expect(report.status).toBe("dry-run");
+    expect(report.tableAccess.readTables).toEqual([...FLOW_VIEW_TABLES].sort());
+    expect(manager.getProfile("dev").tableAccess).toBeUndefined();
+  });
+
   it("writes validated table access rules onto an existing profile", async () => {
     const io = capture();
     await runSetupCli({
@@ -528,6 +645,174 @@ describe("setup grant", () => {
     );
   });
 
+  const JOURNAL_TOOLS = ["sn_incident_add_comment", "sn_incident_add_work_note"];
+  const READ_DEFAULTS = ["sn_aggregate", "sn_get", "sn_query", "sn_schema"];
+
+  async function grant(argv: readonly string[]): Promise<void> {
+    await runSetupCli({
+      home,
+      argv: ["grant", "--profile", "dev", ...argv],
+      profileManager: manager,
+      writeStdout: () => undefined,
+    });
+  }
+
+  function toolsOn(table: string): readonly string[] | undefined {
+    return new ProfileManager({ configFilePath: profileConfigPath(home) })
+      .getProfile("dev")
+      .tableAccess?.targets?.find((target) => target.table === table)?.tools;
+  }
+
+  /** Load the persisted rules with the loader the server uses at request time. */
+  function persistedPolicy(): TableAccessPolicy {
+    const persisted = new ProfileManager({
+      configFilePath: profileConfigPath(home),
+    }).getProfile("dev");
+    return createTableAccessPolicy(persisted.tableAccess!);
+  }
+
+  function expectDenied(
+    operation: "read" | "write",
+    table: string,
+    tools: readonly string[]
+  ): void {
+    const policy = persistedPolicy();
+    for (const tool of tools) {
+      expect(() => authorizeTableAccess(policy, { operation, table }, tool)).toThrow(
+        /denied by policy/u
+      );
+    }
+  }
+
+  describe("incident journal tools", () => {
+    it("adds both journal tools to a default incident write grant, and the policy loads", async () => {
+      await grant(["--write", "incident"]);
+
+      expect(toolsOn("incident")).toEqual([
+        "sn_create",
+        "sn_incident_add_comment",
+        "sn_incident_add_work_note",
+        "sn_update",
+      ]);
+      const policy = persistedPolicy();
+      for (const tool of JOURNAL_TOOLS) {
+        expect(
+          authorizeTableAccess(policy, { operation: "write", table: "incident" }, tool)
+        ).toBe("incident");
+      }
+      // Destructive tools are still never granted implicitly.
+      expect(() =>
+        authorizeTableAccess(policy, { operation: "write", table: "incident" }, "sn_delete")
+      ).toThrow(/denied by policy/u);
+    });
+
+    it("adds neither journal tool to a write grant on another table, or a read-only incident grant", async () => {
+      await grant(["--read", "incident", "--write", "change_request"]);
+
+      expect(toolsOn("change_request")).toEqual(["sn_create", "sn_update"]);
+      for (const tool of JOURNAL_TOOLS) {
+        expect(toolsOn("incident")).not.toContain(tool);
+      }
+    });
+
+    it("honours an explicit --tools list without adding the journal tools", async () => {
+      await grant(["--write", "incident", "--tools", "sn_update"]);
+
+      expect(toolsOn("incident")).toEqual(["sn_update"]);
+      expectDenied("write", "incident", JOURNAL_TOOLS);
+    });
+
+    it("keeps the existing tools when re-granting, and adds the journal tools to an older target", async () => {
+      // A target written before the journal tools were a default, carrying a
+      // tool the operator once named explicitly.
+      await grant(["--write", "incident", "--tools", "sn_create,sn_delete,sn_update"]);
+      expect(toolsOn("incident")).toEqual(["sn_create", "sn_delete", "sn_update"]);
+
+      await grant(["--write", "incident"]);
+
+      expect(toolsOn("incident")).toEqual([
+        "sn_create",
+        "sn_delete",
+        "sn_incident_add_comment",
+        "sn_incident_add_work_note",
+        "sn_update",
+      ]);
+      persistedPolicy();
+    });
+
+    it("keeps the journal tools when a later grant names --tools", async () => {
+      await grant(["--write", "incident"]);
+      await grant(["--write", "incident", "--tools", "sn_batch"]);
+
+      expect(toolsOn("incident")).toEqual([
+        "sn_batch",
+        "sn_create",
+        "sn_incident_add_comment",
+        "sn_incident_add_work_note",
+        "sn_update",
+      ]);
+      persistedPolicy();
+    });
+
+    it("removes the journal tools from an existing profile under --replace with --tools", async () => {
+      await grant(["--write", "incident"]);
+      await grant(["--replace", "--write", "incident", "--tools", "sn_update"]);
+
+      expect(toolsOn("incident")).toEqual(["sn_update"]);
+      expectDenied("write", "incident", JOURNAL_TOOLS);
+    });
+
+    it("names the journal tools in the grant help", async () => {
+      await expect(grant(["--help"])).rejects.toMatchObject({
+        help: expect.stringContaining(JOURNAL_TOOLS.join(",")),
+      });
+    });
+  });
+
+  // The merged allowlists also hold the profile's earlier grants and the
+  // related tables of other targets. Default tools must follow only the
+  // tables this invocation names, or a later read grant widens writes.
+  describe("defaults follow the tables this grant names", () => {
+    it("adds no write or journal tool when a read grant follows a narrowed write grant", async () => {
+      await grant(["--write", "incident", "--tools", "sn_update"]);
+      await grant(["--read", "incident"]);
+
+      expect(toolsOn("incident")).toEqual([...READ_DEFAULTS, "sn_update"].sort());
+      expectDenied("write", "incident", ["sn_create", ...JOURNAL_TOOLS]);
+      expect(
+        authorizeTableAccess(persistedPolicy(), { operation: "write", table: "incident" }, "sn_update")
+      ).toBe("incident");
+    });
+
+    it("keeps a table reachable only through another target unwritable after a read grant", async () => {
+      await grant(["--write", "task", "--related", "task=incident"]);
+      expect(toolsOn("incident")).toBeUndefined();
+      expectDenied("write", "incident", ["sn_create", "sn_update", ...JOURNAL_TOOLS]);
+
+      await grant(["--read", "incident"]);
+
+      expect(toolsOn("incident")).toEqual(READ_DEFAULTS);
+      expectDenied("write", "incident", ["sn_create", "sn_update", ...JOURNAL_TOOLS]);
+      // The task target still reaches incident through its closure.
+      expect(
+        authorizeTableAccess(persistedPolicy(), { operation: "write", table: "task" }, "sn_update")
+      ).toBe("task");
+    });
+
+    it("adds no read tool when a write grant names a table readable only through another target", async () => {
+      await grant(["--read", "task", "--related", "task=incident"]);
+      await grant(["--write", "incident"]);
+
+      expect(toolsOn("incident")).toEqual([
+        "sn_create",
+        "sn_incident_add_comment",
+        "sn_incident_add_work_note",
+        "sn_update",
+      ]);
+      expectDenied("read", "incident", READ_DEFAULTS);
+    });
+  });
+
   it("refuses a wildcard grant", async () => {
     await expect(
       runSetupCli({
@@ -597,7 +882,8 @@ describe("setup doctor", () => {
     argv: readonly string[],
     env: NodeJS.ProcessEnv = { HOME: home },
     override?: ProfileManager,
-    commandExists: (command: string) => boolean = () => true
+    commandExists: (command: string) => boolean = () => true,
+    overrides: Partial<SetupCliDependencies> = {}
   ): Promise<{ status: string; checks: Array<{ name: string; ok: boolean; detail: string; remedy?: string }> }> {
     const io = capture();
     await runSetupCli({
@@ -606,10 +892,170 @@ describe("setup doctor", () => {
       env,
       profileManager: override ?? manager,
       commandExists,
+      // The PATH-based server command check; Windows is exercised explicitly.
+      platform: "linux",
       writeStdout: (value) => io.out.push(value),
+      ...overrides,
     });
     return JSON.parse(io.out.join(""));
   }
+
+  it("doctor --live reports a hibernating instance with the wake hint", async () => {
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+    });
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const verifyCredential = vi.fn(async (config: { instance: string }) =>
+      classifyVerificationFailure(
+        createInstanceHibernatingError("dev00001.service-now.com"),
+        config as never
+      )
+    );
+
+    const report = await doctor(
+      ["doctor", "--profile", "dev", "--live", "--json"],
+      { HOME: home },
+      undefined,
+      () => true,
+      { verifyCredential }
+    );
+    const live = report.checks.find((check) => check.name === "profile dev: live instance");
+    expect(verifyCredential).toHaveBeenCalledTimes(1);
+    expect(live?.ok).toBe(false);
+    expect(live?.detail).toContain("Instance hibernating");
+    expect(live?.remedy).toContain("https://developer.servicenow.com");
+    expect(JSON.stringify(report)).not.toContain("not-a-real-value");
+  });
+
+  it("doctor --live probes profiles concurrently, with a short timeout, in name order", async () => {
+    for (const name of ["zeta", "alpha"]) {
+      manager.addProfile(name, {
+        instance: "https://dev00001.service-now.com",
+        authType: "basic",
+        username: "u",
+        credential: "env:SN_PASSWORD",
+      });
+    }
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const timeouts: Array<number | undefined> = [];
+    const verifyCredential = vi.fn(async (config: { timeoutMs?: number }) => {
+      timeouts.push(config.timeoutMs);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return { ok: false, detail: "no answer", remedy: "wait" };
+    });
+
+    const started = Date.now();
+    const report = await doctor(
+      ["doctor", "--live", "--json"],
+      { HOME: home },
+      undefined,
+      () => true,
+      { verifyCredential }
+    );
+    const elapsed = Date.now() - started;
+    const live = report.checks.filter((check) => check.name.endsWith(": live instance"));
+    expect(live.map((check) => check.name)).toEqual([
+      "profile alpha: live instance",
+      "profile zeta: live instance",
+    ]);
+    expect(timeouts).toEqual([10_000, 10_000]);
+    expect(elapsed).toBeLessThan(750); // one 400 ms wait, not two
+  });
+
+  async function liveText(argv: readonly string[]): Promise<{ text: string; json: string }> {
+    const textIo = capture();
+    await runSetupCli({
+      home, argv: [...argv], env: { HOME: home }, profileManager: manager,
+      commandExists: () => true, platform: "linux",
+      writeStdout: (value) => textIo.out.push(value),
+    });
+    const jsonIo = capture();
+    await runSetupCli({
+      home, argv: [...argv, "--json"], env: { HOME: home }, profileManager: manager,
+      commandExists: () => true, platform: "linux",
+      writeStdout: (value) => jsonIo.out.push(value),
+    });
+    return { text: textIo.out.join(""), json: jsonIo.out.join("") };
+  }
+
+  it("doctor --live runs the real probe and echoes no response bytes", async () => {
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+    });
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const bodies: Array<[string, string]> = [
+      ["text/plain", "\u001b[8m\u001b[2J LEAKED-TEXT"],
+      ["application/json", "\u001b[2J LEAKED-TEXT"],
+      ["application/xml", "<?xml version='1.0'?><html>hibernating LEAKED-TEXT</html>"],
+      ["text/html", "<html><title>Sign in</title>\u001b[2J LEAKED-TEXT</html>"],
+    ];
+    for (const [type, body] of bodies) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(body, { headers: { "Content-Type": type } }))
+      );
+      const { text, json } = await liveText(["doctor", "--profile", "dev", "--live"]);
+      expect(text).toContain("live instance");
+      for (const output of [text, json]) {
+        expect(output).not.toContain("LEAKED-TEXT");
+        expect(output).not.toContain("\u001b");
+        expect(output).not.toContain("\\u001b");
+      }
+    }
+  });
+
+  it("doctor --live keeps other profiles' results when one cannot build a client", async () => {
+    manager.addProfile("a", {
+      instance: "https://deva.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+    });
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const file = profileConfigPath(home);
+    const config = JSON.parse(readFileSync(file, "utf8"));
+    config.profiles.b = {
+      instance: "https://devb.service-now.com",
+      authType: "oauth",
+      clientId: "cid",
+    };
+    writeFileSync(file, JSON.stringify(config), { mode: 0o600 });
+    manager = new ProfileManager({ configFilePath: file });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"result":[]}', { headers: { "Content-Type": "application/json" } }))
+    );
+    const { text } = await liveText(["doctor", "--live"]);
+    expect(text).toMatch(/ok\s+profile a: live instance/u);
+    expect(text).toMatch(/FAIL\s+profile b: live instance/u);
+    expect(text).toMatch(/profile b: live instance: .*credentials are incomplete, so no request was sent/u);
+    expect(text).not.toMatch(/401/u);
+    // Only profile a's probe reached fetch; profile b sent nothing.
+    const urls = vi.mocked(fetch).mock.calls.map((call) => String(call[0]));
+    expect(urls).toHaveLength(2); // profile a, once per liveText run
+    expect(urls.every((url) => url.startsWith("https://deva.service-now.com/"))).toBe(true);
+  });
+
+  it("plain doctor never probes the instance", async () => {
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+    });
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const verifyCredential = vi.fn();
+    await doctor(["doctor", "--profile", "dev", "--json"], { HOME: home }, undefined, () => true, {
+      verifyCredential,
+    });
+    expect(verifyCredential).not.toHaveBeenCalled();
+  });
 
   it("reports a profile with no table access as denying every call", async () => {
     manager.addProfile("dev", {
@@ -752,6 +1198,44 @@ describe("setup doctor", () => {
     expect(report.status).toBe("problems");
   });
 
+  it("on Windows, passes when node and the entrypoint exist, whatever PATH holds", async () => {
+    await runSetupCli({
+      home,
+      argv: ["--clients", "none", "--json"],
+      env: { HOME: home },
+      writeStdout: () => undefined,
+      writeStderr: () => undefined,
+    });
+    const entrypoint = join(home, "index.js");
+    writeFileSync(entrypoint, "");
+
+    // The bare command is not on PATH, which is exactly what doctor reported as
+    // a failure on a correct Windows install before clients were registered by
+    // absolute path.
+    const report = await doctor(["doctor", "--json"], { HOME: home }, undefined, () => false, {
+      platform: "win32",
+      serverEntrypoint: entrypoint,
+    });
+    const command = report.checks.find((check) => check.name === "server command");
+    expect(command?.ok).toBe(true);
+    expect(command?.detail).toContain(process.execPath);
+    expect(command?.detail).toContain(entrypoint);
+    expect(command?.detail).not.toContain("PATH");
+  });
+
+  it("on Windows, fails with a reinstall remedy when the entrypoint is missing", async () => {
+    const entrypoint = join(home, "missing", "index.js");
+    const report = await doctor(["doctor", "--json"], { HOME: home }, undefined, () => true, {
+      platform: "win32",
+      serverEntrypoint: entrypoint,
+    });
+    const command = report.checks.find((check) => check.name === "server command");
+    expect(command?.ok).toBe(false);
+    expect(command?.detail).toContain(entrypoint);
+    expect(command?.remedy).toContain("npm i -g @onlyflows/servicenow-mcp");
+    expect(report.status).toBe("problems");
+  });
+
   it("reports no service, endpoint, or bearer check at all", async () => {
     await runSetupCli({
       home,
@@ -839,6 +1323,28 @@ function scriptedPrompter(
   };
 }
 
+/** Records notes and questions in the order the operator would see them. */
+function transcriptOf(scripted: ScriptedPrompter): {
+  prompter: ScriptedPrompter;
+  events: string[];
+} {
+  const events: string[] = [];
+  return {
+    events,
+    prompter: {
+      ...scripted,
+      ask: (question, options) => {
+        events.push(`ask: ${question}`);
+        return scripted.ask(question, options);
+      },
+      note: (text) => {
+        events.push(`note: ${text}`);
+        scripted.note(text);
+      },
+    },
+  };
+}
+
 const FIXED_KEY: ProfileEncryptionKeyProvider = {
   getKey: () => Buffer.alloc(32, 7),
 };
@@ -862,7 +1368,7 @@ describe("setup wizard", () => {
     script: readonly string[],
     overrides: Partial<SetupCliDependencies> = {},
     secrets: readonly string[] = ["hunter2"]
-  ): Promise<{ prompter: ScriptedPrompter; out: string }> {
+  ): Promise<{ prompter: ScriptedPrompter; out: string; err: string }> {
     // The wizard's last step is a local check pass with nothing to confirm:
     // a client spawns the server, so there is no service to offer to start
     // and no endpoint whose reachability could make this suite depend on
@@ -884,7 +1390,7 @@ describe("setup wizard", () => {
       writeStderr: (value) => io.err.push(value),
       ...overrides,
     });
-    return { prompter, out: io.out.join("") };
+    return { prompter, out: io.out.join(""), err: io.err.join("") };
   }
 
   const CUSTOM = "Enter a custom list";
@@ -921,12 +1427,57 @@ describe("setup wizard", () => {
     const incident = profile.tableAccess?.targets?.find((t) => t.table === "incident");
     expect(incident?.closureComplete).toBe(true);
     expect(incident?.tools).toContain("sn_update");
+    expect(incident?.tools).toContain("sn_incident_add_comment");
+    expect(incident?.tools).toContain("sn_incident_add_work_note");
     expect(incident?.tools).not.toContain("sn_delete");
 
     expect(out).toContain("Setup complete.");
     expect(out).toContain("servicenow-mcp-setup doctor --profile dev");
     // Never echoes the secret anywhere.
     expect(out).not.toContain("hunter2");
+  });
+
+  it("says before the first question that no client CLI is installed", async () => {
+    const { prompter, events } = transcriptOf(scriptedPrompter(HAPPY));
+    const { out } = await runWizard([], { prompter });
+
+    // Said up front, so the operator can install Claude Code before spending
+    // time on a credential, not only in the summary's "(none registered)".
+    const warned = events.findIndex((event) =>
+      event.includes("No Claude Code (claude) or Codex (codex) CLI was found")
+    );
+    const firstQuestion = events.findIndex((event) => event.startsWith("ask: "));
+    expect(warned).toBeGreaterThanOrEqual(0);
+    expect(warned).toBeLessThan(firstQuestion);
+    expect(events[warned]).toContain('servicenow-mcp-setup again (choose "clients")');
+    expect(prompter.remaining()).toBe(0);
+    expect(out).toContain("(none registered)");
+  });
+
+  it("registers with Claude Code installed off PATH, and says how to fix PATH", async () => {
+    // The Windows native installer's location, in a terminal opened before
+    // the install, whose PATH does not include it yet.
+    const claude = join(home, ".local", "bin", "claude.exe");
+    mkdirSync(dirname(claude), { recursive: true });
+    writeFileSync(claude, "");
+    const commands: string[] = [];
+
+    const { prompter, out } = await runWizard([...HAPPY, "y"], {
+      platform: "win32",
+      serverEntrypoint: join(home, "index.js"),
+      commandExists: () => false,
+      runCommand: (command, args) => {
+        commands.push(`${command} ${args[1]}`);
+        return args[1] === "get" ? { status: 1 } : { status: 0 };
+      },
+    });
+
+    const notes = prompter.notes.join("\n");
+    expect(notes).toContain(`Found Claude Code (claude) at ${claude},`);
+    expect(notes).toContain("not on this terminal's PATH");
+    expect(notes).toContain(`add ${dirname(claude)} to your PATH`);
+    expect(commands).toEqual([`${claude} get`, `${claude} add`]);
+    expect(out).toContain("Clients   claude-code");
   });
 
   it("bootstraps the owner-only server env and no credential files", async () => {
@@ -1076,6 +1627,22 @@ describe("setup wizard", () => {
     expect(reloaded.getProfile("staging").username).toBe("integration.user");
   });
 
+  it("refuses an unusable profile name where it is typed, and suggests one", async () => {
+    // "my-dev" answers the same prompt again. Had the name been accepted, it
+    // would be consumed as the instance and the script would fall out of step.
+    const { prompter } = await runWizard(["my dev", "my-dev", ...HAPPY.slice(1)]);
+
+    expect(prompter.rejections).toEqual([
+      expect.stringContaining("Spaces aren't allowed"),
+    ]);
+    expect(prompter.rejections[0]).toContain("Use 1-64 letters, digits");
+    expect(prompter.rejections[0]).toContain('Try "my-dev".');
+    expect(prompter.remaining()).toBe(0);
+    expect(
+      new ProfileManager({ configFilePath: profileConfigPath(home) }).getProfile("my-dev").username
+    ).toBe("integration.user");
+  });
+
   it("offers the parent table without requiring the operator to know it", async () => {
     await runWizard(
       [
@@ -1179,6 +1746,484 @@ describe("setup wizard", () => {
       new ProfileManager({ configFilePath: profileConfigPath(home) }).listProfiles()
     ).toEqual([]);
   });
+
+  describe("parent tables, resolved by name", () => {
+    /**
+     * A stand-in sys_db_object. A table's super_class stores its parent; the
+     * reference's display value is the parent's label, which differs from the
+     * name across most of the CMDB and is what the wizard used to follow.
+     */
+    const TABLES: Readonly<Record<string, { readonly label: string; readonly parent?: string }>> = {
+      cmdb: { label: "Base Configuration Item" },
+      cmdb_ci: { label: "Configuration Item", parent: "cmdb" },
+      cmdb_ci_hardware: { label: "Hardware", parent: "cmdb_ci" },
+      cmdb_ci_computer: { label: "Computer", parent: "cmdb_ci_hardware" },
+      cmdb_ci_server: { label: "Server", parent: "cmdb_ci_computer" },
+      cmdb_ci_linux_server: { label: "Linux Server", parent: "cmdb_ci_server" },
+      task: { label: "Task" },
+      incident: { label: "Incident", parent: "task" },
+      problem: { label: "Problem", parent: "task" },
+      x_cycle: { label: "Cycle", parent: "x_cycle" },
+      // A stored name no table can have, as a tampered or broken row would carry.
+      x_bad_parent: { label: "Bad Parent", parent: "incident,sys_user" },
+    };
+
+    function ancestor(table: string, hops: number): string | undefined {
+      let current: string | undefined = table;
+      for (let hop = 0; hop < hops && current !== undefined; hop += 1) {
+        current = TABLES[current]?.parent;
+      }
+      return current;
+    }
+
+    function json(body: unknown, status = 200): Response {
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    /**
+     * Serve sys_db_object reads and OAuth tokens, recording both and each
+     * read's Authorization header. With
+     * `ignoreFieldList`, every row carries the whole ancestor chain whatever
+     * sysparm_fields asked for, so the walk's own depth limit is what holds.
+     */
+    function stubInstance(options: { readonly ignoreFieldList?: boolean } = {}) {
+      const reads: URLSearchParams[] = [];
+      const authorizations: string[] = [];
+      const tokenBodies: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          const request = input instanceof Request ? input : new Request(String(input), init);
+          const url = new URL(request.url);
+          if (url.pathname === "/oauth_token.do") {
+            const body = await request.text();
+            tokenBodies.push(body);
+            // Each token names the secret it was issued for, so a read shows
+            // whose credential it carried.
+            const secret = new URLSearchParams(body).get("client_secret") ?? "none";
+            return json({
+              access_token: `tok-${secret}-${tokenBodies.length}`,
+              token_type: "Bearer",
+              expires_in: 1800,
+            });
+          }
+          if (url.pathname !== "/api/now/table/sys_db_object") return json({}, 404);
+          reads.push(url.searchParams);
+          authorizations.push(request.headers.get("authorization") ?? "");
+          const name = /^name=(.*)$/u.exec(url.searchParams.get("sysparm_query") ?? "")?.[1] ?? "";
+          if (name === "x_broken") return json({ error: { message: "boom" } }, 500);
+          if (TABLES[name] === undefined) return json({ result: [] });
+          const displayValues = url.searchParams.get("sysparm_display_value") === "true";
+          const fields = options.ignoreFieldList
+            ? ["name", "super_class", ...[1, 2, 3, 4, 5, 6].map((hops) => `${"super_class.".repeat(hops)}name`)]
+            : (url.searchParams.get("sysparm_fields") ?? "").split(",");
+          const row: Record<string, string> = {};
+          for (const field of fields) {
+            if (field === "name") row.name = name;
+            else if (field === "super_class") {
+              const parent = TABLES[name]?.parent;
+              row.super_class =
+                parent === undefined ? "" : displayValues ? (TABLES[parent]?.label ?? "") : "0".repeat(32);
+            } else {
+              const hops = field.split(".").length - 1;
+              row[field] = ancestor(name, hops) ?? "";
+            }
+          }
+          return json({ result: [row] });
+        })
+      );
+      return { reads, authorizations, tokenBodies, tokens: () => tokenBodies.length };
+    }
+
+    const DEFAULT_RESOLVER: Partial<SetupCliDependencies> = { resolveParentTable: undefined };
+
+    /** Every tool that can name a table, for checks that a table is unaddressable. */
+    const EVERY_TABLE_TOOL = [
+      "sn_query",
+      "sn_get",
+      "sn_aggregate",
+      "sn_schema",
+      "sn_create",
+      "sn_update",
+      "sn_delete",
+      "sn_batch",
+      "sn_attach",
+      "sn_relationships",
+      "sn_incident_add_comment",
+      "sn_incident_add_work_note",
+      "sn_atf_author",
+    ];
+
+    /** A basic-auth "dev" profile; `null` answers "None" for that operation. */
+    function wizardGranting(
+      reads: string | null,
+      writes: string | null,
+      ...confirms: string[]
+    ): string[] {
+      return [
+        "dev",
+        "dev00001.service-now.com",
+        "basic",
+        "encrypted",
+        "integration.user",
+        ...(reads === null ? [NONE] : [CUSTOM, reads]),
+        ...(writes === null ? [NONE] : [CUSTOM, writes]),
+        ...confirms,
+      ];
+    }
+
+    function wizardReading(tables: string, ...confirms: string[]): string[] {
+      return wizardGranting(tables, null, ...confirms);
+    }
+
+    function savedProfile() {
+      return new ProfileManager({ configFilePath: profileConfigPath(home) }).getProfile("dev");
+    }
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    });
+
+    it("proposes a CMDB parent by its name, where the label differs", async () => {
+      const instance = stubInstance();
+      const { prompter } = await runWizard(
+        wizardReading("cmdb_ci_linux_server,cmdb_ci_hardware", "y", "y"),
+        DEFAULT_RESOLVER
+      );
+
+      const notes = prompter.notes.join("\n");
+      expect(notes).toContain("cmdb_ci_linux_server extends cmdb_ci_server.");
+      // "Configuration Item" has a space, so following the label offered nothing.
+      expect(notes).toContain("cmdb_ci_hardware extends cmdb_ci.");
+      expect(prompter.remaining()).toBe(0);
+      expect(savedProfile().tableAccess?.readTables).toEqual([
+        "cmdb_ci",
+        "cmdb_ci_hardware",
+        "cmdb_ci_linux_server",
+        "cmdb_ci_server",
+      ]);
+
+      // One read per table, of stored values, asking for one ancestor only.
+      expect(instance.reads).toHaveLength(2);
+      for (const params of instance.reads) {
+        expect(params.get("sysparm_display_value")).toBe("false");
+        expect(params.get("sysparm_fields")).toBe("name,super_class.name");
+        expect(params.get("sysparm_limit")).toBe("1");
+      }
+      expect(instance.reads.map((params) => params.get("sysparm_query"))).toEqual([
+        "name=cmdb_ci_linux_server",
+        "name=cmdb_ci_hardware",
+      ]);
+    });
+
+    it("still proposes task for incident", async () => {
+      stubInstance();
+      const { prompter } = await runWizard(wizardReading("incident", "y"), DEFAULT_RESOLVER);
+      expect(prompter.notes.join("\n")).toContain("incident extends task.");
+      expect(savedProfile().tableAccess?.readTables).toEqual(["incident", "task"]);
+    });
+
+    it("proposes nothing for a root, unknown, unreadable, or invalid parent", async () => {
+      const instance = stubInstance();
+      // No confirm is scripted: a single backing-table question would exhaust it.
+      const { prompter } = await runWizard(
+        wizardReading("task,x_unknown,x_broken,x_bad_parent"),
+        DEFAULT_RESOLVER
+      );
+      expect(prompter.notes.join("\n")).not.toContain(" extends ");
+      expect(instance.reads).toHaveLength(4);
+      const profile = savedProfile();
+      expect(profile.tableAccess?.readTables).toEqual(["task", "x_bad_parent", "x_broken", "x_unknown"]);
+      for (const target of profile.tableAccess?.targets ?? []) {
+        expect(target.relatedTables).toEqual([target.table]);
+      }
+    });
+
+    it.each(["Configuration Item", "incident,sys_user"])(
+      "offers no injected parent that is not a table name: %s",
+      async (parent) => {
+        const { prompter } = await runWizard(wizardReading("change_request"), {
+          resolveParentTable: async () => parent,
+        });
+        expect(prompter.notes.join("\n")).not.toContain(" extends ");
+        expect(savedProfile().tableAccess?.readTables).toEqual(["change_request"]);
+      }
+    );
+
+    it("stops at a table that names itself as its parent", async () => {
+      stubInstance();
+      const { prompter } = await runWizard(wizardReading("x_cycle"), DEFAULT_RESOLVER);
+      expect(prompter.notes.join("\n")).not.toContain(" extends ");
+      expect(savedProfile().tableAccess?.readTables).toEqual(["x_cycle"]);
+    });
+
+    it("proposes only the immediate parent when the row carries the whole chain", async () => {
+      stubInstance({ ignoreFieldList: true });
+      const { prompter } = await runWizard(
+        wizardReading("cmdb_ci_linux_server", "y"),
+        DEFAULT_RESOLVER
+      );
+      expect(prompter.notes.filter((note) => note.includes(" extends "))).toEqual([
+        "\n  cmdb_ci_linux_server extends cmdb_ci_server.",
+      ]);
+      expect(savedProfile().tableAccess?.readTables).toEqual([
+        "cmdb_ci_linux_server",
+        "cmdb_ci_server",
+      ]);
+    });
+
+    it("writes a grant the server's policy loader accepts, with the parent unaddressable", async () => {
+      stubInstance();
+      // The child is in both READS and WRITES, so the parent joins both allowlists.
+      await runWizard(
+        wizardGranting("cmdb_ci_hardware", "cmdb_ci_hardware", "y"),
+        DEFAULT_RESOLVER
+      );
+
+      const tableAccess = savedProfile().tableAccess!;
+      expect(tableAccess.readTables).toEqual(["cmdb_ci", "cmdb_ci_hardware"]);
+      expect(tableAccess.writeTables).toEqual(["cmdb_ci", "cmdb_ci_hardware"]);
+      expect(tableAccess.targets).toEqual([
+        expect.objectContaining({
+          table: "cmdb_ci_hardware",
+          closureComplete: true,
+          relatedTables: ["cmdb_ci", "cmdb_ci_hardware"],
+        }),
+      ]);
+      // The loader the server uses at request time.
+      const policy = createTableAccessPolicy(tableAccess);
+      expect(
+        authorizeTableAccess(policy, { operation: "read", table: "cmdb_ci_hardware" }, "sn_query")
+      ).toBe("cmdb_ci_hardware");
+      for (const tool of EVERY_TABLE_TOOL) {
+        for (const operation of ["read", "write"] as const) {
+          expect(() =>
+            authorizeTableAccess(policy, { operation, table: "cmdb_ci" }, tool)
+          ).toThrow(/denied by policy/u);
+        }
+      }
+      // sn_relationships always plans a read of cmdb_ci; the parent is no way in.
+      const plan = resolveToolTableAccess("sn_relationships", { sys_id: "a".repeat(32) });
+      expect(() =>
+        authorizeTableAccessPlan(policy, plan.requests, "sn_relationships")
+      ).toThrow(/denied by policy/u);
+    });
+
+    it("writes the self-only closure when the operator declines the parent", async () => {
+      stubInstance();
+      await runWizard(wizardGranting("incident", "incident", "n"), DEFAULT_RESOLVER);
+
+      const tableAccess = savedProfile().tableAccess!;
+      expect(tableAccess).toEqual({
+        readTables: ["incident"],
+        writeTables: ["incident"],
+        targets: [
+          {
+            table: "incident",
+            kind: "canonical",
+            tools: [
+              "sn_aggregate",
+              "sn_create",
+              "sn_get",
+              "sn_incident_add_comment",
+              "sn_incident_add_work_note",
+              "sn_query",
+              "sn_schema",
+              "sn_update",
+            ],
+            closureComplete: true,
+            relatedTables: ["incident"],
+          },
+        ],
+      } satisfies TableAccessPolicyInput);
+      expect(() => createTableAccessPolicy(tableAccess)).not.toThrow();
+    });
+
+    describe("a parent selected for the other operation", () => {
+      /**
+       * Each tool's real access plan on `table`, as "tool operation:table" when
+       * the policy allows the whole plan. A plan that fails to resolve fails the
+       * test, so no tool drops out of the check unnoticed.
+       */
+      function reachable(policy: TableAccessPolicy, table: string): string[] {
+        const id = "a".repeat(32);
+        const fields = { short_description: "x" };
+        const argsFor: Readonly<Record<string, Record<string, unknown>>> = {
+          sn_query: { table },
+          sn_get: { table, sys_id: id },
+          sn_aggregate: { table, type: "COUNT" },
+          sn_schema: { table },
+          sn_create: { table, fields },
+          sn_update: { table, sys_id: id, fields },
+          sn_delete: { table, sys_id: id },
+          sn_batch: {
+            table,
+            action: "update",
+            structured_query: {
+              filter: { type: "equality", field: "active", operator: "eq", value: "true" },
+            },
+            fields,
+            confirm: true,
+          },
+          sn_attach: { action: "list", table, sys_id: id },
+        };
+        return Object.entries(argsFor).flatMap(([tool, args]) => {
+          const plan = resolveToolTableAccess(tool, args);
+          try {
+            authorizeTableAccessPlan(policy, plan.requests, tool);
+          } catch {
+            return [];
+          }
+          return plan.requests.map((request) => `${tool} ${request.operation}:${request.table}`);
+        });
+      }
+
+      it("reads the child and writes the parent: the parent stays unreadable", async () => {
+        stubInstance();
+        // incident extends task; task is granted for WRITES only.
+        await runWizard(wizardGranting("incident", "task", "y"), DEFAULT_RESOLVER);
+
+        const tableAccess = savedProfile().tableAccess!;
+        expect(tableAccess.readTables).toEqual(["incident", "task"]);
+        expect(tableAccess.writeTables).toEqual(["task"]);
+        expect(tableAccess.targets?.find((target) => target.table === "task")?.tools).toEqual([
+          "sn_create",
+          "sn_update",
+        ]);
+        const policy = createTableAccessPolicy(tableAccess);
+        expect(reachable(policy, "task")).toEqual(["sn_create write:task", "sn_update write:task"]);
+        // Not vacuous: the same read plans resolve and pass on the child.
+        expect(reachable(policy, "incident")).toEqual(
+          expect.arrayContaining([
+            "sn_query read:incident",
+            "sn_get read:incident",
+            "sn_aggregate read:incident",
+          ])
+        );
+      });
+
+      it("writes the child and reads the parent: the parent stays unwritable", async () => {
+        stubInstance();
+        await runWizard(wizardGranting("task", "incident", "y"), DEFAULT_RESOLVER);
+
+        const tableAccess = savedProfile().tableAccess!;
+        expect(tableAccess.readTables).toEqual(["task"]);
+        expect(tableAccess.writeTables).toEqual(["incident", "task"]);
+        expect(tableAccess.targets?.find((target) => target.table === "task")?.tools).toEqual([
+          "sn_aggregate",
+          "sn_get",
+          "sn_query",
+          "sn_schema",
+        ]);
+        const policy = createTableAccessPolicy(tableAccess);
+        const task = reachable(policy, "task");
+        expect(task.filter((entry) => entry.includes("write:task"))).toEqual([]);
+        expect(task).toEqual(expect.arrayContaining(["sn_query read:task"]));
+        expect(reachable(policy, "incident")).toEqual(
+          expect.arrayContaining(["sn_create write:incident", "sn_update write:incident"])
+        );
+      });
+    });
+
+    it("fetches one OAuth token for every parent lookup in a run", async () => {
+      const instance = stubInstance();
+      await runWizard(
+        [
+          "dev",
+          "dev00001.service-now.com",
+          "oauth",
+          "client_credentials",
+          "encrypted",
+          "abc123-client-id",
+          CUSTOM,
+          "incident,cmdb_ci_linux_server,cmdb_ci_hardware",
+          NONE,
+          "n",
+          "n",
+          "n",
+        ],
+        DEFAULT_RESOLVER,
+        ["oauth-client-secret"]
+      );
+      expect(instance.reads).toHaveLength(3);
+      expect(instance.tokens()).toBe(1);
+    });
+
+    describe("a client per configuration and per run", () => {
+      function oauthScript(reads: string): string[] {
+        return [
+          "dev00001.service-now.com",
+          "oauth",
+          "client_credentials",
+          "encrypted",
+          "abc123-client-id",
+          CUSTOM,
+          reads,
+          NONE,
+          "n",
+          "n",
+        ];
+      }
+
+      it("sends each OAuth run's own secret, and each read that run's token", async () => {
+        const instance = stubInstance();
+        const consoleCalls = (["log", "error", "warn", "info", "debug"] as const).map((method) =>
+          vi.spyOn(console, method).mockImplementation(() => undefined)
+        );
+
+        const first = await runWizard(["dev", ...oauthScript("incident,problem")], DEFAULT_RESOLVER, [
+          "SECRET-A",
+        ]);
+        const second = await runWizard(
+          ["profile", "staging", ...oauthScript("incident,problem")],
+          DEFAULT_RESOLVER,
+          ["SECRET-B"]
+        );
+
+        expect(
+          instance.tokenBodies.map((body) => new URLSearchParams(body).get("client_secret"))
+        ).toEqual(["SECRET-A", "SECRET-B"]);
+        expect(instance.authorizations).toEqual([
+          "Bearer tok-SECRET-A-1",
+          "Bearer tok-SECRET-A-1",
+          "Bearer tok-SECRET-B-2",
+          "Bearer tok-SECRET-B-2",
+        ]);
+        const shown = [
+          ...first.prompter.notes,
+          first.out,
+          first.err,
+          ...second.prompter.notes,
+          second.out,
+          second.err,
+          ...consoleCalls.flatMap((spy) => spy.mock.calls.flat().map(String)),
+        ].join("\n");
+        for (const secret of ["SECRET-A", "SECRET-B", "tok-SECRET"]) {
+          expect(shown).not.toContain(secret);
+        }
+      });
+
+      it("sends each basic run's own password", async () => {
+        const instance = stubInstance();
+        await runWizard(wizardReading("incident", "n"), DEFAULT_RESOLVER, ["pw-one"]);
+        await runWizard(
+          ["profile", "staging", ...wizardReading("incident", "n").slice(1)],
+          DEFAULT_RESOLVER,
+          ["pw-two"]
+        );
+
+        expect(
+          instance.authorizations.map((header) =>
+            Buffer.from(header.replace(/^Basic /u, ""), "base64").toString()
+          )
+        ).toEqual(["integration.user:pw-one", "integration.user:pw-two"]);
+      });
+    });
+  });
 });
 
 describe("setup wizard opt-out", () => {
@@ -1242,6 +2287,21 @@ describe("credential verification diagnosis", () => {
   const diagnose = (error: unknown, overrides: Record<string, unknown> = {}) =>
     classifyVerificationFailure(error, { ...config, ...overrides } as never);
 
+  it("names a hibernating instance and gives the wake hint", () => {
+    const result = diagnose(createInstanceHibernatingError("dev00001.service-now.com"));
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("Instance hibernating");
+    expect(result.detail).toContain("dev00001.service-now.com");
+    expect(result.remedy).toContain("https://developer.servicenow.com");
+  });
+
+  it("explains a generic HTML response", () => {
+    const result = diagnose(createHtmlResponseError());
+    expect(result.ok).toBe(false);
+    expect(result.detail).toMatch(/HTML page/u);
+    expect(result.remedy).toMatch(/single sign-on/u);
+  });
+
   it("names a rejected credential and keeps the host, not the secret", () => {
     const result = diagnose(createToolError("authentication", "retry_after_correction"));
     expect(result.ok).toBe(false);
@@ -1289,10 +2349,12 @@ describe("credential verification diagnosis", () => {
     expect(result.remedy).not.toMatch(/NODE_TLS_REJECT_UNAUTHORIZED|rejectUnauthorized/u);
   });
 
-  it("falls back to the raw reason when nothing matches", () => {
-    const result = diagnose(new Error("something unusual"));
+  it("never prints the raw reason when nothing matches", () => {
+    const result = diagnose(new Error("something unusual \u001b[2J"));
     expect(result.ok).toBe(false);
-    expect(result.detail).toContain("something unusual");
+    expect(result.detail).toContain("could not be reached");
+    expect(result.detail).not.toContain("something unusual");
+    expect(result.detail).not.toContain("\u001b");
     expect(result.remedy).toBeTruthy();
   });
 });
@@ -1550,6 +2612,7 @@ describe("setup wizard closing checks", () => {
       verifyCredential: async () => ({ ok: true, detail: "accepted" }),
       resolveParentTable: async () => undefined,
       commandExists: () => false,
+      platform: "linux",
       writeStdout: (value) => io.out.push(value),
       writeStderr: () => undefined,
       ...overrides,
@@ -1725,4 +2788,294 @@ describe("stdio has no authentication boundary to configure", () => {
     expect(text).toContain("ServiceNow MCP doctor");
     expect(text).toMatch(/^ok\s+server env:/mu);
   });
+});
+
+describe("risky grant warning", () => {
+  let home: string;
+  let manager: ProfileManager;
+
+  beforeEach(() => {
+    home = newHome("sn-mcp-risky-");
+    mkdirSync(join(home, ".servicenow-mcp"), { recursive: true, mode: 0o700 });
+    manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "integration.user",
+      credential: "env:SN_PASSWORD",
+    });
+  });
+
+  async function grantOutput(argv: readonly string[]): Promise<string> {
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv: ["grant", "--profile", "dev", ...argv],
+      profileManager: manager,
+      writeStdout: (value) => io.out.push(value),
+    });
+    return io.out.join("");
+  }
+
+  async function wizard(script: readonly string[]) {
+    const prompter = scriptedPrompter(script);
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: true,
+      prompter,
+      profileManager: manager,
+      keyProvider: FIXED_KEY,
+      verifyCredential: ACCEPTS,
+      resolveParentTable: async () => undefined,
+      commandExists: () => false,
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: (value) => io.err.push(value),
+    });
+    return { notes: prompter.notes.join("\n"), out: io.out.join("") };
+  }
+
+  it.each([
+    "sys_user_has_role",
+    "sys_user_grmember",
+    "sys_group_has_role",
+    "sys_user_role",
+    "sysapproval_approver",
+  ])("warns on a write grant on %s and still grants it", async (table) => {
+    const out = await grantOutput(["--read", table, "--write", table]);
+    expect(out).toContain("WARNING: this grant gives write access on privilege-sensitive tables");
+    expect(out).toContain(table);
+    expect(out).toContain("The grant is still allowed");
+    expect(out).toContain("Granted table access on profile dev.");
+    // Not blocked: the profile really holds the write grant.
+    expect(manager.getProfile("dev").tableAccess?.writeTables).toEqual([table]);
+  });
+
+  it("warns on a dry run and in --json output, without blocking either", async () => {
+    const dry = await grantOutput(["--write", "sys_user_has_role", "--dry-run"]);
+    expect(dry).toContain("WARNING");
+    expect(manager.getProfile("dev").tableAccess).toBeUndefined();
+
+    const json = JSON.parse(
+      await grantOutput(["--write", "sysapproval_approver", "--json"])
+    ) as { status: string; warnings?: string[] };
+    expect(json.status).toBe("granted");
+    expect(json.warnings?.[0]).toContain("sysapproval_approver");
+  });
+
+  it("does not warn for ordinary tables or for a read-only grant on a role table", async () => {
+    const ordinary = await grantOutput(["--read", "incident", "--write", "incident"]);
+    expect(ordinary).not.toContain("WARNING");
+    const readOnly = await grantOutput(["--read", "sys_user_has_role"]);
+    expect(readOnly).not.toContain("WARNING");
+    const json = JSON.parse(await grantOutput(["--read", "problem", "--json"])) as {
+      warnings?: string[];
+    };
+    expect(json.warnings).toBeUndefined();
+  });
+
+  it("warns in the wizard, in the notes and the summary, and the profile is still written", async () => {
+    const { notes, out } = await wizard([
+      "profile",
+      "dev2",
+      "dev00002.service-now.com",
+      "basic",
+      "encrypted",
+      "integration.user",
+      "Just incident",
+      "Enter a custom list",
+      "sys_user_has_role",
+    ]);
+    expect(notes).toContain("WARNING: this grant gives write access");
+    expect(out).toContain("WARNING: this grant gives write access");
+    expect(manager.getProfile("dev2").tableAccess?.writeTables).toEqual(["sys_user_has_role"]);
+  });
+
+  it("does not warn in the wizard for an ordinary write grant", async () => {
+    const { notes, out } = await wizard([
+      "profile",
+      "dev3",
+      "dev00003.service-now.com",
+      "basic",
+      "encrypted",
+      "integration.user",
+      "Just incident",
+      "Just incident",
+    ]);
+    expect(notes).not.toContain("WARNING");
+    expect(out).not.toContain("WARNING");
+  });
+});
+
+describe("setup policy show", () => {
+  let home: string;
+  let manager: ProfileManager;
+
+  beforeEach(() => {
+    home = newHome("sn-mcp-policy-");
+    mkdirSync(join(home, ".servicenow-mcp"), { recursive: true, mode: 0o700 });
+    manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "oauth",
+      grantType: "client_credentials",
+      clientId: "client-id-canary",
+      clientSecret: "env:SN_CLIENT_SECRET_REF_CANARY",
+      credential: "env:SN_PASSWORD_REF_CANARY",
+      fieldPolicy: { incident: { readable: ["sys_id", "number"], writable: ["short_description"] } },
+      tableAccess: {
+        readTables: ["incident"],
+        writeTables: ["incident"],
+        targets: [
+          {
+            table: "incident",
+            kind: "canonical",
+            tools: ["sn_query", "sn_update"],
+            closureComplete: true,
+            relatedTables: ["incident"],
+          },
+        ],
+      },
+    });
+  });
+
+  async function show(argv: readonly string[]): Promise<string> {
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv: ["policy", "show", ...argv],
+      env: { HOME: home },
+      profileManager: manager,
+      writeStdout: (value) => io.out.push(value),
+    });
+    return io.out.join("");
+  }
+
+  it("prints the effective policy as one table, matching the enforced field sets", async () => {
+    const out = await show(["--profile", "dev"]);
+    expect(out).toContain("Policy card: dev (https://dev00001.service-now.com)");
+    expect(out).toContain("Auth: oauth (client_credentials)");
+    expect(out).toMatch(/incident\s+yes\s+yes\s+sn_query,sn_update\s+number,sys_id\s+short_description/u);
+    expect(out).toContain("Batch: dry run by default");
+  });
+
+  it("never prints a secret, a key, a client id, or a credential reference", async () => {
+    const out = await show(["--profile", "dev"]);
+    const json = await show(["--profile", "dev", "--json"]);
+    for (const text of [out, json]) {
+      expect(text).not.toContain("SN_CLIENT_SECRET_REF_CANARY");
+      expect(text).not.toContain("SN_PASSWORD_REF_CANARY");
+      expect(text).not.toContain("client-id-canary");
+      expect(text).not.toMatch(/secret_ref|"credential"|clientSecret/iu);
+    }
+    expect((JSON.parse(json) as { policy: { profile: string } }).policy.profile).toBe("dev");
+  });
+
+  it("requires --profile and a known profile", async () => {
+    await expect(show([])).rejects.toThrow(/--profile is required/u);
+    await expect(show(["--profile", "nope"])).rejects.toThrow();
+  });
+});
+
+describe("security review fixes in setup", () => {
+  let home: string;
+  let manager: ProfileManager;
+
+  beforeEach(() => {
+    home = newHome("sn-mcp-secfix-");
+    mkdirSync(join(home, ".servicenow-mcp"), { recursive: true, mode: 0o700 });
+    manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+  });
+
+  async function run(argv: readonly string[]): Promise<string> {
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv,
+      env: { HOME: home },
+      profileManager: manager,
+      writeStdout: (value) => io.out.push(value),
+    });
+    return io.out.join("");
+  }
+
+  const target = (table: string, tools: string[]) => ({
+    table,
+    kind: "canonical" as const,
+    tools,
+    closureComplete: true as const,
+    relatedTables: [table],
+  });
+
+  it("policy show sees a late-sorting write grant behind more than 100 read-only tables", async () => {
+    const readOnly = Array.from({ length: 120 }, (_, i) => `a_tbl_${String(i).padStart(3, "0")}`);
+    manager.addProfile("big", {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic",
+      username: "u",
+      credential: "env:SN_PASSWORD",
+      tableAccess: {
+        readTables: [...readOnly, "sys_user_has_role"],
+        writeTables: ["sys_user_has_role"],
+        targets: [
+          ...readOnly.map((table) => target(table, ["sn_query"])),
+          target("sys_user_has_role", ["sn_query", "sn_create"]),
+        ],
+      },
+    });
+    const text = await run(["policy", "show", "--profile", "big"]);
+    expect(text).not.toContain("cannot write");
+    expect(text).toContain("WARNING: write access on privilege-sensitive tables: sys_user_has_role");
+    const json = JSON.parse(await run(["policy", "show", "--profile", "big", "--json"])) as {
+      policy: { can_write_anything: boolean; risky_write_tables: string[] };
+    };
+    expect(json.policy.can_write_anything).toBe(true);
+    expect(json.policy.risky_write_tables).toEqual(["sys_user_has_role"]);
+  });
+
+  it("policy show prints a bare origin, never a password in the configured URL", async () => {
+    // addProfile refuses such a URL, so write the file by hand, as an
+    // operator editing config.json could.
+    writeFileSync(
+      profileConfigPath(home),
+      JSON.stringify({
+        version: 2,
+        profiles: {
+          p: {
+            instance: "https://admin:canary-pw-123@dev00001.service-now.com",
+            authType: "basic",
+            username: "u",
+            credential: "env:SN_PASSWORD",
+            tableAccess: { readTables: ["incident"], targets: [target("incident", ["sn_query"])] },
+          },
+        },
+      }),
+      { mode: 0o600 }
+    );
+    manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+    const text = await run(["policy", "show", "--profile", "p"]);
+    const json = await run(["policy", "show", "--profile", "p", "--json"]);
+    for (const out of [text, json]) {
+      expect(out).not.toContain("canary-pw-123");
+      expect(out).toContain("https://dev00001.service-now.com");
+    }
+  });
+
+  it.each(["sys_script", "sysauto_script", "sys_properties", "sys_user"])(
+    "warns on a write grant on %s, and names the real profile, not a placeholder",
+    async (table) => {
+      manager.addProfile("dev", {
+        instance: "https://dev00001.service-now.com",
+        authType: "basic",
+        username: "u",
+        credential: "env:SN_PASSWORD",
+      });
+      const out = await run(["grant", "--profile", "dev", "--write", table, "--dry-run"]);
+      expect(out).toContain("WARNING: this grant gives write access on privilege-sensitive tables");
+      expect(out).toContain("policy show --profile dev");
+      expect(out).not.toContain("<name>");
+    }
+  );
 });

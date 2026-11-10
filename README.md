@@ -1,17 +1,92 @@
 # @onlyflows/servicenow-mcp
 
-<!-- Logo placeholder -->
-<!-- ![ServiceNow MCP Server](banner.png) -->
+A governed ServiceNow MCP server: it lets an AI client read and change records on your instances, within limits you set per connection.
 
-**The most comprehensive ServiceNow MCP server.** 19 tools for full CRUD, append-only incident journals, CMDB graph traversal, ATF testing, multi-instance profiles, and more.
-
-Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](https://github.com/onlyflowstech)
+<!-- DEMO GIF PLACEHOLDER: add a short screen recording here (asking a question, then a denied write and a dry-run batch). Not recorded yet. -->
 
 [![npm version](https://img.shields.io/npm/v/@onlyflows/servicenow-mcp)](https://www.npmjs.com/package/@onlyflows/servicenow-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
----
+Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](https://github.com/onlyflowstech)
 
+## Governed and safe for production
+
+The server exposes 24 tools over stdio. Every call runs inside controls that
+you configure and that no tool of this server can change:
+
+- **Per-profile table and field policy.** Each profile (a named ServiceNow
+  connection) has its own read and write table allowlists. Access is
+  deny-by-default: a profile with no rules denies every ServiceNow call. Field
+  policy decides which fields can be read or written; sensitive field names
+  are refused.
+- **Confirmation flag on destructive tools.** `sn_delete` and `sn_batch`
+  change nothing unless the call carries `confirm: true`. The model sets that
+  flag itself, so it is a guard against accidents, not an approval. A person
+  approves through the client's own tool-approval prompt, and many clients let
+  you "always allow" a tool. `sn_create` and `sn_update` take no confirm flag;
+  keep write grants narrow.
+- **Safe batching.** `sn_batch` takes a structured filter (no raw encoded
+  queries), runs as a dry run by default, caps a run at 10,000 records, and
+  never re-sends a batch.
+- **Activity events.** Each completed tool call writes one JSON line to
+  stderr with the tool, profile, instance and outcome, plus hashed owner and
+  client labels. It records no table, record or fields. Delivery is
+  best-effort through stderr, and events are dropped above 256 pending lines.
+  Use ServiceNow's own audit history for record changes.
+- **Explicit profile on every call.** There is no default or "active"
+  instance. Each call names its profile, so nothing reaches an instance the
+  call didn't name. Keep write grants on production profiles narrow.
+- **Credentials stay out of clients.** Secrets are entered at a hidden prompt,
+  verified against the instance before anything is saved, and stored
+  encrypted in an owner-only `~/.servicenow-mcp` directory.
+
+> **Limits of these controls.** They hold against the model's tool calls. A
+> client that gives the model a shell or file access (Claude Code and Codex
+> can) could run `servicenow-mcp-setup grant` or read
+> `~/.servicenow-mcp/server.env`. The encryption key sits in the same
+> owner-only folder as the encrypted profiles, so it protects against other
+> users and stray copies of the files, not against your own account. Run
+> production profiles from a client or account without shell access where you
+> can.
+
+Details: [Table access policy](#table-access-policy),
+[Safety Features](#safety-features) and [docs/PRODUCTION-SECURITY.md](docs/PRODUCTION-SECURITY.md).
+
+## Works with
+
+Any MCP client that can launch a stdio server. Setup registers **Claude Code**
+and **Codex** automatically; **Claude Desktop**, **Cursor**, **VS Code** and
+**Windsurf** are configured with `servicenow-mcp-setup client --client <name>`
+(see [Connecting a client](#connecting-a-client)). Requires Node.js 20 or newer.
+
+## Quick start
+
+1. **Install:** `npm install -g @onlyflows/servicenow-mcp`
+2. **Set up a connection:** `servicenow-mcp-setup`. It asks for your instance
+   and credential, checks them against the instance, asks which tables to
+   allow, and registers Claude Code and Codex if their CLIs are installed.
+   Choose **OAuth** when the wizard asks for the authentication type; Basic
+   is the wizard's default but is [deprecated by ServiceNow](#basic-default-deprecated-by-servicenow).
+3. **Open your client and ask.** There is no server to start; the client
+   launches `servicenow-mcp` itself.
+
+The default read grant in the wizard is **just `incident`**, and writes default
+to **none**. Grant more later with `servicenow-mcp-setup grant`.
+
+## Try asking
+
+These work with the default read grant (profile named `dev`):
+
+1. "On dev, list the 10 most recent open P1 incidents."
+2. "On dev, how many incidents are there, grouped by priority?"
+3. "On dev, which assignment groups have the most incidents?"
+4. "On dev, which open incidents have no assignee, oldest first?"
+5. "On dev, show incident INC0010001 and summarize where it stands."
+
+Your client sends `profile: "dev"` with each call. Asking about other tables
+(for example `change_request`) is denied until you grant them.
+
+---
 
 ## Installation
 
@@ -136,7 +211,13 @@ servicenow-mcp-setup grant --profile dev --read incident,problem --write inciden
 | `servicenow-mcp-setup` | Generate local auth material and register supported clients |
 | `servicenow-mcp-setup client --client <name>` | Print copy-pasteable config for a client |
 | `servicenow-mcp-setup grant --profile <name> --read <tables>` | Add table access rules to a profile |
+| `servicenow-mcp-setup policy show --profile <name>` | Print the profile's effective policy as one table (tables, tools, fields, batch limits); never prints a secret |
 | `servicenow-mcp-setup doctor` | Diagnose the install and print remedies |
+
+`grant` and the wizard print a warning, and still grant, when write access
+lands on a privilege-sensitive table: role, group, approval, script,
+property, user or authentication tables such as `sys_user_has_role`,
+`sysapproval_approver` or `sys_script`.
 
 `--force` regenerates the owner/client identifiers but deliberately preserves
 `SN_PROFILE_ENCRYPTION_KEY`, which decrypts every credential envelope in
@@ -324,7 +405,11 @@ The resulting `~/.servicenow-mcp/config.json` looks like this. Note
           {
             "table": "incident",
             "kind": "canonical",
-            "tools": ["sn_query", "sn_get", "sn_aggregate", "sn_schema", "sn_create", "sn_update"],
+            "tools": [
+              "sn_query", "sn_get", "sn_aggregate", "sn_schema",
+              "sn_create", "sn_update",
+              "sn_incident_add_comment", "sn_incident_add_work_note"
+            ],
             "closureComplete": true,
             "relatedTables": ["incident"]
           },
@@ -348,12 +433,29 @@ environment the server is spawned with, or in `~/.servicenow-mcp/server.env`,
 which the server falls back to. Do not type either value into a shell command,
 command argument, dotenv file, or command history.
 
-Each `targets` entry asserts `closureComplete: true`, meaning `relatedTables`
-lists every backing, ancestor, and descendant table the operation can reach.
-When a table extends another, declare it:
+Each `targets` entry must set the literal `closureComplete: true`, and its
+`relatedTables` must include the target table itself. `relatedTables` is a
+declaration that the loader checks for consistency: every related table must
+be in the allowlist of each operation the target is in, or the profile is
+rejected. The loader does not derive it from the instance. ServiceNow returns
+inherited fields through the child table's own endpoint, so a self-only list
+such as `["incident"]` is enough to read them. Declaring the immediate parent,
+as `servicenow-mcp-setup` offers, is optional:
 `servicenow-mcp-setup grant --profile dev --read change_request --related change_request=task`.
-Related tables join the allowlist but get no target of their own, so a caller
-cannot address them directly.
+That adds `task` to the read allowlist, because the loader requires it, and a
+later grant that gives `change_request` another operation adds `task` to that
+operation's allowlist too. On its own this makes `task` addressable by no tool,
+because it has no target of its own, unless such an allowlist is `*`. If
+`task` has, or later gets, a target of its own, that target's tools can then
+use those operations on it, so declare a table only where every tool on its
+own target may use every operation the declaring target has or will have.
+A grant on a base table such as `task` reaches the records of the tables that
+extend it, such as `incident`, whatever `relatedTables` lists, so grant a base
+table only when those records should be reachable through it. Likewise, a
+view or alias returns data from every table it reads, whatever
+`relatedTables` lists: declare each of those tables, so the loader requires
+each to carry the same permission, and grant the view only when all of that
+data should be reachable.
 
 ### Credential Options
 
@@ -471,36 +573,28 @@ ServiceNow upstream can return HTTP 429 with an empty body, while this server's 
 
 ---
 
-## Why This MCP Server?
+## What the tools cover
 
-Most ServiceNow MCP integrations are **read-only** and support a handful of
-tables. This service offers a broader tool catalog behind explicit,
-deny-by-default table and tool policy:
+The registered catalog has 24 tools (see [Tools Reference](#tools-reference)):
 
-| Feature | Others | @onlyflows/servicenow-mcp |
-|---------|--------|--------------------------|
-| Query records | ✅ | ✅ |
-| Create records | ❌ | ✅ |
-| Update records | ❌ | ✅ |
-| Delete records | ❌ | ✅ (with safety confirm) |
-| Bulk operations | ❌ | ✅ (dry-run by default) |
-| Aggregations (COUNT/AVG/MIN/MAX/SUM) | ❌ | ✅ |
-| Table schema introspection | ❌ | ✅ |
-| CMDB relationship traversal | ❌ | ✅ (recursive, configurable depth) |
-| Instance health monitoring | ❌ | ✅ (version, nodes, jobs, stats) |
-| Attachment management | ❌ | ✅ (list, upload, download; inline base64, no host filesystem) |
-| System log queries | ❌ | ✅ |
-| Code search across artifacts | ❌ | ✅ |
-| Table/app/plugin discovery | ❌ | ✅ |
-| ATF test execution | ❌ | 🚧 listing/results available; execution currently policy-denied |
-| Natural language interface | ❌ | 🚧 currently policy-denied pending a typed access plan |
-| Background scripts | ❌ | 🚧 on the [roadmap](#roadmap) (SNS-39) |
-| Multi-instance profiles | ❌ | ✅ (named profiles, per-call override) |
-| **Total tools** | **1–3** | **19** |
+| Area | Tools |
+|------|-------|
+| Records | `sn_query`, `sn_get`, `sn_create`, `sn_update`, `sn_delete`, `sn_batch` |
+| Incident journals (append-only) | `sn_incident_add_comment`, `sn_incident_add_work_note` |
+| Analytics and schema | `sn_aggregate`, `sn_schema`, `sn_health` |
+| CMDB and operations | `sn_relationships`, `sn_attach`, `sn_syslog`, `sn_codesearch`, `sn_discover` |
+| ATF | `sn_atf_author`, `sn_atf_run`, `sn_atf_results`, `sn_atf_readiness`, `sn_atf` |
+| Flow Designer (read-only) | `sn_flow_view` |
+| Profiles | `sn_profile` |
+| Natural language | `sn_nl` (currently policy-denied pending a typed access plan) |
+
+Every tool requires a `profile`, and every tool is subject to the profile's
+table and field policy. `sn_script` (background scripts) is not registered; see
+the [Roadmap](#roadmap).
 
 ---
 
-## Quick Start
+## Manual environment setup
 
 The server speaks stdio and requires Node.js 20 or newer. The shortest path is
 the bootstrap described under [Installation](#installation):
@@ -570,6 +664,10 @@ Those two require action on every install. The transport is stdio, as it was in
 The breaking changes from `1.0.0`, each with a before/after example, are in
 [Migrating to 2.0](docs/V2-MIGRATION.md#breaking-changes-at-a-glance).
 
+Already on 2.x? 2.2.0 changes field-policy loading and journal writes, and
+can refuse to start on a configuration that loads today. Read
+[Upgrading to 2.2.0](docs/V2-MIGRATION.md#upgrading-to-220) first.
+
 ### Deployment guides for the dormant HTTP transport
 
 2.0 ships stdio only. The container image, the health and shutdown contract,
@@ -596,12 +694,12 @@ in this section is needed to use this server.
 |------|-------------|
 | `sn_query` | Query an approved table with structured filters, field selection, pagination, and sorting; bounded raw reads require an explicit policy rule |
 | `sn_get` | Get a single record by sys_id from an approved table |
-| `sn_create` | Create a record on any table granted for writes, using only field-policy-approved writable fields; `incident` additionally requires a bounded `short_description` |
-| `sn_update` | Update one record selected by exact `sys_id` on any table granted for writes, using only field-policy-approved writable fields; rejects `comments` and `work_notes` with dedicated-tool migration guidance |
+| `sn_create` | Create a record on any table granted for writes, using only field-policy-approved writable fields, including the journal fields `comments` and `work_notes`; `incident` additionally requires a bounded `short_description` |
+| `sn_update` | Update one record selected by exact `sys_id` on any table granted for writes, using only field-policy-approved writable fields; `comments` and `work_notes` append a journal entry |
 | `sn_incident_add_comment` | Append one bounded customer-visible comment to an incident; repeated calls append again |
 | `sn_incident_add_work_note` | Append one bounded internal work note to an incident; repeated calls append again |
 | `sn_delete` | Delete a record on an approved write table (requires `confirm: true`) |
-| `sn_batch` | Bulk update/delete using a required structured filter and dry-run safety (raw encoded selectors are prohibited; requires `confirm: true` to execute) |
+| `sn_batch` | Bulk update/delete using a required structured filter and dry-run safety (raw encoded selectors are prohibited; requires `confirm: true` to execute; a dry run returns the count, up to 5 sample records the profile may read, and the field names it would write). Values get the same policy as `sn_update`; execution uses the ServiceNow REST Batch API and never re-sends a batch |
 
 ### Analytics & Schema
 
@@ -625,18 +723,28 @@ in this section is needed to use this server.
 
 | Tool | Description |
 |------|-------------|
-| `sn_atf` | List ATF tests/suites and get results; `run`/`run-suite` currently fail closed |
+| `sn_atf_author` | Create tests/suites, ordered memberships and validated typed steps |
+| `sn_atf` | Legacy test/suite listing and results; execution redirects to `sn_atf_run` |
+| `sn_atf_readiness` | Check plugins, properties, Cloud Runner installation and permissions |
+| `sn_atf_run` | Execute a suite through Cloud Runner only, with bounded polling |
+| `sn_atf_results` | Fetch results, cached history and comparisons |
 | `sn_nl` | Currently fails closed until natural-language composition emits a complete typed access plan |
 
 `sn_script` (background script execution) shipped in 1.0.0 as an unimplemented
 stub and is **not published in 2.0** — it does not appear in `tools/list`. Use
 `sn_query` and `sn_batch` instead. See [Roadmap](#roadmap).
 
+### Flow Designer
+
+| Tool | Description |
+|------|-------------|
+| `sn_flow_view` | Show a flow or subflow as a Mermaid diagram, an outline and a structured graph: trigger, steps, branches, loops, error handling, input values under field policy, and called subflows to depth 3. Read-only through the Table API; never calls Flow Designer's internal API. See [docs/FLOW-VIEW.md](docs/FLOW-VIEW.md) |
+
 ### Profile Management
 
 | Tool | Description |
 |------|-------------|
-| `sn_profile` | Inspect non-secret metadata for one explicitly named profile; profile configuration is operator-managed out of band |
+| `sn_profile` | Inspect non-secret metadata and the effective policy card for one explicitly named profile; profile configuration is operator-managed out of band |
 
 ---
 
@@ -743,49 +851,57 @@ for 24 hours by default. The default cached table patterns are
 `sys_metadata*`, and `sys_flow*`. Set `metadataCache.ttlMs` and
 `metadataCache.tables` on a file-backed profile, or `SN_METADATA_CACHE_TTL_MS`
 / `SN_METADATA_CACHE_TABLES` for the explicit environment profile. `sn_query`,
-`sn_get`, and `sn_schema` accept `force_recache: true` to refresh metadata. A
-cache hit performs a lightweight `sys_updated_on` probe and is used only when no
-matching metadata rows changed since the previous sync.
+`sn_get`, and `sn_schema` accept `force_recache: true` to refresh metadata.
 
-**Prerequisite: a resolvable session timezone.** The freshness probe compares
-`sys_updated_on`, which ServiceNow evaluates in the *session user's* timezone,
-not UTC. Resolving that zone requires the authenticating account's `user_name`
-to look up `sys_user.time_zone`, falling back to the `glide.sys.default.tz`
-property. When it cannot be resolved the cache **disables itself** for that
-identity rather than assuming UTC — a wrong assumption would silently serve
-stale metadata for the length of the offset. The server logs a warning naming
-the reads it needs.
-
-This has one consequence worth knowing before you configure it:
-
-| Profile auth | Metadata caching |
-|---|---|
-| Basic | works — the profile carries a username |
-| OAuth **password** grant | works — the profile carries a username |
-| OAuth **client_credentials** | **disabled** — no username to resolve a timezone from |
-| API key | **disabled** — no username to resolve a timezone from |
-
-The profile also needs read access to `sys_user` (for `time_zone`) and
-`sys_properties` (for `glide.sys.default.tz`) for the lookup to succeed at all.
+**Freshness is checked against the instance, in every auth mode.** Before each
+fetch the cache reads a watermark in one small request: the table's row count
+(`X-Total-Count`) and its newest row by `sys_updated_on`, as ServiceNow stores
+it (UTC). A cache hit is served only while a new read of that watermark still
+matches. Inserts and deletes change the count, and inserts and updates change
+the newest row. Both sides of the comparison come from the instance, so the
+session timezone, the date format, and clock skew between this host and the
+instance play no part, and no user lookup is needed. Basic, OAuth (password or
+client_credentials), and API-key profiles all cache the same way. The only
+access it needs is the ServiceNow read permission of the user the credential
+runs as, on the cached table itself; no `tableAccess` change is needed.
 
 **The honest tradeoff:** the cache only ever saved payload bytes, never round
-trips — a cache hit still costs one freshness probe. So on a client-credentials
-or API-key profile the practical loss is bandwidth on `sys_dictionary` reads,
-not latency. If you are choosing an auth mode, this should not be the deciding
-factor.
+trips — a cache hit still costs one watermark read, and a miss costs one extra.
+A tool call reads each table's watermark once, however many times it reads the
+table, until the call writes. A hierarchy walk reads `sys_db_object` once for
+the whole chain. An empty table caches like any other.
 
-**Deletions become visible within one TTL.** The freshness probe detects
-updates, not deletes, so a row deleted upstream stays served until its entry
-expires and is re-fetched — up to 24 hours at the default TTL. This is accepted
-behavior, not a defect; lower `SN_METADATA_CACHE_TTL_MS` or pass
-`force_recache: true` if you need a deletion reflected sooner.
+If a table's watermark cannot be used, its reads go straight upstream, without
+a watermark request, for a while: 15 minutes when the cause persists (an
+incomplete or future-dated watermark, a 403 or 404), 30 seconds when it may not
+(429, 5xx, timeouts, network), never longer than the TTL. A table whose newest
+row is dated after the instance's own clock is one of these: that row would
+stay the newest however many others were updated. Entries cached earlier are
+kept and serve again once the table is cacheable, and `force_recache: true`
+asks again at once.
+
+**What the watermark can miss.** An update within the same second as the stored
+watermark, to a row other than the newest, and a write that skips the system
+fields (`autoSysFields(false)`) leave it unchanged. Such a change shows within
+one TTL — up to 24 hours at the default. Lower `SN_METADATA_CACHE_TTL_MS` or
+pass `force_recache: true` to see it sooner. `sn_batch` is not exposed to these
+gaps: it looks up the records it will update or delete on the instance on every
+run, never in the cache, even on a cached table.
+
+**`sn_schema` results** are also kept for 5 minutes per profile, credential
+identity, and effective policy, so a repeat call costs no request at all. They
+are not revalidated in that window; `force_recache: true` refreshes them, and
+`schemaCacheTtlMs` / `SN_SCHEMA_CACHE_TTL_MS` (up to 1 hour) changes the window.
 
 ### Unrestricted field selection (`fields=all`, `response_format=detailed`)
 
-Both resolve to a wildcard selection. They previously dropped `sysparm_fields`
-entirely, so ServiceNow returned every column and a wide table could breach the
-1 MiB cumulative upstream cap and **fail the call outright**. They are now
-bounded to at most **100 columns**.
+Both resolve to the profile's readable set for the table. Where the field
+policy narrows that set, they request exactly the listed fields and read no
+dictionary rows; the rest of this section applies when the readable set is
+every field. That wildcard selection used to drop `sysparm_fields` entirely,
+so ServiceNow returned every column and a wide table could breach the 1 MiB
+cumulative upstream cap and **fail the call outright**. It is now bounded to at
+most **100 columns**.
 
 The cap bounds the *upstream request*, not the response — truncating after
 receipt would not help, because the bytes have already crossed the wire and
@@ -804,7 +920,8 @@ Two behavior changes worth stating plainly, because they change what a caller
 gets back:
 
 - **Journal fields are now returned.** `comments` and `work_notes` are included
-  in the resolved set for `fields=all` and `detailed`. See
+  in the resolved set for `fields=all` and `detailed` wherever the profile can
+  read them. See
   [Journal content and field selection](#journal-content-and-field-selection).
 - **Sensitive-looking field names are excluded from the resolved set entirely.**
   A name matching the sensitive-field pattern is never *requested*, rather than
@@ -866,6 +983,7 @@ the same loader the server uses at request time:
 servicenow-mcp-setup grant --profile dev --read incident,problem --write incident
 servicenow-mcp-setup grant --profile dev --read cmdb_ci --tools sn_query,sn_relationships
 servicenow-mcp-setup grant --profile dev --read change_request --related change_request=task
+servicenow-mcp-setup grant --profile dev --flows   # sn_flow_view's 15 tables, bound to sn_flow_view only
 ```
 
 Allowlist entries may be exact table names or the literal `*` to allow every
@@ -885,21 +1003,25 @@ and must be valid ServiceNow identifiers.
 |----------|----------|---------|-------------|
 | `SN_ALLOWED_READ_TABLES` | ❌ | deny all | Tables permitted for read operations on the explicit `SN_PROFILE_NAME` environment profile only. Use `*` to allow every readable table. |
 | `SN_ALLOWED_WRITE_TABLES` | ❌ | deny all | Tables permitted for create, update, incident journal append, delete, upload, and confirmed batch operations on the explicit `SN_PROFILE_NAME` environment profile only. Use `*` to allow every writable table. Write permission never implies read permission. |
-| `SN_TABLE_ACCESS_TARGETS` | Required for exact allowlisted caller-addressable tables; optional with `*` | `[]` | Trusted JSON classification with `table`, exact permitted `tools`, `kind` (`canonical`, `alias`, `view`, or `extension`), literal `closureComplete: true`, and the complete backing/ancestor/descendant `relatedTables` closure. With `*`, omitted target entries use the wildcard operation grant; explicit target entries can still narrow tools and validate related-table closure. |
-| `SN_FIELD_POLICY_DEFINITIONS` | Required for custom/generic table fields | built-in finite policy | Trusted JSON object keyed by table name or `*`. Each entry may define `defaults`, `readable`, and `writable`; `readable`/`writable` accept exact field arrays or `"*"`. Sensitive field names are still denied. Use `{"*":{"defaults":["sys_id"],"readable":"*","writable":[]}}` for broad read-only custom-table exploration. Use `writable:"*"` only for intentional broad mutation access. |
+| `SN_TABLE_ACCESS_TARGETS` | Required for exact allowlisted caller-addressable tables; optional with `*` | `[]` | Trusted JSON classification with `table`, exact permitted `tools`, `kind` (`canonical`, `alias`, `view`, or `extension`), literal `closureComplete: true`, and `relatedTables`: the target itself plus any backing or parent tables the operator declares. The loader checks that every related table has the target's operation permission; it does not derive the list from the instance, and the list grants no access. A self-only list is valid for a `canonical` target; `alias`, `view` and `extension` targets must name at least one backing table, and a view or alias should declare every table it reads, because it returns data from each of them whatever the list says. With `*`, omitted target entries use the wildcard operation grant; explicit target entries can still narrow tools and check their related tables. |
+| `SN_FIELD_POLICY_DEFINITIONS` | ❌ | no narrowing | Field policy for the explicit `SN_PROFILE_NAME` environment profile only, like the `SN_ALLOWED_*` variables. **If `~/.servicenow-mcp/config.json` exists, setting this variable stops startup**; give those profiles their own `fieldPolicy` instead. The value is trusted JSON, at most 65,536 characters: either a table map keyed by table name or `*`, the same shape as a profile's `fieldPolicy`, or an object holding the profile keys (`fieldPolicy`, or `readableTableFields` / `writableTableFields`), not both. Each field set is a list of exact field names or `"*"`; `["*"]` means `"*"` in that exact form only, and patterns such as `"u_*"` are rejected. A malformed value stops startup with the key named. Sensitive field names are always denied. See [Field policy](#field-policy). |
 | `SN_ENCODED_QUERY_READ_POLICY` | ❌ | deny all | Trusted JSON object containing bounded `rules` for an exact `sn_query`/table pair. Each rule requires `maxLength`, `maxTerms`, readable `fields`, supported `operators`, `maxLimit`, `maxOffset`, and `maxResponseBytes`. No rule can authorize a write or another tool. |
 
 Invalid policy configuration fails startup. A composed tool is admitted only
-when its complete backing-table plan is allowed before the first ServiceNow
-client access. Every related target must have the same read or write
-permission, so a base table, alias, view, or extension cannot bypass an
-unlisted backing or descendant table.
-Related permission does not make a dependency directly caller-addressable
-without its own target entry. Field policy narrows what a granted table exposes; it does not deny a table the
+when every table in its access plan is allowed before the first ServiceNow
+client access. A target's declared related tables must each have the same
+read or write permission as the target, or the policy is rejected. Related
+permission does not make a table directly caller-addressable without its own
+target entry. The related tables are a declaration, not a list derived from
+the instance: a grant on a base table reaches the records of the tables that
+extend it whether or not they are listed, so grant a base table only when
+those records should be reachable. Likewise, a view or alias returns data from
+every table it reads, whatever `relatedTables` lists: declare each of those
+tables, so the loader requires each to carry the same permission, and grant
+the view only when all of that data should be reachable. Field policy narrows what a granted table exposes; it does not deny a table the
 operator granted. Sensitive-looking field names remain excluded regardless. Build the
-complete target catalog from approved ServiceNow metadata and treat it as
-trusted startup configuration; omit a target when reachability cannot be proven
-complete. File-backed profile example:
+target catalog from approved ServiceNow metadata and treat it as trusted
+startup configuration. File-backed profile example:
 
 ```json
 {
@@ -916,7 +1038,7 @@ complete. File-backed profile example:
           {
             "table": "incident",
             "kind": "canonical",
-            "tools": ["sn_query", "sn_get", "sn_create", "sn_update"],
+            "tools": ["sn_query", "sn_get", "sn_create", "sn_update", "sn_incident_add_comment", "sn_incident_add_work_note"],
             "closureComplete": true,
             "relatedTables": ["incident"]
           }
@@ -926,13 +1048,301 @@ complete. File-backed profile example:
   }
 }
 ```
-`sn_nl` and ATF `run`/`run-suite` currently fail closed because they do not emit
-a complete typed side-effect plan; use the corresponding typed tool instead.
-Incident journal fields are append-only: generic `sn_update` rejects `comments`
-and `work_notes` before credentials or client creation. Use
-`sn_incident_add_comment` or `sn_incident_add_work_note` with exactly
-`profile`, incident `sys_id`, and bounded `content`; grant the selected tool
-explicitly on the `incident` target as well as write access to that table.
+`sn_nl` remains denied without a complete typed side-effect plan. Legacy ATF
+`run`/`run-suite` return migration guidance; use `sn_atf_run` with an explicit
+`atf.execute` profile grant. Typed ATF steps use the authenticated native form
+to save and verify inputs and output references without ACL changes or an
+installed application. See [ATF workflow](docs/ATF-WORKFLOW.md).
+
+#### Field policy
+
+Field policy is the second gate after `tableAccess`. It narrows which fields
+of a granted table a profile may read, filter on, return and write; it never
+denies a table the profile grants. A profile with no field policy may read and
+write every field of a granted table, except that sensitive-looking names
+(`password`, `token`, `secret`, `api_key` and similar) are always denied, and
+the class and domain fields below must be listed before they can be written.
+
+State it on a profile in `~/.servicenow-mcp/config.json`, beside
+`tableAccess`, in one of two forms. A profile that states both fails to load.
+For the `SN_PROFILE_NAME` environment profile, `SN_FIELD_POLICY_DEFINITIONS`
+supplies the same keys.
+
+**`fieldPolicy`** maps a table name, or `"*"`, to an entry with up to three
+keys:
+
+| Key | What it limits | When the entry leaves it out |
+|---|---|---|
+| `readable` | Fields a call may read, return, or filter on | The `"*"` entry's `readable` where that entry applies (below); otherwise every field |
+| `writable` | Fields a write may set | The `"*"` entry's `writable` where that entry applies; otherwise every field |
+| `defaults` | Fields a read returns when the caller names none | A bounded projection inside `readable`: a built-in table's own projection; on other tables the `"*"` entry's `defaults`, or `sys_id` |
+
+**`readableTableFields` / `writableTableFields`** are lists of
+`{ "table": ..., "fields": ... }` entries that set `readable` and `writable`.
+They have no `defaults`. A table may appear once in each list.
+
+Every field set is a list of exact field names, or `"*"` for every field.
+`["*"]` means the same as `"*"`, in that exact form only: `["*", "number"]`,
+`[" * "]` and patterns such as `"u_*"` are rejected. Table and field names are
+letters, digits and underscores, start with a letter, are at most 80
+characters, and are compared case-insensitively. `defaults` must stay inside
+`readable`. On a table with no built-in entry, an entry that lists
+`readable` but no `defaults` returns that whole list by default, and an entry
+that states only `defaults` also limits `readable` to those fields unless a
+`"*"` entry states `readable`.
+
+A worked example, added to a profile beside `tableAccess`:
+
+```json
+{
+  "fieldPolicy": {
+    "*": {
+      "writable": ["short_description", "description", "state", "work_notes"]
+    },
+    "incident": {
+      "writable": ["short_description", "description", "state", "assigned_to", "assignment_group", "work_notes"]
+    },
+    "u_integration_log": {
+      "readable": [],
+      "writable": "*"
+    },
+    "sys_user": {
+      "readable": ["sys_id", "user_name", "name", "email"],
+      "writable": []
+    }
+  }
+}
+```
+
+On that profile, for the tables its `tableAccess` grants:
+
+- Every ITSM table except `incident`, and every table without a built-in
+  entry except `u_integration_log`, can be written only in the four fields of
+  the `"*"` entry. `comments` is not listed, so no customer-visible comment
+  can be posted there. The `"*"` entry states no `readable`, so reads stay
+  open.
+- `incident` states its own `writable`, which replaces the `"*"` list for
+  `incident` only. `sn_incident_add_comment` is denied there, because
+  `comments` is not listed, and `sn_incident_add_work_note` is allowed.
+- `u_integration_log` is write-only. Any field except sensitive names and the
+  class and domain fields can be written, and a write returns only `sys_id`.
+  Reads are denied, so `sn_batch`, which reads the matching `sys_id`s first,
+  cannot run there.
+- `sys_user` is a system table, so the `"*"` entry does not reach it, and
+  naming it is the only way to narrow it. Here it can read four fields and
+  cannot be written. Other system tables, such as `sys_script`, are not
+  narrowed by this policy at all.
+
+The same policy in the list form:
+
+```json
+{
+  "readableTableFields": [
+    { "table": "u_integration_log", "fields": [] },
+    { "table": "sys_user", "fields": ["sys_id", "user_name", "name", "email"] }
+  ],
+  "writableTableFields": [
+    { "table": "*", "fields": ["short_description", "description", "state", "work_notes"] },
+    { "table": "incident", "fields": ["short_description", "description", "state", "assigned_to", "assignment_group", "work_notes"] },
+    { "table": "u_integration_log", "fields": "*" },
+    { "table": "sys_user", "fields": [] }
+  ]
+}
+```
+
+**Which tables a `"*"` entry reaches.** Tables fall into three groups:
+
+- **ITSM tables:** `incident`, `change_request`, `problem`, `sc_request`,
+  `sc_req_item`, `sc_task`, `task`, `cmdb_ci`, `cmdb_ci_server`,
+  `cmdb_ci_computer`, `kb_knowledge`.
+- **Every table without a built-in entry:** `u_*` and `x_*` tables, and
+  platform tables such as `change_task` and `sys_properties`.
+- **The 23 system tables:** `sys_script`, `sys_script_include`,
+  `sys_script_client`, `sys_ui_script`, `sys_ws_operation`, `sys_user`,
+  `sys_user_group`, `sys_user_grmember`, `sys_db_object`, `sys_app`,
+  `sys_store_app`, `v_plugin`, `sys_atf_test`, `sys_atf_test_suite`,
+  `sys_atf_test_suite_test`, `sys_atf_test_result`, `sys_atf_step`,
+  `sys_element_mapping`, `sys_variable_value`, `sys_atf_test_suite_result`,
+  `sys_atf_test_result_step`, `sys_atf_agent`, `syslog`.
+
+On an ITSM table or a table without a built-in entry, named in the policy or
+not, `readable` and `writable` each resolve from the table's own entry, then
+the `"*"` entry, then every field. To keep one key open on such a table under
+a narrowing `"*"` entry, state it on the table, such as
+`"u_x": { "writable": "*" }`. The ITSM tables keep their built-in default
+projections, trimmed to the effective `readable` set.
+
+A `"*"` entry never reaches a system table, named or not: each key comes from
+the table's own entry, or else covers every field. The system tables include
+the script tables (`sys_script`, `sys_script_include`, `sys_script_client`,
+`sys_ui_script`, `sys_ws_operation`), whose records hold server- or
+client-side code, and the user and group tables (`sys_user`,
+`sys_user_group`, `sys_user_grmember`). Name a system table to narrow it, and
+grant it in `tableAccess` only deliberately.
+
+**Read-only profiles.** A `"*"` entry with `writable: []` does not make a
+profile read-only, because it never reaches the system tables. To make a
+profile read-only, grant no writes: `tableAccess.writeTables: []`, or
+`SN_ALLOWED_WRITE_TABLES=''` for the environment profile.
+
+**Class and domain fields.** `sys_class_name`, `sys_class_path`, `sys_domain`
+and `sys_domain_path` move a record to another class or domain, so no
+writable wildcard covers them, including the open default of a profile with
+no field policy. Each is written only where it is named in the table's
+`writable`, or in a `"*"` entry's `writable` on a table that entry reaches.
+Listing `sys_domain` does not list `sys_domain_path`, and the reverse.
+Otherwise the write is denied with:
+
+```text
+Write denied by policy: field "sys_domain" on "incident" changes the record's class or domain, so a writable wildcard never covers it. List it explicitly in fieldPolicy.incident.writable to allow this write.
+```
+
+**`readable: []` and `writable: []`.** `readable: []` makes a table
+write-only: writes succeed and return only `sys_id`, reads are denied, and
+`sn_batch` cannot run there. `writable: []` blocks writes. To make a table
+unreachable, leave it out of `tableAccess`. Every write response includes the
+written record's `sys_id`; every other field, `number` included, follows the
+readable set.
+
+**Parent tables.** Field policy is evaluated against the table a call names.
+If a profile may write a parent table such as `task`, a write addressed to
+`task` is checked against `task`'s policy, whatever the class of the record.
+When you narrow a field such as `comments` on `incident`, narrow it on every
+write-granted parent table too, or do not grant writes on the parent. A
+`"*"` entry covers `incident` and `task` alike. The same holds for a platform
+table that stores journal entries directly, such as `sys_journal_field`: if a
+profile may write it, per-table narrowing on `incident` does not reach a
+write addressed to it, so either leave it out of the write grant or narrow
+with a `"*"` entry, which reaches it.
+
+**Schema metadata.** `sn_schema` describes the fields the profile can read on
+the table it names. It needs `tableAccess` read on `sys_dictionary`,
+`sys_db_object`, `sys_documentation` and `sys_choice`, but a field policy on
+those metadata tables does not trim the labels, types, choices and help it
+returns for the readable fields. The exception is `inherited_from`, the
+ancestor table a field comes from: it appears only where the profile can read
+`super_class` on `sys_db_object`.
+
+**Role and group-membership tables.** Nothing built in blocks
+`sys_user_role`, `sys_user_has_role`, `sys_group_has_role` or
+`sys_user_grmember`. This is deliberate: profile configuration alone decides,
+with `tableAccess` granting the table, field policy narrowing it, and the
+integration account's ServiceNow roles bounding what is left. Grant these
+tables only deliberately. `sys_user_grmember` is a system table; the other
+three have no built-in entry, so a `"*"` entry reaches them.
+
+**Validation.** Field policy is checked when profiles load, and any error
+stops the server from starting. Table keys must be unique ignoring case, a
+table may appear once in each list, and a field may appear once in each set.
+Unknown keys are rejected, including comment keys such as `_comment`: a
+`fieldPolicy` entry accepts only `defaults`, `readable` and `writable`, and a
+list entry only `table` and `fields`. Every error and its message is listed in
+[Field-policy load errors](docs/V2-MIGRATION.md#field-policy-load-errors).
+
+#### Journal fields
+
+`comments` (customer-visible) and `work_notes` (internal) are written like any
+other field through `sn_create`, `sn_update` and `sn_batch`, on any table
+granted for writes: `incident`, `change_request`, `problem`, `sc_task`, custom
+task tables. A Table API write to a journal field appends one entry; it never
+edits or removes earlier entries. Each entry is 1-8,000 characters of
+non-blank text, at most 16,384 UTF-8 bytes, without control or format
+characters other than newline, carriage return and tab.
+
+Field policy decides who may write them, and with no field policy every
+write-granted table accepts both. To keep a profile from posting
+customer-visible comments, set `writable` to an explicit list that leaves
+`comments` out: on each table, or on the `"*"` entry, and on write-granted
+parent tables such as `task` (see [Field policy](#field-policy)). On
+`incident` the same setting also denies `sn_incident_add_comment`, so both
+routes to the field agree. Leaving the dedicated tools off a target does not
+withhold journals from `sn_create`, `sn_update` or `sn_batch`.
+
+The dedicated incident tools take exactly `profile`, incident `sys_id` and
+bounded `content`, and need write access to `incident`.
+`servicenow-mcp-setup grant --write incident` binds both to the incident
+target unless you pass `--tools`.
+
+Journal handling is keyed by field name. Only `comments` and `work_notes` get
+the journal bounds and are never re-sent; a custom journal field gets the
+generic bounds. See
+[Production security boundaries](docs/PRODUCTION-SECURITY.md#journal-content).
+
+#### Write values
+
+A field approved by the field policy accepts:
+
+- a string, a boolean, a safe integer, or a finite decimal such as `12.5`
+  (not exponent forms such as `1e21`);
+- `""` or `null` to clear the field;
+- an array of scalars for a list field such as `watch_list`, sent as one
+  comma-separated value, so no element may contain a comma;
+- a `{"value": ..., "display_value": ..., "link": ...}` object, the shape
+  reads return with display values, which is written as its `value`.
+
+Values cannot contain control or format characters (newline, carriage return
+and tab are allowed) and are bounded to 100,000 characters and 400,000 UTF-8
+bytes. On `incident`,
+`short_description`, `description`, `close_notes`, the reference fields
+`caller_id`, `assignment_group` and `assigned_to`, and the choice fields keep
+typed checks: a reference takes a 32-character `sys_id` or `""`, a choice
+cannot contain `^`, `=` or `,`, and `short_description` is required on create
+and cannot be cleared. Every other incident field gets the generic bounds.
+
+#### Bulk writes
+
+`sn_batch` sends confirmed updates and deletes through the ServiceNow REST
+Batch API (`/api/now/v1/batch`), up to 50 records per request and fewer when
+field values are large, so a request body stays under 4 MiB unless one
+record's fields alone exceed about 3 MiB of JSON; such a record is sent one
+per request. Each request gets its own 1 MiB response budget, so a run can reach the 10,000-record cap
+(`limit` defaults to 200). The lookup's `sys_id`s are de-duplicated, so each
+matched record is targeted once per run.
+
+A batch request that may have reached the instance is never sent again:
+
+- If the instance refuses a batch request outright (401, 403 or 404), nothing
+  in it ran, so the run switches to one Table API call per record, for that
+  batch and the rest. Batches already confirmed are not sent again.
+- A rate limit (429) stops the run. The remaining records are reported as not
+  sent, with the `Retry-After` hint, because serial calls would only add load.
+- A record whose sub-request returns a server error (5xx or 408) is
+  unconfirmed: it may have been changed, so it is reported and never retried,
+  and the run continues.
+- The run stops, and reports the remaining records as not sent, when a batch
+  request fails or its response cannot be read or matched to the records
+  sent, when every serviced record in one batch returns a server error, or
+  when more than 10 records in the run are unconfirmed.
+
+The result's `message` says how many records were unconfirmed or not sent,
+and why a run stopped. Unconfirmed records count as neither processed nor
+failed; records not sent count as failed.
+
+The serial fallback follows the HTTP client's retry rules. A journal write
+(`comments` or `work_notes`) is never re-sent on any path. An ordinary
+`PATCH` is retried up to twice after a 502, 503, 504 or connection error, the
+same rule `sn_update` follows. The fallback stops at the first record whose
+outcome it cannot confirm, at a 429, and at a 401.
+
+**Re-running a batch appends again.** A journal-only update does not change
+which records the filter matches, so running the same `sn_batch` again
+appends another entry to every matched record, not only to the records
+reported as unconfirmed or not sent. Check the unconfirmed records and
+narrow the filter to the records still to do before you re-run it.
+
+**Practical size per call.** Each batch request must finish within the
+profile's request timeout (`timeoutMs`, or `SN_TIMEOUT_MS`; 30 seconds by
+default), and its duration grows with the server-side time each record's
+business rules take. As a rough guide, at 50-100 ms per record a 50-record
+batch takes a few seconds; at about 600 ms per record a single batch can
+reach the timeout, and its records are then reported as unconfirmed and the
+run stops. Over stdio the server sets no overall deadline on a call; the
+dormant HTTP transport ends a call after 120 seconds by default, which at
+those rates is roughly 1,200-2,400 records. For tables with heavy business
+rules, use a lower `limit` and split the work across calls with narrower
+filters. While the fields being set come to less than about 62 KB of JSON,
+each batch holds 50 records, so journal fields alone never make a batch
+smaller.
 
 ### ServiceNow profiles
 
@@ -1003,10 +1413,10 @@ exact `profile`; no prior call creates default, active, or switch-profile state.
 This server is designed for production use with multiple safety layers:
 
 - **Delete operations** require explicit `confirm: true`
-- **Batch operations** run in dry-run mode by default — shows match count without making changes
+- **Batch operations** run in dry-run mode by default — shows the match count, a sample of up to 5 records and the fields it would write, without making changes (`confirm` re-runs the query and can match different records)
 - **Bulk operations** require `confirm: true` to leave dry-run mode
-- **Unclassified composition is denied** — `sn_nl` and ATF execution do not run until they can emit complete typed access plans
-- **Table access is deny-by-default** with independent exact read/write allowlists and non-configurable sensitive-table denials
+- **Unclassified composition is denied** — `sn_nl` requires a complete typed access plan; ATF suite execution requires a separate explicit `atf.execute` grant
+- **Table access is deny-by-default** with independent exact read/write allowlists; sensitive field names are denied and no configuration can grant them
 - **User input is neutralized** before interpolation into encoded queries (`^` is stripped from filter values — ServiceNow's query syntax has no escape sequence)
 
 ---

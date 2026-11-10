@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { ServiceNowOperations } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
 import {
-  ENCODED_QUERY_MIGRATION_MESSAGE,
+  ENCODED_QUERY_STRICT_OBJECT_PARAMS,
   rejectRawEncodedWrite,
 } from "../encoded-query-policy.js";
 import {
@@ -17,7 +17,6 @@ import {
   normalizeWriteTable,
   prepareWriteFieldValues,
 } from "../write-value-policy.js";
-import { rejectGenericIncidentJournalFields } from "../incident-journal-policy.js";
 import {
   serviceNowSysIdPathSegment,
   serviceNowSysIdSchema,
@@ -39,21 +38,23 @@ import {
 export const definition = Object.freeze({
   name: "sn_update",
   description:
-    "Update ordinary fields on exactly one record selected by canonical sys_id, " +
-    "on any table the configured policy grants for writes. At least one bounded " +
-    "approved field is required; journals use dedicated tools.",
+    "Update fields on exactly one record selected by canonical sys_id, on any " +
+    "table the configured policy grants for writes. At least one bounded " +
+    "approved field is required; journal fields (comments, work_notes) add an entry.",
   annotations: Object.freeze({
     title: "Update record",
     readOnlyHint: false,
     destructiveHint: false,
-    idempotentHint: true,
+    // A journal field (comments, work_notes) appends an entry on every call,
+    // so repeating the same update is not free of additional effect.
+    idempotentHint: false,
     openWorldHint: true,
   }),
 } satisfies ToolDefinition);
 
 function compatibleInputSchema() {
   return z
-    .object({
+    .strictObject({
       table: z
         .string()
         .describe(
@@ -63,12 +64,11 @@ function compatibleInputSchema() {
         "The exact 32-hex sys_id of the one record to update"
       ),
       fields: z
-        .record(z.unknown())
+        .record(z.string(), z.unknown())
         .describe(
-          "At least one approved bounded ordinary field; comments and work_notes are rejected"
+          'At least one field approved by the configured field policy. comments and work_notes add a journal entry; "" or null clears a field (e.g. {"state":"2","work_notes":"Investigating"})'
         ),
-    })
-    .strict(ENCODED_QUERY_MIGRATION_MESSAGE);
+    }, ENCODED_QUERY_STRICT_OBJECT_PARAMS);
 }
 
 export const schema = compatibleInputSchema();
@@ -96,7 +96,6 @@ export function resolveUpdateAccess(candidate: unknown): UpdateAccessResolution 
   rejectRawEncodedWrite(
     (parsed as unknown as Readonly<Record<string, unknown>>).query
   );
-  rejectGenericIncidentJournalFields(parsed.fields);
   const table = normalizeWriteTable(parsed.table);
   let prepared = prepareWriteFieldArguments(parsed, table);
   const fields = prepareWriteFieldValues("update", table, prepared.fields);
@@ -120,7 +119,6 @@ async function executeUpdate(
   rejectRawEncodedWrite(
     (args as unknown as Readonly<Record<string, unknown>>).query
   );
-  rejectGenericIncidentJournalFields(args.fields);
   const sysId = serviceNowSysIdPathSegment(args.sys_id);
   const table = normalizeWriteTable(args.table);
   const fields = prepareWriteFieldValues("update", table, args.fields);

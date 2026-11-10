@@ -4,6 +4,7 @@ import * as path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   normalizeInstanceUrl,
+  profileNameProblem,
   type Profile,
   ProfileManager,
 } from "../src/profile-manager.js";
@@ -36,6 +37,7 @@ const ENV_KEYS = [
   "SN_ALLOWED_INSTANCE_HOSTS",
   "SN_METADATA_CACHE_TTL_MS",
   "SN_METADATA_CACHE_TABLES",
+  "SN_FIELD_POLICY_DEFINITIONS",
   "SN_PROFILE_ENCRYPTION_KEY",
   "UNSET_PROFILE_SECRET",
   // Test-only variables referenced by sn_profile add round-trip tests
@@ -117,6 +119,70 @@ describe("explicit named SN_* environment profile", () => {
       ttlMs: 86400000,
       tables: ["sys_dictionary", "sys_metadata*"],
     });
+  });
+
+  it("maps SN_FIELD_POLICY_DEFINITIONS onto the environment profile only", () => {
+    const policy = { incident: { writable: ["state"] } };
+    process.env.SN_FIELD_POLICY_DEFINITIONS = JSON.stringify(policy);
+    process.env.SN_PROFILE_NAME = "field-env";
+    process.env.SN_INSTANCE = "https://field-env.service-now.com";
+
+    const environment = new ProfileManager().getProfile("field-env");
+    expect(environment.fieldPolicy).toEqual(policy);
+    expect(Object.isFrozen(environment.fieldPolicy)).toBe(true);
+    expect(environment.readableTableFields).toBeUndefined();
+    expect(environment.writableTableFields).toBeUndefined();
+
+  });
+
+  it("refuses to start when SN_FIELD_POLICY_DEFINITIONS is set beside a config file", () => {
+    // A config file replaces the environment profile, so the variable could
+    // no longer narrow anything. Up to 2.1.0 it narrowed these profiles.
+    process.env.SN_FIELD_POLICY_DEFINITIONS = JSON.stringify({
+      u_secret_table: { writable: [] },
+    });
+    writeConfigFile({
+      version: 2,
+      profiles: {
+        file: {
+          instance: "https://file.service-now.com",
+          username: "admin",
+          credential: "env:SN_PASSWORD",
+        },
+      },
+    });
+
+    let message = "";
+    try {
+      new ProfileManager();
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(
+      /^SN_FIELD_POLICY_DEFINITIONS is set, but profiles are loaded from the config file; .*Move the policy into each profile's fieldPolicy, or unset the variable\.$/u
+    );
+    expect(message).not.toContain("u_secret_table");
+
+    delete process.env.SN_FIELD_POLICY_DEFINITIONS;
+    expect(new ProfileManager().getProfile("file").fieldPolicy).toBeUndefined();
+  });
+
+  it("rejects a malformed field policy at load and names the profile, table, and key", () => {
+    writeConfigFile({
+      version: 2,
+      profiles: {
+        audit: {
+          instance: "https://audit.service-now.com",
+          username: "admin",
+          credential: "env:SN_PASSWORD",
+          fieldPolicy: { u_audit: { writable: ["u_*"] } },
+        },
+      },
+    });
+
+    expect(() => new ProfileManager()).toThrow(
+      /^Profile configuration is invalid: profile "audit": fieldPolicy\.u_audit\.writable\[0\] is not a field name/u
+    );
   });
 
   it("maps basic-auth SN_* values only under SN_PROFILE_NAME", () => {
@@ -202,6 +268,7 @@ describe("explicit named SN_* environment profile", () => {
       clientSecret: "oauth-client-secret",
       grantType: "password",
       timeoutMs: 7654,
+      atf: { execute: false, allowScriptSteps: false, resultCacheSize: 10 },
     });
   });
 
@@ -243,6 +310,7 @@ describe("explicit named SN_* environment profile", () => {
       authType: "basic",
       grantType: "client_credentials",
       timeoutMs: 4321,
+      atf: { execute: false, allowScriptSteps: false, resultCacheSize: 10 },
     });
   });
 
@@ -1105,5 +1173,44 @@ describe("SNSDK-38 secure profile persistence", () => {
       expect(fs.statSync(first.getConfigPath()).mode & 0o777).toBe(0o600);
       expect(fs.statSync(path.dirname(first.getConfigPath())).mode & 0o777).toBe(0o700);
     }
+  });
+});
+
+describe("profile name rule", () => {
+  it.each(["dev", "MDDEMO", "_scratch", "qa.west-2", "a".repeat(64)])(
+    "accepts %j",
+    (name) => {
+      expect(profileNameProblem(name)).toBeUndefined();
+    }
+  );
+
+  it.each([
+    ["", /required/u],
+    ["my dev", /Spaces aren't allowed/u],
+    ["tab\there", /Spaces aren't allowed/u],
+    ["prod!", /"!" isn't allowed/u],
+    ["東京", /"東" isn't allowed/u],
+    [".dev", /can't start with "\."/u],
+    ["-dev", /can't start with "-"/u],
+    ["a".repeat(65), /65 characters; the limit is 64/u],
+  ])("refuses %j and says why", (name, reason) => {
+    const problem = profileNameProblem(name);
+    expect(problem).toMatch(reason);
+  });
+
+  it("states what is allowed alongside the reason", () => {
+    expect(profileNameProblem("my dev")).toContain(
+      "Use 1-64 letters, digits, dots, underscores, or hyphens"
+    );
+  });
+
+  it("is the rule the store enforces, with the reason in the error", () => {
+    const manager = new ProfileManager();
+    expect(() =>
+      manager.addProfile("my dev", {
+        instance: "https://dev.service-now.com",
+        credential: "env:SN_PASSWORD",
+      })
+    ).toThrow(/^Profile name is invalid\. Spaces aren't allowed\./u);
   });
 });

@@ -1,9 +1,18 @@
 import { readFileSync } from "node:fs";
 
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Protocol } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { PingRequestSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import {
+  ListToolsRequestSchema,
+  PingRequestSchema,
+  type JSONRPCMessage,
+  type Tool,
+} from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 import {
   createMcpServer,
@@ -458,6 +467,132 @@ describe("createMcpServer", () => {
     expect(transport.close).toHaveBeenCalledOnce();
     expect(candidate).toBeDefined();
     expect(candidate?.isConnected()).toBe(true);
+  });
+
+  it("parses each tools/list request once while stripping the dialect", async () => {
+    // Every handler installed through the SDK's setRequestHandler parses the
+    // request before it runs. Count how many of those tools/list layers one
+    // call passes through: the dialect wrapper must not add a second one.
+    const original = Protocol.prototype.setRequestHandler;
+    let layers = 0;
+    const spy = vi
+      .spyOn(Protocol.prototype, "setRequestHandler")
+      .mockImplementation(function (this: Protocol<never, never, never>, schema, handler) {
+        if ((schema as unknown) !== ListToolsRequestSchema) {
+          original.call(this, schema, handler);
+          return;
+        }
+        original.call(this, schema, (request, extra) => {
+          layers += 1;
+          return handler(request, extra);
+        });
+      });
+    try {
+      const server = await createMcpServer({
+        dependencies: {},
+        register: (surface) => {
+          surface.registerTool("one", { inputSchema: { profile: z.string() } }, async () => ({
+            content: [{ type: "text", text: "ok" }],
+          }));
+        },
+      });
+      const client = new Client({ name: "single-parse-test", version: "0.0.0" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      try {
+        const { tools } = await client.listTools();
+        expect(tools.map((tool) => tool.name)).toEqual(["one"]);
+        expect(JSON.stringify(tools)).not.toContain("$schema");
+      } finally {
+        await client.close();
+        await server.close();
+      }
+      expect(layers).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("serves tool schemas without the draft-07 dialect the SDK declares", async () => {
+    const DRAFT_07 = "http://json-schema.org/draft-07/schema#";
+    const register = (surface: { registerTool: McpServer["registerTool"] }): void => {
+      surface.registerTool(
+        "structured-tool",
+        {
+          description: "Returns structured content",
+          inputSchema: { profile: z.string().min(1) },
+          outputSchema: { profile: z.string() },
+          annotations: { readOnlyHint: true },
+        },
+        async () => ({
+          content: [{ type: "text", text: "ok" }],
+          structuredContent: { profile: "p" },
+        })
+      );
+      surface.registerTool(
+        "text-tool",
+        { inputSchema: { profile: z.string() } },
+        async () => ({ content: [{ type: "text", text: "ok" }] })
+      );
+    };
+    const listToolsOf = async (server: McpServer): Promise<Tool[]> => {
+      const client = new Client({ name: "schema-dialect-test", version: "0.0.0" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      try {
+        return (await client.listTools()).tools;
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    };
+
+    // The SDK alone declares draft-07, which current MCP clients refuse
+    // (SNSDK-86). If this control fails, the SDK changed what it emits and the
+    // factory's rewrite can be revisited.
+    const raw = new McpServer({ name: "raw", version: "0.0.0" }, { capabilities: { tools: {} } });
+    register(raw);
+    const rawTools = await listToolsOf(raw);
+    expect(rawTools.map((tool) => tool.inputSchema.$schema)).toEqual([DRAFT_07, DRAFT_07]);
+    expect(rawTools[0]?.outputSchema?.$schema).toBe(DRAFT_07);
+
+    const tools = await listToolsOf(await createMcpServer({ dependencies: {}, register }));
+
+    expect(JSON.stringify(tools)).not.toContain("$schema");
+    // Only the declaration goes; everything else about each tool is served as
+    // is. A raw shape becomes a stripping object, for which zod 4's converter
+    // emits no additionalProperties on input (zod 3's emitted false); the
+    // catalog's own stripping inputs carry it as metadata (tool-module.ts).
+    expect(tools).toEqual([
+      {
+        name: "structured-tool",
+        description: "Returns structured content",
+        inputSchema: {
+          type: "object",
+          properties: { profile: { type: "string", minLength: 1 } },
+          required: ["profile"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: { profile: { type: "string" } },
+          required: ["profile"],
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true },
+        execution: { taskSupport: "forbidden" },
+      },
+      {
+        name: "text-tool",
+        inputSchema: {
+          type: "object",
+          properties: { profile: { type: "string" } },
+          required: ["profile"],
+        },
+        execution: { taskSupport: "forbidden" },
+      },
+    ]);
   });
 
   it("keeps transport, listener, and process lifecycle imports out of the factory", () => {

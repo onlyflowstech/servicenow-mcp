@@ -1,3 +1,4 @@
+import { atfResultStore } from "../atf-result-cache.js";
 /**
  * High-level ServiceNow tool registry.
  *
@@ -10,6 +11,7 @@
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { jsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/types.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { types as utilTypes } from "node:util";
@@ -39,6 +41,8 @@ import {
   isWriteValuePolicyError,
   writeValueDenialMessage,
 } from "../write-value-policy.js";
+import { atfHandlerSettings } from "../atf-config.js";
+import { atfPolicyDenialMessage, isAtfPolicyError } from "../atf-policy.js";
 import {
   createAuditRecord,
   createExecutionContext,
@@ -84,6 +88,7 @@ import * as profile from "./profile.js";
 import * as query from "./query.js";
 import * as relationships from "./relationships.js";
 import * as schema from "./schema.js";
+import { schemaCacheBinding } from "./schema-module.js";
 import * as syslog from "./syslog.js";
 import * as update from "./update.js";
 import { finalizeEnvelopeResult } from "./result-envelope.js";
@@ -94,6 +99,7 @@ import {
   snapshotIssuedToolSchema,
   snapshotToolModuleCatalog,
   type ContextOnlyToolModuleContract,
+  type SchemaCacheBinding,
   type ServiceNowToolHandlerServices,
   type ServiceNowToolModuleContract,
   type ToolModuleContract,
@@ -110,8 +116,10 @@ export {
   withResolvedProfileOutput,
 } from "./tool-module.js";
 export type {
+  AnyZodObject,
   ContextOnlyToolHandlerServices,
   RequiredToolAnnotations,
+  SchemaCacheBinding,
   ServiceNowToolHandlerServices,
   ServiceNowToolSettings,
   ToolDefinition,
@@ -168,7 +176,7 @@ export const toolModules = allToolModules;
 export const REGISTERED_TOOL_COUNT = toolModules.length;
 
 /**
- * Register all 19 published tools through the SDK's high-level API.
+ * Register all 24 published tools through the SDK's high-level API.
  *
  * The contract factory retains each module's inferred Zod type while this
  * dispatcher consumes its deliberately erased, runtime-validated boundary.
@@ -243,6 +251,26 @@ type ToolRegistrationPlan = Readonly<{
   config: ReturnType<typeof toolRegistrationConfig>;
 }>;
 
+/**
+ * Validator factory for the preflight client only. It compiles nothing; a
+ * validator it returns rejects every input, so it cannot silently accept
+ * tool output if the preflight ever started calling tools.
+ *
+ * Output schemas are therefore no longer compiled at preflight, so a
+ * malformed one (bad regex, dangling $ref, wrong keyword types) is not
+ * refused here; validateDiscoveredToolConfigurations only checks the
+ * discovery shape. The strict-Ajv test in
+ * test/snsdk-50-structured-output.test.ts, which compiles every advertised
+ * schema in CI, is what guards against malformed ones.
+ */
+const PREFLIGHT_INERT_SCHEMA_VALIDATOR: jsonSchemaValidator = Object.freeze({
+  getValidator: () => () => ({
+    valid: false as const,
+    data: undefined,
+    errorMessage: "preflight client does not validate tool output",
+  }),
+});
+
 /** Materialize and discover every frozen config before target writes. */
 async function preflightSdkToolConfigurations(
   plans: readonly ToolRegistrationPlan[]
@@ -257,10 +285,17 @@ async function preflightSdkToolConfigurations(
       structuredContent: { profile: "registration-preflight" },
     }));
   }
-  const client = new Client({
-    name: "servicenow-tool-catalog-preflight-client",
-    version: "0.0.0",
-  });
+  // The preflight never calls a tool, so the client's output-schema
+  // validators would be compiled by Ajv on listTools() and never used. Hand
+  // it an inert validator factory instead. This client is private to the
+  // preflight; the server's own input/output validation is unaffected.
+  const client = new Client(
+    {
+      name: "servicenow-tool-catalog-preflight-client",
+      version: "0.0.0",
+    },
+    { jsonSchemaValidator: PREFLIGHT_INERT_SCHEMA_VALIDATOR }
+  );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   try {
     await preflight.connect(serverTransport);
@@ -504,6 +539,9 @@ function registerStandardTool(
         // tableAccess.writeTables. Reporting it as one sends the operator to
         // edit a key that cannot change the outcome.
         const writeValueDenied = isWriteValuePolicyError(error);
+        // An ATF execution denial is lifted by the profile's atf.execute
+        // grant, never by a table rule, so it must not read as one.
+        const atfExecutionDenied = isAtfPolicyError(error);
         auditInvocation(
           contextDependencies,
           {
@@ -518,7 +556,9 @@ function registerStandardTool(
                     ? "field_access_denied"
                     : writeValueDenied
                       ? "write_value_denied"
-                      : "table_access_denied",
+                      : atfExecutionDenied
+                        ? "atf_execution_denied"
+                        : "table_access_denied",
             profile: binding,
           },
           tool.definition.name,
@@ -535,7 +575,9 @@ function registerStandardTool(
                   ? `${fieldPolicyDenialMessage(error)} Correlation ID: ${context.correlationId}.`
                   : writeValueDenied
                     ? `${writeValueDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
-                    : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
+                    : atfExecutionDenied
+                      ? `${atfPolicyDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
+                      : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
         );
       }
 
@@ -604,15 +646,19 @@ function registerStandardTool(
             // per-user ACLs, and a cache hit bypasses the upstream read, so
             // two identities on one instance must never share a partition.
             `${context.profile.instance}|${credentialFingerprint(config)}`,
-            config.metadataCache,
-            // Needed to resolve the session timezone the freshness probe
-            // compares in; without it the cache disables itself.
-            config.user
+            config.metadataCache
           ),
+          ...(tool.definition.name === "sn_atf_run" || tool.definition.name === "sn_atf_results" ? { atfResults: atfResultStore(binding.name, config, JSON.stringify(context.effectivePolicy)) } : {}),
+          // Partitioned like the metadata cache, plus the profile and its
+          // effective policy: the policy decides which fields a schema shows.
+          ...(tool.definition.name === "sn_schema"
+            ? schemaCacheServices(context, config)
+            : {}),
           settings: Object.freeze({
             instance: context.profile.instance,
             displayValue: config.displayValue,
             relDepth: config.relDepth,
+            atf: atfHandlerSettings(config.atf),
           }),
           context,
           policy: context.effectivePolicy,
@@ -835,6 +881,7 @@ function registerProfileDiagnostic(
         // branch keeps the two paths from drifting apart again.
         const fieldAccessDenied = isFieldPolicyError(error);
         const writeValueDenied = isWriteValuePolicyError(error);
+        const atfExecutionDenied = isAtfPolicyError(error);
         auditInvocation(
           contextDependencies,
           {
@@ -843,7 +890,9 @@ function registerProfileDiagnostic(
               ? "field_access_denied"
               : writeValueDenied
                 ? "write_value_denied"
-                : "table_access_denied",
+                : atfExecutionDenied
+                  ? "atf_execution_denied"
+                  : "table_access_denied",
             profile: binding,
           },
           tool.definition.name,
@@ -854,7 +903,9 @@ function registerProfileDiagnostic(
             ? `${fieldPolicyDenialMessage(error)} Correlation ID: ${context.correlationId}.`
             : writeValueDenied
               ? `${writeValueDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
-              : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
+              : atfExecutionDenied
+                ? `${atfPolicyDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
+                : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
         );
       }
 
@@ -1170,7 +1221,9 @@ function finalizeHandlerInvocation(
     const enriched = validateSuccessfulModuleResult(
       outputSchema,
       guarded.result,
-      canonicalProfile
+      canonicalProfile,
+      tool,
+      profile.instance
     );
     if (!enriched) {
       return handlerResultFailure(
@@ -1228,6 +1281,21 @@ function correlatedToolError(
   return err(`${formatToolError(error)}\nCorrelation ID: ${correlationId}.`);
 }
 
+/** The sn_schema cache partition for one call, when the cache is on. */
+function schemaCacheServices(
+  context: ExecutionContext,
+  config: ServiceNowConfig
+): { readonly schemaCache?: SchemaCacheBinding } {
+  const schemaCache = schemaCacheBinding({
+    profile: context.profile.name,
+    instance: context.profile.instance,
+    credentialIdentity: credentialFingerprint(config),
+    policy: context.effectivePolicy,
+    ttlMs: config.schemaCacheTtlMs,
+  });
+  return schemaCache === undefined ? {} : { schemaCache };
+}
+
 /** Preserve handler output and centrally attach the canonical profile envelope. */
 export function enrichSuccessfulResult(
   result: CallToolResult,
@@ -1246,7 +1314,9 @@ export function enrichSuccessfulResult(
 function validateSuccessfulModuleResult(
   outputSchema: ReturnType<typeof toolRegistrationConfig>["outputSchema"],
   result: CallToolResult,
-  canonicalProfile: string
+  canonicalProfile: string,
+  tool: string,
+  instanceOrigin: string
 ): CallToolResult | undefined {
   try {
     const enriched = enrichSuccessfulResult(result, canonicalProfile);
@@ -1256,7 +1326,8 @@ function validateSuccessfulModuleResult(
       ...enriched,
       structuredContent: parsed.data,
     };
-    const finalized = finalizeEnvelopeResult(validated);
+    // The instance origin feeds only renderer context, never structuredContent.
+    const finalized = finalizeEnvelopeResult(validated, tool, { instanceOrigin });
     if (!finalized) return undefined;
     const finalParsed = outputSchema.safeParse(finalized.structuredContent);
     if (!finalParsed.success) return undefined;

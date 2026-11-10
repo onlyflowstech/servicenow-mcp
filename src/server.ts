@@ -1,5 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  ListToolsRequestSchema,
+  type ServerResult,
+} from "@modelcontextprotocol/sdk/types.js";
 
+import { MAX_TOOL_INPUT_ELEMENTS } from "./json-shape-limits.js";
 import { VERSION } from "./version.js";
 
 export type LowLevelMcpRegistrationSurface = Pick<
@@ -59,6 +64,80 @@ function createRegistrationSurface(server: McpServer): McpServerRegistrationSurf
   });
 }
 
+/**
+ * Serve every tool schema without a `$schema` dialect declaration.
+ *
+ * The SDK converts zod schemas with a draft-07 target (zod 4's own converter),
+ * which stamps each one
+ * `"$schema": "http://json-schema.org/draft-07/schema#"`. Clients built on the
+ * current MCP spec validate with a JSON Schema 2020-12 validator and refuse a
+ * schema that names draft-07, which disabled every tool (SNSDK-86). With no
+ * declaration, those clients read a schema as 2020-12 and older ones read it
+ * as draft-07. Ours use only keywords that mean the same in both, and a
+ * contract test holds them to that. Declaring 2020-12 instead would break the
+ * older clients.
+ *
+ * Before SDK 1.32 the tools/list handler was installed through
+ * `setRequestHandler` when the first tool was registered, so wrapping that
+ * method was enough. From 1.32 the constructor installs it up front, so the
+ * already-installed entry is wrapped in place as well.
+ */
+function serveDialectNeutralToolSchemas(server: McpServer): void {
+  const lowLevel = server.server;
+  const install = lowLevel.setRequestHandler.bind(lowLevel);
+  const setRequestHandler: typeof lowLevel.setRequestHandler = (requestSchema, handler) => {
+    // Identity against the SDK's own schema object, the one McpServer passes.
+    if ((requestSchema as unknown) !== ListToolsRequestSchema) {
+      install(requestSchema, handler);
+      return;
+    }
+    install(requestSchema, async (request, extra) =>
+      withoutSchemaDialects(await handler(request, extra))
+    );
+  };
+  lowLevel.setRequestHandler = setRequestHandler;
+
+  // SDK 1.32 installs the tools/list handler in the McpServer constructor when
+  // the tools capability is declared, before this wrapper exists. That entry
+  // already parses the request, so the wrapped entry replaces it in the
+  // handler map directly; going through `setRequestHandler` again would add a
+  // second parse to every call. This reaches into one SDK-private map, the
+  // single place the dependency is touched; the exact SDK pin and the dialect
+  // contract tests catch any change to it.
+  const handlers = (
+    lowLevel as unknown as {
+      _requestHandlers?: Map<string, (request: unknown, extra: unknown) => Promise<ServerResult>>;
+    }
+  )._requestHandlers;
+  const installed = handlers?.get("tools/list");
+  if (handlers !== undefined && installed !== undefined) {
+    handlers.set("tools/list", async (request, extra) =>
+      withoutSchemaDialects(await installed(request, extra))
+    );
+  }
+}
+
+function withoutSchemaDialects(result: ServerResult): ServerResult {
+  if (!("tools" in result) || !Array.isArray(result.tools)) return result;
+  return {
+    ...result,
+    tools: result.tools.map((tool) => ({
+      ...tool,
+      inputSchema: withoutDialect(tool.inputSchema),
+      ...(tool.outputSchema === undefined
+        ? {}
+        : { outputSchema: withoutDialect(tool.outputSchema) }),
+    })),
+  };
+}
+
+function withoutDialect<TSchema extends object>(schema: TSchema): TSchema {
+  if (!Object.hasOwn(schema, "$schema")) return schema;
+  const copy: Record<string, unknown> = { ...(schema as Record<string, unknown>) };
+  delete copy.$schema;
+  return copy as TSchema;
+}
+
 /** Close a connected construction candidate and verify that it disconnected. */
 async function closeConnectedCandidate(server: McpServer): Promise<void> {
   await server.close();
@@ -87,9 +166,17 @@ export async function createMcpServer<TDependencies extends object>(
         tools: {},
         prompts: {},
       },
+      // Counted before any input schema runs, on every transport, so the
+      // cost of validating one tool call is bounded by its element count.
+      // Derived from the largest legitimate call, a full field write.
+      maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS,
     }
   );
 
+  // Before registration. On SDK 1.32 the constructor has already installed
+  // tools/list (the tools capability is declared above); this wraps that
+  // entry, and the setRequestHandler wrapper covers any later install.
+  serveDialectNeutralToolSchemas(server);
   const registrationSurface = createRegistrationSurface(server);
   try {
     await options.register(registrationSurface, options.dependencies);

@@ -106,12 +106,15 @@ describe("stdio-only package contract", () => {
     );
     expect(packageJson.scripts?.prebuild).toBe("node scripts/clean-dist.mjs");
     expect(packageJson.engines?.node).toBe(">=20");
-    expect(packageJson.dependencies?.["@modelcontextprotocol/sdk"]).toBe("1.30.0");
-    expect(packageJson.dependencies?.["@hono/node-server"]).toBe("2.0.12");
-    expect(packageJson.overrides?.["@hono/node-server"]).toBe("2.0.12");
+    expect(packageJson.dependencies?.["@modelcontextprotocol/sdk"]).toBe("1.32.2");
+    // Exact: tool-schema hardening (src/tools/tool-module.ts) depends on zod 4.6 internals.
+    expect(packageJson.dependencies?.zod).toBe("4.6.7");
+    expect(packageJson.dependencies?.["@hono/node-server"]).toBe("2.1.3");
+    expect(packageJson.overrides?.["@hono/node-server"]).toBe("2.1.3");
     expect(packageJson.files).toContain("docs/V2-MIGRATION.md");
     expect(packageJson.files).toContain("docs/PROFILE-CREDENTIALS.md");
     expect(packageJson.files).toContain("docs/CONTAINER-DEPLOYMENT.md");
+    expect(packageJson.files).toContain("docs/FLOW-VIEW.md");
     // The published description and keywords must name the transport clients
     // actually get, not the one 2.0 briefly shipped.
     expect(packageJson.description).toContain("stdio");

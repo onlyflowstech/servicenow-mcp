@@ -1,13 +1,18 @@
+import { atfExecutionResultSchema, atfResultsSchema, atfReadinessSchema } from "./atf-contracts.js";
+import { FLOW_VIEW_LIMITS, flowGraphSchema } from "./flow-view-contracts.js";
 /** Shared SNSDK-33 structured-result contracts and compatibility adapter. */
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
+import { BATCH_LIMITS } from "../batch-limits.js";
+import { MAX_FIELD_OBJECT_OWN_KEYS } from "../field-policy.js";
 import {
   MAX_RESPONSE_BYTES_DEFAULT,
   MAX_RESPONSE_BYTES_MAX,
   MAX_RESPONSE_BYTES_MIN,
 } from "../utils.js";
+import { canonicalHttpsOrigin } from "./markdown.js";
 import { withResolvedProfileOutput } from "./tool-module.js";
 
 export const DEFAULT_RESULT_RECORD_LIMIT = 1_000;
@@ -82,7 +87,7 @@ export const resultMetadataSchema = z
   })
   .strict();
 
-export function withStructuredResultEnvelope<TSchema extends z.ZodTypeAny>(
+export function withStructuredResultEnvelope<TSchema extends z.ZodType>(
   dataSchema: TSchema
 ) {
   return withResolvedProfileOutput(
@@ -95,7 +100,7 @@ export function withStructuredResultEnvelope<TSchema extends z.ZodTypeAny>(
   );
 }
 
-const dynamicRecordSchema = z.record(z.unknown());
+const dynamicRecordSchema = z.record(z.string(), z.unknown());
 const canonicalSysIdSchema = z.string().regex(/^[0-9a-f]{32}$/u);
 const dynamicArraySchema = z.array(z.unknown());
 const dynamicJsonRootSchema = z.union([
@@ -150,6 +155,21 @@ const atfResultEnvelopeSchema = z
     result: dynamicJsonRootSchema,
   })
   .strict();
+
+const atfRecordIdSchema = z.string().regex(/^[a-f0-9]{32}$/);
+const atfAuthorResultSchema = z.object({
+  action: z.enum(["create_test", "create_suite", "add_tests_to_suite", "add_steps", "list_step_types"]),
+  step_types: z.array(z.record(z.string(), z.unknown())).optional(),
+  outcome: z.enum(["created", "failed", "catalog"]),
+  results: z.array(z.object({
+    table: z.enum(["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_atf_step"]),
+    sys_id: atfRecordIdSchema,
+  }).strict()).max(100),
+  rolled_back: z.array(atfRecordIdSchema).max(1000),
+  rollback_failed: z.array(atfRecordIdSchema).max(1000),
+  uncertain_insert: z.boolean(),
+  message: z.string().max(1000).optional(),
+}).strict();
 
 const queryResultSchema = z
   .object({
@@ -206,6 +226,14 @@ const batchResultSchema = z
     matched: nonNegativeInteger,
     dry_run: z.boolean().optional(),
     message: z.string().optional(),
+    sample: z
+      .array(
+        z.object({ sys_id: z.string(), display: z.string().optional() }).strict()
+      )
+      .max(BATCH_LIMITS.dryRunSampleSize)
+      .optional(),
+    fields_to_write: z.array(z.string()).max(MAX_FIELD_OBJECT_OWN_KEYS).optional(),
+    note: z.string().optional(),
     processed: nonNegativeInteger.optional(),
     failed: nonNegativeInteger.optional(),
   })
@@ -225,6 +253,9 @@ const profileResultSchema = z
     name: z.string(),
     instance: z.string(),
     auth_type: z.enum(["apikey", "basic", "oauth"]),
+    /** The effective policy as data, and the same card as text. */
+    policy: dynamicRecordSchema,
+    policy_card: z.string().optional(),
   })
   .strict();
 
@@ -246,6 +277,11 @@ const productionDataSchemas = Object.freeze({
   sn_codesearch: listResultSchema,
   sn_discover: listResultSchema,
   sn_atf: atfResultEnvelopeSchema,
+  sn_atf_run: atfExecutionResultSchema,
+  sn_atf_results: atfResultsSchema,
+  sn_atf_readiness: atfReadinessSchema,
+  sn_atf_author: atfAuthorResultSchema,
+  sn_flow_view: flowGraphSchema,
   sn_nl: naturalLanguageResultSchema,
   sn_profile: profileResultSchema,
 });
@@ -276,12 +312,75 @@ export const productionToolOutputSchemas = Object.freeze({
   sn_codesearch: withStructuredResultEnvelope(productionDataSchemas.sn_codesearch),
   sn_discover: withStructuredResultEnvelope(productionDataSchemas.sn_discover),
   sn_atf: withStructuredResultEnvelope(productionDataSchemas.sn_atf),
+  sn_atf_run: withStructuredResultEnvelope(productionDataSchemas.sn_atf_run),
+  sn_atf_results: withStructuredResultEnvelope(productionDataSchemas.sn_atf_results),
+  sn_atf_readiness: withStructuredResultEnvelope(productionDataSchemas.sn_atf_readiness),
+  sn_atf_author: withStructuredResultEnvelope(productionDataSchemas.sn_atf_author),
+  sn_flow_view: withStructuredResultEnvelope(productionDataSchemas.sn_flow_view),
   sn_nl: withStructuredResultEnvelope(productionDataSchemas.sn_nl),
   sn_profile: withStructuredResultEnvelope(productionDataSchemas.sn_profile),
 });
 
 export function isProductionToolName(name: string): name is ProductionToolName {
   return Object.hasOwn(productionToolOutputSchemas, name);
+}
+
+/** Read-only copy of a finalized envelope handed to a tool text renderer. */
+export interface RenderableEnvelope {
+  readonly profile?: string;
+  readonly data: unknown;
+  readonly metadata: Readonly<z.infer<typeof resultMetadataSchema>>;
+}
+
+export interface EnvelopeTextRenderContext {
+  /** The generic one-line summary, including continuation/truncation guidance. */
+  readonly summary: string;
+  /**
+   * Canonical https origin of the resolved profile's instance, for building
+   * record links. Coordinator-supplied, never taken from ServiceNow content,
+   * and absent when the profile instance is not a bare https origin.
+   */
+  readonly instanceOrigin?: string;
+}
+
+/** Trusted coordinator inputs to text rendering; never part of structuredContent. */
+export interface EnvelopeTextRenderOptions {
+  readonly instanceOrigin?: string;
+}
+
+/**
+ * Human-readable text for one tool's successful result. It receives a deeply
+ * frozen copy, so it cannot alter structuredContent, and the values in it come
+ * from ServiceNow: build output only with the escaping helpers in markdown.ts.
+ */
+export type EnvelopeTextRenderer = (
+  envelope: RenderableEnvelope,
+  context: EnvelopeTextRenderContext
+) => string;
+
+// Populated while modules load, then sealed by the first finalized result so a
+// renderer cannot be added or swapped once tool calls are being served.
+const ENVELOPE_TEXT_RENDERERS = new Map<string, EnvelopeTextRenderer>();
+let envelopeTextRenderersSealed = false;
+
+/** Register the text renderer for one production tool, once, before first use. */
+export function registerEnvelopeTextRenderer(
+  tool: ProductionToolName,
+  renderer: EnvelopeTextRenderer
+): void {
+  if (envelopeTextRenderersSealed) {
+    throw new TypeError("envelope text renderers are sealed once results are finalized");
+  }
+  if (typeof tool !== "string" || !isProductionToolName(tool)) {
+    throw new TypeError("envelope text renderer requires a production tool name");
+  }
+  if (typeof renderer !== "function") {
+    throw new TypeError(`${tool}: envelope text renderer must be a function`);
+  }
+  if (ENVELOPE_TEXT_RENDERERS.has(tool)) {
+    throw new TypeError(`${tool}: envelope text renderer is already registered`);
+  }
+  ENVELOPE_TEXT_RENDERERS.set(tool, renderer);
 }
 
 interface MutableMetadata {
@@ -389,6 +488,9 @@ function collectionArray(data: unknown): unknown[] | undefined {
   if (typeof data !== "object" || data === null) return undefined;
   const record = data as Record<string, unknown>;
   if (Array.isArray(record.results)) return record.results;
+  if (Array.isArray(record.runs)) return record.runs;
+  if (Array.isArray(record.failures)) return record.failures;
+  if (typeof record.execution === "object" && record.execution !== null) return collectionArray(record.execution);
   if (Array.isArray(record.relationships)) return record.relationships;
   if (Array.isArray(record.fields)) return record.fields;
   if (Array.isArray(record.result)) return record.result;
@@ -488,6 +590,17 @@ function byteLimit(
       Math.max(args.max_response_bytes, MAX_RESPONSE_BYTES_MIN),
       MAX_RESPONSE_BYTES_MAX
     );
+  }
+  if (name === "sn_flow_view") {
+    // Canonical arguments always carry max_response_bytes; the clamp is
+    // defense in depth behind the input schema.
+    const requested = args.max_response_bytes;
+    return typeof requested === "number" && Number.isSafeInteger(requested)
+      ? Math.min(
+          Math.max(requested, FLOW_VIEW_LIMITS.MIN_MAX_RESPONSE_BYTES),
+          FLOW_VIEW_LIMITS.MAX_MAX_RESPONSE_BYTES
+        )
+      : FLOW_VIEW_LIMITS.DEFAULT_MAX_RESPONSE_BYTES;
   }
   return DEFAULT_RESULT_BYTE_LIMIT;
 }
@@ -822,12 +935,79 @@ function truncateLongestString(data: unknown): boolean {
   return true;
 }
 
+function deepFreeze(value: unknown): unknown {
+  if (typeof value === "object" && value !== null) {
+    for (const entry of Object.values(value)) deepFreeze(entry);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function renderedEnvelopeText(
+  renderer: EnvelopeTextRenderer,
+  envelope: MutableEnvelope,
+  context: EnvelopeTextRenderContext
+): string | undefined {
+  try {
+    const view = deepFreeze(
+      JSON.parse(JSON.stringify(envelope))
+    ) as RenderableEnvelope;
+    const text = renderer(view, context);
+    return typeof text === "string" && text.trim() !== "" ? text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Replace handler text with a coordinator-rendered summary and enforce the
+ * Replace handler text with coordinator-rendered text and enforce the
  * declared final MCP result byte limit. Returns undefined when even a fully
  * minimized valid envelope cannot fit, causing the caller to fail closed.
+ *
+ * The envelope is always fitted against the generic one-line summary. A tool
+ * with a registered renderer then gets its readable text only if the fitted
+ * result still fits with it; a renderer that throws, returns no text, or
+ * overflows the budget falls back to the summary. Readable text therefore
+ * never costs structured records and never turns a success into an error.
  */
 export function finalizeEnvelopeResult(
+  result: CallToolResult,
+  tool?: string,
+  options: EnvelopeTextRenderOptions = {}
+): CallToolResult | undefined {
+  envelopeTextRenderersSealed = true;
+  const summarized = finalizeSummaryResult(result);
+  const renderer =
+    tool === undefined ? undefined : ENVELOPE_TEXT_RENDERERS.get(tool);
+  if (
+    !summarized ||
+    !renderer ||
+    !isMutableEnvelope(summarized.structuredContent)
+  ) {
+    return summarized;
+  }
+  const envelope = summarized.structuredContent;
+  const block = summarized.content[0];
+  const instanceOrigin = canonicalHttpsOrigin(options.instanceOrigin);
+  const text = renderedEnvelopeText(
+    renderer,
+    envelope,
+    Object.freeze({
+      summary: block?.type === "text" ? block.text : "",
+      ...(instanceOrigin === undefined ? {} : { instanceOrigin }),
+    })
+  );
+  if (text === undefined) return summarized;
+  const rendered: CallToolResult = {
+    ...summarized,
+    content: [{ type: "text", text }],
+  };
+  return resultBytes(rendered) <= envelope.metadata.limits.max_bytes
+    ? rendered
+    : summarized;
+}
+
+function finalizeSummaryResult(
   result: CallToolResult
 ): CallToolResult | undefined {
   if (!isMutableEnvelope(result.structuredContent)) return result;

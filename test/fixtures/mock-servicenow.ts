@@ -9,6 +9,7 @@ import type {
   ServiceNowClient,
   ServiceNowOperations,
 } from "../../src/client.js";
+import type { AtfExecutionPolicyInput } from "../../src/atf-policy.js";
 import type { ServiceNowConfig } from "../../src/config.js";
 import type {
   ExecutionContextDependencies,
@@ -33,7 +34,8 @@ export type MockServiceNowOperation =
   | "patch"
   | "delete"
   | "postBinary"
-  | "getRaw";
+  | "getRaw"
+  | "saveAtfStepInputs";
 
 export interface MockServiceNowCall {
   readonly operation: MockServiceNowOperation;
@@ -87,12 +89,13 @@ export function createMockServiceNowFixture(
   }
 
   const operations: ServiceNowOperations = Object.freeze({
+    saveAtfStepInputs: (body: import("../../src/atf-form.js").AtfFormInput) => invoke<void>({ operation: "saveAtfStepInputs", path: "/sys_atf_step.do", body }),
     get: <T>(path: string, params?: Record<string, string>) =>
       invoke<T | null>({ operation: "get", path, params }),
     getWithMeta: <T>(path: string, params?: Record<string, string>) =>
       invoke<RequestResult<T>>({ operation: "getWithMeta", path, params }),
-    post: <T>(path: string, body?: unknown) =>
-      invoke<T | null>({ operation: "post", path, body }),
+    post: <T>(path: string, body?: unknown, params?: Record<string, string>) =>
+      invoke<T | null>({ operation: "post", path, body, ...(params ? { params } : {}) }),
     patch: <T>(path: string, body?: unknown) =>
       invoke<T | null>({ operation: "patch", path, body }),
     delete: (path: string) =>
@@ -149,6 +152,9 @@ export interface MockServiceNowHarnessOptions {
   readonly steps?: readonly MockServiceNowStep[];
   readonly tableAccess?: TableAccessPolicy;
   readonly modules?: readonly ToolModuleContract[];
+  /** ATF grants stated by the mocked policy; omission denies them. */
+  readonly atf?: AtfExecutionPolicyInput;
+  readonly atfCacheDirectory?: string;
 }
 
 /** Shared MCP boundary harness for future ServiceNow domain-module tests. */
@@ -172,6 +178,7 @@ export async function createMockServiceNowHarness(
     instance: SNSDK54_INSTANCE,
     user: "snsdk-54-user",
     password: SNSDK54_FAILURE_CANARIES.credential,
+    ...(options.atfCacheDirectory ? { atf: { execute: options.atf?.execute === true, allowScriptSteps: false, resultCacheSize: 10, resultCacheDir: options.atfCacheDirectory } } : {}),
     displayValue: "true",
     relDepth: 3,
     authType: "basic" as const,
@@ -206,6 +213,7 @@ export async function createMockServiceNowHarness(
         id: "snsdk-54-mocked-policy",
         revision: "v1",
         tableAccess,
+        ...(options.atf === undefined ? {} : { atf: options.atf }),
       }),
     },
     auditSink: {
@@ -453,6 +461,7 @@ function isMockOperation(value: unknown): value is MockServiceNowOperation {
       "delete",
       "postBinary",
       "getRaw",
+      "saveAtfStepInputs",
     ].includes(value)
   );
 }

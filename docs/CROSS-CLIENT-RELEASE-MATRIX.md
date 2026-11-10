@@ -3,7 +3,7 @@
 This is the release contract for the HTTP MCP surface. A release must expose
 one immutable server artifact at `/mcp` and pass the same contract through both
 the official Model Context Protocol SDK client and an independent Fetch
-JSON-RPC client. The required production catalog contains exactly 19 tools.
+JSON-RPC client. The required production catalog contains exactly 24 tools.
 User-facing configuration and examples for both clients are in
 `docs/CLIENT-SETUP.md`.
 
@@ -18,7 +18,7 @@ transport.
 | Contract | Required evidence | Blocking evidence |
 | --- | --- | --- |
 | One artifact and endpoint | Both clients initialize, list, and invoke the same runtime at `/mcp`; the container check repeats discovery against one image ID | `test/snsdk-55-release-matrix.test.ts`, `scripts/container-validate.mjs` |
-| Exact discovery parity | Both clients return the same sorted 20 tool names, input schemas, output schemas, and annotations; every input schema requires non-empty `profile` | `test/snsdk-55-release-matrix.test.ts`, `test/http-cross-client.test.ts`, `scripts/container-validate.mjs` |
+| Exact discovery parity | Both clients return the same sorted 24 tool names, input schemas, output schemas, and annotations; every input schema requires non-empty `profile` | `test/snsdk-55-release-matrix.test.ts`, `test/http-cross-client.test.ts`, `scripts/container-validate.mjs` |
 | Profile boundary | Missing and unknown profiles fail before configuration or client construction; `sn_profile` succeeds without ServiceNow access or secret disclosure | `test/snsdk-55-release-matrix.test.ts`, `test/http-cross-client.test.ts`, `scripts/container-validate.mjs` |
 | Selected-instance isolation | Crossed read/write calls from both clients bind only to the selected profile's fake ServiceNow adapter | `test/snsdk-55-release-matrix.test.ts`, `test/execution-context.test.ts` |
 | Representative read and controlled write | Each client executes `sn_query` and the dedicated append-only incident journal tool against local fakes | `test/snsdk-55-release-matrix.test.ts`, `test/http-cross-client.test.ts` |

@@ -124,3 +124,68 @@ rejected instead of being loaded or silently falling back to environment
 configuration. To recover such a file, keep any backup owner-only, remove every
 plaintext secret from the active configuration, and recreate or rotate each
 credential through the protected administration entry point.
+
+## ATF authoring and result cache
+
+`sn_atf_author` supports `create_test`, `create_suite`,
+`add_tests_to_suite`, `list_step_types`, and `add_steps`. A profile needs explicit writes for the corresponding
+`sys_atf_test`, `sys_atf_test_suite`, or `sys_atf_test_suite_test` table and
+field grants for the values being written. For example:
+
+```sh
+servicenow-mcp-setup grant --profile pdi --atf --dry-run
+servicenow-mcp-setup grant --profile pdi --atf
+```
+
+The preset binds six authoring tables to `sn_atf_author`: the three above,
+plus `sys_atf_step`, `sys_variable_value`, and `sys_element_mapping` for step
+authoring. Inputs and output mappings are saved through the authenticated native
+ATF form with stored-value verification; no ACL changes or installed app are required.
+It also grants the metadata and read-back tables needed by `add_steps`.
+It does not enable execution or script authoring, and does not add authoring
+to unrelated table targets. Existing grants remain in place.
+
+Create a test with `{"profile":"pdi","action":"create_test","name":"Example"}`.
+Creation accepts optional `description`, `active` (default true), and
+`application_scope` (a scope sys_id, or `"global"` for Global). Membership accepts `suite_sys_id`,
+`test_sys_ids` (1–100 unique IDs), and optional `start_order` (default 100).
+Orders increment by one; existing memberships are not deduplicated or reordered.
+The instance enforces reference integrity, application scope, and ACLs.
+
+Successful calls report `data.outcome: "created"`. A failed attempt reports
+`data.outcome: "failed"`, `rolled_back`, `rollback_failed`, and
+`uncertain_insert`. Check the outcome before treating the call as successful.
+Rollback deletes only records confirmed created by that invocation. A timeout,
+connection loss, unusable create response, cancellation, or failed delete can
+require manual inspection before retrying; this is not a database transaction.
+
+Profiles accept an optional `atf` block:
+
+```json
+{
+  "atf": {
+    "execute": false,
+    "allowScriptSteps": false,
+    "resultCacheSize": 10
+  }
+}
+```
+
+`resultCacheSize` accepts 1–100; `resultCacheDir` optionally selects an absolute
+owner-only directory. Cache tuning falls back to `SN_ATF_RESULT_CACHE_SIZE`
+and `SN_ATF_RESULT_CACHE_DIR`. `SN_ATF_EXECUTE` and
+`SN_ATF_ALLOW_SCRIPT_STEPS` grant permissions only to an environment-only
+profile, never to stored profiles.
+
+`sn_atf_run` and `sn_atf_results get` cache completed, verified suite runs.
+The cache stores compact run summaries and
+at most 500 characters of the first failure per test, without raw step output.
+Files default to `~/.servicenow-mcp/atf-results/<sha256-profile-name>.json`;
+hashed profile names prevent path traversal. Each file is bound to the
+instance origin, credential fingerprint and effective policy, with up to 200 suites and a 16 MiB
+file cap. Least-recently-used suites are evicted when those bounds are reached.
+Changing instance, credentials or policy discards the old history. Cache directories
+and files must be private (0700/0600 on POSIX).
+
+See [ATF workflow](ATF-WORKFLOW.md) for readiness, execution, results and typed
+step authoring. Legacy execution actions return migration guidance.

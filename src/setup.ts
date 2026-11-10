@@ -39,6 +39,7 @@ import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 
 import { ServiceNowClient } from "./client.js";
+import { commandInvocation, resolveCommand } from "./command-resolution.js";
 import type { AuthType, GrantType, ServiceNowConfig } from "./config.js";
 import {
   createProtectedInputIO,
@@ -60,14 +61,23 @@ import {
   ProfileManager,
   instanceHostError,
   normalizeInstanceUrl,
+  profileNameProblem,
   type Profile,
 } from "./profile-manager.js";
+import { buildPolicyCard, renderPolicyCard } from "./policy-card.js";
+import { riskyGrantWarning } from "./risky-grants.js";
 import { trustedToolErrorDescriptor } from "./tool-error.js";
 import {
   createTableAccessPolicy,
   type TableAccessPolicyInput,
   type TableAccessTargetInput,
 } from "./table-policy.js";
+import {
+  createEncodedQueryAccessPolicy,
+  encodedQueryAccessPolicyFromEnvironment,
+} from "./encoded-query-policy.js";
+import { FLOW_VIEW_TABLES } from "./tools/flow-view-contracts.js";
+import { resolveTableHierarchy } from "./tools/table-hierarchy.js";
 
 export interface SetupCliDependencies {
   readonly env?: NodeJS.ProcessEnv;
@@ -81,6 +91,13 @@ export interface SetupCliDependencies {
     args: readonly string[],
     env: NodeJS.ProcessEnv
   ) => CommandResult;
+  /**
+   * Injected for tests; defaults to `process.platform`. Decides the command
+   * clients are registered to launch, and what doctor checks for it.
+   */
+  readonly platform?: NodeJS.Platform;
+  /** Injected for tests; defaults to this package's own `dist/index.js`. */
+  readonly serverEntrypoint?: string;
   /** Injected for tests; defaults to the real profile store under `home`. */
   readonly profileManager?: ProfileManager;
   /** Injected for tests; defaults to a readline/TTY prompter. */
@@ -91,7 +108,7 @@ export interface SetupCliDependencies {
   readonly verifyCredential?: (
     config: ServiceNowConfig
   ) => Promise<CredentialVerification>;
-  /** Injected for tests; defaults to reading sys_db_object.super_class. */
+  /** Injected for tests; defaults to reading sys_db_object.super_class.name. */
   readonly resolveParentTable?: (
     config: ServiceNowConfig,
     table: string
@@ -149,7 +166,7 @@ interface CommandResult {
   readonly error?: Error;
 }
 
-type Subcommand = "init" | "client" | "grant" | "doctor";
+type Subcommand = "init" | "client" | "grant" | "doctor" | "policy";
 
 type ClientTarget =
   | "codex"
@@ -187,7 +204,12 @@ interface ClientOptions {
   readonly clients: readonly ClientTarget[];
 }
 
+const ATF_AUTHOR_TABLES = Object.freeze(["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test", "sys_atf_step", "sys_variable_value", "sys_element_mapping"]);
+
 interface GrantOptions {
+  readonly atf?: boolean;
+  /** Read on the sn_flow_view table closure, bound to sn_flow_view only. */
+  readonly flows?: boolean;
   readonly profile: string;
   readonly read: readonly string[];
   readonly write: readonly string[];
@@ -201,6 +223,8 @@ interface GrantOptions {
 interface DoctorOptions {
   readonly profile?: string;
   readonly json: boolean;
+  /** Opt in to one bounded authenticated read per profile. */
+  readonly live: boolean;
 }
 
 const CONFIG_RELATIVE_DIR = ".servicenow-mcp";
@@ -270,6 +294,17 @@ const DEFAULT_WRITE_TOOLS: readonly string[] = Object.freeze([
   "sn_update",
 ]);
 
+/**
+ * Added to the `incident` target by a write grant when `--tools` is not given.
+ * These tools append to comments and work_notes and are authorized as incident
+ * writes, so an incident target that omitted them would deny them on a profile
+ * that can otherwise write incident.
+ */
+const INCIDENT_JOURNAL_TOOLS: readonly string[] = Object.freeze([
+  "sn_incident_add_comment",
+  "sn_incident_add_work_note",
+]);
+
 export async function runSetupCli(
   dependencies: SetupCliDependencies = {}
 ): Promise<void> {
@@ -286,6 +321,9 @@ export async function runSetupCli(
       return;
     case "grant":
       runGrant(parseGrantArguments(args), home, dependencies, out);
+      return;
+    case "policy":
+      runPolicy(parsePolicyArguments(args), home, env, dependencies, out);
       return;
     case "doctor":
       await runDoctor(parseDoctorArguments(args), home, env, dependencies, out);
@@ -354,6 +392,12 @@ async function runWizard(
     const keyProvider =
       dependencies.keyProvider ?? encryptionKeyProviderFromValue(values[ENCRYPTION_KEY_ENV]);
 
+    // Which client CLIs are installed, said before anything is asked, so an
+    // operator without one learns it now rather than after the credential.
+    const clientContext = registrationContext(dependencies, env, home);
+    const clis = locateClientClis(clientContext);
+    prompter.note(renderClientCliNote(clis));
+
     // 2. Re-run safety: never clobber an existing profile without being told.
     const existing = existingProfileNames(manager);
     if (existing.length > 0) {
@@ -366,8 +410,8 @@ async function runWizard(
         const only = await registerClientsInteractively(
           prompter,
           options,
-          env,
-          dependencies
+          clis,
+          clientContext
         );
         out(renderClientOnlySummary(only, home));
         return;
@@ -459,6 +503,10 @@ async function runWizard(
 
     // 5. Table access. A profile without rules denies every call.
     const tableAccess = await askTableAccess(prompter, config, dependencies);
+    // Allowed, never blocked: privilege-sensitive tables are controlled by the
+    // profile's own configuration. The operator just has to see it said.
+    const riskWarning = riskyGrantWarning(tableAccess.writeTables ?? [], name);
+    if (riskWarning !== undefined) prompter.note(`\n${riskWarning}`);
 
     // 6. One write, with the rules already attached — never a rules-less window.
     //
@@ -499,8 +547,8 @@ async function runWizard(
     const registered = await registerClientsInteractively(
       prompter,
       options,
-      env,
-      dependencies
+      clis,
+      clientContext
     );
 
     // 8. Verify the install the way `doctor` does, so setup ends by reporting
@@ -549,17 +597,36 @@ async function askProfileName(
   prompter: WizardPrompter,
   existing: readonly string[]
 ): Promise<string> {
-  return prompter.ask("Profile name", {
+  return prompter.ask("Profile name (letters, digits, . _ -; no spaces)", {
     default: existing.includes("dev") ? "" : "dev",
+    // The store's own rule, checked here so an unusable name is refused before
+    // the credential is typed and verified, not at the final save. The answer
+    // is checked exactly as it will be saved, so anything accepted can be.
     validate: (value) => {
-      const name = value.trim();
-      if (name === "") return "A profile name is required.";
-      if (existing.includes(name)) {
-        return `Profile "${name}" already exists. Choose another name, or remove it with servicenow-mcp-profile remove --name ${name}.`;
+      const problem = profileNameProblem(value);
+      if (problem !== undefined) {
+        const suggestion = suggestProfileName(value);
+        return suggestion !== undefined && !existing.includes(suggestion)
+          ? `${problem} Try "${suggestion}".`
+          : problem;
+      }
+      if (existing.includes(value)) {
+        return `Profile "${value}" already exists. Choose another name, or remove it with servicenow-mcp-profile remove --name ${value}.`;
       }
       return undefined;
     },
   });
+}
+
+/** The nearest valid name to one that was refused, such as `my-dev` for `my dev`. */
+function suggestProfileName(value: string): string | undefined {
+  const candidate = value
+    .trim()
+    .replace(/\s+/gu, "-")
+    .replace(/[^A-Za-z0-9._-]/gu, "")
+    .replace(/^[.-]+/u, "")
+    .slice(0, 64);
+  return profileNameProblem(candidate) === undefined ? candidate : undefined;
 }
 
 const SERVICENOW_SUFFIXES = Object.freeze([".service-now.com", ".servicenowservices.com"]);
@@ -643,7 +710,18 @@ function wizardConfig(
 async function verifyCredentialAgainstInstance(
   config: ServiceNowConfig
 ): Promise<CredentialVerification> {
-  const client = new ServiceNowClient(config, { maxRetries: 0 });
+  let client: ServiceNowClient;
+  try {
+    client = new ServiceNowClient(config, { maxRetries: 0 });
+  } catch {
+    // Construction failed (for example an OAuth profile with no client
+    // secret): no request was sent, so this is not an HTTP 401.
+    return Object.freeze({
+      ok: false,
+      detail: `${safeHost(config.instance)}: the profile's credentials are incomplete, so no request was sent.`,
+      remedy: "Re-enter them with servicenow-mcp-setup.",
+    });
+  }
   try {
     await client.get(`/api/now/table/${WIZARD_PROBE_TABLE}`, {
       sysparm_limit: "1",
@@ -666,6 +744,36 @@ export function classifyVerificationFailure(
   const descriptor = trustedToolErrorDescriptor(error);
   const host = safeHost(config.instance);
 
+  if (descriptor?.reason === "instance_hibernating") {
+    return Object.freeze({
+      ok: false,
+      detail: `Instance hibernating: ${host} answered with a hibernation page instead of the API.`,
+      remedy:
+        "Developer instances sleep when idle. Wake it at https://developer.servicenow.com, wait a few minutes, then retry.",
+    });
+  }
+  if (descriptor?.reason === "html_response") {
+    return Object.freeze({
+      ok: false,
+      detail: `${host} returned an HTML page instead of an API response.`,
+      remedy:
+        "The instance may be asleep, behind single sign-on, or under maintenance. Check that the instance URL is reachable in a browser.",
+    });
+  }
+  if (descriptor?.reason === "redirected") {
+    return Object.freeze({
+      ok: false,
+      detail: `${host} redirected the request to another location.`,
+      remedy: "Check that the profile's instance URL is the instance's canonical URL.",
+    });
+  }
+  if (descriptor?.reason === "invalid_response") {
+    return Object.freeze({
+      ok: false,
+      detail: `${host} returned a response that is not valid JSON.`,
+      remedy: "Check that the instance URL is correct and reachable in a browser.",
+    });
+  }
   if (descriptor?.category === "authentication") {
     return Object.freeze({
       ok: false,
@@ -733,7 +841,8 @@ export function classifyVerificationFailure(
   }
   return Object.freeze({
     ok: false,
-    detail: `${host} could not be reached: ${message}`,
+    // Fixed text only: the underlying message can quote response bytes.
+    detail: `${host} could not be reached.`,
     remedy: "Check the instance URL and this machine's outbound network access.",
   });
 }
@@ -760,9 +869,10 @@ async function askTableAccess(
   const write = await askTableSelection(prompter, "WRITES", "");
 
   const related = new Map<string, readonly string[]>();
+  const resolveParent = dependencies.resolveParentTable ?? parentTableReader();
   for (const table of new Set([...read, ...write])) {
     if (table === TABLE_ALLOWLIST_WILDCARD) continue;
-    const parent = await lookupParentTable(config, table, dependencies);
+    const parent = await lookupParentTable(resolveParent, config, table);
     if (parent === undefined || parent === table) continue;
     prompter.note(`\n  ${table} extends ${parent}.`);
     const include = await prompter.confirm(
@@ -850,76 +960,107 @@ async function askCustomTableList(
  * failure, because the self-only closure the wizard writes is valid on its own.
  */
 async function lookupParentTable(
+  resolve: ParentTableResolver,
   config: ServiceNowConfig,
-  table: string,
-  dependencies: SetupCliDependencies
+  table: string
 ): Promise<string | undefined> {
-  const resolve = dependencies.resolveParentTable ?? defaultParentTable;
   try {
-    return await resolve(config, table);
+    const parent = await resolve(config, table);
+    // Only a table name is ever offered, whichever resolver produced it: the
+    // answer goes into the allowlist and the target's closure as written.
+    return typeof parent === "string" && TABLE_NAME.test(parent) ? parent : undefined;
   } catch {
     return undefined;
   }
 }
 
-async function defaultParentTable(
-  config: ServiceNowConfig,
-  table: string
-): Promise<string | undefined> {
-  if (!TABLE_NAME.test(table)) return undefined;
-  const client = new ServiceNowClient(config, { maxRetries: 0 });
-  const response = await client.get<{ result?: unknown[] }>(
-    "/api/now/table/sys_db_object",
-    {
-      sysparm_query: `name=${table}`,
-      sysparm_fields: "name,super_class",
-      sysparm_limit: "1",
-      sysparm_display_value: "true",
-      sysparm_exclude_reference_link: "true",
+type ParentTableResolver = NonNullable<SetupCliDependencies["resolveParentTable"]>;
+
+/** The table itself and its immediate parent: the wizard offers only that one. */
+const PARENT_LOOKUP_DEPTH = 2;
+
+/**
+ * The default resolver: the parent's name from sys_db_object, through the same
+ * walk sn_schema uses. super_class's display value is the parent's label, not
+ * its name, so following it offered "server" for cmdb_ci_linux_server and
+ * nothing at all for a label with a space, such as "Configuration Item".
+ *
+ * It keeps one client per configuration, so an OAuth profile fetches one token
+ * for the run's lookups rather than one per table.
+ */
+function parentTableReader(): ParentTableResolver {
+  let cached: { readonly config: ServiceNowConfig; readonly client: ServiceNowClient } | undefined;
+  return async (config, table) => {
+    if (!TABLE_NAME.test(table)) return undefined;
+    if (cached?.config !== config) {
+      cached = { config, client: new ServiceNowClient(config, { maxRetries: 0 }) };
     }
-  );
-  const row = Array.isArray(response?.result) ? response.result[0] : undefined;
-  if (typeof row !== "object" || row === null) return undefined;
-  const value = (row as Record<string, unknown>).super_class;
-  const parent =
-    typeof value === "string"
-      ? value
-      : typeof value === "object" && value !== null
-        ? (value as Record<string, unknown>).display_value
-        : undefined;
-  if (typeof parent !== "string") return undefined;
-  const normalized = parent.trim().toLowerCase();
-  return TABLE_NAME.test(normalized) ? normalized : undefined;
+    const [, parent] = await resolveTableHierarchy(
+      cached.client,
+      table,
+      PARENT_LOOKUP_DEPTH,
+      false
+    );
+    return parent;
+  };
 }
 
 async function registerClientsInteractively(
   prompter: WizardPrompter,
   options: InitOptions,
-  env: NodeJS.ProcessEnv,
-  dependencies: SetupCliDependencies
+  clis: readonly ClientCli[],
+  context: RegistrationContext
 ): Promise<readonly string[]> {
-  const commandExists = dependencies.commandExists ?? defaultCommandExists;
-  const runCommand = dependencies.runCommand ?? defaultRunCommand;
-  const available = AUTO_REGISTERED_CLIENTS.filter((client) =>
-    commandExists(client === "codex" ? "codex" : "claude")
-  );
-  if (available.length === 0) return Object.freeze([]);
+  if (clis.length === 0) {
+    // Without this, the summary's "(none registered)" is the only sign, and it
+    // does not say that no client CLI was found to register with.
+    prompter.note(
+      "\nNo Claude Code (claude) or Codex (codex) CLI was found, so no client\n" +
+        "was registered automatically."
+    );
+    return Object.freeze([]);
+  }
   if (
     !(await prompter.confirm(
-      `\nRegister this server with ${available.join(" and ")}?`,
+      `\nRegister this server with ${clis.map((cli) => cli.client).join(" and ")}?`,
       true
     ))
   ) {
     return Object.freeze([]);
   }
-  const context: RegistrationContext = { commandExists, runCommand, env };
   const configured: string[] = [];
-  for (const client of available) {
-    const result = registerClient(client, options.force, context);
-    if (result.ok) configured.push(client);
-    else prompter.note(`  skipped ${client}: ${result.reason}`);
+  for (const cli of clis) {
+    const result = registerClient(cli, options.force, context);
+    if (result.ok) configured.push(cli.client);
+    else prompter.note(`  skipped ${cli.client}: ${result.reason}`);
   }
   return Object.freeze(configured);
+}
+
+/**
+ * Say up front which clients setup can register with, before the operator
+ * spends time on a credential. With none, they can stop and install Claude
+ * Code first, or know that the client is theirs to configure afterwards.
+ */
+function renderClientCliNote(clis: readonly ClientCli[]): string {
+  if (clis.length === 0) {
+    return (
+      "No Claude Code (claude) or Codex (codex) CLI was found, so setup cannot\n" +
+      "register this server with a client for you. It will still create and\n" +
+      "verify your profile. Afterwards, either install Claude Code and run\n" +
+      'servicenow-mcp-setup again (choose "clients"), or configure your client\n' +
+      "by hand: servicenow-mcp-setup client\n"
+    );
+  }
+  const lines = clis.map((cli) =>
+    cli.offPath
+      ? `Found ${CLIENT_CLI_LABELS[cli.client]} at ${cli.command},\n` +
+        "but its folder is not on this terminal's PATH. Setup will run it from\n" +
+        `there. To run ${clientBinary(cli.client)} yourself, open a new terminal; if it is\n` +
+        `still not recognized, add ${dirname(cli.command)} to your PATH.`
+      : `Found ${CLIENT_CLI_LABELS[cli.client]}.`
+  );
+  return `${lines.join("\n")}\n`;
 }
 
 function renderWizardSummary(
@@ -930,6 +1071,7 @@ function renderWizardSummary(
   checks: readonly Check[]
 ): string {
   const failed = checks.filter((check) => !check.ok).length;
+  const riskWarning = riskyGrantWarning(tableAccess.writeTables ?? [], profile);
   const lines = [
     "",
     "Setup complete.",
@@ -937,6 +1079,7 @@ function renderWizardSummary(
     `Profile   ${profile}`,
     `Reads     ${(tableAccess.readTables ?? []).join(", ") || "(none)"}`,
     `Writes    ${(tableAccess.writeTables ?? []).join(", ") || "(none)"}`,
+    ...(riskWarning === undefined ? [] : ["", riskWarning.trimEnd(), ""]),
     `Transport stdio (each client spawns its own ${SERVER_COMMAND})`,
     `Clients   ${registered.length > 0 ? registered.join(", ") : "(none registered)"}`,
     "",
@@ -1123,8 +1266,7 @@ async function runInit(
 
   writeSecureEnvFile(paths.serverEnv, values);
 
-  const commandExists = dependencies.commandExists ?? defaultCommandExists;
-  const runCommand = dependencies.runCommand ?? defaultRunCommand;
+  const context = registrationContext(dependencies, env, home);
   const configuredClients: string[] = [];
   const skippedClients: string[] = [];
 
@@ -1133,11 +1275,12 @@ async function runInit(
       skippedClients.push(`${client} (no CLI to register with)`);
       continue;
     }
-    const registration = registerClient(client, options.force, {
-      commandExists,
-      runCommand,
-      env,
-    });
+    const cli = locateClientCli(client, context);
+    if (cli === undefined) {
+      skippedClients.push(`${client} (${clientBinary(client)} CLI not found)`);
+      continue;
+    }
+    const registration = registerClient(cli, options.force, context);
     if (registration.ok) configuredClients.push(client);
     else skippedClients.push(`${client} (${registration.reason})`);
   }
@@ -1187,6 +1330,119 @@ interface RegistrationContext {
     env: NodeJS.ProcessEnv
   ) => CommandResult;
   readonly env: NodeJS.ProcessEnv;
+  readonly home: string;
+  readonly platform: NodeJS.Platform;
+  readonly serverEntrypoint: string;
+}
+
+function registrationContext(
+  dependencies: SetupCliDependencies,
+  env: NodeJS.ProcessEnv,
+  home: string
+): RegistrationContext {
+  return Object.freeze({
+    commandExists: dependencies.commandExists ?? defaultCommandExists,
+    runCommand: dependencies.runCommand ?? defaultRunCommand,
+    env,
+    home,
+    platform: dependencies.platform ?? process.platform,
+    serverEntrypoint: dependencies.serverEntrypoint ?? defaultServerEntrypoint(),
+  });
+}
+
+/** An installed client CLI setup can register with, and how to run it. */
+interface ClientCli {
+  readonly client: ClientTarget;
+  /** The bare name when it resolves on PATH; otherwise the absolute path found. */
+  readonly command: string;
+  /** Found in a default install location that this terminal's PATH lacks. */
+  readonly offPath: boolean;
+}
+
+const CLIENT_CLI_LABELS: Readonly<Partial<Record<ClientTarget, string>>> = Object.freeze({
+  codex: "Codex (codex)",
+  "claude-code": "Claude Code (claude)",
+});
+
+function clientBinary(client: ClientTarget): "claude" | "codex" {
+  return client === "codex" ? "codex" : "claude";
+}
+
+function locateClientClis(context: RegistrationContext): readonly ClientCli[] {
+  return Object.freeze(
+    AUTO_REGISTERED_CLIENTS.map((client) => locateClientCli(client, context)).filter(
+      (cli): cli is ClientCli => cli !== undefined
+    )
+  );
+}
+
+/**
+ * Find a client's CLI on PATH or, failing that, where its installer puts it.
+ *
+ * Installed but not on PATH is common on Windows: the Claude Code installer
+ * adds its folder to the user PATH, but a terminal opened before the install
+ * keeps the old PATH, so `claude` is not recognized there. Registering needs
+ * only the executable, not PATH, so setup runs it by full path instead of
+ * reporting it missing.
+ */
+function locateClientCli(
+  client: ClientTarget,
+  context: RegistrationContext
+): ClientCli | undefined {
+  const binary = clientBinary(client);
+  if (context.commandExists(binary)) {
+    return Object.freeze({ client, command: binary, offPath: false });
+  }
+  const found = defaultInstallLocations(binary, context).find(isRegularFile);
+  return found === undefined
+    ? undefined
+    : Object.freeze({ client, command: found, offPath: true });
+}
+
+/**
+ * Where each CLI's documented installers put it
+ * (https://code.claude.com/docs/en/troubleshoot-install). WinGet and Homebrew
+ * installs are left out: their paths are not documented, and they normally
+ * land on PATH anyway.
+ */
+function defaultInstallLocations(
+  binary: "claude" | "codex",
+  context: RegistrationContext
+): readonly string[] {
+  const windows = context.platform === "win32";
+  // Claude Code installs under USERPROFILE, which HOME can differ from on
+  // Windows (Git Bash sets it), so check both.
+  const homes = [
+    ...new Set(
+      [context.home, windows ? context.env.USERPROFILE : undefined].filter(
+        (home): home is string => Boolean(home)
+      )
+    ),
+  ];
+  const locations: string[] = [];
+  if (binary === "claude") {
+    for (const home of homes) {
+      // The native installer.
+      locations.push(join(home, ".local", "bin", windows ? "claude.exe" : "claude"));
+      // The legacy local install older versions created.
+      if (!windows) locations.push(join(home, ".claude", "local", "claude"));
+    }
+  }
+  // npm's default global prefix on Windows, where `npm install -g` writes its
+  // .cmd shims: Codex always installs this way, and Claude Code can.
+  if (windows && context.env.APPDATA) {
+    locations.push(join(context.env.APPDATA, "npm", `${binary}.cmd`));
+  }
+  return locations;
+}
+
+function isRegularFile(path: string): boolean {
+  return statSync(path, { throwIfNoEntry: false })?.isFile() ?? false;
+}
+
+/** The server entrypoint that ships beside this CLI in `dist`. */
+function defaultServerEntrypoint(): string {
+  return join(__dirname, "index.js");
 }
 
 /**
@@ -1198,33 +1454,33 @@ interface RegistrationContext {
  * client's own PATH will not have — registering it anyway would produce a
  * client that fails to launch with nothing to point at. So fall back to this
  * CLI's own sibling entrypoint, which is unambiguous and always correct.
+ *
+ * Windows always gets the entrypoint. There, npm installs `servicenow-mcp` as
+ * a `.cmd` shim, and clients spawn stdio servers without a shell, which cannot
+ * run one, so the bare name fails to launch even when it is on PATH.
  */
 function resolveServerLaunch(
-  commandExists: (command: string) => boolean
+  context: RegistrationContext
 ): { readonly command: string; readonly args: readonly string[] } {
-  if (commandExists(SERVER_COMMAND)) {
+  if (context.platform !== "win32" && context.commandExists(SERVER_COMMAND)) {
     return Object.freeze({ command: SERVER_COMMAND, args: Object.freeze([]) });
   }
   return Object.freeze({
     command: process.execPath,
-    args: Object.freeze([join(__dirname, "index.js")]),
+    args: Object.freeze([context.serverEntrypoint]),
   });
 }
 
 function registerClient(
-  client: ClientTarget,
+  cli: ClientCli,
   force: boolean,
   context: RegistrationContext
 ): { ok: true } | { ok: false; reason: string } {
-  const binary = client === "codex" ? "codex" : "claude";
-  if (!context.commandExists(binary)) {
-    return { ok: false, reason: `${binary} CLI not found` };
-  }
-  const launch = resolveServerLaunch(context.commandExists);
+  const launch = resolveServerLaunch(context);
   const result =
-    client === "codex"
-      ? configureCodex(launch, force, context)
-      : configureClaudeCode(launch, force, context);
+    cli.client === "codex"
+      ? configureCodex(cli.command, launch, force, context)
+      : configureClaudeCode(cli.command, launch, force, context);
   if (result.status === 0) return { ok: true };
   return {
     ok: false,
@@ -1234,22 +1490,23 @@ function registerClient(
 
 /** `codex mcp add <name> -- <command> [args...]` registers a stdio server. */
 function configureCodex(
+  codex: string,
   launch: { readonly command: string; readonly args: readonly string[] },
   force: boolean,
   context: RegistrationContext
 ): CommandResult {
-  const existing = context.runCommand("codex", ["mcp", "get", MCP_SERVER_NAME], context.env);
+  const existing = context.runCommand(codex, ["mcp", "get", MCP_SERVER_NAME], context.env);
   if (existing.status === 0) {
     if (!force) return Object.freeze({ status: 0 });
     const removed = context.runCommand(
-      "codex",
+      codex,
       ["mcp", "remove", MCP_SERVER_NAME],
       context.env
     );
     if (removed.status !== 0) return removed;
   }
   return context.runCommand(
-    "codex",
+    codex,
     ["mcp", "add", MCP_SERVER_NAME, "--", launch.command, ...launch.args],
     context.env
   );
@@ -1260,26 +1517,27 @@ function configureCodex(
  * stdio is the default transport, so `--transport` is deliberately omitted.
  */
 function configureClaudeCode(
+  claude: string,
   launch: { readonly command: string; readonly args: readonly string[] },
   force: boolean,
   context: RegistrationContext
 ): CommandResult {
   const existing = context.runCommand(
-    "claude",
+    claude,
     ["mcp", "get", MCP_SERVER_NAME],
     context.env
   );
   if (existing.status === 0) {
     if (!force) return Object.freeze({ status: 0 });
     const removed = context.runCommand(
-      "claude",
+      claude,
       ["mcp", "remove", MCP_SERVER_NAME, "--scope", "user"],
       context.env
     );
     if (removed.status !== 0) return removed;
   }
   return context.runCommand(
-    "claude",
+    claude,
     ["mcp", "add", "--scope", "user", MCP_SERVER_NAME, "--", launch.command, ...launch.args],
     context.env
   );
@@ -1388,13 +1646,33 @@ function runGrant(
     ? Object.freeze({})
     : (current.tableAccess ?? Object.freeze({}));
 
-  const tableAccess = buildTableAccess(existing, options);
+  const ordinary = buildTableAccess(existing, options);
+  const withAtf = options.atf
+    ? buildTableAccess(ordinary, { ...options, read: ["sys_atf_test_suite", "sys_atf_test", "sys_atf_step", "sys_atf_step_config", "var_dictionary", "sys_variable_value", "sys_element_mapping"], write: ATF_AUTHOR_TABLES, tools: ["sn_atf_author"] })
+    : ordinary;
+  const tableAccess = options.flows
+    ? buildTableAccess(withAtf, { ...options, read: FLOW_VIEW_TABLES, write: [], tools: ["sn_flow_view"] })
+    : withAtf;
+
+  // What this grant adds to the write allowlist, including related tables
+  // that buildTableAccess pulls in. A re-run that adds nothing new still
+  // names the tables it was asked for.
+  const alreadyWritable = new Set(existing.writeTables ?? []);
+  const grantedWrites = [
+    ...new Set([
+      ...options.write,
+      ...(tableAccess.writeTables ?? []).filter((table) => !alreadyWritable.has(table)),
+    ]),
+  ];
+  const riskWarning = riskyGrantWarning(grantedWrites, options.profile);
+  const warnings = riskWarning === undefined ? {} : { warnings: [riskWarning.trim()] };
 
   if (options.dryRun) {
     out(
       options.json
-        ? `${JSON.stringify({ status: "dry-run", profile: options.profile, tableAccess }, null, 2)}\n`
-        : `Would write to profile ${options.profile}:\n${indent(JSON.stringify(tableAccess, null, 2))}\n`
+        ? `${JSON.stringify({ status: "dry-run", profile: options.profile, tableAccess, ...warnings }, null, 2)}\n`
+        : `Would write to profile ${options.profile}:\n${indent(JSON.stringify(tableAccess, null, 2))}\n` +
+          (riskWarning === undefined ? "" : `\n${riskWarning}`)
     );
     return;
   }
@@ -1402,17 +1680,23 @@ function runGrant(
   manager.addProfile(options.profile, { ...current, tableAccess });
 
   if (options.json) {
-    out(`${JSON.stringify({ status: "granted", profile: options.profile, tableAccess }, null, 2)}\n`);
+    out(`${JSON.stringify({ status: "granted", profile: options.profile, tableAccess, ...warnings }, null, 2)}\n`);
     return;
   }
   out(
     `Granted table access on profile ${options.profile}.\n\n` +
       `${indent(JSON.stringify(tableAccess, null, 2))}\n\n` +
-      `Each target asserts closureComplete: true, meaning relatedTables lists every\n` +
-      `backing, ancestor, and descendant table the operation can reach. Pass\n` +
-      `--related "<table>=<t1>,<t2>" when a table extends or views another one;\n` +
-      `related tables join the allowlist but get no target, so a caller cannot\n` +
-      `address them directly.\n` +
+      (riskWarning === undefined ? "" : `${riskWarning}\n`) +
+      `relatedTables is a declaration the loader checks: each related table must\n` +
+      `be allowed for every operation its target has, so --related adds it to the\n` +
+      `allowlist of each of those operations, including one a later grant adds.\n` +
+      `On its own that makes the table addressable by no tool, because it has no\n` +
+      `target, unless such an allowlist is "*". If the table has, or later gets,\n` +
+      `a target of its own, that target's tools can then use those operations on\n` +
+      `it.\n` +
+      `Inherited fields are read through the table itself, so a self-only list is\n` +
+      `enough. Pass --related "<table>=<t1>,<t2>" to declare a parent or a view's\n` +
+      `backing table.\n` +
       `Restart the MCP client for the change to take effect: it reads the\n` +
       `profile when it launches the server.\n`
   );
@@ -1428,12 +1712,11 @@ function buildTableAccess(
 ): TableAccessPolicyInput {
   const readTables = new Set([...(existing.readTables ?? []), ...options.read]);
   const writeTables = new Set([...(existing.writeTables ?? []), ...options.write]);
-  const targets = mergeTargets(existing.targets, options, readTables, writeTables);
+  const targets = mergeTargets(existing.targets, options);
 
-  // A target asserts that relatedTables is its complete reachable closure, and
-  // the policy loader requires every one of those tables to carry the same
-  // operation permission. They stay out of `targets`, so they are reachable
-  // through the target but never directly addressable by a caller.
+  // The policy loader requires every table a target declares in relatedTables
+  // to carry the target's operation permission. They stay out of `targets`,
+  // so they are never directly addressable by a caller.
   for (const target of targets) {
     if (readTables.has(target.table)) {
       for (const related of target.relatedTables) readTables.add(related);
@@ -1461,9 +1744,7 @@ function sorted(values: ReadonlySet<string>): readonly string[] {
 
 function mergeTargets(
   existing: readonly TableAccessTargetInput[] | undefined,
-  options: GrantOptions,
-  readTables: ReadonlySet<string>,
-  writeTables: ReadonlySet<string>
+  options: GrantOptions
 ): readonly TableAccessTargetInput[] {
   const byTable = new Map<string, TableAccessTargetInput>();
   for (const target of existing ?? []) byTable.set(target.table, target);
@@ -1474,11 +1755,18 @@ function mergeTargets(
     if (options.tools) {
       for (const tool of options.tools) tools.add(tool);
     } else {
-      if (readTables.has(table)) {
+      // Defaults follow what this invocation granted, not the merged
+      // allowlists. Those also hold the profile's earlier grants and the
+      // related tables of other targets, so gating on them would let a
+      // read-only grant add write tools to a target.
+      if (options.read.includes(table)) {
         for (const tool of DEFAULT_READ_TOOLS) tools.add(tool);
       }
-      if (writeTables.has(table)) {
+      if (options.write.includes(table)) {
         for (const tool of DEFAULT_WRITE_TOOLS) tools.add(tool);
+        if (table === "incident") {
+          for (const tool of INCIDENT_JOURNAL_TOOLS) tools.add(tool);
+        }
       }
     }
     const related = new Set([
@@ -1500,6 +1788,66 @@ function mergeTargets(
   return Object.freeze([...byTable.values()]);
 }
 
+// ── policy ─────────────────────────────────────────────────────────
+
+interface PolicyOptions {
+  readonly profile: string;
+  readonly json: boolean;
+}
+
+/**
+ * `policy show`: the profile's effective policy as one table. It is built from
+ * the same loaders the server uses (profile snapshot, table-access policy,
+ * field-policy resolver), and reads no credential: the profile is loaded
+ * without resolving any secret.
+ */
+function runPolicy(
+  options: PolicyOptions,
+  home: string,
+  env: NodeJS.ProcessEnv,
+  dependencies: SetupCliDependencies,
+  out: (value: string) => void
+): void {
+  const manager = dependencies.profileManager ?? profileManagerFor(home);
+  const profile = manager.getProfile(options.profile);
+  // Raw encoded-query reads are configured in the server's environment, which
+  // this shell may not share. Say so rather than guess.
+  let encodedQueryAccess = createEncodedQueryAccessPolicy();
+  let encodedNote =
+    "Raw encoded read queries and ATF grants shown are those of this shell's environment; " +
+    "the server reads its own.";
+  try {
+    encodedQueryAccess = encodedQueryAccessPolicyFromEnvironment(env);
+  } catch {
+    encodedNote = "The encoded-query read policy in this shell's environment is invalid; shown as denied.";
+  }
+  const card = buildPolicyCard({
+    profile: options.profile,
+    instance: profile.instance,
+    authType: profile.authType ?? "basic",
+    ...(profile.grantType === undefined || profile.authType !== "oauth"
+      ? {}
+      : { grantType: profile.grantType }),
+    tableAccess: createTableAccessPolicy(profile.tableAccess ?? Object.freeze({})),
+    fieldPolicy: {
+      ...(profile.fieldPolicy === undefined ? {} : { fieldPolicy: profile.fieldPolicy }),
+      ...(profile.readableTableFields === undefined
+        ? {}
+        : { readableTableFields: profile.readableTableFields }),
+      ...(profile.writableTableFields === undefined
+        ? {}
+        : { writableTableFields: profile.writableTableFields }),
+    },
+    encodedQueryAccess,
+    atf: manager.getAtfConfig(options.profile),
+  });
+  out(
+    options.json
+      ? `${JSON.stringify({ policy: card, note: encodedNote }, null, 2)}\n`
+      : `${renderPolicyCard(card)}\n${encodedNote}\n`
+  );
+}
+
 // ── doctor ─────────────────────────────────────────────────────────
 
 interface Check {
@@ -1517,7 +1865,12 @@ async function runDoctor(
   out: (value: string) => void
 ): Promise<void> {
   const paths = resolvePaths(home);
-  const checks = runInstallChecks(paths, home, env, dependencies, options.profile);
+  const checks = options.live
+    ? [
+        ...runInstallChecks(paths, home, env, dependencies, options.profile),
+        ...(await runLiveChecks(paths, home, dependencies, options.profile)),
+      ]
+    : runInstallChecks(paths, home, env, dependencies, options.profile);
   const failed = checks.filter((check) => !check.ok);
   if (options.json) {
     out(
@@ -1534,6 +1887,65 @@ async function runDoctor(
 }
 
 /**
+ * `doctor --live`: one bounded authenticated read per profile, through the
+ * same probe the wizard uses, so a hibernating instance is reported as such
+ * with the wake hint instead of a generic failure. Opt-in, because plain
+ * `doctor` never touches the network.
+ */
+/** Per-profile bound for `doctor --live`; shorter than the client default. */
+const DOCTOR_LIVE_TIMEOUT_MS = 10_000;
+
+async function runLiveChecks(
+  paths: ResolvedPaths,
+  home: string,
+  dependencies: SetupCliDependencies,
+  only: string | undefined
+): Promise<readonly Check[]> {
+  if (!existsSync(paths.profileConfig) && dependencies.profileManager === undefined) return [];
+  const verify = dependencies.verifyCredential ?? verifyCredentialAgainstInstance;
+  const checks: Check[] = [];
+  try {
+    const manager = dependencies.profileManager ?? profileManagerFor(home);
+    const names = manager
+      .listProfiles()
+      .map((entry) => entry.name)
+      .filter((name) => only === undefined || name === only);
+    // Concurrent, with doctor's own short timeout, so unresponsive profiles
+    // cost one timeout in total. Promise.all keeps the profile-name order.
+    const results = await Promise.all(
+      [...names].sort().map(async (name): Promise<Check | undefined> => {
+        let config: ServiceNowConfig;
+        try {
+          config = { ...manager.getConfig(name), timeoutMs: DOCTOR_LIVE_TIMEOUT_MS };
+        } catch {
+          return undefined; // The credential check has already reported why.
+        }
+        try {
+          const result = await verify(config);
+          return {
+            name: `profile ${name}: live instance`,
+            ok: result.ok,
+            detail: result.detail,
+            ...(result.remedy === undefined ? {} : { remedy: result.remedy }),
+          };
+        } catch {
+          return {
+            name: `profile ${name}: live instance`,
+            ok: false,
+            detail: "could not be probed",
+            remedy: "Check the profile's instance URL and credential settings.",
+          };
+        }
+      })
+    );
+    for (const check of results) if (check !== undefined) checks.push(check);
+  } catch {
+    // Profile loading failures are reported by the static checks.
+  }
+  return checks;
+}
+
+/**
  * Prove the command registered clients spawn can actually be found.
  *
  * This is the check a listening service did not need and a spawned one cannot
@@ -1545,9 +1957,31 @@ async function runDoctor(
  * PATH here is this shell's, which is the best available proxy. A GUI client
  * launched from the desktop may hold a different one, so the remedy names the
  * absolute-path registration that removes the question entirely.
+ *
+ * On Windows, clients are registered with node and the entrypoint by absolute
+ * path, never the bare name (see `resolveServerLaunch`). PATH is irrelevant
+ * there, so the check is that both files a client will launch exist.
  */
 function checkServerCommand(dependencies: SetupCliDependencies): Check {
   const name = "server command";
+  const fallback = dependencies.serverEntrypoint ?? defaultServerEntrypoint();
+  if ((dependencies.platform ?? process.platform) === "win32") {
+    const missing = [process.execPath, fallback].filter((file) => !existsSync(file));
+    return missing.length === 0
+      ? {
+          name,
+          ok: true,
+          detail: `clients launch ${process.execPath} with ${fallback} over stdio`,
+        }
+      : {
+          name,
+          ok: false,
+          detail: `${missing.join(" and ")} not found`,
+          remedy:
+            "Reinstall the package (npm i -g @onlyflows/servicenow-mcp), then run " +
+            "servicenow-mcp-setup again from the new install.",
+        };
+  }
   const commandExists = dependencies.commandExists ?? defaultCommandExists;
   if (commandExists(SERVER_COMMAND)) {
     return {
@@ -1556,7 +1990,6 @@ function checkServerCommand(dependencies: SetupCliDependencies): Check {
       detail: `${SERVER_COMMAND} resolves on PATH; clients spawn it over stdio`,
     };
   }
-  const fallback = join(__dirname, "index.js");
   return {
     name,
     ok: false,
@@ -1854,7 +2287,12 @@ function splitSubcommand(argv: readonly string[]): {
   args: readonly string[];
 } {
   const first = argv[0];
-  if (first === "client" || first === "grant" || first === "doctor") {
+  if (
+    first === "client" ||
+    first === "grant" ||
+    first === "doctor" ||
+    first === "policy"
+  ) {
     return { subcommand: first, args: Object.freeze(argv.slice(1)) };
   }
   if (first === "init") return { subcommand: "init", args: Object.freeze(argv.slice(1)) };
@@ -1965,7 +2403,7 @@ function parseGrantArguments(args: readonly string[]): GrantOptions {
   const parsed = parseFlags(
     args,
     {
-      boolean: new Set(["--replace", "--dry-run", "--json"]),
+      boolean: new Set(["--replace", "--dry-run", "--json", "--atf", "--flows"]),
       value: new Set(["--profile", "--read", "--write", "--tools", "--related"]),
       repeatable: new Set(["--related"]),
     },
@@ -1975,8 +2413,8 @@ function parseGrantArguments(args: readonly string[]): GrantOptions {
   if (!profile) throw new Error(`--profile is required.\n\n${usage}`);
   const read = parseTableList(parsed.values.get("--read"), "--read");
   const write = parseTableList(parsed.values.get("--write"), "--write");
-  if (read.length === 0 && write.length === 0) {
-    throw new Error(`Give at least one of --read or --write.\n\n${usage}`);
+  if (read.length === 0 && write.length === 0 && !parsed.flags.has("--atf") && !parsed.flags.has("--flows")) {
+    throw new Error(`Give at least one of --read, --write, --atf or --flows.\n\n${usage}`);
   }
   return Object.freeze({
     profile,
@@ -1985,6 +2423,8 @@ function parseGrantArguments(args: readonly string[]): GrantOptions {
     ...(parsed.values.has("--tools")
       ? { tools: parseToolList(parsed.values.get("--tools") as string) }
       : {}),
+    atf: parsed.flags.has("--atf"),
+    flows: parsed.flags.has("--flows"),
     related: parseRelated(parsed.repeated.get("--related") ?? []),
     replace: parsed.flags.has("--replace"),
     dryRun: parsed.flags.has("--dry-run"),
@@ -1992,12 +2432,28 @@ function parseGrantArguments(args: readonly string[]): GrantOptions {
   });
 }
 
+function parsePolicyArguments(args: readonly string[]): PolicyOptions {
+  const usage = renderPolicyHelp();
+  if (args[0] !== "show") {
+    if (args[0] === "--help" || args[0] === "-h") throw new SetupHelp(usage);
+    throw new Error(`Usage: servicenow-mcp-setup policy show --profile NAME\n\n${usage}`);
+  }
+  const parsed = parseFlags(
+    args.slice(1),
+    { boolean: new Set(["--json"]), value: new Set(["--profile"]) },
+    usage
+  );
+  const profile = parsed.values.get("--profile");
+  if (!profile) throw new Error(`--profile is required.\n\n${usage}`);
+  return Object.freeze({ profile, json: parsed.flags.has("--json") });
+}
+
 function parseDoctorArguments(args: readonly string[]): DoctorOptions {
   const usage = renderDoctorHelp();
   const parsed = parseFlags(
     args,
     {
-      boolean: new Set(["--json"]),
+      boolean: new Set(["--json", "--live"]),
       value: new Set(["--profile"]),
     },
     usage
@@ -2005,6 +2461,7 @@ function parseDoctorArguments(args: readonly string[]): DoctorOptions {
   return Object.freeze({
     ...(parsed.values.has("--profile") ? { profile: parsed.values.get("--profile") } : {}),
     json: parsed.flags.has("--json"),
+    live: parsed.flags.has("--live"),
   });
 }
 
@@ -2226,11 +2683,7 @@ function unquoteShellValue(raw: string): string {
 }
 
 function defaultCommandExists(command: string): boolean {
-  const result = spawnSync("/bin/sh", ["-lc", `command -v ${shellQuote(command)}`], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  return result.status === 0;
+  return resolveCommand(command) !== undefined;
 }
 
 function defaultRunCommand(
@@ -2238,10 +2691,12 @@ function defaultRunCommand(
   args: readonly string[],
   env: NodeJS.ProcessEnv
 ): CommandResult {
-  const result = spawnSync(command, [...args], {
+  const invocation = commandInvocation(command, args, { env });
+  const result = spawnSync(invocation.command, [...invocation.args], {
     encoding: "utf8",
     env,
     stdio: ["ignore", "pipe", "pipe"],
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments,
   });
   return Object.freeze({
     status: result.status,
@@ -2384,6 +2839,7 @@ function renderSetupHelp(): string {
     "             instance, table access, and client registration.",
     "  client     Print copy-pasteable configuration for one or more MCP clients.",
     "  grant      Add least-privilege table access rules to an existing profile.",
+    "  policy     Show a profile's effective policy as one table (policy show).",
     "  doctor     Diagnose a local install and print the remedy for each failure.",
     "",
     "Run any command with --help for its options.",
@@ -2441,11 +2897,17 @@ function renderGrantHelp(): string {
     "  --profile NAME          Profile to modify (required)",
     "  --read TABLES           Comma-separated tables to allow for reads",
     "  --write TABLES          Comma-separated tables to allow for writes",
+    "  --atf                   Grant the ATF authoring tables to sn_atf_author only",
+    "                          Does not enable execution or script-step authoring",
+    "  --flows                 Grant read on the 15 sn_flow_view tables to sn_flow_view only",
+    "                          (see docs/FLOW-VIEW.md)",
     `  --tools LIST            Tools permitted on these targets`,
     `                          (default read: ${DEFAULT_READ_TOOLS.join(",")};`,
-    `                           default write adds: ${DEFAULT_WRITE_TOOLS.join(",")})`,
-    "  --related TABLE=LIST    Backing/ancestor/descendant tables the target reaches;",
-    "                          repeatable, and required whenever a table extends another",
+    `                           default write adds: ${DEFAULT_WRITE_TOOLS.join(",")};`,
+    `                           default write on incident also adds:`,
+    `                           ${INCIDENT_JOURNAL_TOOLS.join(",")})`,
+    "  --related TABLE=LIST    Parent or backing tables to declare for a target;",
+    "                          repeatable. Optional for a table that extends another",
     "  --replace               Discard existing rules instead of adding to them",
     "  --dry-run               Print the resulting rules without writing them",
     "  --json                  Machine-readable output",
@@ -2456,17 +2918,36 @@ function renderGrantHelp(): string {
   ].join("\n");
 }
 
+function renderPolicyHelp(): string {
+  return [
+    "Usage: servicenow-mcp-setup policy show --profile NAME [--json]",
+    "",
+    "Prints what the profile may do, from the same policy the server enforces:",
+    "tables readable and writable with their tools, readable and writable fields,",
+    "the explicit-listing fields, auth type, raw encoded-query reads, ATF grants,",
+    "and the sn_batch limits. Warns when write access reaches privilege-sensitive",
+    "tables (roles, approvals, scripts, users). Never prints a secret, a key, or a credential reference, and never",
+    "touches the network.",
+    "",
+    "Options:",
+    "  --profile NAME    Profile to show (required)",
+    "  --json            Machine-readable output",
+  ].join("\n");
+}
+
 function renderDoctorHelp(): string {
   return [
-    "Usage: servicenow-mcp-setup doctor [--profile NAME]",
+    "Usage: servicenow-mcp-setup doctor [--profile NAME] [--live]",
     "",
     "Checks Node version, that the servicenow-mcp command clients spawn resolves",
     "on PATH, config file ownership and modes, profile completeness, credential",
     "resolution, and table access. Exits non-zero when any check fails. Never",
-    "prints a secret value, and never touches the network.",
+    "prints a secret value. It touches the network only with --live.",
     "",
     "Options:",
     "  --profile NAME    Check only this profile (default: every configured profile)",
+    "  --live            Also make one authenticated read per profile; reports a",
+    "                    hibernating instance with how to wake it",
     "  --json            Machine-readable output",
   ].join("\n");
 }

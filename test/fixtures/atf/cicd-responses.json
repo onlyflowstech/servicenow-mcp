@@ -1,0 +1,133 @@
+{
+  "_meta": {
+    "story": "SNSDK-67 (ATF S0 spike)",
+    "verification": "UNVERIFIED on an instance. Shapes come from ServiceNow's CI/CD API docs and ServiceNow/sncicd-tests-run (src/App.ts, src/App.types.ts). The CI/CD endpoints are not exposed as scripted REST records, so they could not be inspected read-only through the Table API.",
+    "sanitized": "Host is example.service-now.com; ids are synthetic.",
+    "consumers": ["S4 role probe", "S5 sn_atf_run", "S6 sn_atf_results get"]
+  },
+  "required_role": {
+    "any_of": ["sn_cicd.sys_ci_automation", "admin"],
+    "plugin": "com.glide.continuousdelivery"
+  },
+  "status_enum": {
+    "0": "Pending",
+    "1": "Running",
+    "2": "Successful",
+    "3": "Failed",
+    "4": "Canceled",
+    "_terminal_when": "status >= 2 (reference implementation)",
+    "_note": "The values are sent as strings in the reference implementation's types; compare numerically. They mirror sys_execution_tracker.state 0-4 (verified on instance)."
+  },
+  "testsuite_run": {
+    "method": "POST",
+    "path": "/api/sn_cicd/testsuite/run",
+    "query_params": {
+      "test_suite_sys_id": "required unless test_suite_name",
+      "test_suite_name": "required unless test_suite_sys_id",
+      "browser_name": "optional (client tests)",
+      "browser_version": "optional",
+      "os_name": "optional",
+      "os_version": "optional"
+    },
+    "body": {},
+    "response": {
+      "result": {
+        "links": {
+          "progress": {
+            "id": "b0000000000000000000000000000001",
+            "url": "https://example.service-now.com/api/sn_cicd/progress/b0000000000000000000000000000001"
+          }
+        },
+        "status": "0",
+        "status_label": "Pending",
+        "status_message": "",
+        "status_detail": "",
+        "error": "",
+        "percent_complete": 0
+      }
+    }
+  },
+  "progress_running": {
+    "method": "GET",
+    "path": "/api/sn_cicd/progress/{progress_id}",
+    "response": {
+      "result": {
+        "links": {
+          "progress": {
+            "id": "b0000000000000000000000000000001",
+            "url": "https://example.service-now.com/api/sn_cicd/progress/b0000000000000000000000000000001"
+          }
+        },
+        "status": "1",
+        "status_label": "Running",
+        "status_message": "",
+        "status_detail": "",
+        "error": "",
+        "percent_complete": 40
+      }
+    }
+  },
+  "progress_complete": {
+    "method": "GET",
+    "path": "/api/sn_cicd/progress/{progress_id}",
+    "response": {
+      "result": {
+        "links": {
+          "progress": {
+            "id": "b0000000000000000000000000000001",
+            "url": "https://example.service-now.com/api/sn_cicd/progress/b0000000000000000000000000000001"
+          },
+          "results": {
+            "id": "b0000000000000000000000000000002",
+            "url": "https://example.service-now.com/api/sn_cicd/testsuite/results/b0000000000000000000000000000002"
+          }
+        },
+        "status": "3",
+        "status_label": "Failed",
+        "status_message": "",
+        "status_detail": "",
+        "error": "",
+        "percent_complete": 100
+      }
+    }
+  },
+  "testsuite_results": {
+    "method": "GET",
+    "path": "/api/sn_cicd/testsuite/results/{result_id}",
+    "response": {
+      "result": {
+        "links": {
+          "results": {
+            "id": "b0000000000000000000000000000002",
+            "url": "https://example.service-now.com/api/sn_cicd/testsuite/results/b0000000000000000000000000000002"
+          }
+        },
+        "status": "3",
+        "status_label": "Failed",
+        "status_message": "",
+        "status_detail": "",
+        "error": "",
+        "percent_complete": 100,
+        "test_suite_name": "Example Suite",
+        "test_suite_status": "failure",
+        "test_suite_duration": "8 Seconds",
+        "rolledup_test_success_count": 1,
+        "rolledup_test_failure_count": 2,
+        "rolledup_test_error_count": 0,
+        "rolledup_test_skip_count": 0,
+        "child_suite_results": []
+      }
+    }
+  },
+  "role_probe": {
+    "request": "GET /api/sn_cicd/progress/00000000000000000000000000000000",
+    "expected_without_role": "403",
+    "expected_with_role": "404 or 400 (unknown progress id)",
+    "verification": "UNVERIFIED - see the manual steps in the spike write-up"
+  },
+  "hypotheses": {
+    "results_id_is_suite_result_sys_id": "UNVERIFIED. The observed ATF execution tracker result JSON carries test_suite_result_id; the CI/CD results id is likely the sys_atf_test_suite_result sys_id, which would let S5/S6 fetch per-test detail from the result tables directly.",
+    "progress_id_is_execution_tracker_sys_id": "UNVERIFIED. The status enum matches sys_execution_tracker.state exactly."
+  },
+  "reference_polling_interval_ms": 3000
+}

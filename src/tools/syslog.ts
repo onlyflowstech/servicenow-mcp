@@ -4,7 +4,7 @@ import type { ExecutionContext } from "../execution-context.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
 import {
   authorizeRawEncodedRead,
-  ENCODED_QUERY_MIGRATION_MESSAGE,
+  ENCODED_QUERY_STRICT_OBJECT_PARAMS,
 } from "../encoded-query-policy.js";
 import {
   fieldSelectionToSysparmFields,
@@ -49,7 +49,7 @@ export const definition = {
 };
 
 export const schema = z
-  .object({
+  .strictObject({
     level: z.enum(LEVEL_ENUM).optional().describe("Filter by severity level: a name (error, warning, info, debug) or the numeric value syslog stores (-1=debug, 0=info, 1=warning, 2=error)"),
     source: z.string().optional().describe("Filter by source field (LIKE match)"),
     message: z.string().optional().describe("Filter message contains text (LIKE match)"),
@@ -57,8 +57,7 @@ export const schema = z
     offset: z.number().int().min(0).max(10000).optional().describe("Pagination offset (max 10000)"),
     since: z.number().int().min(1).max(525600).optional().default(60).describe("Show logs from last N minutes (default 60, max 525600)"),
     fields: z.string().optional().describe("Fields to return (default: sys_id,level,source,message,sys_created_on)"),
-  })
-  .strict(ENCODED_QUERY_MIGRATION_MESSAGE);
+  }, ENCODED_QUERY_STRICT_OBJECT_PARAMS);
 
 function parseTotalCountHeader(value: string | null): number | undefined {
   if (value === null || !/^(?:0|[1-9]\d*)$/u.test(value)) return undefined;

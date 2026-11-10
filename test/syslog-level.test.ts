@@ -67,9 +67,11 @@ describe("sn_syslog level filter", () => {
   });
 
   it("keeps the level values and description in the authoritative Zod schema", () => {
-    expect(schema.shape.level.unwrap().options).toEqual([
-      "error", "warning", "info", "debug", "-1", "0", "1", "2",
-    ]);
+    // zod 4 keeps enum values as object keys, so the integer-like ones
+    // enumerate first; the set of values is what the filter depends on.
+    expect([...schema.shape.level.unwrap().options].sort()).toEqual(
+      ["error", "warning", "info", "debug", "-1", "0", "1", "2"].sort()
+    );
     expect(schema.shape.level.description).toContain("-1=debug");
   });
 

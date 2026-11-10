@@ -39,7 +39,7 @@ npm run container:scan
 ```
 
 `npm run container:validate` exercises the official SDK and an independent
-Fetch JSON-RPC client against the same immutable image. It compares all 20 tool
+Fetch JSON-RPC client against the same immutable image. It compares all 24 tool
 names, input schemas, output schemas, and annotations and verifies the explicit
 profile boundary with synthetic local configuration. Provider tunnel coverage
 is separate and optional; it is not part of this portable gate.

@@ -43,12 +43,14 @@ export function validateReleaseContract(options = {}) {
   const inspectorSource = read("scripts/inspector.mjs");
   const releaseGuide = read("docs/RELEASE-VALIDATION.md");
 
-  assert(/^[0-9]+\.[0-9]+\.[0-9]+$/u.test(packageJson.version), "package version is not stable semver");
+  const channel = releaseChannel(packageJson.version);
+  assert(read("src/version.ts").includes(`export const VERSION = "${packageJson.version}";`), "runtime version differs from package version");
   assert(packageLock.version === packageJson.version, "package-lock version differs from package version");
   assert(
     packageLock.packages?.[""]?.version === packageJson.version,
     "root lock package version differs from package version"
   );
+  validateServerJson(JSON.parse(read("server.json")), packageJson);
   const tag = options.tag ?? releaseTagFromEnvironment(options.environment ?? process.env);
   if (tag !== undefined) {
     assert(tag === `v${packageJson.version}`, "release tag must exactly match package version");
@@ -80,6 +82,7 @@ export function validateReleaseContract(options = {}) {
     "scripts/inspector.mjs",
     "scripts/release-validate.mjs",
     "scripts/smoke-test.mjs",
+    "server.json",
     "docs/RELEASE-VALIDATION.md",
     "tools/inspector/package.json",
     "tools/inspector/package-lock.json",
@@ -155,6 +158,7 @@ export function validateReleaseContract(options = {}) {
 
   return Object.freeze({
     version: packageJson.version,
+    channel,
     tag: tag ?? null,
     inspectorVersion: inspectorPackage.dependencies["@modelcontextprotocol/inspector"],
     portableGateCount: PORTABLE_RELEASE_GATES.length,
@@ -164,11 +168,72 @@ export function validateReleaseContract(options = {}) {
   });
 }
 
+/**
+ * Fail closed on the official-registry manifest: it must describe exactly one
+ * stdio npm package that is this package at this version, with nothing that
+ * could add a remote endpoint, environment, or launch arguments.
+ */
+export function validateServerJson(serverJson, packageJson) {
+  const keys = (value) => Object.keys(value ?? {});
+  const allowedTop = new Set([
+    "$schema", "name", "title", "description", "repository", "version", "packages",
+  ]);
+  for (const key of keys(serverJson)) {
+    assert(allowedTop.has(key), `server.json has unexpected field ${key}`);
+  }
+  assert(
+    typeof packageJson.mcpName === "string" &&
+      typeof serverJson?.name === "string" &&
+      serverJson.name === packageJson.mcpName &&
+      serverJson.name.startsWith("io.github.onlyflowstech/"),
+    "server.json name and package.json mcpName must match and start with io.github.onlyflowstech/"
+  );
+  assert(
+    serverJson.version === packageJson.version,
+    "server.json version differs from package.json"
+  );
+  assert(
+    Array.isArray(serverJson.packages) && serverJson.packages.length === 1,
+    "server.json must list exactly one package"
+  );
+  const [entry] = serverJson.packages;
+  const allowedPackage = new Set([
+    "registryType", "identifier", "version", "runtimeHint", "transport",
+  ]);
+  for (const key of keys(entry)) {
+    assert(allowedPackage.has(key), `server.json package has unexpected field ${key}`);
+  }
+  assert(entry.runtimeHint === "npx", 'server.json runtimeHint must be "npx"');
+  const repo = serverJson.repository;
+  assert(
+    repo?.url === "https://github.com/onlyflowstech/servicenow-mcp" &&
+      repo.source === "github" &&
+      keys(repo).length === 2,
+    "server.json repository must be exactly the onlyflowstech/servicenow-mcp GitHub URL"
+  );
+  assert(entry.registryType === "npm", "server.json package must be registryType npm");
+  assert(
+    entry.identifier === packageJson.name && entry.version === packageJson.version,
+    "server.json package identifier or version differs from package.json"
+  );
+  assert(
+    entry.transport?.type === "stdio" && keys(entry.transport).length === 1,
+    "server.json package transport must be exactly stdio"
+  );
+}
+
+/** Only reviewed stable and dev channels can be published. */
+export function releaseChannel(version) {
+  const match = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(-dev\.(?:0|[1-9][0-9]*))?$/u.exec(version);
+  assert(typeof version === "string" && match !== null && match[0] === version, "package version must be stable semver or a dev.N prerelease");
+  return match[1] === undefined ? "latest" : "dev";
+}
+
 function releaseTagFromEnvironment(environment) {
   if (environment.GITHUB_REF_TYPE !== "tag") return undefined;
   const tag = environment.GITHUB_REF_NAME;
-  if (typeof tag !== "string" || !/^v[0-9]+\.[0-9]+\.[0-9]+$/u.test(tag)) {
-    throw new Error("tag release is missing a valid stable GITHUB_REF_NAME");
+  if (typeof tag !== "string" || !/^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-dev\.(?:0|[1-9][0-9]*))?$/u.test(tag)) {
+    throw new Error("tag release is missing a valid stable or dev GITHUB_REF_NAME");
   }
   return tag;
 }
@@ -191,7 +256,8 @@ function isMainModule() {
 
 if (isMainModule()) {
   try {
-    process.stdout.write(`${JSON.stringify(validateReleaseContract())}\n`);
+    const result = validateReleaseContract();
+    process.stdout.write(`${process.argv.includes("--npm-tag") ? result.channel : JSON.stringify(result)}\n`);
   } catch (error) {
     process.stderr.write(
       `${error instanceof Error ? error.message : "Release contract validation failed"}\n`

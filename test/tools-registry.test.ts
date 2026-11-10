@@ -183,6 +183,10 @@ afterEach(async () => {
 describe("high-level tool discovery", () => {
   const expectedInputs: Record<string, string[]> = {
     sn_aggregate: ["display_value", "field", "group_by", "limit", "offset", "profile", "table", "type"],
+    sn_atf_author: ["action", "active", "application_scope", "description", "name", "profile", "start_order", "steps", "suite_sys_id", "test_sys_id", "test_sys_ids"],
+    sn_atf_run: ["browser_name", "profile", "run_in_cloud", "suite_name", "suite_sys_id", "timeout", "wait"],
+    sn_atf_results: ["action", "failures_limit", "failures_offset", "limit", "output_field", "output_limit", "output_offset", "previous_result_id", "profile", "progress_id", "regression_percent", "result_id", "step_result_id", "suite_sys_id", "test_sys_id", "tests_limit", "tests_offset"],
+    sn_atf_readiness: ["profile", "suite_name", "suite_sys_id"],
     sn_atf: ["action", "execution_id", "fields", "limit", "offset", "profile", "suite_name", "suite_sys_id", "test_sys_id", "timeout", "wait"],
     sn_attach: ["action", "attachment_sys_id", "content_base64", "content_type", "file_name", "limit", "offset", "profile", "sys_id", "table"],
     sn_batch: ["action", "confirm", "fields", "limit", "profile", "structured_query", "table"],
@@ -190,6 +194,7 @@ describe("high-level tool discovery", () => {
     sn_create: ["fields", "profile", "table"],
     sn_delete: ["confirm", "profile", "sys_id", "table"],
     sn_discover: ["active", "limit", "offset", "profile", "query", "type"],
+    sn_flow_view: ["depth", "flow", "format", "include_inputs", "max_nodes", "max_response_bytes", "profile"],
     sn_get: ["display_value", "fields", "force_recache", "identifier", "max_response_bytes", "profile", "response_format", "sys_id", "table"],
     sn_health: ["check", "profile"],
     sn_incident_add_comment: ["content", "profile", "sys_id"],
@@ -214,6 +219,10 @@ describe("high-level tool discovery", () => {
     }
   > = {
     sn_aggregate: { title: "Aggregate records", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    sn_atf_author: { title: "Author ATF tests and suites", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    sn_atf_run: { title: "Run an ATF suite", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    sn_atf_results: { title: "Read ATF results", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    sn_atf_readiness: { title: "Check ATF readiness", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_atf: { title: "Run ATF tests", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     sn_attach: { title: "Manage attachments", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     sn_batch: { title: "Bulk update/delete records", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -221,6 +230,7 @@ describe("high-level tool discovery", () => {
     sn_create: { title: "Create record", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     sn_delete: { title: "Delete record", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     sn_discover: { title: "Discover tables, apps, and plugins", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    sn_flow_view: { title: "View Flow Designer flow", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_get: { title: "Get record", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_health: { title: "Check instance health", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_incident_add_comment: { title: "Add incident comment", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -231,10 +241,10 @@ describe("high-level tool discovery", () => {
     sn_relationships: { title: "Traverse CI relationships", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_schema: { title: "Get table schema", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_syslog: { title: "Query system logs", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    sn_update: { title: "Update record", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    sn_update: { title: "Update record", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   };
 
-  it("publishes 19 unique sn_* tools from Zod with required profile", async () => {
+  it("publishes 24 unique sn_* tools from Zod with required profile", async () => {
     const fake = createProfileManager();
     const { client } = await harness(fake);
     const discovered = (await client.listTools()).tools;
@@ -446,6 +456,10 @@ describe("structured query registry boundary", () => {
 describe("profile validation boundary", () => {
   const validArguments: Record<string, Record<string, unknown>> = {
     sn_aggregate: { table: "incident", type: "COUNT" },
+    sn_atf_author: { action: "create_test", name: "Example" },
+    sn_atf_run: { suite_sys_id: "1".repeat(32) },
+    sn_atf_results: { action: "history", suite_sys_id: "1".repeat(32) },
+    sn_atf_readiness: {},
     sn_atf: { action: "list" },
     sn_attach: { action: "list" },
     sn_batch: {
@@ -459,6 +473,7 @@ describe("profile validation boundary", () => {
     sn_create: { table: "incident", fields: {} },
     sn_delete: { table: "incident", sys_id: "11111111111111111111111111111111", confirm: false },
     sn_discover: { type: "tables" },
+    sn_flow_view: { flow: "Example flow" },
     sn_get: { table: "incident", sys_id: "11111111111111111111111111111111" },
     sn_health: {},
     sn_incident_add_comment: {

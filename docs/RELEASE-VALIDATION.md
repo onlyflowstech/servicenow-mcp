@@ -26,7 +26,7 @@ npm audit --omit=dev --audit-level=moderate
 
 The unit and protocol commands are deliberately separate release records even
 though the complete unit suite contains the focused protocol cases. The
-protocol gate includes the all-19-tool missing-profile rejection matrix through
+protocol gate includes the all-24-tool missing-profile rejection matrix through
 the official SDK and independent Fetch clients, plus the catalog-wide resolved
 profile/result/audit contract. The profile gate covers encryption,
 secret-reference resolution, operator administration, and profile isolation.
@@ -68,7 +68,7 @@ bearer header in argv. In the local UI:
 
 1. Select Streamable HTTP and enter the exact `MCP_URL` shown by the launcher.
 2. Enter the bearer directly from the approved secret store in the local UI.
-3. Run `tools/list`; verify exactly 19 tools and required non-empty `profile`
+3. Run `tools/list`; verify exactly 24 tools and required non-empty `profile`
    schemas.
 4. Call `sn_profile` once without `profile` and verify rejection.
 5. Call it again with the exact `MCP_PROFILE`; verify
@@ -138,3 +138,30 @@ the target; stable-tag publication fails unless the tag exactly matches them.
 
 The Inspector operating model and security constraints are documented by the
 [official MCP Inspector project](https://github.com/modelcontextprotocol/inspector).
+
+## Dev releases
+
+A development release uses a unique version such as `2.2.0-dev.1` in
+`package.json`, both root entries in `package-lock.json`, and `src/version.ts`.
+Commit the version and changelog, then push the matching Git tag:
+
+```sh
+git tag -a v2.2.0-dev.1 -m "Development release 2.2.0-dev.1"
+git push origin v2.2.0-dev.1
+```
+
+The existing `publish.yml` workflow runs the release gates and publishes through
+npm trusted publishing. The validator maps stable versions to `latest` and
+`X.Y.Z-dev.N` versions to `dev`; other prerelease channels and mismatched tags
+are rejected. Every published version must be unique. GitHub prereleases can
+be created for these tags without marking them as the latest stable release.
+
+Install the newest development build or pin an exact build:
+
+```sh
+npm install -g @onlyflows/servicenow-mcp@dev
+npm install -g @onlyflows/servicenow-mcp@2.2.0-dev.1
+```
+
+Restart the MCP client after updating. To return to the stable channel, install
+`@onlyflows/servicenow-mcp@latest` and restart the client again.

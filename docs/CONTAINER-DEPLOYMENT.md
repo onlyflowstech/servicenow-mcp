@@ -308,3 +308,14 @@ docker image inspect servicenow-mcp:1.2.0 \
 
 Changing an AI client changes only client configuration: the HTTPS MCP URL and
 bearer token. It never changes the image build inputs.
+
+### ATF result-cache storage
+
+The ATF result-cache library defaults to `~/.servicenow-mcp/atf-results` and
+supports a per-profile absolute `atf.resultCacheDir`. Use a dedicated directory
+owned by the runtime user with mode 0700; files are written atomically at 0600.
+It rejects symlink cache files/directories and does not change permissions on
+an existing shared directory. On a read-only or unavailable filesystem it
+warns once on stderr and uses bounded memory until restart. Corrupt or oversized
+files are discarded with a warning. Completed, verified runs from `sn_atf_run` and `sn_atf_results get` populate
+the cache. History and comparison read it without ServiceNow requests.

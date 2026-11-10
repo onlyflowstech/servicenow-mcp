@@ -140,16 +140,25 @@ The top-level source object's prototype, bound methods, descriptors, and
 identity are not used as proof of provenance and are not retained. Only the
 normalized instances issued by these helpers may enter a module catalog.
 
-Composition also hardens the complete reachable schema graph with cycle,
-depth, node, property, and container-size bounds. Every nested Zod node gets a
-contract-owned definition; object shapes and lazy targets are materialized
-once; checks, arrays, plain objects, maps, sets, and regular expressions are
-copied into parse-stable containers; Zod parse caches are initialized; and
-schema definitions, methods, prototype behavior, and nodes are locked. Map,
-set, and regular-expression mutation methods are disabled. References to an
-older definition or collection therefore cannot change parsing or discovery.
-Field schema nodes supplied to a composition helper become immutable and must
-not be configured or reused for further schema construction afterward.
+Composition also hardens the complete reachable schema graph with depth,
+node, property, and container-size bounds. zod 4 parses through closures each
+node's constructor builds over its definition, so every nested Zod node,
+checks included, is rebuilt by its own zod constructor from a frozen,
+contract-owned copy of its definition; object shapes are materialized once;
+arrays, plain objects, maps, sets, and regular expressions are copied into
+parse-stable containers; zod's lazily derived state is computed up front; and
+definitions, internals, methods, prototype behavior, and nodes are locked.
+Map, set, and regular-expression mutation methods are disabled. References to
+the source graph, its definitions, checks, or collections therefore cannot
+change parsing or discovery; the source field schemas stay usable. Two
+exceptions: a bare refinement check (`.superRefine()` or `.check(fn)`) gets its
+behavior after construction, so it is frozen in place instead of rebuilt; and
+`z.lazy` (recursive) schemas are refused. Descriptions and other metadata live
+in zod's global registry and are copied to the rebuilt nodes.
+
+A strict tool input reports an unknown key, such as a legacy raw `query`, with
+the encoded-query migration message. zod 4's `.strict()` takes no message, so
+declare it as `z.strictObject({ ... }, ENCODED_QUERY_STRICT_OBJECT_PARAMS)`.
 
 ## Contract checklist
 
@@ -159,7 +168,7 @@ Every module must declare all of the following:
 - input composed with `withRequiredProfile` and output composed with
   `withResolvedProfileOutput`—local schemas cannot redefine `profile`;
 - explicit read/write permissions;
-- every ServiceNow API family (`table`, `aggregate`, `attachment`, or `atf`),
+- every ServiceNow API family (`table`, `aggregate`, `attachment`, `atf` or `cicd`),
   including an explicit empty list when none is used;
 - read/write field-policy dependencies and at least one reviewable capability;
 - an access resolver that canonicalizes inputs and returns the complete table
@@ -220,8 +229,8 @@ Run the focused module tests, then `npm run typecheck`, `npm run lint`,
 
 ## Registration performance evidence
 
-`test/tool-module.test.ts` validates the complete 20-module production catalog
-2,000 times (40,000 module validations) under a one-second bound. This guards
+`test/tool-module.test.ts` validates the complete production catalog (24 modules)
+2,000 times (48,000 module validations) under a one-second bound. This guards
 against accidental network, credential, client, or other super-linear work in
 startup preflight. The bound is deliberately much wider than local execution
 for shared CI hosts.
