@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Container base image.** The runtime base,
+  `gcr.io/distroless/nodejs22-debian13:nonroot`, moves to a newer digest whose
+  `zlib1g` is 1:1.3.dfsg+really1.3.1-1+deb13u1 and whose Node is 22.23.4,
+  clearing CVE-2026-76844 and CVE-2026-85091 from the `container-release`
+  scan. The image serves the dormant HTTP transport and is not published.
+
 ## [2.2.0] — 2026-10-30
 
 2.2.0 is the first stable release since 2.1.0. It contains everything
