@@ -65,12 +65,15 @@ describe("SNSDK-39 production OCI artifact", () => {
     const buildDigest =
       "sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c";
     const runtimeDigest =
-      "sha256:ec2313763dd43931543bd03830466e0c409ce73a487e8d46f10db72d3b816c1c";
+      "sha256:1b90ca047c3a1046ad3527998c747c25b6a88dde91ba8c71b98669d5813aaa21";
     expect(dockerfile).toMatch(
       new RegExp(`^FROM node:22\\.21\\.1-bookworm-slim@${buildDigest} AS build$`, "mu")
     );
     expect(dockerfile).toMatch(
       new RegExp(`^FROM gcr\\.io/distroless/nodejs22-debian13:nonroot@${runtimeDigest} AS runtime$`, "mu")
+    );
+    expect(dockerfile).toContain(
+      `org.opencontainers.image.base.digest="${runtimeDigest}"`
     );
     expect(dockerfile).toContain(
       "npm ci --engine-strict --ignore-scripts --no-audit --no-fund"
