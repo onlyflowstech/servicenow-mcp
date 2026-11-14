@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **HTTP transport rejects a backslash in the request path.** A request whose
+  raw path (the part before `?` or `#`) contains a literal `\` now gets
+  `400 Bad Request`, on every route including the health paths. The WHATWG URL
+  parser reads `\` as `/` and resolves `..`, so `/x/..\mcp` or `//h\mcp` would
+  otherwise pass our path check as `/mcp`; until now only the
+  `@hono/node-server` dependency inside the MCP SDK transport refused the ones
+  that reached `/mcp`, and the health paths answered them. Backslashes in the
+  query string and a percent-encoded `%5C` behave as before.
+
 ## [2.3.0-rc.1] — 2026-11-14
 
 Release candidate for 2.3.0, published to the `next` dist-tag. It contains the

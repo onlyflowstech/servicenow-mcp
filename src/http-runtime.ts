@@ -654,6 +654,16 @@ class StatelessHttpRuntime implements HttpRuntime {
       return;
     }
 
+    // The WHATWG parser behind requestPath() reads "\" as "/" and resolves
+    // "..", so "/x/..\mcp" or "//h\mcp" would pass as "/mcp". Reject a literal
+    // backslash in the raw path ourselves, on every route, whatever the
+    // listener or dependency in front of us does.
+    if (hasRawPathBackslash(request.url)) {
+      observedReason = "malformed_request";
+      writeJsonRpcError(response, 400, -32600, "Invalid request.");
+      return;
+    }
+
     if (pathname === MCP_LIVENESS_PATH) {
       if (!isHealthMethod(request.method)) {
         observedReason = "method_not_allowed";
@@ -1343,6 +1353,13 @@ function requestPath(rawUrl: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** True when the raw request target's path (before "?" or "#") has a literal backslash. */
+function hasRawPathBackslash(rawUrl: string | undefined): boolean {
+  if (typeof rawUrl !== "string") return false;
+  const end = rawUrl.search(/[?#]/u);
+  return (end === -1 ? rawUrl : rawUrl.slice(0, end)).includes("\\");
 }
 
 function writeHealthResponse(

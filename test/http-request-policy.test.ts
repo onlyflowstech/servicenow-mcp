@@ -733,6 +733,68 @@ describe("SNSDK-24 HTTP runtime request boundary", () => {
     }
   });
 
+  it("rejects a raw backslash in the request path with 400 on every route, before routing or authentication", async () => {
+    const finish = vi.fn();
+    const harness = await startPolicyRuntime({
+      observability: {
+        beginRequest: () => ({ finish }),
+        beginTool: () => ({ finish: vi.fn() }),
+      },
+    });
+    const get = async (target: string): Promise<string> =>
+      rawTcpExchange(
+        harness.url,
+        [
+          {
+            data:
+              `GET ${target} HTTP/1.1\r\nHost: 127.0.0.1:${harness.url.port}\r\n` +
+              `Authorization: ${AUTHORIZATION}\r\nConnection: close\r\n\r\n`,
+          },
+        ],
+        true
+      );
+    try {
+      // The WHATWG parser would read each of these as /mcp or a health path,
+      // or as /mcp/ or /health/live/ (which were 404 before this check).
+      for (const target of [
+        "//h\\mcp",
+        "/mcp\\",
+        "/x/..\\mcp",
+        "/health\\live",
+        "/health/live\\",
+        "/x/..\\health/ready",
+        "/mcp\\?x=1",
+        "/mcp\\#frag",
+      ]) {
+        const raw = await get(target);
+        expect(responseStatus(raw), target).toBe(400);
+        expect(raw, target).toContain('"message":"Invalid request."');
+      }
+      expect(harness.authenticate).not.toHaveBeenCalled();
+      expect(harness.createServer).not.toHaveBeenCalled();
+      expect(finish).toHaveBeenCalledWith({
+        correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+        outcome: "rejected",
+        reason: "malformed_request",
+        statusCode: 400,
+      });
+
+      // A backslash in the query is not part of the path and stays accepted.
+      const query = await get("/mcp?x=a\\b");
+      expect(responseStatus(query)).not.toBe(400);
+      const healthQuery = await get("/health/live?x=a\\b");
+      expect(responseStatus(healthQuery)).toBe(200);
+      const fragment = await get("/health/live#a\\b");
+      expect(responseStatus(fragment)).toBe(200);
+
+      // A percent-encoded backslash is a different path and keeps its behaviour.
+      const encoded = await get("/mcp%5C");
+      expect(responseStatus(encoded)).toBe(404);
+    } finally {
+      await harness.runtime.close({ gracePeriodMs: 100 });
+    }
+  });
+
   it("serves exact-origin restrictive preflight without authenticating", async () => {
     const policy = createHttpRequestPolicy({
       allowedOrigins: ["https://client.example"],
