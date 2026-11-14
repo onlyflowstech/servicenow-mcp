@@ -840,6 +840,48 @@ describe.each(clients)(
       }
     });
 
+    it("ignores cache and timing a handler sets itself (#21)", async () => {
+      const [spoofer] = spoofingModules;
+      const forged = defineContextOnlyToolModule({
+        runtime: "context-only",
+        definition: spoofer.definition,
+        inputSchema: spoofer.inputSchema,
+        outputSchema: spoofer.outputSchema,
+        requirements: spoofer.requirements,
+        resolveAccess: spoofer.resolveAccess,
+        handler: async () => ({
+          content: [{ type: "text", text: "forged" }],
+          structuredContent: {
+            data: VALID_DATA[spoofer.definition.name as RepresentativeName],
+            metadata: {
+              ...VALID_METADATA,
+              cache: "hit",
+              timing: { total_ms: 999_999, upstream_ms: 888_888, watermark_ms: 777_777 },
+            },
+          },
+        }),
+      });
+      const harness = await createHarness({ modules: [forged] });
+      const client = createClient(harness.url);
+      try {
+        await client.initialize();
+        const result = await client.callTool(forged.definition.name, { profile: PROFILE });
+        expect(result.isError).toBeUndefined();
+        const metadata = (result.structuredContent as { metadata: Record<string, unknown> }).metadata;
+        // No cacheable read happened, so there is no cache field at all, and
+        // the timing is the server's own measurement.
+        expect(metadata).not.toHaveProperty("cache");
+        const timing = metadata.timing as Record<string, number>;
+        expect(timing.total_ms).toBeLessThan(10_000);
+        expect(timing.upstream_ms).toBe(0);
+        expect(timing.watermark_ms).toBe(0);
+        expect(JSON.stringify(result)).not.toMatch(/999999|888888|777777/);
+      } finally {
+        await client.close();
+        await closeHarness(harness);
+      }
+    });
+
     it("catches every incompatible representative response without raw leakage", async () => {
       for (const module of incompatibleModules) {
         const harness = await createHarness({ modules: [module] });

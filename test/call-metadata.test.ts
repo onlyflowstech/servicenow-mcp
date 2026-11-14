@@ -270,6 +270,10 @@ describe("the output schema", () => {
       expect(Object.keys((metadata.timing as { properties: object }).properties), tool.name).toEqual([
         "total_ms", "upstream_ms", "watermark_ms",
       ]);
+      // The advertised bound is left out to keep the list small; the type and minimum stay.
+      for (const field of Object.values((metadata.timing as { properties: Record<string, unknown> }).properties)) {
+        expect(field, tool.name).toEqual({ type: "integer", minimum: 0 });
+      }
     }
   });
 

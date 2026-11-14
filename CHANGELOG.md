@@ -22,8 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sn_query`'s `filter` says a list is read as AND and shows one, and the
   `sn_query` description gains a one-line example with the OR group form.
   `sn_batch`'s `filter` has its own text: one condition or group, and a list is
-  not accepted, because a mutation never selects records through a list. Costs
-  602 characters in `tools/list` (`sn_query` +459, `sn_batch` +143).
+  not accepted, because a mutation never selects records through a list. Its
+  example filters on `sys_id`, a field every table has: an example on a field
+  such as `name` would match every row of a table without that column, since
+  ServiceNow drops a condition on a field the table lacks. Costs 605 characters
+  in `tools/list` (`sn_query` +459, `sn_batch` +146).
 - **Responses say whether the metadata cache was used and where the time went
   (#21).** `structuredContent.metadata` gains two optional fields. `cache` is
   `hit`, `miss`, `bypass` (a `force_recache` refresh) or `mixed` (several
@@ -31,9 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `table`), and is absent when the call read no cacheable table. `timing` is
   `{ total_ms, upstream_ms, watermark_ms }` in whole milliseconds, wall-clock:
   `upstream_ms` and `watermark_ms` are the time at least one request of that
-  kind was in flight, so overlapping requests count once. They are added only
-  when they fit the result's byte limit, so they never cost a record. Every
-  tool's `outputSchema` grows by 403 characters (9,672 in `tools/list`). Cache
+  kind was in flight, so overlapping requests count once. Only the server sets
+  them (a value a tool supplies is discarded), and they are added only when
+  they fit the result's byte limit, so they never cost a record. Every tool's
+  `outputSchema` grows by 322 characters (7,728 in `tools/list`). Cache
   behaviour is unchanged.
 
 ### Fixed

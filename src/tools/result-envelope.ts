@@ -71,11 +71,15 @@ export const resultPaginationSchema = z.union([
  * them and the dispatcher adds them, and `cache` is absent when the call made
  * no cacheable read.
  */
+// Validation still bounds these to safe integers; only the advertised
+// `maximum` (2^53 - 1, 81 characters per tool in `tools/list`) is left out,
+// since no duration comes near it. The undefined meta value removes the key.
+const wholeMilliseconds = nonNegativeInteger.meta({ maximum: undefined });
 const callTimingSchema = z
   .object({
-    total_ms: nonNegativeInteger,
-    upstream_ms: nonNegativeInteger,
-    watermark_ms: nonNegativeInteger,
+    total_ms: wholeMilliseconds,
+    upstream_ms: wholeMilliseconds,
+    watermark_ms: wholeMilliseconds,
   })
   .strict();
 
@@ -781,6 +785,22 @@ function synchronizePagingFields(
 }
 
 /**
+ * Remove `metadata.cache` and `metadata.timing` from a handler's result. Only
+ * the dispatcher reports them, from what it observed, so a value a handler
+ * sets is never passed on, whether or not the dispatcher adds its own.
+ */
+export function withoutCallMetadata(result: CallToolResult): CallToolResult {
+  const content = result.structuredContent;
+  if (typeof content !== "object" || content === null) return result;
+  const metadata = (content as { metadata?: unknown }).metadata;
+  if (typeof metadata !== "object" || metadata === null) return result;
+  const rest: Record<string, unknown> = { ...(metadata as Record<string, unknown>) };
+  delete rest.cache;
+  delete rest.timing;
+  return { ...result, structuredContent: { ...content, metadata: rest } };
+}
+
+/**
  * Add what the call reports about itself to a finished result's envelope
  * metadata, only if the result still fits its own byte limit with it.
  *
@@ -791,9 +811,11 @@ function synchronizePagingFields(
  * result, the same one the limit check itself makes.
  */
 export function withCallMetadata(
-  result: CallToolResult,
+  handlerResult: CallToolResult,
   snapshot: CallMetricsSnapshot
 ): CallToolResult {
+  // Whatever the handler put in the two fields never survives, fitted or not.
+  const result = withoutCallMetadata(handlerResult);
   const content = result.structuredContent;
   if (typeof content !== "object" || content === null) return result;
   const metadata = (content as { metadata?: unknown }).metadata;

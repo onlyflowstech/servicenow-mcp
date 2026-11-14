@@ -900,10 +900,14 @@ ServiceNow other than a watermark read was in flight (retry waits included);
 `watermark_ms` is the same for the cache's watermark reads. Overlapping
 requests are counted once, not summed, so each figure is at most `total_ms`,
 though the two can overlap each other and add up to more than it. A hit reports
-`upstream_ms: 0` and the watermark round trip it still costs. Both fields hold
-only numbers and those four words, and appear whether or not the cache is on
-(`timing` always, `cache` only when a cacheable read happened). Each tool's
-`outputSchema` grows by about 400 characters for them.
+`upstream_ms: 0` and the watermark round trip it still costs. Callers that
+share a credential share cache warmth (several profiles on one credential, or
+several HTTP clients on one profile), so `cache: "hit"` can reflect another
+caller's earlier read made with the same credential. Both fields hold only
+numbers and those four words, and appear whether or not the cache is on
+(`timing` always, `cache` only when a cacheable read happened). Only the server
+sets them; a tool cannot supply its own. Each tool's `outputSchema` grows by
+about 320 characters for them.
 
 If a table's watermark cannot be used, its reads go straight upstream, without
 a watermark request, for a while: 15 minutes when the cause persists (an

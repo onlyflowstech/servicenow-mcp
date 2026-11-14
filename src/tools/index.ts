@@ -92,7 +92,11 @@ import * as schema from "./schema.js";
 import { schemaCacheBinding } from "./schema-module.js";
 import * as syslog from "./syslog.js";
 import * as update from "./update.js";
-import { finalizeEnvelopeResult, withCallMetadata } from "./result-envelope.js";
+import {
+  finalizeEnvelopeResult,
+  withCallMetadata,
+  withoutCallMetadata,
+} from "./result-envelope.js";
 import { guardedHandlerResult } from "./handler-result.js";
 import {
   profileNameSchema,
@@ -1331,7 +1335,9 @@ function validateSuccessfulModuleResult(
   instanceOrigin: string
 ): CallToolResult | undefined {
   try {
-    const enriched = enrichSuccessfulResult(result, canonicalProfile);
+    // Cache status and timing are the dispatcher's to report: whatever a
+    // handler put there is discarded before anything reads it.
+    const enriched = enrichSuccessfulResult(withoutCallMetadata(result), canonicalProfile);
     const parsed = outputSchema.safeParse(enriched.structuredContent);
     if (!parsed.success) return undefined;
     const validated = {
