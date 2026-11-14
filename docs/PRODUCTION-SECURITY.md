@@ -287,7 +287,7 @@ SN_ALLOWED_READ_TABLES=incident,problem,change_request
 SN_ALLOWED_WRITE_TABLES=incident,change_request
 SN_TABLE_ACCESS_TARGETS=<runtime-config:reviewed-target-catalog>
 SN_METADATA_CACHE_TTL_MS=86400000
-SN_METADATA_CACHE_TABLES=sys_glide_object,sys_dictionary,sys_db_object,sys_app,sys_plugins,sys_metadata*,sys_flow*
+SN_METADATA_CACHE_TABLES=sys_glide_object,sys_dictionary,sys_db_object,sys_app,sys_plugins,sys_metadata*,sys_flow*,sys_script,sys_script_include,sys_ui_script,sys_script_client,sys_ws_operation
 ```
 
 Metadata caching works in every auth mode, including the client_credentials

@@ -848,10 +848,17 @@ limit is always 1 MiB and no environment variable changes it.
 Stable ServiceNow metadata reads are cached per instance and credential identity
 for 24 hours by default. The default cached table patterns are
 `sys_glide_object`, `sys_dictionary`, `sys_db_object`, `sys_app`, `sys_plugins`,
-`sys_metadata*`, and `sys_flow*`. Set `metadataCache.ttlMs` and
+`sys_metadata*`, `sys_flow*`, and the five code tables `sn_codesearch`
+searches: `sys_script`, `sys_script_include`, `sys_ui_script`,
+`sys_script_client`, and `sys_ws_operation`. A repeated code search or
+`sn_query` page on those tables is served from the cache while the table's
+watermark is unchanged. Set `metadataCache.ttlMs` and
 `metadataCache.tables` on a file-backed profile, or `SN_METADATA_CACHE_TTL_MS`
-/ `SN_METADATA_CACHE_TABLES` for the explicit environment profile. `sn_query`,
-`sn_get`, and `sn_schema` accept `force_recache: true` to refresh metadata.
+/ `SN_METADATA_CACHE_TABLES` for the explicit environment profile; a table
+list you set replaces the default list, so name the code tables in it to keep
+caching them. `sn_query`, `sn_get`, and `sn_schema` accept `force_recache: true`
+to refresh metadata; `sn_codesearch` has no such flag, so a change the
+watermark cannot see shows there after at most one TTL.
 
 **Freshness is checked against the instance, in every auth mode.** Before each
 fetch the cache reads a watermark in one small request: the table's row count

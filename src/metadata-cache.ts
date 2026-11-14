@@ -51,11 +51,33 @@ export const DEFAULT_METADATA_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
  * The bar for inclusion is a large payload relative to the watermark read,
  * not merely "this table changes rarely" -- a cache hit still costs one
  * upstream round trip (see tableWatermark), so the saving is payload bytes,
- * never request count. sys_properties is deliberately absent: its rows are
- * ACL-restricted per user and routinely hold integration secrets in `value`,
- * and the only reads of it here are three single-value build-info lookups
- * whose payloads are far too small to be worth retaining for a day. Operators
- * who want it can add it through SN_METADATA_CACHE_TABLES.
+ * never request count. Why each pattern is here:
+ *
+ * - sys_dictionary, sys_db_object: the field and table definitions behind
+ *   sn_schema, the all-fields cap and sn_discover. A table's dictionary alone
+ *   is hundreds of rows, and a hierarchy walk reads them repeatedly.
+ * - sys_app, sys_plugins, sys_glide_object, sys_metadata*, sys_flow*:
+ *   application, plugin, field-type and application-file listings, and the
+ *   Flow Designer tables. They are large and change rarely. The list is the
+ *   original metadata set; not every table in it has a reader in this
+ *   server today.
+ * - sys_script, sys_script_include, sys_ui_script, sys_script_client,
+ *   sys_ws_operation: the five code tables sn_codesearch searches, which
+ *   sn_query also reads. Each row carries a full script body, so a repeated
+ *   search or page is among the heaviest reads this server makes. Editing a
+ *   script moves sys_updated_on, which the watermark sees, so a cached search
+ *   never outlives a save. They are not covered by sys_metadata*: patterns
+ *   match a table's name, not its place in the table hierarchy.
+ *
+ * sys_properties is deliberately absent: its rows are ACL-restricted per user
+ * and routinely hold integration secrets in `value`, and the only reads of it
+ * here are three single-value build-info lookups whose payloads are far too
+ * small to be worth retaining for a day. Operators who want it can add it
+ * through SN_METADATA_CACHE_TABLES.
+ *
+ * An explicit SN_METADATA_CACHE_TABLES or `metadataCache.tables` replaces this
+ * list; it does not extend it, so a profile that sets its own list must name
+ * the code tables itself to cache them.
  */
 export const DEFAULT_METADATA_CACHE_TABLES = Object.freeze([
   "sys_glide_object",
@@ -65,6 +87,11 @@ export const DEFAULT_METADATA_CACHE_TABLES = Object.freeze([
   "sys_plugins",
   "sys_metadata*",
   "sys_flow*",
+  "sys_script",
+  "sys_script_include",
+  "sys_ui_script",
+  "sys_script_client",
+  "sys_ws_operation",
 ]);
 
 export interface MetadataCacheConfigInput {
