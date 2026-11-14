@@ -105,11 +105,24 @@ export const structuredQueryScalarSchema = z.union([
 
 export type StructuredQueryScalar = z.output<typeof structuredQueryScalarSchema>;
 
+/**
+ * The operators each condition type accepts. The schema and the filter error
+ * diagnosis both read these lists, so the message can never name an operator
+ * the schema rejects, or leave one out.
+ */
+const EQUALITY_OPERATORS = ["eq", "neq"] as const;
+const SET_OPERATORS = ["in", "not_in"] as const;
+const SCALAR_RANGE_OPERATORS = ["gt", "gte", "lt", "lte"] as const;
+const BETWEEN_OPERATOR = "between";
+const TEXT_OPERATORS = ["contains", "not_contains", "starts_with", "ends_with"] as const;
+const NULL_OPERATORS = ["is_null", "is_not_null"] as const;
+const GROUP_OPERATORS = ["and", "or"] as const;
+
 const equalityConditionSchema = z
   .object({
     type: z.literal("equality"),
     field: fieldNameSchema,
-    operator: z.enum(["eq", "neq"]),
+    operator: z.enum(EQUALITY_OPERATORS),
     value: structuredQueryScalarSchema,
   })
   .strict();
@@ -118,7 +131,7 @@ const setConditionSchema = z
   .object({
     type: z.literal("set"),
     field: fieldNameSchema,
-    operator: z.enum(["in", "not_in"]),
+    operator: z.enum(SET_OPERATORS),
     values: boundedArray(structuredQueryScalarSchema, MAX_STRUCTURED_QUERY_SET_VALUES, {
       min: 1,
     }),
@@ -129,7 +142,7 @@ const scalarRangeConditionSchema = z
   .object({
     type: z.literal("range"),
     field: fieldNameSchema,
-    operator: z.enum(["gt", "gte", "lt", "lte"]),
+    operator: z.enum(SCALAR_RANGE_OPERATORS),
     value: structuredQueryScalarSchema,
   })
   .strict();
@@ -138,7 +151,7 @@ const betweenRangeConditionSchema = z
   .object({
     type: z.literal("range"),
     field: fieldNameSchema,
-    operator: z.literal("between"),
+    operator: z.literal(BETWEEN_OPERATOR),
     lower: structuredQueryScalarSchema,
     upper: structuredQueryScalarSchema,
   })
@@ -148,7 +161,7 @@ const textConditionSchema = z
   .object({
     type: z.literal("text"),
     field: fieldNameSchema,
-    operator: z.enum(["contains", "not_contains", "starts_with", "ends_with"]),
+    operator: z.enum(TEXT_OPERATORS),
     value: stringValueSchema,
   })
   .strict();
@@ -157,7 +170,7 @@ const nullConditionSchema = z
   .object({
     type: z.literal("null"),
     field: fieldNameSchema,
-    operator: z.enum(["is_null", "is_not_null"]),
+    operator: z.enum(NULL_OPERATORS),
   })
   .strict();
 
@@ -192,7 +205,7 @@ function structuredQueryGroupSchema<FilterSchema extends z.ZodType>(
   return z
     .object({
       type: z.literal("group"),
-      operator: z.enum(["and", "or"]),
+      operator: z.enum(GROUP_OPERATORS),
       conditions: boundedArray(filterSchema, MAX_STRUCTURED_QUERY_CONDITIONS, {
         min: 1,
       }),
@@ -247,10 +260,228 @@ export const STRUCTURED_FILTER_EMPTY_LIST_MESSAGE =
   "filter list must hold at least one condition. " +
   `Example: [${FILTER_EXAMPLE}].`;
 
+/**
+ * What each leaf condition type needs: its operators and the keys it takes.
+ * Only the diagnosis below reads this (the schemas above are the authority),
+ * and it is built from the same operator lists.
+ */
+interface LeafShape {
+  readonly operators: readonly string[];
+  /** Keys a condition needs, by operator. */
+  readonly keys: (operator: string) => readonly string[];
+  /** The keys whose value must be one scalar (string, number or boolean). */
+  readonly scalarKeys: readonly string[];
+  /** The keys whose value must be a string. */
+  readonly stringKeys: readonly string[];
+}
+
+const LEAF_SHAPES: Readonly<Record<string, LeafShape>> = Object.freeze({
+  equality: {
+    operators: EQUALITY_OPERATORS,
+    keys: () => ["field", "value"],
+    scalarKeys: ["value"],
+    stringKeys: [],
+  },
+  set: {
+    operators: SET_OPERATORS,
+    keys: () => ["field", "values"],
+    scalarKeys: [],
+    stringKeys: [],
+  },
+  range: {
+    operators: [...SCALAR_RANGE_OPERATORS, BETWEEN_OPERATOR],
+    keys: (operator) =>
+      operator === BETWEEN_OPERATOR ? ["field", "lower", "upper"] : ["field", "value"],
+    scalarKeys: ["value", "lower", "upper"],
+    stringKeys: [],
+  },
+  text: {
+    operators: TEXT_OPERATORS,
+    keys: () => ["field", "value"],
+    scalarKeys: [],
+    stringKeys: ["value"],
+  },
+  null: {
+    operators: NULL_OPERATORS,
+    keys: () => ["field"],
+    scalarKeys: [],
+    stringKeys: [],
+  },
+});
+
+const CONDITION_TYPES = [...Object.keys(LEAF_SHAPES), "group"];
+
+/**
+ * A list filter is wrapped into a synthetic AND group before the union runs.
+ * These sets let the diagnosis name the caller's own positions (`filter[1]`)
+ * instead of positions inside a group the caller never wrote. The path
+ * indexes always come from loops over the list, never from caller text.
+ */
+const listFilterWrappers = new WeakSet<object>();
+const listFilterSingles = new WeakSet<object>();
+
+function ownValue(node: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(node, key);
+  return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isScalarValue(value: unknown): boolean {
+  return typeof value === "string" || typeof value === "boolean" || Number.isFinite(value);
+}
+
+function joinWords(words: readonly string[]): string {
+  return words.length < 2
+    ? words.join("")
+    : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+}
+
+interface DiagnosisSite {
+  /** Where the value sits, as `filter`, `filter[1]` or `filter.conditions[1]`. */
+  readonly path: string;
+  /** Group levels already open above this value. */
+  readonly level: number;
+  /** The value is the filter itself, so the path adds nothing to the message. */
+  readonly topLevel: boolean;
+  /** The filter was a list of two or more, so the depth message says how a list counts. */
+  readonly listForm: boolean;
+}
+
+/**
+ * The first thing wrong with a rejected filter, as fixed text and a path, or
+ * undefined when the walk finds nothing it can name. Every word comes from
+ * the lists above; nothing the caller sent is repeated. A condition type is
+ * quoted only after it matched a known type name, and then the known name is
+ * what is quoted. Reads own data properties only.
+ */
+function diagnoseFilter(node: unknown, site: DiagnosisSite): string | undefined {
+  const located = (text: string): string =>
+    site.topLevel ? text : `${site.path}: ${text}`;
+  if (!isPlainRecord(node)) {
+    if (site.topLevel) return undefined;
+    return located(
+      Array.isArray(node)
+        ? "a condition must be one object, not a list"
+        : "a condition must be an object with a type"
+    );
+  }
+  const type = ownValue(node, "type");
+  if (type === "group") return diagnoseGroup(node, site);
+  const shape =
+    typeof type === "string" && Object.hasOwn(LEAF_SHAPES, type)
+      ? LEAF_SHAPES[type]
+      : undefined;
+  if (shape === undefined) {
+    return located(`type must be one of ${CONDITION_TYPES.join(", ")}`);
+  }
+  const label = `a "${type as string}" condition`;
+  const operator = ownValue(node, "operator");
+  if (typeof operator !== "string" || !shape.operators.includes(operator)) {
+    return located(`${label} needs operator one of ${shape.operators.join(", ")}`);
+  }
+  const keys = shape.keys(operator);
+  if (keys.some((key) => ownValue(node, key) === undefined)) {
+    return located(`${label} needs ${joinWords(keys)}`);
+  }
+  if (keys.includes("values")) {
+    const values = ownValue(node, "values");
+    if (
+      !Array.isArray(values) ||
+      values.length < 1 ||
+      values.length > MAX_STRUCTURED_QUERY_SET_VALUES ||
+      !values.every(isScalarValue)
+    ) {
+      return located(
+        `${label} needs values as a list of 1 to ${MAX_STRUCTURED_QUERY_SET_VALUES} ` +
+          "strings, numbers or booleans"
+      );
+    }
+  }
+  for (const key of shape.stringKeys) {
+    if (typeof ownValue(node, key) !== "string") {
+      return located(`${label} needs ${key} as a string`);
+    }
+  }
+  for (const key of shape.scalarKeys) {
+    if (keys.includes(key) && !isScalarValue(ownValue(node, key))) {
+      return located(`${label} needs ${key} as a string, number or boolean`);
+    }
+  }
+  const allowed = new Set(["type", "operator", ...keys]);
+  if (Object.keys(node).some((key) => !allowed.has(key))) {
+    return located(`${label} takes only ${joinWords(["type", "operator", ...keys])}`);
+  }
+  return undefined;
+}
+
+function diagnoseGroup(
+  node: Record<string, unknown>,
+  site: DiagnosisSite
+): string | undefined {
+  const located = (text: string): string =>
+    site.topLevel ? text : `${site.path}: ${text}`;
+  const level = site.level + 1;
+  if (level > MAX_STRUCTURED_QUERY_NESTING) {
+    return located(
+      `groups nest at most ${MAX_STRUCTURED_QUERY_NESTING} levels deep` +
+        (site.listForm ? ", and a list of two or more counts as one level" : "")
+    );
+  }
+  const operator = ownValue(node, "operator");
+  const conditions = ownValue(node, "conditions");
+  if (
+    typeof operator !== "string" ||
+    !(GROUP_OPERATORS as readonly string[]).includes(operator) ||
+    !Array.isArray(conditions) ||
+    conditions.length < 1
+  ) {
+    return located("a group needs operator and or or, and a non-empty conditions list");
+  }
+  if (Object.keys(node).some((key) => key !== "type" && key !== "operator" && key !== "conditions")) {
+    return located("a group takes only type, operator and conditions");
+  }
+  const synthetic = listFilterWrappers.has(node);
+  for (let index = 0; index < conditions.length; index += 1) {
+    const problem = diagnoseFilter(conditions[index], {
+      path: synthetic ? `${site.path}[${index}]` : `${site.path}.conditions[${index}]`,
+      level,
+      topLevel: false,
+      listForm: site.listForm,
+    });
+    if (problem !== undefined) return problem;
+  }
+  return undefined;
+}
+
+/**
+ * The text for a rejected filter: the first mistake found, in fixed words,
+ * with the working example; the shape message when the walk finds none. The
+ * walk runs only on a rejected value, after the structural pass has bounded
+ * its size, and takes no part in what the schema accepts.
+ */
+function filterErrorMessage(input: unknown, fallback: string): string {
+  try {
+    const single = isPlainRecord(input) && listFilterSingles.has(input);
+    const listForm = isPlainRecord(input) && listFilterWrappers.has(input);
+    const problem = diagnoseFilter(input, {
+      path: single ? "filter[0]" : "filter",
+      level: 0,
+      topLevel: !single,
+      listForm,
+    });
+    return problem === undefined ? fallback : `${problem}. Example: ${FILTER_EXAMPLE}.`;
+  } catch {
+    return fallback;
+  }
+}
+
 function structuredQueryFilterUnion(message: string): z.ZodType<StructuredQueryFilter> {
   return z.union(
     [structuredLeafConditionSchema, structuredQueryGroupLevelThreeSchema],
-    { error: message }
+    { error: (issue) => filterErrorMessage(issue.input, message) }
   );
 }
 
@@ -278,8 +509,14 @@ const structuredQueryListFilterSchema = z.preprocess(
       });
       return value;
     }
-    if (value.length === 1) return value[0];
-    return { type: "group", operator: "and", conditions: value };
+    if (value.length === 1) {
+      const only: unknown = value[0];
+      if (isPlainRecord(only)) listFilterSingles.add(only);
+      return only;
+    }
+    const wrapper = { type: "group", operator: "and", conditions: value };
+    listFilterWrappers.add(wrapper);
+    return wrapper;
   },
   structuredQueryFilterUnion(STRUCTURED_FILTER_LIST_ERROR_MESSAGE)
 );

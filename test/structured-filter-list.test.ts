@@ -74,7 +74,9 @@ describe("sn_query reads a list filter as an implicit AND (#17)", () => {
       table: "incident",
       structured_query: { filter: [PRIORITY, nested(3)] },
     });
-    expect(message).toContain(STRUCTURED_FILTER_LIST_ERROR_MESSAGE);
+    // The diagnosis names the group that is one level too deep and how a
+    // list counts; the shape message stays the fallback.
+    expect(message).toContain("filter[1].conditions[0].conditions[0]: groups nest at most");
     expect(message).toContain(`at most ${MAX_STRUCTURED_QUERY_NESTING} levels`);
     expect(message).toContain("counts as one level");
     // The same tree written as an explicit 4-level group is refused alike.
@@ -99,13 +101,16 @@ describe("sn_query reads a list filter as an implicit AND (#17)", () => {
 
   it("does not read a list nested inside a group or another list", async () => {
     const connected = await harness();
-    for (const filter of [group("and", [ACTIVE, NAMED]), [[ACTIVE, NAMED]]]) {
-      const message = await callError(connected, "sn_query", {
-        table: "incident",
-        structured_query: { filter },
-      });
-      expect(message).toContain(STRUCTURED_FILTER_LIST_ERROR_MESSAGE);
-    }
+    const inGroup = await callError(connected, "sn_query", {
+      table: "incident",
+      structured_query: { filter: group("and", [ACTIVE, NAMED]) },
+    });
+    expect(inGroup).toContain("filter.conditions[0]: a condition must be one object, not a list");
+    const inList = await callError(connected, "sn_query", {
+      table: "incident",
+      structured_query: { filter: [[ACTIVE, NAMED]] },
+    });
+    expect(inList).toContain(STRUCTURED_FILTER_LIST_ERROR_MESSAGE);
   });
 
   it("applies the structural bounds to the list's elements", () => {
