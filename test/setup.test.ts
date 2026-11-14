@@ -646,7 +646,13 @@ describe("setup grant", () => {
   });
 
   const JOURNAL_TOOLS = ["sn_incident_add_comment", "sn_incident_add_work_note"];
-  const READ_DEFAULTS = ["sn_aggregate", "sn_get", "sn_query", "sn_schema"];
+  const READ_DEFAULTS = [
+    "sn_aggregate",
+    "sn_codesearch",
+    "sn_get",
+    "sn_query",
+    "sn_schema",
+  ];
 
   async function grant(argv: readonly string[]): Promise<void> {
     await runSetupCli({
@@ -765,6 +771,83 @@ describe("setup grant", () => {
     it("names the journal tools in the grant help", async () => {
       await expect(grant(["--help"])).rejects.toMatchObject({
         help: expect.stringContaining(JOURNAL_TOOLS.join(",")),
+      });
+    });
+  });
+
+  describe("code search follows a read grant on a code table (issue #2)", () => {
+    const CODE_SEARCH_ARGS = {
+      search_term: "GlideRecord",
+      table: "sys_script_include",
+    };
+
+    it("lets a plain read grant on a code table run a code search on it", async () => {
+      await grant(["--read", "sys_script_include"]);
+
+      expect(toolsOn("sys_script_include")).toEqual(READ_DEFAULTS);
+      const plan = resolveToolTableAccess("sn_codesearch", CODE_SEARCH_ARGS);
+      expect(() =>
+        authorizeTableAccessPlan(persistedPolicy(), plan.requests, "sn_codesearch")
+      ).not.toThrow();
+    });
+
+    it("still denies a code search on a code table the profile does not read", async () => {
+      await grant(["--read", "sys_script_include"]);
+
+      const plan = resolveToolTableAccess("sn_codesearch", {
+        search_term: "GlideRecord",
+        table: "sys_script",
+      });
+      expect(() =>
+        authorizeTableAccessPlan(persistedPolicy(), plan.requests, "sn_codesearch")
+      ).toThrow(/denied by policy/u);
+    });
+
+    it("grants no write tool and no other table through the code search default", async () => {
+      await grant(["--read", "sys_script_include"]);
+
+      expectDenied("write", "sys_script_include", ["sn_create", "sn_update", "sn_codesearch"]);
+      expectDenied("read", "incident", ["sn_query", "sn_codesearch"]);
+    });
+
+    it("leaves a stored target alone and adds code search only when the table is granted again", async () => {
+      // A target written before sn_codesearch was a default holds a
+      // materialised four-tool list. Nothing rewrites it behind the owner's back.
+      await grant([
+        "--read",
+        "sys_script_include",
+        "--tools",
+        "sn_query,sn_get,sn_aggregate,sn_schema",
+      ]);
+      const stored = toolsOn("sys_script_include");
+      expect(stored).not.toContain("sn_codesearch");
+
+      // An unrelated grant does not touch it...
+      await grant(["--read", "incident"]);
+      expect(toolsOn("sys_script_include")).toEqual(stored);
+      const plan = resolveToolTableAccess("sn_codesearch", CODE_SEARCH_ARGS);
+      expect(() =>
+        authorizeTableAccessPlan(persistedPolicy(), plan.requests, "sn_codesearch")
+      ).toThrow(/denied by policy/u);
+
+      // ...and each documented remedy adds the tool without removing any.
+      await grant(["--read", "sys_script_include"]);
+      expect(toolsOn("sys_script_include")).toEqual(READ_DEFAULTS);
+      expect(() =>
+        authorizeTableAccessPlan(persistedPolicy(), plan.requests, "sn_codesearch")
+      ).not.toThrow();
+    });
+
+    it("adds code search to a stored target with --tools sn_codesearch alone", async () => {
+      await grant(["--read", "sys_script_include", "--tools", "sn_query"]);
+      await grant(["--read", "sys_script_include", "--tools", "sn_codesearch"]);
+
+      expect(toolsOn("sys_script_include")).toEqual(["sn_codesearch", "sn_query"]);
+    });
+
+    it("lists code search in the grant help", async () => {
+      await expect(grant(["--help"])).rejects.toMatchObject({
+        help: expect.stringContaining("sn_codesearch"),
       });
     });
   });
@@ -2027,6 +2110,7 @@ describe("setup wizard", () => {
             kind: "canonical",
             tools: [
               "sn_aggregate",
+              "sn_codesearch",
               "sn_create",
               "sn_get",
               "sn_incident_add_comment",
@@ -2115,6 +2199,7 @@ describe("setup wizard", () => {
         expect(tableAccess.writeTables).toEqual(["incident", "task"]);
         expect(tableAccess.targets?.find((target) => target.table === "task")?.tools).toEqual([
           "sn_aggregate",
+          "sn_codesearch",
           "sn_get",
           "sn_query",
           "sn_schema",

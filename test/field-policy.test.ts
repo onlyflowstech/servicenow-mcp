@@ -593,6 +593,40 @@ describe("SNSDK-30 dispatcher preparation", () => {
     }
   );
 
+  it.each([
+    ["sys_script", "script"],
+    ["sys_script_include", "script"],
+    ["sys_ui_script", "script"],
+    ["sys_script_client", "script"],
+    ["sys_ws_operation", "operation_script"],
+  ] as const)(
+    "denies a code search on %s when its %s field is not readable, as sn_query does",
+    (table, scriptField) => {
+      // An operator who narrows a code table so the script body is not
+      // readable must not be able to read or probe it through code search.
+      const readable = { [table]: { readable: ["sys_id", "name", "active"] } };
+      withFieldPolicy(readable, () => {
+        expectPolicyReason(
+          () => resolveReadableFields(table, { fields: scriptField }),
+          "unreadable_field"
+        );
+        expectPolicyReason(
+          () => resolveToolTableAccess("sn_codesearch", { search_term: "x", table }),
+          "unreadable_field"
+        );
+        expectPolicyReason(
+          () => resolveToolTableAccess("sn_codesearch", { search_term: "x" }),
+          "unreadable_field"
+        );
+      });
+      // The unnarrowed default reads the same field, so the denial above is
+      // the policy's doing and not a property of code search.
+      expect(() =>
+        resolveToolTableAccess("sn_codesearch", { search_term: "x", table })
+      ).not.toThrow();
+    }
+  );
+
   it("carries independent issued projections for every multi-table branch", () => {
     const apps = resolveToolTableAccess("sn_discover", { type: "apps" });
     const code = resolveToolTableAccess("sn_codesearch", {});

@@ -406,7 +406,7 @@ The resulting `~/.servicenow-mcp/config.json` looks like this. Note
             "table": "incident",
             "kind": "canonical",
             "tools": [
-              "sn_query", "sn_get", "sn_aggregate", "sn_schema",
+              "sn_query", "sn_get", "sn_aggregate", "sn_schema", "sn_codesearch",
               "sn_create", "sn_update",
               "sn_incident_add_comment", "sn_incident_add_work_note"
             ],
@@ -416,7 +416,7 @@ The resulting `~/.servicenow-mcp/config.json` looks like this. Note
           {
             "table": "problem",
             "kind": "canonical",
-            "tools": ["sn_query", "sn_get", "sn_aggregate", "sn_schema"],
+            "tools": ["sn_query", "sn_get", "sn_aggregate", "sn_schema", "sn_codesearch"],
             "closureComplete": true,
             "relatedTables": ["problem"]
           }
@@ -716,7 +716,7 @@ in this section is needed to use this server.
 | `sn_relationships` | CMDB CI graph traversal — upstream/downstream/both, configurable depth |
 | `sn_attach` | List attachments, return downloads as inline base64, and upload inline base64 content; never touches a host filesystem path |
 | `sn_syslog` | Query system logs with severity/source/time filters |
-| `sn_codesearch` | Search business rules, script includes, client scripts, etc. |
+| `sn_codesearch` | Search business rules, script includes, client scripts, etc. Part of the default read grant, so a plain read grant on a code table allows it |
 | `sn_discover` | Discover tables, scoped apps, store apps, plugins |
 
 ### Testing & Automation
@@ -985,6 +985,20 @@ servicenow-mcp-setup grant --profile dev --read cmdb_ci --tools sn_query,sn_rela
 servicenow-mcp-setup grant --profile dev --read change_request --related change_request=task
 servicenow-mcp-setup grant --profile dev --flows   # sn_flow_view's 15 tables, bound to sn_flow_view only
 ```
+
+A read grant without `--tools` binds `sn_query`, `sn_get`, `sn_aggregate`,
+`sn_schema` and `sn_codesearch` to each table it names. `sn_codesearch` is
+authorized per code table it searches (`sys_script`, `sys_script_include`,
+`sys_ui_script`, `sys_script_client`, `sys_ws_operation`), so
+`servicenow-mcp-setup grant --profile dev --read sys_script_include` lets that
+profile search script includes; a search with no `table` needs a read grant on
+all five. On any other table the binding is inert. **A profile written before
+`sn_codesearch` was a default keeps the tool list it was saved with** and is not
+rewritten: re-run the same `grant --read <code table>` to add it, or pass
+`--tools sn_codesearch` to add only that tool. Neither removes a tool. The
+profile's field policy still decides the script field: `sn_codesearch` is
+denied on a code table whose script field is not readable, exactly as `sn_query`
+is for that field.
 
 Allowlist entries may be exact table names or the literal `*` to allow every
 table for that operation. Table names are trimmed, lowercased, deduplicated,
