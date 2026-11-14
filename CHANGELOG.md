@@ -42,6 +42,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A rejected `structured_query.filter` names the mistake (#27).** A bad
+  operator, an unknown or missing `type`, a bad group, a missing key, a value of
+  the wrong kind or a group nested too deep used to get the same shape message,
+  even when the condition sat inside a group. The message now says the first
+  thing wrong, in fixed words, with an index path, for example `filter.conditions[1]:
+  a "text" condition needs operator one of contains, not_contains, starts_with,
+  ends_with`, `type must be one of equality, set, range, text, null, group` and
+  `a group needs operator and or or, and a non-empty conditions list`, followed
+  by the working example. A list filter on `sn_query` is reported at the
+  caller's own position (`filter[1]`); `sn_batch` gives the same text and still
+  says a list is not accepted. Nothing the caller sent is repeated, and a
+  condition type is quoted only when it is one of the known type names. The
+  shape message remains for anything the walk cannot name. `tools/list` is
+  byte-identical.
+- **The `sn_query` truncation hint gives values to use (#29).** The
+  `max_response_bytes` description promised exact follow-up arguments, but the
+  hint said "a lower limit" and "a higher max_response_bytes" with no numbers,
+  and a caller who chose their own `fields` got no field advice. The hint now
+  reads like `Dropped 14/22; continue offset=8 limit=8; retry offset=0 with
+  fields="sys_id,name" or max_response_bytes=31500.` The `limit` is the number
+  of rows that fit. The `max_response_bytes` is measured where the envelope
+  refits the result, with its own cost in it, and holds at least the next row;
+  if no budget up to 1,000,000 could, the hint says so and offers fields and
+  `sn_get`. A caller's own `fields` list is offered back without its large
+  fields (such as `script`); a list with none gets the `limit` and the budget,
+  and a read of `fields=all` gets the table's short default list. Only fields
+  the profile may read are named, never a sensitive one. The count still equals
+  `dropped_records` and the hint stays within 600 characters. The
+  `max_response_bytes` description now names what the hint carries (5
+  characters shorter; `tools/list` `sn_query` 16,579 to 16,574).
 - **`sn_query` no longer stops paging after page 2 (#1).** The tool sends
   `sysparm_no_count`, so ServiceNow's `X-Total-Count` header holds the size of
   the response (the page plus the one sentinel row), not the table. The handler
@@ -86,6 +116,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`has_more` and `next_offset` count rows dropped for size (#28). Contract
+  change for truncated pages.** A page cut to fit `max_response_bytes` kept
+  `has_more` and `next_offset` for the rows beyond the page, so a client that
+  followed `next_offset` skipped every dropped row, and a cut last page said
+  `has_more: false` with `record_count: 0`. Now `record_count`, `truncated` and
+  `dropped_records` keep their meaning, and:
+  - `has_more` is true when rows were dropped for size **or** rows exist past
+    the page: rows exist that the response did not contain.
+  - `next_offset` is `offset + record_count` when at least one row came back:
+    the first row not returned. A client that only follows it re-reads the
+    dropped rows and loses nothing.
+  - When no row fit, `next_offset` is omitted and `metadata.pagination.recovery`
+    is `adjust_request_and_retry_same_offset`: `has_more: true` with no
+    `next_offset` means the request must change (fewer `fields`, a lower
+    `limit`, or a higher `max_response_bytes`). The pagination output schema
+    accepts `has_more` without `next_offset` only with `recovery`.
+  - The old post-page continuation is gone from the hint; `next_offset` covers
+    it. A page that lost no rows to size is unchanged.
+
+  Applies to every list tool that fits through the shared envelope:
+  `sn_query`, `sn_syslog`, `sn_schema`, `sn_relationships`, `sn_codesearch`,
+  `sn_discover`, `sn_attach` (list) and `sn_atf` continue at `offset + rows
+  returned`; any other cut collection (for example `sn_aggregate`) reports
+  `has_more: true` with no `next_offset`. This also stops a byte drop made only
+  by the envelope (#23) from skipping the dropped row when `next_offset` is
+  followed, and the tool's "More records available. Call sn_query again with
+  offset=N." hint is restated at `next_offset` (or says no row fit), so it never
+  contradicts it; #23's `truncated`/`dropped_records` flags in `data` are not
+  added here. See the README, "Paging when a response is cut to size".
 - **Code tables are in the default metadata cache.** `sys_script`,
   `sys_script_include`, `sys_ui_script`, `sys_script_client` and
   `sys_ws_operation` now cache like the other system-level metadata tables,
