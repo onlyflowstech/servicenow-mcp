@@ -403,14 +403,16 @@ describe("SNSDK-57 deterministic CI and release contract", () => {
     );
   });
 
-  it("routes stable and dev versions explicitly and rejects other channels", () => {
+  it("routes stable, dev, and rc versions explicitly and rejects other channels", () => {
     expect(releaseChannel("2.1.0")).toBe("latest");
     expect(releaseChannel("2.2.0-dev.1")).toBe("dev");
-    for (const version of ["2.2.0-beta.1", "2.2.0-dev", "2.2.0-dev.01", "02.2.0", "2.2.0-dev.1+sha", "2.2.0-dev.1\n"]) {
+    expect(releaseChannel("2.3.0-rc.1")).toBe("next");
+    for (const version of ["2.2.0-beta.1", "2.2.0-dev", "2.2.0-dev.01", "02.2.0", "2.2.0-dev.1+sha", "2.2.0-dev.1\n", "2.2.0-rc", "2.2.0-rc.01", "2.2.0-rc.1+sha", "2.2.0-RC.1", "2.2.0-rc.1-dev.1", "2.2.0-dev.1-rc.1"]) {
       expect(() => releaseChannel(version)).toThrow();
     }
     const workflow = read(".github/workflows/publish.yml");
     expect(workflow).toContain('"v[0-9]+.[0-9]+.[0-9]+-dev.[0-9]+"');
+    expect(workflow).toContain('"v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"');
     expect(workflow).toContain('npm_tag="$(node scripts/release-validate.mjs --npm-tag)"\n          npm publish --access public --tag "$npm_tag"');
     const version = JSON.parse(read("package.json")).version;
     expect(validateReleaseContract({ environment: { GITHUB_REF_TYPE: "tag", GITHUB_REF_NAME: `v${version}` } }).channel).toBe(releaseChannel(version));
@@ -447,6 +449,12 @@ describe("SNSDK-57 deterministic CI and release contract", () => {
         },
       })
     ).toThrow(/stable/u);
+    // An rc tag passes the format check and is then rejected only for not matching the package version.
+    expect(() =>
+      validateReleaseContract({
+        environment: { GITHUB_REF_TYPE: "tag", GITHUB_REF_NAME: "v9.9.9-rc.1" },
+      })
+    ).toThrow(/exactly match/u);
 
     const dependencies = {
       ...packageJson.dependencies,

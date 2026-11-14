@@ -1,12 +1,14 @@
 name: Publish
 
-# Stable versions publish to latest; dev prereleases publish only to dev.
+# Stable versions publish to latest; dev prereleases publish only to dev;
+# rc prereleases (cut on the test branch) publish only to next.
 # The release validator strictly checks the version and exact pushed tag.
 on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-dev.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
 
 jobs:
   portable-release:

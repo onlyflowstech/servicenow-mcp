@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Release candidates publish to `next`.** A `vX.Y.Z-rc.N` tag (cut on the
+  `test` branch by convention) now publishes to the `next` dist-tag. Stable and
+  `-dev.N` tags are unchanged, and every other prerelease suffix is still
+  rejected.
+
+### Security
+
+- **Container base image.** The runtime base,
+  `gcr.io/distroless/nodejs22-debian13:nonroot`, moves to a newer digest whose
+  `zlib1g` is 1:1.3.dfsg+really1.3.1-1+deb13u1 and whose Node is 22.23.4,
+  clearing CVE-2026-76844 and CVE-2026-85091 from the `container-release`
+  scan. The image serves the dormant HTTP transport and is not published.
+- **HTTP server dependencies.** `@hono/node-server` moves from 2.1.3 to 2.1.7
+  and `hono` (transitive, through the MCP SDK) from 4.13.13 to 4.13.18,
+  clearing the advisories that `npm audit --omit=dev` reported:
+  GHSA-qv5m-9pm6-hqp3 and GHSA-jpvv-r467-5p4w in `@hono/node-server`, and
+  GHSA-4m76-xfj5-7975, GHSA-h7mg-cq63-vhpq, GHSA-3gg2-335m-rxc6,
+  GHSA-4h7h-rv7c-7m2v and GHSA-46wx-v44x-9hh2 in `hono`. The same releases
+  also carry the fixes for GHSA-7v5p-43qr-wch5 and GHSA-fj57-4f93-cfw6
+  (`@hono/node-server`) and GHSA-92p4-j3wq-jmqx, GHSA-39q9-qp46-w8xg and
+  GHSA-74fm-fwc7-3fwp (`hono`). The `tools/inspector` lock moves to `hono`
+  4.13.18 and `@hono/node-server` 2.1.8. In the published package, only the
+  dormant HTTP transport uses these packages. One behaviour
+  change: a request to `/mcp` whose raw path contains a backslash (for example
+  `\mcp`, which the server's own path check reads as `/mcp`) now gets 400 Bad
+  Request.
+
 ## [2.2.0] — 2026-10-30
 
 2.2.0 is the first stable release since 2.1.0. It contains everything

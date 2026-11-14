@@ -222,18 +222,18 @@ export function validateServerJson(serverJson, packageJson) {
   );
 }
 
-/** Only reviewed stable and dev channels can be published. */
+/** Only reviewed stable, dev, and rc channels can be published. */
 export function releaseChannel(version) {
-  const match = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(-dev\.(?:0|[1-9][0-9]*))?$/u.exec(version);
-  assert(typeof version === "string" && match !== null && match[0] === version, "package version must be stable semver or a dev.N prerelease");
-  return match[1] === undefined ? "latest" : "dev";
+  const match = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(dev|rc)\.(?:0|[1-9][0-9]*))?$/u.exec(version);
+  assert(typeof version === "string" && match !== null && match[0] === version, "package version must be stable semver, a dev.N prerelease, or an rc.N prerelease");
+  return match[1] === undefined ? "latest" : match[1] === "rc" ? "next" : "dev";
 }
 
 function releaseTagFromEnvironment(environment) {
   if (environment.GITHUB_REF_TYPE !== "tag") return undefined;
   const tag = environment.GITHUB_REF_NAME;
-  if (typeof tag !== "string" || !/^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-dev\.(?:0|[1-9][0-9]*))?$/u.test(tag)) {
-    throw new Error("tag release is missing a valid stable or dev GITHUB_REF_NAME");
+  if (typeof tag !== "string" || !/^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:dev|rc)\.(?:0|[1-9][0-9]*))?$/u.test(tag)) {
+    throw new Error("tag release is missing a valid stable, dev, or rc GITHUB_REF_NAME");
   }
   return tag;
 }

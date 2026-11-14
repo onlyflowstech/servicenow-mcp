@@ -152,9 +152,15 @@ git push origin v2.2.0-dev.1
 
 The existing `publish.yml` workflow runs the release gates and publishes through
 npm trusted publishing. The validator maps stable versions to `latest` and
-`X.Y.Z-dev.N` versions to `dev`; other prerelease channels and mismatched tags
-are rejected. Every published version must be unique. GitHub prereleases can
-be created for these tags without marking them as the latest stable release.
+`X.Y.Z-dev.N` versions to `dev`, and `X.Y.Z-rc.N` versions to `next`; other
+prerelease channels and mismatched tags are rejected. Every published version
+must be unique. GitHub prereleases can be created for these tags without
+marking them as the latest stable release.
+
+Test releases use `X.Y.Z-rc.N` (for example `2.3.0-rc.1`), are cut on the
+`test` branch by convention (the workflow does not check the branch), and
+publish to the `next` dist-tag with the same steps. Install the newest one with
+`npm install -g @onlyflows/servicenow-mcp@next`.
 
 Install the newest development build or pin an exact build:
 
