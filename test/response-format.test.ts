@@ -208,12 +208,13 @@ describe("sn_query max_response_bytes truncation", () => {
     expect(payload.total).toBeUndefined();
     // Continue at the first row not returned, so nothing is skipped; or
     // re-fetch the window's offset with a narrower response to get every row.
-    expect(payload.hint).toContain(`continue offset=${5 + kept}`);
-    expect(payload.hint).toContain("recover offset=5");
-    // The caller chose the fields, so the hint does not pick others for them.
-    expect(payload.hint).not.toContain('fields="');
-    expect(payload.hint).toContain("a lower limit");
-    expect(payload.hint).toContain("max_response_bytes");
+    expect(payload.hint).toContain(`continue offset=${5 + kept} limit=${kept}`);
+    expect(payload.hint).toContain("retry offset=5");
+    // The caller chose the fields; the hint offers them back without the
+    // large one (description), and the limit that fit, and a budget.
+    expect(payload.hint).toContain('fields="sys_id"');
+    expect(payload.hint).not.toContain("description");
+    expect(payload.hint).toMatch(/max_response_bytes=\d+\.$/u);
     expect(payload.next_offset).toBe(5 + kept);
     expect(payload.has_more).toBe(true);
   });
@@ -256,7 +257,7 @@ describe("sn_query max_response_bytes truncation", () => {
     expect(payload.hint).toContain('fields="sys_id,number,short_description"');
   });
 
-  it("does not suggest fields the caller already passed", async () => {
+  it("offers a caller's own fields back without the large ones", async () => {
     const { client } = metaClient(bigRecords());
     const result = await queryHandler(
       querySchema.parse({ table: "incident", fields: "sys_id,description", limit: 10, max_response_bytes: 1000 }),
@@ -264,8 +265,10 @@ describe("sn_query max_response_bytes truncation", () => {
       config
     );
     const payload = parseText(result);
-    expect(payload.hint).not.toContain("fields=");
-    expect(payload.hint).toContain("a lower limit or a higher max_response_bytes");
+    // The caller's own list holds one large field (description): offered back without it.
+    expect(payload.hint).toContain('fields="sys_id"');
+    expect(payload.hint).not.toContain("description");
+    expect(payload.hint).toMatch(/limit=\d+/u);
   });
 
   it("drops everything when even one record cannot fit", async () => {
@@ -315,14 +318,15 @@ describe("sn_query max_response_bytes truncation", () => {
     expect(payload).not.toHaveProperty("next_offset");
     expect(payload.hint).not.toContain("Fetch the rest");
     expect(payload.hint).toContain("row too large");
-    expect(payload.hint).toContain("recover offset=4");
+    expect(payload.hint).toContain("retry offset=4");
     expect(payload.hint).not.toContain("continue offset");
     expect(payload.hint).not.toContain("resume");
     expect(payload.hint).toContain("sn_get");
-    expect(payload.hint).toContain("max_response_bytes");
+    expect(payload.hint).toMatch(/max_response_bytes=\d+/u);
     // A lower limit cannot help when a single row is over budget.
-    expect(payload.hint).not.toContain("lower limit");
-    expect(payload.hint).not.toContain('fields="');
+    expect(payload.hint).not.toContain("limit");
+    // The caller's list is only a large field and sys_id; nothing to offer back but sys_id.
+    expect(payload.hint).toContain('fields="sys_id"');
   });
 
   it("leaves responses under the default budget byte-identical (no guard keys)", async () => {

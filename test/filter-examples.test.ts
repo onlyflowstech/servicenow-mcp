@@ -132,12 +132,12 @@ describe("tools/list size ledger (#19)", () => {
         "sn_incident_add_work_note": 3278,
         "sn_nl": 3588,
         "sn_profile": 3299,
-        "sn_query": 16579,
+        "sn_query": 16574,
         "sn_relationships": 4292,
         "sn_schema": 3518,
         "sn_syslog": 4243,
         "sn_update": 3661,
-        "total": 140892,
+        "total": 140887,
       }
     `);
   });

@@ -3,19 +3,47 @@
  *
  * Two stages can drop rows from one response: the tool's own budget check and,
  * after the shared envelope adds its metadata, the envelope's fit. The first
- * writes the hint; the second changes how many rows were dropped. The text is
- * therefore built and parsed here, in one place, so the envelope can rewrite
- * the counts and the continuation (the offset of the first row not returned,
- * which is `next_offset`) from its final state and the two never disagree. Rendering and parsing are covered by one round-trip test.
+ * writes the hint; the second changes how many rows were dropped and knows
+ * what the envelope itself costs. The text is therefore built and parsed here,
+ * in one place, so the envelope can rewrite the counts, the continuation (the
+ * offset of the first row not returned, which is `next_offset`) and the byte
+ * budget that would hold the next row from its final state, and the hint and
+ * the fields beside it never disagree. Rendering and parsing are covered by
+ * one round-trip test.
+ *
+ * The hint is a list of fixed clauses joined by "; ", each matched on its own
+ * by an anchored pattern, so only text this module wrote is ever rewritten:
+ *
+ *     Dropped 14/22; continue offset=8 limit=8; retry offset=0 with
+ *     fields="sys_id,name" or max_response_bytes=31500.
  *
  * @module truncation-hint
  */
 
-/** Advice used when no field list can be suggested. */
-export const LOWER_LIMIT_ADVICE = "a lower limit";
+import { MAX_RESPONSE_BYTES_MAX, MAX_RESPONSE_BYTES_MIN } from "../utils.js";
 
-const BUDGET_ADVICE = "a higher max_response_bytes";
 const HINT_MAX_LENGTH = 600;
+
+/**
+ * Bytes added to the measured size of the next row's response before it is
+ * offered as `max_response_bytes`, so that a budget with a longer digit count
+ * or a slightly longer hint still holds it.
+ */
+const NEEDED_BYTES_SLACK = 64;
+const NEEDED_BYTES_STEP = 100;
+
+/**
+ * `max_response_bytes` that would hold the next row: the measured size of the
+ * response with that row (`measured`) plus a small margin, rounded up to a
+ * whole {@link NEEDED_BYTES_STEP}, and always above the budget just used
+ * (`current`). Infinity when that is more than the largest budget the schema
+ * accepts: no value of `max_response_bytes` would hold the row.
+ */
+export function neededResponseBytes(measured: number, current: number): number {
+  const padded = Math.max(measured + NEEDED_BYTES_SLACK, current + 1, MAX_RESPONSE_BYTES_MIN);
+  const rounded = Math.ceil(padded / NEEDED_BYTES_STEP) * NEEDED_BYTES_STEP;
+  return rounded > MAX_RESPONSE_BYTES_MAX ? Number.POSITIVE_INFINITY : rounded;
+}
 
 export interface TruncationHintParts {
   /** Rows dropped from the window the caller asked for. */
@@ -30,61 +58,147 @@ export interface TruncationHintParts {
   readonly offset: number;
   /**
    * How to shrink the rows: a `fields="..."` or `response_format="..."`
-   * suggestion, or {@link LOWER_LIMIT_ADVICE} when none applies.
+   * suggestion. Absent when none applies; the hint then offers the lower
+   * `limit` (while a row fits) and the byte budget.
    */
-  readonly advice: string;
+  readonly advice?: string;
+  /**
+   * The `max_response_bytes` that would hold at least the next row, or
+   * Infinity when that is more than the maximum budget.
+   */
+  readonly neededBytes: number;
+}
+
+/** What a hint names for the rows that fit: the continuation and the `limit` to use. */
+function returnedRows(parts: TruncationHintParts): number {
+  return parts.total - parts.dropped;
+}
+
+const EMPTY_CLAUSE = "row too large";
+const SN_GET_OPTION = "sn_get";
+const OVER_MAXIMUM_CLAUSE = `the next row exceeds the maximum max_response_bytes (${MAX_RESPONSE_BYTES_MAX})`;
+
+function renderHint(parts: TruncationHintParts, withAdvice: boolean): string {
+  const returned = returnedRows(parts);
+  const empty = returned <= 0;
+  const over = !Number.isFinite(parts.neededBytes);
+  const options = [
+    withAdvice ? parts.advice : undefined,
+    over ? undefined : `max_response_bytes=${parts.neededBytes}`,
+    // When no row fits, a narrower page cannot help; the single-record read can.
+    empty ? SN_GET_OPTION : undefined,
+  ].filter((option): option is string => option !== undefined);
+  const clauses = [`Dropped ${parts.dropped}/${parts.total}`];
+  if (empty) clauses.push(EMPTY_CLAUSE);
+  else clauses.push(`continue offset=${parts.offset + returned} limit=${returned}`);
+  if (over) clauses.push(OVER_MAXIMUM_CLAUSE);
+  if (options.length > 0) {
+    clauses.push(`retry offset=${parts.offset} with ${options.join(" or ")}`);
+  }
+  return `${clauses.join("; ")}.`;
 }
 
 /**
  * Render the hint. When no row is left, the row itself exceeds the budget, so
  * a lower limit cannot help and the single-record read is offered instead.
+ * Field advice that would push the hint past its length limit is left out, so
+ * the hint always parses back.
  */
 export function renderTruncationHint(parts: TruncationHintParts): string {
-  const empty = parts.dropped >= parts.total;
-  const returned = parts.total - parts.dropped;
-  const options = [
-    empty && parts.advice === LOWER_LIMIT_ADVICE ? undefined : parts.advice,
-    BUDGET_ADVICE,
-  ]
-    .filter((option): option is string => option !== undefined)
-    .join(" or ");
-  return (
-    `Dropped ${parts.dropped}/${parts.total}` +
-    (empty ? "; row too large" : `; continue offset=${parts.offset + returned}`) +
-    `; recover offset=${parts.offset} with ${options}` +
-    (empty ? ", or sn_get" : "") +
-    "."
-  );
+  const full = renderHint(parts, true);
+  return full.length <= HINT_MAX_LENGTH ? full : renderHint(parts, false);
 }
 
-const HINT_PATTERN =
-  /^Dropped (\d+)\/(\d+)(?:; row too large|; continue offset=\d+); recover offset=(\d+) with (?:(.+?) or )?a higher max_response_bytes(?:, or sn_get)?\.$/u;
+const DROPPED_CLAUSE = /^Dropped (\d+)\/(\d+)$/u;
+const CONTINUE_CLAUSE = /^continue offset=(\d+) limit=(\d+)$/u;
+const RETRY_CLAUSE = /^retry offset=(\d+) with (.+)$/u;
+const ADVICE_OPTION =
+  /^(?:fields="[a-z][a-z0-9_]*(?:,[a-z][a-z0-9_]*)*"|response_format="concise")$/u;
+const BYTES_OPTION = /^max_response_bytes=([1-9]\d{3,6})$/u;
 
 /** Read back a hint {@link renderTruncationHint} wrote; anything else is undefined. */
 export function parseTruncationHint(hint: string): TruncationHintParts | undefined {
-  if (hint.length > HINT_MAX_LENGTH) return undefined;
-  const match = HINT_PATTERN.exec(hint);
-  if (match === null) return undefined;
-  const [, dropped, total, offset, advice] = match;
-  const parts: TruncationHintParts = {
-    dropped: Number(dropped),
-    total: Number(total),
-    offset: Number(offset),
-    advice: advice ?? LOWER_LIMIT_ADVICE,
+  if (hint.length > HINT_MAX_LENGTH || !hint.endsWith(".")) return undefined;
+  const clauses = hint.slice(0, -1).split("; ");
+  let index = 0;
+  const dropped = DROPPED_CLAUSE.exec(clauses[index++] ?? "");
+  if (dropped === null) return undefined;
+  const droppedCount = Number(dropped[1]);
+  const total = Number(dropped[2]);
+  if (!Number.isSafeInteger(droppedCount) || !Number.isSafeInteger(total) || droppedCount > total) {
+    return undefined;
+  }
+  const returned = total - droppedCount;
+  const empty = returned === 0;
+  let offset: number | undefined;
+  if (empty) {
+    if (clauses[index++] !== EMPTY_CLAUSE) return undefined;
+  } else {
+    const next = CONTINUE_CLAUSE.exec(clauses[index++] ?? "");
+    // The clause restates numbers the counts already fix; a hint that
+    // disagrees with itself was not written here.
+    if (next === null || Number(next[2]) !== returned) return undefined;
+    offset = Number(next[1]) - returned;
+  }
+  let neededBytes: number | undefined;
+  if (clauses[index] === OVER_MAXIMUM_CLAUSE) {
+    neededBytes = Number.POSITIVE_INFINITY;
+    index += 1;
+  }
+  let advice: string | undefined;
+  let sawSnGet = false;
+  const retry = clauses[index] === undefined ? null : RETRY_CLAUSE.exec(clauses[index] ?? "");
+  if (retry !== null) {
+    index += 1;
+    const retryOffset = Number(retry[1]);
+    if (offset !== undefined && offset !== retryOffset) return undefined;
+    offset = retryOffset;
+    for (const option of (retry[2] ?? "").split(" or ")) {
+      const bytes = BYTES_OPTION.exec(option);
+      if (bytes !== null) {
+        if (neededBytes !== undefined) return undefined;
+        neededBytes = Number(bytes[1]);
+      } else if (ADVICE_OPTION.test(option) && advice === undefined) {
+        advice = option;
+      } else if (option === SN_GET_OPTION && !sawSnGet) {
+        sawSnGet = true;
+      } else {
+        return undefined;
+      }
+    }
+  }
+  if (
+    index !== clauses.length ||
+    offset === undefined ||
+    neededBytes === undefined ||
+    sawSnGet !== empty ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0
+  ) {
+    return undefined;
+  }
+  return {
+    dropped: droppedCount,
+    total,
+    offset,
+    ...(advice === undefined ? {} : { advice }),
+    neededBytes,
   };
-  return [parts.dropped, parts.total, parts.offset].every(Number.isSafeInteger)
-    ? parts
-    : undefined;
 }
 
 /**
  * Restate a hint for the response's final state: how many rows were dropped
- * from the window, and so where to continue. Only hints this module wrote are
- * touched; any other text is returned as it came.
+ * from the window, so where to continue and which `limit` fits, and, when the
+ * caller supplies it, the byte budget that would hold the next row. Only hints
+ * this module wrote are touched; any other text is returned as it came.
  */
 export function refreshTruncationHint(
   hint: string,
-  final: { readonly dropped: number; readonly returned: number }
+  final: {
+    readonly dropped: number;
+    readonly returned: number;
+    readonly neededBytes?: number;
+  }
 ): string {
   const parts = parseTruncationHint(hint);
   if (parts === undefined) return hint;
@@ -92,7 +206,8 @@ export function refreshTruncationHint(
     dropped: final.dropped,
     total: final.dropped + final.returned,
     offset: parts.offset,
-    advice: parts.advice,
+    ...(parts.advice === undefined ? {} : { advice: parts.advice }),
+    neededBytes: final.neededBytes ?? parts.neededBytes,
   });
 }
 

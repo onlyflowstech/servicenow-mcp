@@ -37,10 +37,7 @@ import {
   envelopeCompatibilityResult,
   productionToolOutputSchemas,
 } from "./result-envelope.js";
-import {
-  LOWER_LIMIT_ADVICE,
-  renderTruncationHint,
-} from "./truncation-hint.js";
+import { neededResponseBytes, renderTruncationHint } from "./truncation-hint.js";
 import {
   defineServiceNowToolModule,
   withRequiredProfile,
@@ -124,9 +121,9 @@ function compatibleInputSchema() {
         "Byte budget for the serialized response (default 100000, min 1000, " +
           "max 1000000). When exceeded, whole records are dropped from the " +
           "tail (the JSON is never mangled) and the response gains truncated: " +
-          "true plus a hint stating how many records were dropped and the exact " +
-          "offset/limit/fields/response_format " +
-          "follow-up arguments to fetch the rest."
+          "true, has_more: true and a hint with the dropped count and the " +
+          "offset, limit, max_response_bytes, fields or response_format to " +
+          "retry with."
       ),
     limit: z
       .number()
@@ -187,6 +184,8 @@ function stableOrderQuery(
 
 /** Most fields a recovery hint suggests. */
 const SUGGESTED_FIELD_LIMIT = 3;
+/** A caller's own field list is offered back only up to this many names. */
+const SUGGESTED_CHOSEN_FIELD_LIMIT = 12;
 const FIELD_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 /** Readable fields that identify a record to a person, in order of preference. */
 const DISPLAY_FIELDS: readonly string[] = ["number", "name", "short_description", "title"];
@@ -252,10 +251,46 @@ function suggestedFields(table: string): readonly string[] | undefined {
 }
 
 /**
- * How the caller can shrink a truncated read. A caller who chose their own
- * `fields` is not told which fields to use: a lower limit or a higher budget
- * is the advice. A detailed read is pointed back at the concise default, and a
- * concise one at a short list of fields that exist on the table.
+ * The fields of a caller's own list that the hint may offer back: the names
+ * without the large ones (see {@link isLargeField}), or undefined when it
+ * would not narrow the list. Every name must be one the policy lets this
+ * caller read (so no sensitive or unreadable field is ever repeated) and a
+ * well-formed field name; if any name fails that, nothing is offered rather
+ * than a list that silently leaves one out.
+ */
+function slimmerChosenFields(table: string, chosen: string): readonly string[] | undefined {
+  try {
+    const names = [
+      ...new Set(
+        chosen
+          .split(",")
+          .map((name) => name.trim().toLowerCase())
+          .filter((name) => name !== "")
+      ),
+    ];
+    const readable = resolveReadableFields(table, { fields: "all" });
+    const allows = (name: string) =>
+      FIELD_NAME.test(name) &&
+      !isSensitiveFieldName(name) &&
+      (isAllFieldSelection(readable) || readable.includes(name));
+    if (names.length === 0 || names.length > SUGGESTED_CHOSEN_FIELD_LIMIT || !names.every(allows)) {
+      return undefined;
+    }
+    const slimmer = names.filter((name) => !isLargeField(name));
+    return slimmer.length > 0 && slimmer.length < names.length ? slimmer : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * How the caller can shrink a truncated read, or undefined when no field
+ * advice applies (the hint then gives a `limit` and a byte budget). A detailed
+ * read is pointed back at the concise default. A caller who chose their own
+ * `fields` gets that list without its large fields (such as `script`) when it
+ * has any; a list without them gets no field advice, since only a lower limit
+ * or a bigger budget can help. A read of every field, or of no particular
+ * fields, gets a short list of fields that exist on the table.
  *
  * A registered call arrives with `fields` already resolved from the caller's
  * request: the default list for a concise read, "all" for a detailed read or
@@ -263,18 +298,23 @@ function suggestedFields(table: string): readonly string[] | undefined {
  * "all" with response_format="detailed" all mean the caller chose no fields;
  * any other value is the caller's own selection. The one case this cannot
  * tell apart is a caller who typed the table's default list themselves: they
- * get the suggestion, a valid and shorter list, rather than a lower limit.
+ * get the suggestion, a valid and shorter list.
  */
-function shrinkAdviceFor(args: z.infer<typeof schema>): string {
+function shrinkAdviceFor(args: z.infer<typeof schema>): string | undefined {
   const detailed = args.response_format === "detailed";
   if (detailed && (args.fields === undefined || args.fields === "all")) {
     return 'response_format="concise"';
   }
-  if (args.fields !== undefined && args.fields !== defaultFieldList(args.table)) {
-    return LOWER_LIMIT_ADVICE;
+  if (
+    args.fields !== undefined &&
+    args.fields !== "all" &&
+    args.fields !== defaultFieldList(args.table)
+  ) {
+    const slimmer = slimmerChosenFields(args.table, args.fields);
+    return slimmer === undefined ? undefined : `fields="${slimmer.join(",")}"`;
   }
   const fields = suggestedFields(args.table);
-  return fields === undefined ? LOWER_LIMIT_ADVICE : `fields="${fields.join(",")}"`;
+  return fields === undefined ? undefined : `fields="${fields.join(",")}"`;
 }
 
 function defaultFieldList(table: string): string | undefined {
@@ -304,7 +344,11 @@ function enforceByteBudget(
   const fetched = results.length;
   const offset = args.offset ?? 0;
   const shrinkAdvice = shrinkAdviceFor(args);
-  const build = (keep: number): Record<string, unknown> => {
+  // The byte budget the hint names is measured, not guessed: build(keep) with
+  // the widest value is the size of the response that would hold `keep` rows.
+  // This stage measures the payload alone; the shared envelope restates the
+  // number with its own cost added (see refreshTruncationHint).
+  const build = (keep: number, neededBytes: number): Record<string, unknown> => {
     const dropped = fetched - keep;
     const out: Record<string, unknown> = { record_count: keep };
     // Rows were dropped, so rows exist that this response does not hold:
@@ -321,22 +365,24 @@ function enforceByteBudget(
     // envelope can still fit the minimum byte budget after shared metadata is
     // added. The structured pagination object carries the same retry/resume
     // distinction for machine clients. The shared envelope restates the
-    // counts and the continuation if it drops more rows (see
+    // counts, the continuation and the byte budget if it drops more rows (see
     // refreshTruncationHint), so the text always matches dropped_records.
     out.hint = renderTruncationHint({
       dropped,
       total: fetched,
       offset,
-      advice: shrinkAdvice,
+      ...(shrinkAdvice === undefined ? {} : { advice: shrinkAdvice }),
+      neededBytes,
     });
     out.results = results.slice(0, keep);
     return out;
   };
+  const WIDEST = Number.POSITIVE_INFINITY;
 
   // Estimate the largest prefix that fits via per-record sizes, then walk
   // down until the exact serialization is within budget (the hint's digits
   // shift the envelope size slightly as `keep` changes).
-  const envelope = serializedBytes(build(0));
+  const envelope = serializedBytes(build(0, WIDEST));
   let keep = 0;
   let used = envelope;
   for (let i = 0; i < fetched; i++) {
@@ -345,12 +391,16 @@ function enforceByteBudget(
     keep = i + 1;
   }
   keep = Math.min(keep, fetched - 1); // over budget => at least one record goes
-  let out = build(keep);
+  let out = build(keep, WIDEST);
   while (keep > 0 && serializedBytes(out) > maxBytes) {
     keep -= 1;
-    out = build(keep);
+    out = build(keep, WIDEST);
   }
-  return out;
+  // The budget that would hold one more row. The widest hint is what was
+  // measured, so the number is never too small once the real, shorter hint
+  // replaces it.
+  const needed = neededResponseBytes(serializedBytes(build(keep + 1, WIDEST)), maxBytes);
+  return build(keep, needed);
 }
 
 export async function handler(

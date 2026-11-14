@@ -962,6 +962,29 @@ Before this change `next_offset` after a cut page was `offset + limit`, which
 skipped the dropped rows, and a cut last page reported `has_more: false` with
 `record_count: 0`.
 
+**The `sn_query` hint gives values you can use.** For example
+
+```text
+Dropped 14/22; continue offset=8 limit=8; retry offset=0 with fields="sys_id,name" or max_response_bytes=31500.
+```
+
+- `continue offset=8 limit=8` is `next_offset` and the number of rows that fit:
+  page on with that `limit` and nothing is dropped again.
+- `retry offset=0 with ...` re-reads the whole page in one response, with fewer
+  fields or a larger budget. `max_response_bytes=31500` is measured from the
+  response itself (the rows plus the envelope's own metadata), rounded up, and
+  is enough to hold at least the next row. When even that would be more than
+  the 1,000,000-byte maximum, the hint says the next row exceeds the maximum
+  and offers only fields and `sn_get`.
+- `fields=...` appears when it helps: the table's short default list for a
+  read of the defaults or of `all`, or your own list without its large fields
+  (for example `script`) when you chose one. It only ever names fields your
+  profile may read, and never a sensitive one. A list with nothing large in it
+  gets the `limit` and the budget instead. `response_format="concise"` is
+  offered to a `detailed` read.
+- When no row fit, there is no `continue` clause and no `limit`: only the
+  retry options and `sn_get`.
+
 ### Unrestricted field selection (`fields=all`, `response_format=detailed`)
 
 Both resolve to the profile's readable set for the table. Where the field

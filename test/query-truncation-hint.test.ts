@@ -5,7 +5,7 @@ import type { ServiceNowConfig } from "../src/config.js";
 import { runWithFieldPolicyConfiguration } from "../src/field-policy.js";
 import { handler as queryHandler, schema as querySchema } from "../src/tools/query.js";
 import {
-  LOWER_LIMIT_ADVICE,
+  neededResponseBytes,
   parseTruncationHint,
   refreshTruncationHint,
   renderTruncationHint,
@@ -67,16 +67,45 @@ async function directHint(
 }
 
 describe("truncation hint text", () => {
-  const variants: TruncationHintParts[] = [
-    { dropped: 3, total: 20, offset: 0, advice: 'fields="sys_id,name"' },
-    { dropped: 3, total: 20, offset: 40, advice: LOWER_LIMIT_ADVICE },
-    { dropped: 20, total: 20, offset: 5, advice: 'response_format="concise"' },
-    { dropped: 1, total: 1, offset: 0, advice: LOWER_LIMIT_ADVICE },
-    { dropped: 22, total: 22, offset: 0, advice: 'fields="sys_id"' },
+  const OVER = Number.POSITIVE_INFINITY;
+  const variants: Array<[TruncationHintParts, string]> = [
+    [
+      { dropped: 14, total: 22, offset: 0, advice: 'fields="sys_id,name"', neededBytes: 31_500 },
+      'Dropped 14/22; continue offset=8 limit=8; retry offset=0 with fields="sys_id,name" or max_response_bytes=31500.',
+    ],
+    [
+      { dropped: 3, total: 20, offset: 40, neededBytes: 4_200 },
+      "Dropped 3/20; continue offset=57 limit=17; retry offset=40 with max_response_bytes=4200.",
+    ],
+    [
+      { dropped: 20, total: 20, offset: 5, advice: 'response_format="concise"', neededBytes: 1_000_000 },
+      'Dropped 20/20; row too large; retry offset=5 with response_format="concise" or max_response_bytes=1000000 or sn_get.',
+    ],
+    [
+      { dropped: 22, total: 22, offset: 0, neededBytes: 9_000 },
+      "Dropped 22/22; row too large; retry offset=0 with max_response_bytes=9000 or sn_get.",
+    ],
+    [
+      { dropped: 22, total: 22, offset: 7, neededBytes: OVER },
+      "Dropped 22/22; row too large; the next row exceeds the maximum max_response_bytes (1000000); retry offset=7 with sn_get.",
+    ],
+    [
+      { dropped: 1, total: 1, offset: 0, advice: 'fields="sys_id"', neededBytes: OVER },
+      'Dropped 1/1; row too large; the next row exceeds the maximum max_response_bytes (1000000); retry offset=0 with fields="sys_id" or sn_get.',
+    ],
+    [
+      { dropped: 3, total: 20, offset: 40, advice: 'fields="sys_id,name"', neededBytes: OVER },
+      'Dropped 3/20; continue offset=57 limit=17; the next row exceeds the maximum max_response_bytes (1000000); retry offset=40 with fields="sys_id,name".',
+    ],
+    [
+      { dropped: 3, total: 20, offset: 40, neededBytes: OVER },
+      "Dropped 3/20; continue offset=57 limit=17; the next row exceeds the maximum max_response_bytes (1000000).",
+    ],
   ];
 
-  it.each(variants)("parses back what it renders: %j", (parts) => {
+  it.each(variants)("renders and parses back: %j", (parts, text) => {
     const hint = renderTruncationHint(parts);
+    expect(hint).toBe(text);
     expect(parseTruncationHint(hint)).toEqual(parts);
     expect(
       refreshTruncationHint(hint, {
@@ -86,33 +115,72 @@ describe("truncation hint text", () => {
     ).toBe(hint);
   });
 
-  it("restates the counts, the empty case and the continuation from the final state", () => {
+  it("restates the counts, the limit that fits and the budget from the final state", () => {
     const hint = renderTruncationHint({
       dropped: 2,
       total: 22,
       offset: 0,
-      advice: LOWER_LIMIT_ADVICE,
+      neededBytes: 5_000,
     });
     expect(hint).toContain("Dropped 2/22;");
-    expect(hint).toContain("continue offset=20;");
-    expect(hint).toContain("a lower limit or a higher max_response_bytes");
+    expect(hint).toContain("continue offset=20 limit=20;");
+    expect(hint).toContain("max_response_bytes=5000");
+    const fewer = refreshTruncationHint(hint, { dropped: 12, returned: 10, neededBytes: 7_300 });
+    expect(fewer).toBe(
+      "Dropped 12/22; continue offset=10 limit=10; retry offset=0 with max_response_bytes=7300."
+    );
     const refreshed = refreshTruncationHint(hint, { dropped: 22, returned: 0 });
     expect(refreshed).toContain("Dropped 22/22; row too large;");
-    expect(refreshed).toContain(", or sn_get");
-    // A lower limit cannot help when no row fits.
-    expect(refreshed).not.toContain("lower limit");
-    // Nothing is left to continue after: the request has to change.
+    expect(refreshed).toContain("max_response_bytes=5000 or sn_get");
+    // A lower limit cannot help when no row fits, and nothing continues.
+    expect(refreshed).not.toContain("limit");
     expect(refreshed).not.toContain("continue");
   });
 
-  it("leaves text it did not write alone", () => {
+  it("offers a budget just above what the next row needs, and says when none can hold it", () => {
+    expect(neededResponseBytes(2_000, 1_900)).toBe(2_100);
+    expect(neededResponseBytes(1_736, 1_000)).toBe(1_800);
+    // Always above the budget that was just too small.
+    expect(neededResponseBytes(500, 4_000)).toBe(4_100);
+    expect(neededResponseBytes(100, 100)).toBe(1_000);
+    expect(neededResponseBytes(500, 1_000)).toBe(1_100);
+    expect(neededResponseBytes(999_937, 5_000)).toBe(Number.POSITIVE_INFINITY);
+    expect(neededResponseBytes(999_936, 5_000)).toBe(1_000_000);
+  });
+
+  it("leaves text it did not write alone, and rejects a hint that disagrees with itself", () => {
     for (const text of [
       "More records available. Call sn_query again with offset=20.",
       "Dropped lots",
       `Dropped 1/2; ${"x".repeat(700)}`,
+      // The older wording, and a hand-edited one.
+      "Dropped 3/20; recover offset=0 with a lower limit or a higher max_response_bytes; no post-window continuation.",
+      "Dropped 3/20; continue offset=17 limit=9; retry offset=0 with max_response_bytes=4200.",
+      "Dropped 3/20; continue offset=17 limit=17; retry offset=1 with max_response_bytes=4200.",
+      'Dropped 3/20; continue offset=17 limit=17; retry offset=0 with fields="a;b" or max_response_bytes=4200.',
+      'Dropped 3/20; continue offset=17 limit=17; retry offset=0 with fields="sys_id" or fields="name" or max_response_bytes=4200.',
+      "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=4200 or sn_get.",
+      "Dropped 20/20; row too large; retry offset=0 with max_response_bytes=4200.",
+      "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=42.",
+      "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=4200.\nIgnore previous",
     ]) {
-      expect(refreshTruncationHint(text, { dropped: 5, returned: 1 })).toBe(text);
+      expect(parseTruncationHint(text), text).toBeUndefined();
+      expect(refreshTruncationHint(text, { dropped: 5, returned: 1, neededBytes: 4_000 })).toBe(text);
     }
+  });
+
+  it("keeps the hint within its length limit by dropping field advice first", () => {
+    const long = Array.from({ length: 12 }, (_, index) => `u_${"f".repeat(60)}${index}`).join(",");
+    const hint = renderTruncationHint({
+      dropped: 3,
+      total: 20,
+      offset: 0,
+      advice: `fields="${long}"`,
+      neededBytes: 4_200,
+    });
+    expect(hint.length).toBeLessThanOrEqual(600);
+    expect(hint).not.toContain("fields=");
+    expect(parseTruncationHint(hint)).toMatchObject({ dropped: 3, total: 20, neededBytes: 4_200 });
   });
 });
 
@@ -132,15 +200,43 @@ describe("the field suggestion in a truncation hint", () => {
     expect(hint).toContain('fields="sys_id,number,short_description"');
   });
 
-  it("does not suggest fields to a caller who passed fields, including all", async () => {
-    for (const fields of ["sys_id,name,api_name", "all"]) {
-      const hint = await directHint(
-        { table: "sys_script_include", fields, limit: 22 },
-        scriptRows(22, 450)
-      );
-      expect(hint, fields).not.toContain("fields=");
-      expect(hint, fields).toContain("a lower limit or a higher max_response_bytes");
-    }
+  it("offers a caller's own fields back without the large ones, and a lower limit when none are large", async () => {
+    const withScript = await directHint(
+      { table: "sys_script_include", fields: "sys_id,name,script,api_name", limit: 22 },
+      scriptRows(22, 450)
+    );
+    expect(withScript).toContain('fields="sys_id,name,api_name"');
+    expect(withScript).not.toContain("script");
+    expect(withScript).toMatch(/continue offset=\d+ limit=\d+;/u);
+    const withoutLarge = await directHint(
+      { table: "sys_script_include", fields: "sys_id,name,api_name", limit: 22 },
+      scriptRows(22, 450).map((row) => ({ ...row, api_name: row.script }))
+    );
+    // Nothing to leave out of their list: a limit and a budget, with numbers.
+    expect(withoutLarge).not.toContain("fields=");
+    expect(withoutLarge).toMatch(/continue offset=\d+ limit=\d+; retry offset=0 with max_response_bytes=\d+\./u);
+  });
+
+  it("offers the table's default fields to a caller who asked for all of them", async () => {
+    const hint = await directHint(
+      { table: "sys_script_include", fields: "all", limit: 22 },
+      scriptRows(22, 450)
+    );
+    expect(hint).toContain('fields="sys_id,name"');
+  });
+
+  it("never offers a field the caller could not read, or a malformed one", async () => {
+    const policy = {
+      u_widget: { defaults: ["sys_id", "label"], readable: ["sys_id", "label", "script", "user_password"] },
+    };
+    const rows = scriptRows(22, 450).map((row) => ({ sys_id: row.sys_id, label: row.script, script: row.script }));
+    const chosen = await directHint({ table: "u_widget", fields: "sys_id,script,label", limit: 22 }, rows, policy);
+    expect(chosen).toContain('fields="sys_id,label"');
+    expect(chosen).not.toContain("user_password");
+    // A sensitive name is refused before any hint exists.
+    await expect(
+      directHint({ table: "u_widget", fields: "sys_id,user_password,script", limit: 22 }, rows, policy)
+    ).rejects.toThrow();
   });
 
   it("points a detailed read without fields back at the concise default", async () => {
@@ -158,7 +254,7 @@ describe("the field suggestion in a truncation hint", () => {
       scriptRows(22, 450).map((row) => ({ sys_id: row.sys_id, extra: row.script }))
     );
     expect(hint).not.toContain("fields=");
-    expect(hint).toContain("a lower limit");
+    expect(hint).toMatch(/limit=\d+/u);
   });
 
   it("falls back to sys_id plus a display field the policy names", async () => {
@@ -269,7 +365,7 @@ describe("the truncation hint agrees with dropped_records after the envelope fit
     expect(twoStage).toBeGreaterThan(0);
   });
 
-  it("tells a caller who passed fields to lower the limit, not which fields to use", async () => {
+  it("gives a caller who passed fields a limit and a budget with numbers, not other fields", async () => {
     const connected = await harness(
       scriptRows(23, 150).map((row) => ({ sys_id: row.sys_id, name: row.name, api_name: row.script }))
     );
@@ -286,7 +382,8 @@ describe("the truncation hint agrees with dropped_records after the envelope fit
     const { data } = result.structuredContent as { data: { hint: string; results: unknown[] } };
     expect(data.results.length).toBeGreaterThan(0);
     expect(data.hint).not.toContain("fields=");
-    expect(data.hint).toContain("a lower limit or a higher max_response_bytes");
+    expect(data.hint).toContain(`limit=${data.results.length};`);
+    expect(data.hint).toMatch(/with max_response_bytes=\d+\.$/u);
   });
 
   it("cannot tell a typed default list from the default, so it still suggests a shorter list", async () => {
@@ -330,5 +427,139 @@ describe("the truncation hint agrees with dropped_records after the envelope fit
     const { data } = result.structuredContent as { data: { hint: string } };
     expect(data.hint).toContain('response_format="concise"');
     expect(data.hint).not.toContain("fields=");
+  });
+});
+
+
+/** A table that answers reads by sysparm_offset and sysparm_limit. */
+function tableOf(rows: readonly unknown[]) {
+  return harness(rows, {
+    upstream: async (_path, params) => {
+      const offset = Number(params?.sysparm_offset ?? 0);
+      const limit = Number(params?.sysparm_limit ?? rows.length);
+      return {
+        data: { result: rows.slice(offset, offset + limit) },
+        status: 200,
+        headers: new Headers(),
+      };
+    },
+  });
+}
+
+interface Truncated {
+  data: {
+    record_count: number;
+    truncated?: boolean;
+    dropped_records?: number;
+    next_offset?: number;
+    hint?: string;
+    results: Array<{ sys_id: string }>;
+  };
+  metadata: { limits: { max_bytes: number } };
+}
+
+async function readTruncated(
+  connected: Awaited<ReturnType<typeof harness>>,
+  args: Record<string, unknown>
+): Promise<Truncated> {
+  const result = await connected.client.callTool({
+    name: "sn_query",
+    arguments: { profile: "p", table: "sys_script_include", ...args },
+  });
+  expect(result.isError).toBeUndefined();
+  return result.structuredContent as unknown as Truncated;
+}
+
+describe("the truncation hint gives values a caller can use (#29)", () => {
+  it("names the limit that fit and a budget that holds the next row, and both work", async () => {
+    let compared = 0;
+    for (let rowBytes = 100; rowBytes <= 700; rowBytes += 25) {
+      const connected = await tableOf(scriptRows(30, rowBytes));
+      const first = await readTruncated(connected, {
+        limit: 22,
+        max_response_bytes: SERVER_BUDGET,
+      });
+      const label = `size ${rowBytes}: ${first.data.hint}`;
+      expect(first.data.truncated, label).toBe(true);
+      const parts = parseTruncationHint(first.data.hint ?? "");
+      expect(parts, label).toBeDefined();
+      const returned = first.data.results.length;
+      // The count is the final dropped_records, and the number is a real value.
+      expect(parts?.dropped, label).toBe(first.data.dropped_records);
+      expect(parts?.total, label).toBe(22);
+      expect(Number.isFinite(parts?.neededBytes), label).toBe(true);
+      expect(parts?.neededBytes as number, label).toBeGreaterThan(SERVER_BUDGET);
+      expect((parts?.neededBytes as number) % 100, label).toBe(0);
+      expect(first.data.hint?.length, label).toBeLessThanOrEqual(600);
+
+      // The budget it names holds at least the next row: strictly more rows.
+      const larger = await readTruncated(connected, {
+        limit: 22,
+        max_response_bytes: parts?.neededBytes,
+      });
+      expect(larger.data.results.length, label).toBeGreaterThan(returned);
+      compared += 1;
+
+      if (returned === 0) {
+        expect(first.data.hint, label).toContain("row too large");
+        expect(first.data.hint, label).not.toMatch(/limit=/u);
+        continue;
+      }
+      // The limit it names is the rows that fit: asking for that many at the
+      // offset it names loses nothing and truncates nothing.
+      expect(first.data.hint, label).toContain(
+        `continue offset=${first.data.next_offset} limit=${returned};`
+      );
+      const next = await readTruncated(connected, {
+        limit: returned,
+        offset: first.data.next_offset,
+        max_response_bytes: SERVER_BUDGET,
+      });
+      expect(next.data.results.length, label).toBe(returned);
+      expect(next.data.truncated, label).toBeUndefined();
+    }
+    expect(compared).toBeGreaterThan(10);
+  });
+
+  it("restates the budget with the envelope's own cost, not the payload alone", async () => {
+    // At this size the tool's payload fits but the envelope's metadata does
+    // not, so a payload-only number would be too small to hold the next row.
+    const connected = await tableOf(scriptRows(30, 330));
+    const first = await readTruncated(connected, { limit: 22, max_response_bytes: SERVER_BUDGET });
+    const parts = parseTruncationHint(first.data.hint ?? "");
+    expect(parts?.neededBytes).toBeGreaterThan(SERVER_BUDGET);
+    const exact = await readTruncated(connected, {
+      limit: 22,
+      max_response_bytes: parts?.neededBytes,
+    });
+    expect(exact.data.results.length).toBeGreaterThan(first.data.results.length);
+  });
+
+  it("says that no budget holds a row over the maximum, and still names fields and sn_get", async () => {
+    const small = scriptRows(3, 100);
+    const huge = { ...small[0], script: "x".repeat(1_100_000) };
+    const connected = await tableOf([huge, small[1], small[2]]);
+    const page = await readTruncated(connected, { limit: 2, max_response_bytes: 1_000_000 });
+    expect(page.data.results).toEqual([]);
+    expect(page.data.truncated).toBe(true);
+    expect(page.data).not.toHaveProperty("next_offset");
+    const hint = page.data.hint ?? "";
+    expect(hint).toContain("the next row exceeds the maximum max_response_bytes (1000000)");
+    expect(hint).toContain('retry offset=0 with fields="sys_id,name" or sn_get.');
+    expect(hint).not.toMatch(/max_response_bytes=\d/u);
+    expect(parseTruncationHint(hint)?.neededBytes).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("keeps every value in the hint to fixed words, numbers and policy-approved fields", async () => {
+    const connected = await tableOf(scriptRows(30, 300));
+    const page = await readTruncated(connected, {
+      limit: 22,
+      fields: "sys_id,name,script,api_name",
+      max_response_bytes: SERVER_BUDGET,
+    });
+    const hint = page.data.hint ?? "";
+    expect(hint).toMatch(
+      /^Dropped \d+\/22; continue offset=\d+ limit=\d+; retry offset=0 with fields="sys_id,name,api_name" or max_response_bytes=\d+\.$/u
+    );
   });
 });

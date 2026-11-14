@@ -14,7 +14,13 @@ import {
   MAX_RESPONSE_BYTES_MIN,
 } from "../utils.js";
 import { canonicalHttpsOrigin } from "./markdown.js";
-import { refreshTruncationHint, restateContinuationHint } from "./truncation-hint.js";
+import {
+  neededResponseBytes,
+  parseTruncationHint,
+  refreshTruncationHint,
+  restateContinuationHint,
+  type TruncationHintParts,
+} from "./truncation-hint.js";
 import { withResolvedProfileOutput } from "./tool-module.js";
 
 export const DEFAULT_RESULT_RECORD_LIMIT = 1_000;
@@ -728,11 +734,32 @@ function synchronizeRecordCount(data: unknown, count: number): void {
   }
 }
 
+/**
+ * The truncation hint a tool wrote, if `data` carries one this module's
+ * parser accepts, looked for where {@link synchronizePagingFields} restates it.
+ */
+function truncationHintParts(data: unknown, depth = 0): TruncationHintParts | undefined {
+  if (typeof data !== "object" || data === null || Array.isArray(data) || depth > 3) {
+    return undefined;
+  }
+  const record = data as Record<string, unknown>;
+  if (typeof record.hint === "string" && Object.hasOwn(record, "dropped_records")) {
+    const parts = parseTruncationHint(record.hint);
+    if (parts !== undefined) return parts;
+  }
+  for (const wrapper of ["meta", "request", "result"] as const) {
+    const parts = truncationHintParts(record[wrapper], depth + 1);
+    if (parts !== undefined) return parts;
+  }
+  return undefined;
+}
+
 function synchronizePagingFields(
   data: unknown,
   pagination: MutableMetadata["pagination"],
   truncation: MutableMetadata["truncation"],
-  depth = 0
+  depth = 0,
+  neededBytes?: number
 ): void {
   if (
     pagination.mode !== "offset" ||
@@ -787,6 +814,7 @@ function synchronizePagingFields(
           target.hint = refreshTruncationHint(target.hint, {
             dropped: truncation.dropped_records,
             returned: pagination.returned,
+            ...(neededBytes === undefined ? {} : { neededBytes }),
           });
         }
       }
@@ -797,7 +825,13 @@ function synchronizePagingFields(
     synchronizeObject(record.meta as Record<string, unknown>);
   }
   for (const wrapper of ["request", "result"] as const) {
-    synchronizePagingFields(record[wrapper], pagination, truncation, depth + 1);
+    synchronizePagingFields(
+      record[wrapper],
+      pagination,
+      truncation,
+      depth + 1,
+      neededBytes
+    );
   }
 }
 
@@ -1170,14 +1204,36 @@ function finalizeSummaryResult(
   ) as MutableEnvelope;
   let candidate = candidateResult(result, sourceEnvelope);
   const maximum = sourceEnvelope.metadata.limits.max_bytes;
-  if (resultBytes(candidate) <= maximum) return candidate;
+  // A tool that dropped rows for size wrote the budget that would hold the
+  // next row from what it could measure, the payload alone. Only here is the
+  // rest of the result known.
+  const toolHint = truncationHintParts(sourceEnvelope.data);
+  if (resultBytes(candidate) <= maximum) {
+    if (toolHint === undefined || !Number.isFinite(toolHint.neededBytes)) return candidate;
+    const overhead = resultBytes(candidate) - Buffer.byteLength(JSON.stringify(sourceEnvelope.data), "utf8");
+    const restated = JSON.parse(JSON.stringify(sourceEnvelope)) as MutableEnvelope;
+    synchronizePagingFields(
+      restated.data,
+      restated.metadata.pagination,
+      restated.metadata.truncation,
+      0,
+      neededResponseBytes(toolHint.neededBytes + overhead, maximum)
+    );
+    const restatedCandidate = candidateResult(result, restated);
+    // The larger number can add a digit; if that tips the result over its
+    // limit, fit it like any other result that is too big.
+    if (resultBytes(restatedCandidate) <= maximum) return restatedCandidate;
+  }
 
   const sourceRecords = collectionArray(sourceEnvelope.data);
   let envelope = sourceEnvelope;
   if (sourceRecords) {
     const originalRecordCount = sourceRecords.length;
     const priorDropped = sourceEnvelope.metadata.truncation.dropped_records ?? 0;
-    const envelopeForCount = (count: number): MutableEnvelope => {
+    // While fitting, a hint carries the widest form of its byte budget (the
+    // "exceeds the maximum" clause), which is never shorter than a number, so
+    // a result that fits that way still fits with the real number.
+    const envelopeForCount = (count: number, neededBytes?: number): MutableEnvelope => {
       const probe = JSON.parse(JSON.stringify(sourceEnvelope)) as MutableEnvelope;
       const probeRecords = collectionArray(probe.data);
       if (!probeRecords) throw new TypeError("collection envelope lost its records");
@@ -1204,16 +1260,19 @@ function finalizeSummaryResult(
       synchronizePagingFields(
         probe.data,
         probe.metadata.pagination,
-        probe.metadata.truncation
+        probe.metadata.truncation,
+        0,
+        neededBytes
       );
       return probe;
     };
+    const widest = Number.POSITIVE_INFINITY;
     let low = 0;
     let high = originalRecordCount;
     let best = -1;
     while (low <= high) {
       const midpoint = Math.floor((low + high) / 2);
-      const probe = candidateResult(result, envelopeForCount(midpoint));
+      const probe = candidateResult(result, envelopeForCount(midpoint, widest));
       if (resultBytes(probe) <= maximum) {
         best = midpoint;
         low = midpoint + 1;
@@ -1226,9 +1285,17 @@ function finalizeSummaryResult(
     // can retry this exact window with a narrower projection/larger budget,
     // while next_offset (when present) remains the separately authoritative
     // post-window resume point.
-    envelope = envelopeForCount(Math.max(best, 0));
+    const kept = Math.max(best, 0);
+    envelope = envelopeForCount(kept, widest);
     candidate = candidateResult(result, envelope);
-    return resultBytes(candidate) <= maximum ? candidate : undefined;
+    if (resultBytes(candidate) > maximum) return undefined;
+    if (toolHint === undefined || kept >= originalRecordCount) return candidate;
+    // The budget that would hold one more row is measured here, with the
+    // envelope's own cost in it, not guessed.
+    const withNextRow = candidateResult(result, envelopeForCount(kept + 1, widest));
+    const needed = neededResponseBytes(resultBytes(withNextRow), maximum);
+    const restated = candidateResult(result, envelopeForCount(kept, needed));
+    return resultBytes(restated) <= maximum ? restated : candidate;
   }
 
   while (resultBytes(candidate) > maximum && truncateLongestString(envelope.data)) {
