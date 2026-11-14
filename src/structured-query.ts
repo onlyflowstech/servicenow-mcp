@@ -236,9 +236,52 @@ export const STRUCTURED_FILTER_ERROR_MESSAGE =
   `Combine conditions with ${GROUP_EXAMPLE}; groups nest at most ` +
   `${MAX_STRUCTURED_QUERY_NESTING} levels deep. A list is not accepted here.`;
 
-export const structuredQueryFilterSchema: z.ZodType<StructuredQueryFilter> = z.union(
-  [structuredLeafConditionSchema, structuredQueryGroupLevelThreeSchema],
-  { error: STRUCTURED_FILTER_ERROR_MESSAGE }
+/** The same, for a tool that also reads a list as an implicit AND. */
+export const STRUCTURED_FILTER_LIST_ERROR_MESSAGE =
+  "filter must be one condition or group object (or a list, treated as AND). " +
+  `Example: ${FILTER_EXAMPLE}. Combine with ${GROUP_EXAMPLE}; groups nest at ` +
+  `most ${MAX_STRUCTURED_QUERY_NESTING} levels deep and a list of two or more ` +
+  "counts as one level.";
+
+export const STRUCTURED_FILTER_EMPTY_LIST_MESSAGE =
+  "filter list must hold at least one condition. " +
+  `Example: [${FILTER_EXAMPLE}].`;
+
+function structuredQueryFilterUnion(message: string): z.ZodType<StructuredQueryFilter> {
+  return z.union(
+    [structuredLeafConditionSchema, structuredQueryGroupLevelThreeSchema],
+    { error: message }
+  );
+}
+
+export const structuredQueryFilterSchema: z.ZodType<StructuredQueryFilter> =
+  structuredQueryFilterUnion(STRUCTURED_FILTER_ERROR_MESSAGE);
+
+/**
+ * Read a list as an implicit AND: one element is that element, two or more
+ * become a top-level `and` group, which takes one of the
+ * {@link MAX_STRUCTURED_QUERY_NESTING} group levels. The static group schema
+ * then enforces the depth limit on the wrapped tree like any other, so a list
+ * that would need one level too many fails with the filter message. An empty
+ * list has no meaning and gets its own message. Anything that is not a list
+ * passes through untouched.
+ */
+const structuredQueryListFilterSchema = z.preprocess(
+  (value: unknown, context) => {
+    if (!Array.isArray(value)) return value;
+    if (value.length === 0) {
+      context.addIssue({
+        code: "custom",
+        message: STRUCTURED_FILTER_EMPTY_LIST_MESSAGE,
+        input: value,
+        continue: false,
+      });
+      return value;
+    }
+    if (value.length === 1) return value[0];
+    return { type: "group", operator: "and", conditions: value };
+  },
+  structuredQueryFilterUnion(STRUCTURED_FILTER_LIST_ERROR_MESSAGE)
 );
 
 export const structuredQueryOrderSchema = z
@@ -248,22 +291,24 @@ export const structuredQueryOrderSchema = z
   })
   .strict();
 
-const structuredQueryObjectSchema = z
-  .object({
-    filter: structuredQueryFilterSchema.optional(),
-    order_by: boundedArray(structuredQueryOrderSchema, MAX_STRUCTURED_QUERY_ORDER_COUNT, {
-      min: 1,
-    }).optional(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.filter === undefined && value.order_by === undefined) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "structured_query requires filter or order_by",
-      });
-    }
-  });
+function structuredQueryObjectSchemaFor(filter: z.ZodType<StructuredQueryFilter>) {
+  return z
+    .object({
+      filter: filter.optional(),
+      order_by: boundedArray(structuredQueryOrderSchema, MAX_STRUCTURED_QUERY_ORDER_COUNT, {
+        min: 1,
+      }).optional(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (value.filter === undefined && value.order_by === undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "structured_query requires filter or order_by",
+        });
+      }
+    });
+}
 
 /** Fixed text; it never includes any part of the rejected value. */
 export const STRUCTURED_QUERY_STRUCTURAL_LIMIT_MESSAGE =
@@ -280,9 +325,26 @@ export const STRUCTURED_QUERY_STRUCTURAL_LIMIT_MESSAGE =
  * bounds rejects a query the compiler would accept.
  */
 export const structuredQuerySchema = withStructuralCheck(
-  structuredQueryObjectSchema,
+  structuredQueryObjectSchemaFor(structuredQueryFilterSchema),
   (value) =>
     structuredQueryShapeWithinLimits(value)
+      ? undefined
+      : STRUCTURED_QUERY_STRUCTURAL_LIMIT_MESSAGE
+);
+
+/**
+ * The same query for a tool that only reads: `filter` may also be a list of
+ * conditions, read as an implicit AND. Write tools keep
+ * {@link structuredQuerySchema}, whose filter is one object, so a mutation
+ * never selects records through a list. The structural pass counts the list's
+ * elements as conditions, so its bounds hold for the elements as well.
+ */
+export const structuredQueryReadSchema = withStructuralCheck(
+  structuredQueryObjectSchemaFor(
+    structuredQueryListFilterSchema as unknown as z.ZodType<StructuredQueryFilter>
+  ),
+  (value) =>
+    structuredQueryShapeWithinLimits(value, { allowListFilter: true })
       ? undefined
       : STRUCTURED_QUERY_STRUCTURAL_LIMIT_MESSAGE
 );
@@ -300,9 +362,13 @@ export const structuredQuerySchema = withStructuralCheck(
  * {@link MAX_STRUCTURED_QUERY_GROUPS} group conditions. A condition is a value
  * in a condition position: the `filter` itself, or an element of a group's
  * `conditions`. It is a group when it is an object whose `type` is "group",
- * and a leaf otherwise.
+ * and a leaf otherwise. With `allowListFilter`, a `filter` that is a list is
+ * not itself a condition; its elements are.
  */
-export function structuredQueryShapeWithinLimits(value: unknown): boolean {
+export function structuredQueryShapeWithinLimits(
+  value: unknown,
+  options: { readonly allowListFilter?: boolean } = {}
+): boolean {
   const values: unknown[] = [value];
   const depths: number[] = [0];
   const roles: StructuralRole[] = [StructuralRole.Other];
@@ -322,7 +388,14 @@ export function structuredQueryShapeWithinLimits(value: unknown): boolean {
         !Array.isArray(node) &&
         Object.hasOwn(node, "type") &&
         (node as { type?: unknown }).type === "group";
-      if (role === StructuralRole.Condition) {
+      // With a list accepted, the `filter` itself may be a list of conditions:
+      // it is not a condition, its elements are.
+      const isFilterList =
+        options.allowListFilter === true &&
+        depth === 1 &&
+        role === StructuralRole.Condition &&
+        Array.isArray(node);
+      if (role === StructuralRole.Condition && !isFilterList) {
         if (isGroup ? ++groups > MAX_STRUCTURED_QUERY_GROUPS : ++leaves > MAX_STRUCTURED_QUERY_LEAVES) {
           return false;
         }
@@ -331,7 +404,9 @@ export function structuredQueryShapeWithinLimits(value: unknown): boolean {
       if (Array.isArray(node)) {
         if (node.length > MAX_SNAPSHOT_ARRAY_LENGTH) return false;
         const childRole =
-          role === StructuralRole.Conditions ? StructuralRole.Condition : StructuralRole.Other;
+          role === StructuralRole.Conditions || isFilterList
+            ? StructuralRole.Condition
+            : StructuralRole.Other;
         for (let index = 0; index < node.length; index += 1) {
           values.push(node[index]);
           depths.push(depth + 1);

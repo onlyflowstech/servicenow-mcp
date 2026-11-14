@@ -20,7 +20,7 @@ import {
 import {
   compileStructuredQuery,
   StructuredQueryError,
-  structuredQuerySchema,
+  structuredQueryReadSchema,
 } from "../structured-query.js";
 import { resolveToolTableAccess } from "../tool-table-access.js";
 import {
@@ -76,7 +76,7 @@ function compatibleInputSchema() {
           "only for an explicit bounded sn_query/table policy rule. Prefer " +
           "structured_query."
       ),
-    structured_query: structuredQuerySchema
+    structured_query: structuredQueryReadSchema
       .optional()
       .describe(
         "Policy-authorized structured filters and ordering. Use instead of " +
