@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`sn_query` reads `structured_query.filter` given as a list as an implicit
+  AND (#17).** `filter: [c1, c2]` means `{type: "group", operator: "and",
+  conditions: [c1, c2]}`, and a one-element list means that element. The
+  existing limit of 3 nested group levels is unchanged: a list of two or more
+  takes one level, so a list that holds a 3-level group is rejected, and the
+  error says so. An empty list is rejected with its own message. A list is read
+  this way only as the top-level `filter` and only by `sn_query`: `sn_batch`
+  write filters stay one object, so a mutation never selects records through a
+  list. `tools/list` is unchanged.
+
 ### Fixed
 
 - **`sn_query` no longer stops paging after page 2 (#1).** The tool sends
@@ -33,6 +45,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps the tool list it was saved with, so run `servicenow-mcp-setup grant
   --profile <name> --read <code table>` again to add the default tools, or add
   just this one with `--tools sn_codesearch`. Neither removes a tool.
+- **A truncation hint on `sn_query` no longer disagrees with `dropped_records`,
+  and suggests fields the table has (#20).** A read cut to fit
+  `max_response_bytes` is trimmed in two steps, and the second could drop more
+  rows than the hint's "Dropped n/m" said. The hint is now restated from the
+  final result, so its count, its empty-result advice and its continuation
+  match `dropped_records`, `has_more` and `next_offset`. The suggested
+  projection was always `fields="sys_id,number"`, wrong for any table without
+  a `number` column. It is now the table's default fields without large ones
+  such as `script`, at most three; if that leaves only `sys_id`, `sys_id` and a
+  display field the profile's field policy names, else `sys_id` alone. A call
+  that passed its own `fields` is told to lower `limit` or raise
+  `max_response_bytes` instead of being given a field list.
+- **A rejected `structured_query.filter` now says what is accepted (#18).**
+  Every mistake used to read "Invalid input at structured_query.filter". The
+  message now says the filter is one condition or group object, gives a working
+  example, shows how to combine conditions with a group, and states the limit
+  of 3 nested group levels. It adds nothing to `tools/list`.
 
 ### Changed
 
