@@ -326,6 +326,22 @@ ACLs on the cached rows are not evaluated on the hit. Do not add it, and review 
 table you do add against the same two questions: are its rows ACL-restricted
 per user, and would a stale or cross-identity answer be a disclosure?
 
+The five code tables in the default list (`sys_script`, `sys_script_include`,
+`sys_ui_script`, `sys_script_client`, `sys_ws_operation`) hold script bodies,
+and scripts can contain hard-coded credentials. A cached entry keeps the whole
+response of a read, so it holds the full `script` or `operation_script` of
+every row read, not the 200-character snippet `sn_codesearch` shows. Entries
+live only in process memory, partitioned by instance and credential identity,
+and are never written to disk or to logs. They are kept for up to the cache TTL
+(24 hours by default), within 32 MiB per credential and 128 MiB overall. They
+differ from `sys_properties` in that no cross-identity hit is possible, since
+the partition is the credential, and the payloads are large enough to be worth
+keeping. A script edit moves the table's watermark and refreshes the entry, but
+a tightened ServiceNow ACL does not, so it follows the restart-or-rotate rule
+above. To keep script bodies out of the cache, set `SN_METADATA_CACHE_TABLES`
+(or `metadataCache.tables` on a file-backed profile) to the list without them:
+`sys_glide_object,sys_dictionary,sys_db_object,sys_app,sys_plugins,sys_metadata*,sys_flow*`.
+
 For a named profile, keep the secret out of JSON and reference the same
 canonical runtime secret:
 

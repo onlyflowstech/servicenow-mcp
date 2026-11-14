@@ -692,7 +692,7 @@ in this section is needed to use this server.
 
 | Tool | Description |
 |------|-------------|
-| `sn_query` | Query an approved table with structured filters, field selection, pagination, and sorting; bounded raw reads require an explicit policy rule |
+| `sn_query` | Query an approved table with structured filters, field selection, pagination, and sorting; bounded raw reads require an explicit policy rule. Paging runs on `has_more` and `next_offset`, which can end early if ServiceNow ACLs strip rows from a page; cross-check with `sn_aggregate` `COUNT` |
 | `sn_get` | Get a single record by sys_id from an approved table |
 | `sn_create` | Create a record on any table granted for writes, using only field-policy-approved writable fields, including the journal fields `comments` and `work_notes`; `incident` additionally requires a bounded `short_description` |
 | `sn_update` | Update one record selected by exact `sys_id` on any table granted for writes, using only field-policy-approved writable fields; `comments` and `work_notes` append a journal entry |
@@ -862,7 +862,11 @@ watermark cannot see shows there after at most one TTL. A cold `sn_get` of a
 code-table record costs two requests (the watermark, then the record), and
 `sn_batch` and `sn_aggregate` reads are never cached. Memory is bounded: a
 response over 512 KiB is not cached, one credential scope keeps at most 32 MiB
-and the whole cache 128 MiB, evicting the least recently used first.
+and the whole cache 128 MiB, evicting the least recently used first. Cached
+code-table entries hold full script bodies, which can contain hard-coded
+credentials, in process memory (never on disk) for up to the TTL; to keep them
+out, set `metadataCache.tables` or `SN_METADATA_CACHE_TABLES` to
+`sys_glide_object,sys_dictionary,sys_db_object,sys_app,sys_plugins,sys_metadata*,sys_flow*`.
 
 **Freshness is checked against the instance, in every auth mode.** Before each
 fetch the cache reads a watermark in one small request: the table's row count

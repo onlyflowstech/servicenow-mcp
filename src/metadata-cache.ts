@@ -67,7 +67,13 @@ export const DEFAULT_METADATA_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
  *   search or page is among the heaviest reads this server makes. Editing a
  *   script moves sys_updated_on, which the watermark sees, so a cached search
  *   never outlives a save. They are not covered by sys_metadata*: patterns
- *   match a table's name, not its place in the table hierarchy.
+ *   match a table's name, not its place in the table hierarchy. Unlike
+ *   sys_properties, these can be cached: the scope is the credential, so no
+ *   cross-identity hit is possible, and the payloads are large enough to be
+ *   worth keeping. The bodies may hold hard-coded secrets, though, and an
+ *   entry keeps the whole response in memory; an operator who does not want
+ *   that sets SN_METADATA_CACHE_TABLES (or `metadataCache.tables`) without
+ *   them.
  *
  * sys_properties is deliberately absent: its rows are ACL-restricted per user
  * and routinely hold integration secrets in `value`, and the only reads of it

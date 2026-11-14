@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **`total` is no longer returned by `sn_query`** (the output schema already
   made it optional); counting would need a COUNT query on every call, which
   `sysparm_no_count` exists to avoid. Page on `has_more` and `next_offset`, or
-  call `sn_aggregate` with `COUNT` when the table size matters.
+  call `sn_aggregate` with `COUNT` when the table size matters. If ServiceNow
+  ACLs strip rows from a page, `has_more` can read false early; cross-check
+  with `sn_aggregate` `COUNT`.
 - **A read grant now allows code search (#2).** `servicenow-mcp-setup grant
   --read <table>` binds `sn_codesearch` along with `sn_query`, `sn_get`,
   `sn_aggregate` and `sn_schema`, so `--read sys_script_include` is enough to
@@ -49,7 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   32 MiB and the whole cache 128 MiB (least recently used out first), and
   expired entries are dropped as new ones are stored. A no-table
   `sn_codesearch` reads its five tables concurrently, within the client's
-  existing request limit.
+  existing request limit. Cached code-table entries hold full script bodies,
+  which can contain hard-coded credentials, in process memory (never on disk)
+  for up to the TTL; to keep them out, set `metadataCache.tables` or
+  `SN_METADATA_CACHE_TABLES` to
+  `sys_glide_object,sys_dictionary,sys_db_object,sys_app,sys_plugins,sys_metadata*,sys_flow*`.
 
 ### Security
 
