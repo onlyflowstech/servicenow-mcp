@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this way only as the top-level `filter` and only by `sn_query`: `sn_batch`
   write filters stay one object, so a mutation never selects records through a
   list. `tools/list` is unchanged.
+- **`structured_query.filter` shows a working example in `tools/list` (#19).**
+  `sn_query`'s `filter` says a list is read as AND and shows one, and the
+  `sn_query` description gains a one-line example with the OR group form.
+  `sn_batch`'s `filter` has its own text: one condition or group, and a list is
+  not accepted, because a mutation never selects records through a list. Costs
+  602 characters in `tools/list` (`sn_query` +459, `sn_batch` +143).
+- **Responses say whether the metadata cache was used and where the time went
+  (#21).** `structuredContent.metadata` gains two optional fields. `cache` is
+  `hit`, `miss`, `bypass` (a `force_recache` refresh) or `mixed` (several
+  cacheable reads with different outcomes, such as an `sn_codesearch` with no
+  `table`), and is absent when the call read no cacheable table. `timing` is
+  `{ total_ms, upstream_ms, watermark_ms }` in whole milliseconds, wall-clock:
+  `upstream_ms` and `watermark_ms` are the time at least one request of that
+  kind was in flight, so overlapping requests count once. They are added only
+  when they fit the result's byte limit, so they never cost a record. Every
+  tool's `outputSchema` grows by 403 characters (9,672 in `tools/list`). Cache
+  behaviour is unchanged.
 
 ### Fixed
 
