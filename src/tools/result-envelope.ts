@@ -13,6 +13,7 @@ import {
   MAX_RESPONSE_BYTES_MIN,
 } from "../utils.js";
 import { canonicalHttpsOrigin } from "./markdown.js";
+import { refreshTruncationHint } from "./truncation-hint.js";
 import { withResolvedProfileOutput } from "./tool-module.js";
 
 export const DEFAULT_RESULT_RECORD_LIMIT = 1_000;
@@ -730,6 +731,18 @@ function synchronizePagingFields(
         delete target.dropped_records;
       } else {
         target.dropped_records = truncation.dropped_records;
+        // A tool that explains the drop in a hint wrote it before this fit
+        // dropped more rows. Restate it from the final counts and
+        // continuation so the text agrees with the fields beside it.
+        if (typeof target.hint === "string") {
+          target.hint = refreshTruncationHint(target.hint, {
+            dropped: truncation.dropped_records,
+            returned: pagination.returned,
+            ...(pagination.has_more && pagination.next_offset !== undefined
+              ? { resume: { offset: pagination.next_offset, limit: pagination.limit } }
+              : {}),
+          });
+        }
       }
     }
   };

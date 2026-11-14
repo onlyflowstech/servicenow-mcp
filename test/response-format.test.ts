@@ -211,7 +211,9 @@ describe("sn_query max_response_bytes truncation", () => {
     expect(payload.hint).toContain("offset=15");
     expect(payload.hint).toContain("limit=10");
     expect(payload.hint).toContain("recover offset=5");
-    expect(payload.hint).toContain('fields="');
+    // The caller chose the fields, so the hint does not pick others for them.
+    expect(payload.hint).not.toContain('fields="');
+    expect(payload.hint).toContain("a lower limit");
     expect(payload.hint).toContain("max_response_bytes");
     expect(payload.next_offset).toBe(15);
     expect(payload.has_more).toBe(true);
@@ -239,7 +241,23 @@ describe("sn_query max_response_bytes truncation", () => {
     expect(parseText(result).hint).toContain('response_format="concise"');
   });
 
-  it("suggests a narrower fields list when already concise", async () => {
+  it("suggests fields that exist on the table when none were passed", async () => {
+    const { client } = metaClient(
+      Array.from({ length: 10 }, (_, i) => ({
+        sys_id: `sys_${String(i).padStart(3, "0")}`,
+        short_description: "x".repeat(300),
+      }))
+    );
+    const result = await queryHandler(
+      querySchema.parse({ table: "incident", limit: 10, max_response_bytes: 1000 }),
+      client,
+      config
+    );
+    const payload = parseText(result);
+    expect(payload.hint).toContain('fields="sys_id,number,short_description"');
+  });
+
+  it("does not suggest fields the caller already passed", async () => {
     const { client } = metaClient(bigRecords());
     const result = await queryHandler(
       querySchema.parse({ table: "incident", fields: "sys_id,description", limit: 10, max_response_bytes: 1000 }),
@@ -247,7 +265,8 @@ describe("sn_query max_response_bytes truncation", () => {
       config
     );
     const payload = parseText(result);
-    expect(payload.hint).toContain('fields="sys_id,number"');
+    expect(payload.hint).not.toContain("fields=");
+    expect(payload.hint).toContain("a lower limit or a higher max_response_bytes");
   });
 
   it("drops everything when even one record cannot fit", async () => {
@@ -299,7 +318,9 @@ describe("sn_query max_response_bytes truncation", () => {
     expect(payload.hint).toContain("resume offset=5");
     expect(payload.hint).toContain("sn_get");
     expect(payload.hint).toContain("max_response_bytes");
-    expect(payload.hint).toContain('fields="');
+    // A lower limit cannot help when a single row is over budget.
+    expect(payload.hint).not.toContain("lower limit");
+    expect(payload.hint).not.toContain('fields="');
   });
 
   it("leaves responses under the default budget byte-identical (no guard keys)", async () => {

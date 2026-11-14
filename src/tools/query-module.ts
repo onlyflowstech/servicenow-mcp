@@ -37,6 +37,10 @@ import {
   productionToolOutputSchemas,
 } from "./result-envelope.js";
 import {
+  LOWER_LIMIT_ADVICE,
+  renderTruncationHint,
+} from "./truncation-hint.js";
+import {
   defineServiceNowToolModule,
   withRequiredProfile,
   type ToolDefinition,
@@ -172,6 +176,104 @@ function stableOrderQuery(
   return tokens.join("^");
 }
 
+/** Most fields a recovery hint suggests. */
+const SUGGESTED_FIELD_LIMIT = 3;
+const FIELD_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
+/** Readable fields that identify a record to a person, in order of preference. */
+const DISPLAY_FIELDS: readonly string[] = ["number", "name", "short_description", "title"];
+/**
+ * Columns that hold a record's bulk (code, markup, free text), which a slimmer
+ * projection leaves out. short_description is short, so it is not in the set.
+ */
+const LARGE_FIELDS: ReadonlySet<string> = new Set([
+  "script",
+  "condition",
+  "description",
+  "text",
+  "body",
+  "payload",
+  "comments",
+  "work_notes",
+  "close_notes",
+  "html",
+  "xml",
+]);
+
+function isLargeField(field: string): boolean {
+  return LARGE_FIELDS.has(field) || /_(?:script|html|xml|json|payload)$/u.test(field);
+}
+
+/**
+ * A short field list that exists for `table`, for a recovery hint: the table's
+ * configured default fields without the large ones, at most
+ * {@link SUGGESTED_FIELD_LIMIT}. When that leaves nothing but sys_id, sys_id
+ * plus the table's display field if its readable fields name one, else sys_id
+ * alone. Every name comes from the field policy, never from the caller.
+ * Returns undefined when the suggestion would not narrow what was requested
+ * or the policy cannot be resolved.
+ */
+function suggestedFields(table: string): readonly string[] | undefined {
+  try {
+    const defaults = resolveReadableFields(table);
+    if (isAllFieldSelection(defaults)) return undefined;
+    const usable = (field: string) => FIELD_NAME.test(field);
+    let suggestion = defaults
+      .filter((field) => usable(field) && !isLargeField(field))
+      .slice(0, SUGGESTED_FIELD_LIMIT);
+    if (!suggestion.some((field) => field !== "sys_id")) {
+      const readable = resolveReadableFields(table, { fields: "all" });
+      const allows = (field: string) =>
+        isAllFieldSelection(readable) ? false : readable.includes(field);
+      const display = DISPLAY_FIELDS.find(allows);
+      suggestion = [
+        ...(allows("sys_id") || defaults.includes("sys_id") ? ["sys_id"] : []),
+        ...(display === undefined ? [] : [display]),
+      ];
+    }
+    // Suggesting what the read already returned would not shrink it.
+    const alreadyRequested =
+      suggestion.length === defaults.length &&
+      suggestion.every((field) => defaults.includes(field));
+    return suggestion.length === 0 || alreadyRequested ? undefined : suggestion;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * How the caller can shrink a truncated read. A caller who chose their own
+ * `fields` is not told which fields to use: a lower limit or a higher budget
+ * is the advice. A detailed read is pointed back at the concise default, and a
+ * concise one at a short list of fields that exist on the table.
+ *
+ * A registered call arrives with `fields` already resolved from the caller's
+ * request: the default list for a concise read, "all" for a detailed read or
+ * for fields="all". So an unset `fields`, the table's own default list, and
+ * "all" with response_format="detailed" all mean the caller chose no fields;
+ * any other value is the caller's own selection. The one case this cannot
+ * tell apart is a caller who typed the table's default list themselves: they
+ * get the suggestion, a valid and shorter list, rather than a lower limit.
+ */
+function shrinkAdviceFor(args: z.infer<typeof schema>): string {
+  const detailed = args.response_format === "detailed";
+  if (detailed && (args.fields === undefined || args.fields === "all")) {
+    return 'response_format="concise"';
+  }
+  if (args.fields !== undefined && args.fields !== defaultFieldList(args.table)) {
+    return LOWER_LIMIT_ADVICE;
+  }
+  const fields = suggestedFields(args.table);
+  return fields === undefined ? LOWER_LIMIT_ADVICE : `fields="${fields.join(",")}"`;
+}
+
+function defaultFieldList(table: string): string | undefined {
+  try {
+    return resolveReadableFields(table).join(",");
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Enforce the max_response_bytes budget by dropping whole records from the
  * tail of `results`. Records are never split or mangled -- the reply stays
@@ -198,11 +300,7 @@ function enforceByteBudget(
     declaredNextOffset > offset
       ? declaredNextOffset
       : offset + args.limit;
-  const shrinkAdvice =
-    args.fields === undefined && args.response_format === "detailed"
-      ? 'response_format="concise"'
-      : 'fields="sys_id,number"';
-
+  const shrinkAdvice = shrinkAdviceFor(args);
   const build = (keep: number): Record<string, unknown> => {
     const dropped = fetched - keep;
     const out: Record<string, unknown> = { record_count: keep };
@@ -216,15 +314,18 @@ function enforceByteBudget(
     // Keep the recovery hint compact enough that a zero-record production
     // envelope can still fit the minimum byte budget after shared metadata is
     // added. The structured pagination object carries the same retry/resume
-    // distinction for machine clients.
-    out.hint =
-      `Dropped ${dropped}/${fetched}` +
-      (keep === 0 ? "; row too large" : "") +
-      `; recover offset=${offset} with ${shrinkAdvice}/max_response_bytes` +
-      (keep === 0 ? "/sn_get" : "") +
-      (upstreamHasMore
-        ? `; resume offset=${upstreamNextOffset} limit=${args.limit}.`
-        : "; no post-window continuation.");
+    // distinction for machine clients. The shared envelope restates the
+    // counts and the continuation if it drops more rows (see
+    // refreshTruncationHint), so the text always matches dropped_records.
+    out.hint = renderTruncationHint({
+      dropped,
+      total: fetched,
+      offset,
+      advice: shrinkAdvice,
+      ...(upstreamHasMore
+        ? { resume: { offset: upstreamNextOffset, limit: args.limit } }
+        : {}),
+    });
     out.results = results.slice(0, keep);
     return out;
   };
