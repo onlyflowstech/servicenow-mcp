@@ -310,7 +310,6 @@ describe("SNSDK-54 reference tool behavior matrix", () => {
       profile: SNSDK54_PROFILE_NAME,
       data: {
         record_count: 1,
-        total: 1,
         has_more: false,
         results: [
           {
@@ -342,7 +341,6 @@ describe("SNSDK-54 reference tool behavior matrix", () => {
       profile: SNSDK54_PROFILE_NAME,
       data: {
         record_count: 0,
-        total: 0,
         has_more: false,
         results: [],
       },

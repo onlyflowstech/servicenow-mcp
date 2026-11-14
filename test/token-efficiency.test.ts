@@ -173,11 +173,14 @@ describe("sn_query default field selection", () => {
 });
 
 describe("sn_query pagination metadata", () => {
-  it("reports total and next_offset when X-Total-Count says more exist", async () => {
-    const { client } = metaClient(
-      [{ sys_id: "a" }, { sys_id: "b" }],
-      { "X-Total-Count": "10" }
-    );
+  // sn_query always sends sysparm_no_count, so ServiceNow's X-Total-Count
+  // reports the size of the response (limit + the sentinel row), not the
+  // table. These tests feed that header exactly as the instance does.
+  const page = (rows: number) =>
+    Array.from({ length: rows }, (_, index) => ({ sys_id: `row${index}` }));
+
+  it("reports has_more and next_offset from the sentinel row, with no total", async () => {
+    const { client } = metaClient(page(3), { "X-Total-Count": "3" });
     const result = await queryHandler(
       querySchema.parse({ table: "incident", limit: 2, offset: 3 }),
       client,
@@ -185,28 +188,94 @@ describe("sn_query pagination metadata", () => {
     );
     const payload = parseText(result);
     expect(payload.record_count).toBe(2);
-    expect(payload.total).toBe(10);
+    expect(payload.total).toBeUndefined();
     expect(payload.has_more).toBe(true);
     expect(payload.next_offset).toBe(5);
     expect(payload.hint).toContain("offset=5");
     expect(payload.hint).toContain("sn_query");
   });
 
-  it("reports has_more=false at the exact boundary (offset+count === total)", async () => {
-    const { client } = metaClient(
-      [{ sys_id: "a" }, { sys_id: "b" }],
-      { "X-Total-Count": "10" }
-    );
+  it("reports has_more=false when the page ends without a sentinel row", async () => {
+    const { client } = metaClient(page(2), { "X-Total-Count": "2" });
     const result = await queryHandler(
       querySchema.parse({ table: "incident", limit: 2, offset: 8 }),
       client,
       config
     );
     const payload = parseText(result);
-    expect(payload.total).toBe(10);
+    expect(payload.total).toBeUndefined();
     expect(payload.has_more).toBe(false);
     expect(payload.next_offset).toBeUndefined();
     expect(payload.hint).toBeUndefined();
+  });
+
+  it("keeps has_more true on every page but the last of a multi-page read (issue #1)", async () => {
+    // A 45-row table read 20 at a time. The stub answers like the instance
+    // under sysparm_no_count: up to limit + 1 rows, X-Total-Count equal to
+    // the number of rows in that response. Trusting the header made page 2
+    // report has_more=false with 25 rows still unread.
+    const rows = Array.from({ length: 45 }, (_, index) => ({ sys_id: `row${index}` }));
+    const getWithMeta = vi.fn(
+      async (_path: string, params?: Record<string, string>) => {
+        const offset = Number(params?.sysparm_offset ?? 0);
+        const limit = Number(params?.sysparm_limit ?? 0);
+        const slice = rows.slice(offset, offset + limit);
+        expect(params?.sysparm_no_count).toBe("true");
+        return {
+          data: { result: slice },
+          status: 200,
+          headers: new Headers({ "X-Total-Count": String(slice.length) }),
+        };
+      }
+    );
+    const client = { getWithMeta } as unknown as ServiceNowClient;
+
+    const pages: Array<Record<string, unknown>> = [];
+    let offset: number | undefined = 0;
+    while (offset !== undefined && pages.length < 10) {
+      const result = await queryHandler(
+        querySchema.parse({ table: "incident", limit: 20, offset }),
+        client,
+        config
+      );
+      const payload = parseText(result);
+      pages.push(payload);
+      offset = payload.has_more === true ? (payload.next_offset as number) : undefined;
+    }
+
+    expect(pages.map((payload) => payload.has_more)).toEqual([true, true, false]);
+    expect(pages.map((payload) => payload.next_offset)).toEqual([20, 40, undefined]);
+    expect(pages.map((payload) => payload.record_count)).toEqual([20, 20, 5]);
+    for (const payload of pages) expect(payload.total).toBeUndefined();
+  });
+
+  it("does not let a header equal to limit+1 end the read early", async () => {
+    // Page 2 of the issue: 21 rows back (limit 20 + sentinel), header 21.
+    const { client } = metaClient(page(21), { "X-Total-Count": "21" });
+    const result = await queryHandler(
+      querySchema.parse({ table: "incident", limit: 20, offset: 20 }),
+      client,
+      config
+    );
+    const payload = parseText(result);
+    expect(payload.has_more).toBe(true);
+    expect(payload.next_offset).toBe(40);
+    expect(payload.total).toBeUndefined();
+  });
+
+  it("never reports a continuation the sentinel does not show, whatever the header says", async () => {
+    // Whole window returned, no sentinel: the header's claim of 100 rows is
+    // not evidence of more rows at this offset.
+    const { client } = metaClient(page(3), { "X-Total-Count": "100" });
+    const result = await queryHandler(
+      querySchema.parse({ table: "incident", limit: 5, offset: 0 }),
+      client,
+      config
+    );
+    const payload = parseText(result);
+    expect(payload.record_count).toBe(3);
+    expect(payload.has_more).toBe(false);
+    expect(payload.next_offset).toBeUndefined();
   });
 
   it("uses the limit+1 sentinel when the total header is absent", async () => {
@@ -245,44 +314,7 @@ describe("sn_query pagination metadata", () => {
     expect(payload.next_offset).toBeUndefined();
   });
 
-  it("advances next_offset by limit, not record_count, when ACLs trim the page", async () => {
-    // ServiceNow applies limit/offset BEFORE ACL/domain-separation row
-    // stripping: a window of 5 rows can come back with only 3 while
-    // X-Total-Count still counts all matches. Advancing by record_count
-    // would re-read the tail of the window (duplicates).
-    const { client } = metaClient(
-      [{ sys_id: "a" }, { sys_id: "b" }, { sys_id: "c" }],
-      { "X-Total-Count": "100" }
-    );
-    const result = await queryHandler(
-      querySchema.parse({ table: "incident", limit: 5, offset: 0 }),
-      client,
-      config
-    );
-    const payload = parseText(result);
-    expect(payload.record_count).toBe(3);
-    expect(payload.has_more).toBe(true);
-    expect(payload.next_offset).toBe(5);
-    expect(payload.hint).toContain("offset=5");
-  });
-
-  it("never repeats the current offset when an entire window is ACL-stripped", async () => {
-    // Worst case: every row in the window is hidden -> record_count=0 but
-    // has_more=true. next_offset === offset would drive an infinite loop.
-    const { client } = metaClient([], { "X-Total-Count": "100" });
-    const result = await queryHandler(
-      querySchema.parse({ table: "incident", limit: 5, offset: 10 }),
-      client,
-      config
-    );
-    const payload = parseText(result);
-    expect(payload.record_count).toBe(0);
-    expect(payload.has_more).toBe(true);
-    expect(payload.next_offset).toBe(15);
-    expect(payload.next_offset).not.toBe(10);
-  });
-
-  it("handles an empty result set with X-Total-Count: 0", async () => {
+  it("handles an empty result set", async () => {
     const { client } = metaClient([], { "X-Total-Count": "0" });
     const result = await queryHandler(
       querySchema.parse({ table: "incident" }),
@@ -291,12 +323,12 @@ describe("sn_query pagination metadata", () => {
     );
     const payload = parseText(result);
     expect(payload.record_count).toBe(0);
-    expect(payload.total).toBe(0);
+    expect(payload.total).toBeUndefined();
     expect(payload.has_more).toBe(false);
   });
 
   it.each(["-1", "1.5", "9007199254740992", " ", "1e3", "+3", "01"])(
-    "ignores hostile X-Total-Count %j and uses the bounded page fallback",
+    "ignores hostile X-Total-Count %j and uses the sentinel",
     async (header) => {
       const { client } = metaClient([{ sys_id: "a" }], {
         "X-Total-Count": header,

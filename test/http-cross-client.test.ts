@@ -1113,6 +1113,8 @@ describe.each(clientFactories)(
               priority: "1",
               password: "must-not-cross",
             },
+            // The limit + 1 sentinel row: it proves a continuation exists.
+            { sys_id: "2".repeat(32), number: "INC0010002", priority: "1" },
           ],
         },
         status: 200,
@@ -1148,7 +1150,6 @@ describe.each(clientFactories)(
           profile: PROFILE_NAME,
           data: {
             record_count: 1,
-            total: 2,
             has_more: true,
             next_offset: 1,
             results: [
@@ -1195,6 +1196,8 @@ describe.each(clientFactories)(
           sys_id: "1".repeat(32),
           description: "whole-record-canary-" + "x".repeat(5_000),
         },
+        // The limit + 1 sentinel row: it proves a continuation exists.
+        { sys_id: "2".repeat(32), description: "sentinel" },
       ];
       const before = JSON.stringify(records);
       const getWithMeta = vi.fn(async () => ({
@@ -1228,7 +1231,6 @@ describe.each(clientFactories)(
           profile: PROFILE_NAME,
           data: {
             record_count: 0,
-            total: 100,
             has_more: true,
             next_offset: 42,
             truncated: true,

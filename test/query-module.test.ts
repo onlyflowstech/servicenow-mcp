@@ -166,6 +166,8 @@ describe("SNSDK-47 sn_query module", () => {
             priority: "1",
             u_unapproved: "must-not-cross",
           },
+          // The limit + 1 sentinel row: it proves a continuation exists.
+          { sys_id: "3".repeat(32), number: "INC0010003", priority: "1" },
         ],
       },
       status: 200,
@@ -204,7 +206,6 @@ describe("SNSDK-47 sn_query module", () => {
     });
     expect(responseData(result)).toEqual({
       record_count: 2,
-      total: 3,
       has_more: true,
       next_offset: 2,
       hint: "More records available. Call sn_query again with offset=2.",

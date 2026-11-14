@@ -46,7 +46,7 @@ export const definition = Object.freeze({
   name: "sn_query",
   description:
     "Query a policy-approved ServiceNow table. Returns records with pagination metadata " +
-    "(record_count, total, has_more, next_offset). Field verbosity: an " +
+    "(record_count, has_more, next_offset; no table total, which would cost a COUNT query: page with next_offset until has_more is false). Field verbosity: an " +
     "explicit fields list always wins; otherwise response_format=\"concise\" " +
     "(default) uses the table's safe default field set and " +
     "response_format=\"detailed\" returns all policy-approved readable fields " +
@@ -111,8 +111,8 @@ function compatibleInputSchema() {
         "Byte budget for the serialized response (default 100000, min 1000, " +
           "max 1000000). When exceeded, whole records are dropped from the " +
           "tail (the JSON is never mangled) and the response gains truncated: " +
-          "true plus a hint stating how many records were dropped, the total " +
-          "available, and the exact offset/limit/fields/response_format " +
+          "true plus a hint stating how many records were dropped and the exact " +
+          "offset/limit/fields/response_format " +
           "follow-up arguments to fetch the rest."
       ),
     limit: z
@@ -183,8 +183,7 @@ function stableOrderQuery(
 function enforceByteBudget(
   payload: Record<string, unknown>,
   results: unknown[],
-  args: z.infer<typeof schema>,
-  total: number | undefined
+  args: z.infer<typeof schema>
 ): Record<string, unknown> {
   const maxBytes = args.max_response_bytes;
   if (results.length === 0 || serializedBytes(payload) <= maxBytes) return payload;
@@ -207,7 +206,6 @@ function enforceByteBudget(
   const build = (keep: number): Record<string, unknown> => {
     const dropped = fetched - keep;
     const out: Record<string, unknown> = { record_count: keep };
-    if (total !== undefined) out.total = total;
     // Keep the authoritative post-window continuation even when this local
     // byte budget cannot retain a row. The shared envelope separately marks
     // same-offset recovery for rows dropped from the consumed window.
@@ -221,7 +219,6 @@ function enforceByteBudget(
     // distinction for machine clients.
     out.hint =
       `Dropped ${dropped}/${fetched}` +
-      (total !== undefined ? ` (${total} total)` : "") +
       (keep === 0 ? "; row too large" : "") +
       `; recover offset=${offset} with ${shrinkAdvice}/max_response_bytes` +
       (keep === 0 ? "/sn_get" : "") +
@@ -250,13 +247,6 @@ function enforceByteBudget(
     out = build(keep);
   }
   return out;
-}
-
-/** Accept only one canonical non-negative safe-integer count header. */
-function parseTotalCountHeader(value: string | null): number | undefined {
-  if (value === null || !/^(?:0|[1-9]\d*)$/u.test(value)) return undefined;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 export async function handler(
@@ -337,8 +327,11 @@ async function executeQuery(
       fields: rawPlan?.outputFields
         ? rawPlan.outputFields.join(",")
         : fieldSelectionToSysparmFields(effectiveFields),
-      // Fetch one bounded sentinel row so a missing total-count header never
-      // turns an exactly full final page into speculative continuation.
+      // Fetch one bounded sentinel row: it is the only continuation signal.
+      // The request sets sysparm_no_count, so ServiceNow skips the COUNT and
+      // the X-Total-Count header reports the size of this response (limit +
+      // sentinel), not the table. It is therefore never read, and no total is
+      // reported; a caller pages on has_more/next_offset.
       limit: args.limit + 1,
       offset: args.offset,
       orderby: undefined,
@@ -361,17 +354,12 @@ async function executeQuery(
     const offset = args.offset ?? 0;
     const recordCount = results.length;
 
-    const total = parseTotalCountHeader(resp.headers.get("x-total-count"));
-    // A valid total header is authoritative. Otherwise the bounded sentinel,
-    // not the post-policy returned count, decides continuation: policy/ACL
-    // filtering may remove every deliverable row from the consumed window.
-    const hasMore =
-      total !== undefined
-        ? offset + args.limit < total
-        : hasSentinel;
+    // The sentinel, not the post-policy returned count, decides continuation:
+    // policy/ACL filtering may remove every deliverable row from the consumed
+    // window.
+    const hasMore = hasSentinel;
 
     const payload: Record<string, unknown> = { record_count: recordCount };
-    if (total !== undefined) payload.total = total;
     payload.has_more = hasMore;
     if (hasMore) {
       // Advance by the requested limit, not the returned count: ACLs/domain
@@ -391,7 +379,7 @@ async function executeQuery(
         typeof payload.hint === "string" ? `${payload.hint} ${notice}` : notice;
     }
     payload.results = results;
-    return ok(enforceByteBudget(payload, results, args, total));
+    return ok(enforceByteBudget(payload, results, args));
   } catch (error) {
     throw error;
   }

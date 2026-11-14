@@ -189,8 +189,9 @@ describe("sn_query max_response_bytes truncation", () => {
     expect(textBytes(result)).toBeLessThanOrEqual(1000);
   });
 
-  it("reports dropped count, total available, and follow-up args in the hint", async () => {
-    const { client } = metaClient(bigRecords(), { "X-Total-Count": "50" });
+  it("reports dropped count and follow-up args in the hint", async () => {
+    // limit 10 plus the sentinel row: the instance answers with 11 rows.
+    const { client } = metaClient(bigRecords(11));
     const result = await queryHandler(
       querySchema.parse({ table: "incident", fields: "sys_id,description", limit: 10, offset: 5, max_response_bytes: 1000 }),
       client,
@@ -203,8 +204,8 @@ describe("sn_query max_response_bytes truncation", () => {
     expect(match).not.toBeNull();
     expect(Number(match![1])).toBe(10 - kept);
     expect(Number(match![2])).toBe(10);
-    expect(payload.hint).toContain("(50 total)");
-    expect(payload.total).toBe(50);
+    expect(payload.hint).not.toContain("total");
+    expect(payload.total).toBeUndefined();
     // Continue only at the authoritative upstream window boundary. Re-fetch
     // the current offset with a narrower response to recover dropped rows.
     expect(payload.hint).toContain("offset=15");
@@ -271,8 +272,12 @@ describe("sn_query max_response_bytes truncation", () => {
   // instead say the record itself exceeds the budget and route to
   // fields/budget/sn_get, never to a same-window refetch.
   it("keep=0 hint never suggests re-fetching the same window", async () => {
-    const records = [{ sys_id: "big", description: "y".repeat(5000) }];
-    const { client } = metaClient(records, { "X-Total-Count": "9" });
+    // limit 1 plus the sentinel row.
+    const records = [
+      { sys_id: "big", description: "y".repeat(5000) },
+      { sys_id: "next", description: "y" },
+    ];
+    const { client } = metaClient(records);
     const result = await queryHandler(
       querySchema.parse({
         table: "incident",
@@ -299,8 +304,7 @@ describe("sn_query max_response_bytes truncation", () => {
 
   it("leaves responses under the default budget byte-identical (no guard keys)", async () => {
     const { client } = metaClient(
-      [{ sys_id: "a" }, { sys_id: "b" }],
-      { "X-Total-Count": "10" }
+      [{ sys_id: "a" }, { sys_id: "b" }, { sys_id: "c" }]
     );
     const result = await queryHandler(
       querySchema.parse({ table: "incident", limit: 2, offset: 3 }),
@@ -310,7 +314,6 @@ describe("sn_query max_response_bytes truncation", () => {
     // Exactly the pre-guard payload: same keys, no truncated flag.
     expect(parseText(result)).toEqual({
       record_count: 2,
-      total: 10,
       has_more: true,
       next_offset: 5,
       hint: "More records available. Call sn_query again with offset=5.",

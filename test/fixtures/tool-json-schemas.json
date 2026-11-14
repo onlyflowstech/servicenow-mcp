@@ -8849,7 +8849,7 @@
         },
         "max_response_bytes": {
           "default": 100000,
-          "description": "Byte budget for the serialized response (default 100000, min 1000, max 1000000). When exceeded, whole records are dropped from the tail (the JSON is never mangled) and the response gains truncated: true plus a hint stating how many records were dropped, the total available, and the exact offset/limit/fields/response_format follow-up arguments to fetch the rest.",
+          "description": "Byte budget for the serialized response (default 100000, min 1000, max 1000000). When exceeded, whole records are dropped from the tail (the JSON is never mangled) and the response gains truncated: true plus a hint stating how many records were dropped and the exact offset/limit/fields/response_format follow-up arguments to fetch the rest.",
           "type": "integer",
           "minimum": 1000,
           "maximum": 1000000

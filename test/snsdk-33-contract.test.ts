@@ -471,7 +471,11 @@ describe("SNSDK-33 strict production envelopes", () => {
 
   it("drops an intact row only for production-wrapper envelope overhead and exposes recovery plus resume", async () => {
     const description = "whole-record-canary-" + "x".repeat(580);
-    const records = [{ sys_id: "1".repeat(32), description }];
+    // limit 1 plus the sentinel row that proves a continuation exists.
+    const records = [
+      { sys_id: "1".repeat(32), description },
+      { sys_id: "2".repeat(32), description: "sentinel" },
+    ];
     const before = JSON.stringify(records);
     const { getWithMeta, result } = await callRegisteredQuery(records);
 
