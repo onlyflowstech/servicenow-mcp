@@ -22,6 +22,7 @@ import {
   type ServiceNowClient,
 } from "../client.js";
 import type { ServiceNowConfig } from "../config.js";
+import { CallMetrics } from "../call-metrics.js";
 import { createCachedServiceNowOperations } from "../metadata-cache.js";
 import {
   fieldPolicyDenialMessage,
@@ -91,7 +92,7 @@ import * as schema from "./schema.js";
 import { schemaCacheBinding } from "./schema-module.js";
 import * as syslog from "./syslog.js";
 import * as update from "./update.js";
-import { finalizeEnvelopeResult } from "./result-envelope.js";
+import { finalizeEnvelopeResult, withCallMetadata } from "./result-envelope.js";
 import { guardedHandlerResult } from "./handler-result.js";
 import {
   profileNameSchema,
@@ -393,6 +394,8 @@ function registerStandardTool(
     tool.definition.name,
     registrationConfig,
     async (args, extra) => {
+      // Started before anything else, so `timing.total_ms` covers the whole call.
+      const metrics = new CallMetrics();
       const contextDependencies = dependenciesForToolInvocation(
         sharedContextDependencies
       );
@@ -667,7 +670,8 @@ function registerStandardTool(
         result = await runWithServiceNowRequestSignal(context.signal, () =>
           runWithFieldPolicyConfiguration(context.effectivePolicy.fieldPolicy, () =>
             tool.invoke(authorizedArgs, services)
-          )
+          ),
+          metrics
         );
       } catch (error) {
         const cancellation = cancellationResultIfIssued(
@@ -727,6 +731,7 @@ function registerStandardTool(
       return finalizeHandlerInvocation(
         result,
         registrationConfig.outputSchema,
+        metrics,
         context.profile.name,
         contextDependencies,
         binding,
@@ -750,6 +755,8 @@ function registerProfileDiagnostic(
     tool.definition.name,
     registrationConfig,
     async (args, extra) => {
+      // Started before anything else, so `timing.total_ms` covers the whole call.
+      const metrics = new CallMetrics();
       const contextDependencies = dependenciesForToolInvocation(
         sharedContextDependencies
       );
@@ -923,7 +930,8 @@ function registerProfileDiagnostic(
         result = await runWithServiceNowRequestSignal(context.signal, () =>
           runWithFieldPolicyConfiguration(context.effectivePolicy.fieldPolicy, () =>
             tool.invoke(authorizedArgs, services)
-          )
+          ),
+          metrics
         );
       } catch (error) {
         const cancellation = cancellationResultIfIssued(
@@ -983,6 +991,7 @@ function registerProfileDiagnostic(
       return finalizeHandlerInvocation(
         result,
         registrationConfig.outputSchema,
+        metrics,
         context.profile.name,
         contextDependencies,
         binding,
@@ -1200,6 +1209,7 @@ function clientInitializationFailure(
 function finalizeHandlerInvocation(
   candidate: unknown,
   outputSchema: ReturnType<typeof toolRegistrationConfig>["outputSchema"],
+  metrics: CallMetrics,
   canonicalProfile: string,
   dependencies: ExecutionContextDependencies,
   profile: ExecutionContext["profile"],
@@ -1221,6 +1231,7 @@ function finalizeHandlerInvocation(
     const enriched = validateSuccessfulModuleResult(
       outputSchema,
       guarded.result,
+      metrics,
       canonicalProfile,
       tool,
       profile.instance
@@ -1314,6 +1325,7 @@ export function enrichSuccessfulResult(
 function validateSuccessfulModuleResult(
   outputSchema: ReturnType<typeof toolRegistrationConfig>["outputSchema"],
   result: CallToolResult,
+  metrics: CallMetrics,
   canonicalProfile: string,
   tool: string,
   instanceOrigin: string
@@ -1339,10 +1351,16 @@ function validateSuccessfulModuleResult(
     ) {
       return undefined;
     }
-    return {
-      content: [{ type: "text", text: block.text }],
-      structuredContent: finalParsed.data,
-    };
+    // Cache status and timing go in last, and only if they still fit: the
+    // result is fitted to its byte limit without them, so they never cost a
+    // record, a field or the result itself.
+    return withCallMetadata(
+      {
+        content: [{ type: "text", text: block.text }],
+        structuredContent: finalParsed.data,
+      },
+      metrics.snapshot()
+    );
   } catch {
     return undefined;
   }

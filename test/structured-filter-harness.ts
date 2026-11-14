@@ -48,14 +48,42 @@ export interface Harness {
 
 const open: Harness[] = [];
 
+export interface HarnessOptions {
+  /** A distinct instance URL, for a test that uses the process-wide metadata cache. */
+  readonly instance?: string;
+  /** Turns the metadata cache on for this server (it is off in tests by default). */
+  readonly metadataCache?: NonNullable<ServiceNowConfig["metadataCache"]>;
+  /** Answers every read in place of the fixed `records`. */
+  readonly upstream?: (
+    path: string,
+    params: Record<string, string> | undefined
+  ) => Promise<{ data: unknown; status: number; headers: Headers }>;
+  /** Also grant sn_codesearch (and reads) on the five code tables. */
+  readonly codeTables?: boolean;
+}
+
+const CODE_TABLES = [
+  "sys_script",
+  "sys_script_include",
+  "sys_ui_script",
+  "sys_script_client",
+  "sys_ws_operation",
+] as const;
+
 export async function harness(
-  records: readonly unknown[] = [{ sys_id: "1".repeat(32), name: "FleetUtil" }]
+  records: readonly unknown[] = [{ sys_id: "1".repeat(32), name: "FleetUtil" }],
+  options: HarnessOptions = {}
 ): Promise<Harness> {
-  const getWithMeta = vi.fn(async () => ({
-    data: { result: records },
-    status: 200,
-    headers: new Headers(),
-  }));
+  const config: ServiceNowConfig = {
+    ...CONFIG,
+    ...(options.instance === undefined ? {} : { instance: options.instance }),
+    ...(options.metadataCache === undefined ? {} : { metadataCache: options.metadataCache }),
+  };
+  const getWithMeta = vi.fn(async (path: string, params?: Record<string, string>) =>
+    options.upstream
+      ? options.upstream(path, params)
+      : { data: { result: records }, status: 200, headers: new Headers() }
+  );
   const post = vi.fn(async () => ({ serviced_requests: [], unserviced_requests: [] }));
   const serviceNowClient = {
     getWithMeta,
@@ -64,16 +92,22 @@ export async function harness(
   } as unknown as ServiceNowClient;
   const profileManager = {
     getProfile: vi.fn(() => ({
-      instance: CONFIG.instance,
-      username: CONFIG.user,
+      instance: config.instance,
+      username: config.user,
       credential: "env:STRUCTURED_FILTER_TEST_SECRET_IS_NEVER_READ",
       authType: "basic" as const,
     })),
-    getConfig: vi.fn(() => CONFIG),
+    getConfig: vi.fn(() => config),
     getClient: vi.fn(() => serviceNowClient),
   } as unknown as ProfileManager;
   const tableAccess = createTableAccessPolicy({
-    readTables: ["incident", "sys_script_include", "sys_user", "u_widget"],
+    readTables: [
+      "incident",
+      "sys_script_include",
+      "sys_user",
+      "u_widget",
+      ...(options.codeTables ? CODE_TABLES : []),
+    ],
     writeTables: ["incident"],
     targets: [
       {
@@ -86,10 +120,19 @@ export async function harness(
       ...["sys_script_include", "sys_user", "u_widget"].map((table) => ({
         table,
         kind: "canonical" as const,
-        tools: ["sn_query"],
+        tools: ["sn_query", ...(options.codeTables ? ["sn_codesearch"] : [])],
         closureComplete: true,
         relatedTables: [table],
       })),
+      ...(options.codeTables
+        ? CODE_TABLES.filter((table) => table !== "sys_script_include").map((table) => ({
+            table,
+            kind: "canonical" as const,
+            tools: ["sn_query", "sn_codesearch"],
+            closureComplete: true,
+            relatedTables: [table],
+          }))
+        : []),
     ],
   });
   const executionContext: ExecutionContextDependencies = {

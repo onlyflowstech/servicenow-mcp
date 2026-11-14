@@ -795,7 +795,16 @@ describe.each(clients)(
           expect(result.structuredContent, name).toEqual({
             profile: PROFILE,
             data: VALID_DATA[name],
-            metadata: VALID_METADATA,
+            // The server adds the call's timing (#21); the handler's own
+            // metadata is otherwise passed through untouched.
+            metadata: {
+              ...VALID_METADATA,
+              timing: {
+                total_ms: expect.any(Number),
+                upstream_ms: expect.any(Number),
+                watermark_ms: expect.any(Number),
+              },
+            },
           });
           expect(
             productionToolOutputSchemas[name].safeParse(result.structuredContent)

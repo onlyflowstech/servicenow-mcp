@@ -37,7 +37,9 @@
  */
 
 import {
+  asWatermarkRead,
   isServiceNowRequestCancellation,
+  recordCacheOutcome,
   type RequestResult,
   type ServiceNowOperations,
 } from "./client.js";
@@ -307,6 +309,9 @@ async function cachedGetWithMeta<T>(
   const uncacheableUntil = state.uncacheable.get(match);
   if (uncacheableUntil !== undefined) {
     if (!forceRecache && uncacheableUntil > now) {
+      // The cache cannot serve this table right now, so the rows come from
+      // ServiceNow: a miss.
+      recordCacheOutcome("miss");
       return operations.getWithMeta<T>(path, cleanParams);
     }
     // Expired, or the caller asked for a refresh: try the watermark again.
@@ -341,8 +346,12 @@ async function cachedGetWithMeta<T>(
       cache.delete(key);
       cache.set(key, existing);
     }
+    recordCacheOutcome("hit");
     return cloneCachedResult<T>(existing);
   }
+  // Rows come from ServiceNow from here on: a forced refresh is a bypass, any
+  // other read a miss (the entry is absent, expired, changed, or unusable).
+  recordCacheOutcome(forceRecache ? "bypass" : "miss");
 
   // A forced refresh must never leave behind the rows it was asked to replace:
   // it is how a caller surfaces a write the watermark missed. Any other
@@ -451,7 +460,8 @@ function callWatermark(
 ): Promise<WatermarkRead> {
   let pending = watermarks.get(table);
   if (pending === undefined) {
-    pending = tableWatermark(operations, table);
+    // Counted as watermark time, not as upstream time.
+    pending = asWatermarkRead(() => tableWatermark(operations, table));
     watermarks.set(table, pending);
   }
   return pending;

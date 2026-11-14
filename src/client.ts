@@ -19,6 +19,7 @@
 
 import { atfFormInputSchema, prepareAtfForm, atfFormCookies, type AtfFormInput } from "./atf-form.js";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { CallMetrics, type CacheOutcome, type RequestLane } from "./call-metrics.js";
 
 import { ServiceNowConfig } from "./config.js";
 import { configuredHost, htmlResponseError, sniffPrefix } from "./html-response.js";
@@ -115,6 +116,10 @@ interface ServiceNowRequestScope {
   readonly signal: AbortSignal;
   readonly upstreamJsonBytes: CumulativeResponseByteBudget;
   readonly upstreamRawBytes: CumulativeResponseByteBudget;
+  /** What the call reports about itself; shared by every scope the call opens. */
+  readonly metrics: CallMetrics;
+  /** Which clock a request made now is counted against. */
+  readonly lane: RequestLane;
 }
 
 const REQUEST_SCOPE = new AsyncLocalStorage<ServiceNowRequestScope>();
@@ -125,7 +130,8 @@ const REQUEST_SCOPE = new AsyncLocalStorage<ServiceNowRequestScope>();
  */
 export function runWithServiceNowRequestSignal<T>(
   signal: AbortSignal,
-  operation: () => Promise<T>
+  operation: () => Promise<T>,
+  metrics?: CallMetrics
 ): Promise<T> {
   if (!(signal instanceof AbortSignal)) {
     return Promise.reject(new TypeError("request signal must be an AbortSignal"));
@@ -142,11 +148,36 @@ export function runWithServiceNowRequestSignal<T>(
       upstreamRawBytes: new CumulativeResponseByteBudget(
         MAX_CUMULATIVE_RAW_RESPONSE_BYTES
       ),
+      // A scope opened inside a call (a bounded sub-operation with its own
+      // signal) belongs to the same call, so it keeps reporting to it.
+      metrics: metrics ?? REQUEST_SCOPE.getStore()?.metrics ?? new CallMetrics(),
+      lane: "upstream",
     });
     return Promise.resolve(REQUEST_SCOPE.run(scope, operation));
   } catch (error) {
     return Promise.reject(error);
   }
+}
+
+/** Count the cache outcome of one cacheable read against the current call. */
+export function recordCacheOutcome(outcome: CacheOutcome): void {
+  REQUEST_SCOPE.getStore()?.metrics.recordCache(outcome);
+}
+
+/**
+ * Run a cache freshness check so that its requests count as watermark time
+ * rather than upstream time. Outside a call scope it just runs.
+ */
+export function asWatermarkRead<T>(operation: () => Promise<T>): Promise<T> {
+  const scope = REQUEST_SCOPE.getStore();
+  if (scope === undefined) return operation();
+  return REQUEST_SCOPE.run(Object.freeze({ ...scope, lane: "watermark" as const }), operation);
+}
+
+/** Time one request against the current call, on whichever clock it belongs to. */
+function timedRequest<T>(request: () => Promise<T>): Promise<T> {
+  const scope = REQUEST_SCOPE.getStore();
+  return scope === undefined ? request() : scope.metrics.measure(scope.lane, request);
 }
 
 export class ServiceNowClient {
@@ -542,31 +573,37 @@ export class ServiceNowClient {
 
 }
 
-/** Build an immutable, reflection-safe capability around a resolved client. */
+/**
+ * Build an immutable, reflection-safe capability around a resolved client.
+ * Every request it makes is timed against the current call (see
+ * {@link CallMetrics}); the timing never alters, delays or retries a request.
+ */
 export function createServiceNowOperations(
   client: ServiceNowOperations
 ): ServiceNowOperations {
   const operations = Object.create(null) as ServiceNowOperations;
   Object.defineProperties(operations, {
-    ...(client.saveAtfStepInputs ? { saveAtfStepInputs: { value: (input: AtfFormInput) => client.saveAtfStepInputs!(input) } } : {}),
+    ...(client.saveAtfStepInputs ? { saveAtfStepInputs: { value: (input: AtfFormInput) => timedRequest(() => client.saveAtfStepInputs!(input)) } } : {}),
     get: {
       value: <T = ParsedJson>(path: string, params?: Record<string, string>) =>
-        client.get<T>(path, params),
+        timedRequest(() => client.get<T>(path, params)),
     },
     getWithMeta: {
       value: <T = ParsedJson>(path: string, params?: Record<string, string>) =>
-        client.getWithMeta<T>(path, params),
+        timedRequest(() => client.getWithMeta<T>(path, params)),
     },
     post: {
       value: <T = ParsedJson>(path: string, body?: unknown, params?: Record<string, string>) =>
-        params === undefined ? client.post<T>(path, body) : client.post<T>(path, body, params),
+        timedRequest(() =>
+          params === undefined ? client.post<T>(path, body) : client.post<T>(path, body, params)
+        ),
     },
     patch: {
       value: <T = ParsedJson>(path: string, body?: unknown) =>
-        client.patch<T>(path, body),
+        timedRequest(() => client.patch<T>(path, body)),
     },
     delete: {
-      value: (path: string) => client.delete(path),
+      value: (path: string) => timedRequest(() => client.delete(path)),
     },
     postBinary: {
       value: <T = ParsedJson>(
@@ -574,13 +611,13 @@ export function createServiceNowOperations(
         data: Buffer,
         contentType: string,
         params?: Record<string, string>
-      ) => client.postBinary<T>(path, data, contentType, params),
+      ) => timedRequest(() => client.postBinary<T>(path, data, contentType, params)),
     },
     getRaw: {
       value: (
         path: string,
         options?: { readonly maxBytes?: number }
-      ) => client.getRaw(path, options),
+      ) => timedRequest(() => client.getRaw(path, options)),
     },
   });
   return Object.freeze(operations);

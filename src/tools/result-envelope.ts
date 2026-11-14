@@ -6,6 +6,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 import { BATCH_LIMITS } from "../batch-limits.js";
+import type { CacheStatus, CallMetricsSnapshot, CallTiming } from "../call-metrics.js";
 import { MAX_FIELD_OBJECT_OWN_KEYS } from "../field-policy.js";
 import {
   MAX_RESPONSE_BYTES_DEFAULT,
@@ -63,6 +64,27 @@ export const resultPaginationSchema = z.union([
   offsetPaginationSchema,
 ]);
 
+/**
+ * What a call reports about itself (see `call-metrics.ts`): one compact
+ * definition, shared by every tool's output schema. `metadata.cache` and
+ * `metadata.timing` are both optional: a handler builds its envelope without
+ * them and the dispatcher adds them, and `cache` is absent when the call made
+ * no cacheable read.
+ */
+const callTimingSchema = z
+  .object({
+    total_ms: nonNegativeInteger,
+    upstream_ms: nonNegativeInteger,
+    watermark_ms: nonNegativeInteger,
+  })
+  .strict();
+
+const callMetadataShape = {
+  cache: z.enum(["hit", "miss", "bypass", "mixed"]).optional(),
+  timing: callTimingSchema.optional(),
+};
+const callMetadataSchema = z.object(callMetadataShape).strict();
+
 export const resultMetadataSchema = z
   .object({
     kind: z.enum(["single", "collection", "operation"]),
@@ -85,6 +107,7 @@ export const resultMetadataSchema = z
         dropped_records: nonNegativeInteger.optional(),
       })
       .strict(),
+    ...callMetadataShape,
   })
   .strict();
 
@@ -405,6 +428,8 @@ interface MutableMetadata {
     reason?: "record_limit" | "byte_limit";
     dropped_records?: number;
   };
+  cache?: CacheStatus;
+  timing?: CallTiming;
 }
 
 interface MutableEnvelope {
@@ -753,6 +778,41 @@ function synchronizePagingFields(
   for (const wrapper of ["request", "result"] as const) {
     synchronizePagingFields(record[wrapper], pagination, truncation, depth + 1);
   }
+}
+
+/**
+ * Add what the call reports about itself to a finished result's envelope
+ * metadata, only if the result still fits its own byte limit with it.
+ *
+ * The fields are diagnostics, so they never cost the caller anything else: the
+ * result is fitted to its limit first, exactly as before, and gets them only
+ * when they fit as well. A result that is not an envelope, or whose size
+ * cannot be checked, comes back untouched. Costs one serialization of the
+ * result, the same one the limit check itself makes.
+ */
+export function withCallMetadata(
+  result: CallToolResult,
+  snapshot: CallMetricsSnapshot
+): CallToolResult {
+  const content = result.structuredContent;
+  if (typeof content !== "object" || content === null) return result;
+  const metadata = (content as { metadata?: unknown }).metadata;
+  if (typeof metadata !== "object" || metadata === null) return result;
+  const maxBytes = (metadata as { limits?: { max_bytes?: unknown } }).limits?.max_bytes;
+  if (typeof maxBytes !== "number") return result;
+  const added = callMetadataSchema.safeParse({
+    ...(snapshot.cache === undefined ? {} : { cache: snapshot.cache }),
+    timing: snapshot.timing,
+  });
+  if (!added.success) return result;
+  const annotated: CallToolResult = {
+    ...result,
+    structuredContent: {
+      ...content,
+      metadata: { ...metadata, ...added.data },
+    },
+  };
+  return resultBytes(annotated) <= maxBytes ? annotated : result;
 }
 
 export function envelopeCompatibilityResult(

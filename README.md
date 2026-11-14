@@ -886,6 +886,25 @@ A tool call reads each table's watermark once, however many times it reads the
 table, until the call writes. A hierarchy walk reads `sys_db_object` once for
 the whole chain. An empty table caches like any other.
 
+**Seeing what the cache did.** Every successful response carries two optional
+fields in `structuredContent.metadata`. `cache` says how the call's cacheable
+reads were served: `hit` (all from the cache), `miss` (from ServiceNow: nothing
+cached yet, the watermark moved, the entry expired, or the table could not be
+cached just then), `bypass` (a `force_recache: true` refresh), or `mixed` (the
+call made several cacheable reads with different outcomes, such as an
+`sn_codesearch` with no `table` over the five code tables). It is absent when
+the call read no cache-eligible table. `timing` is `{ total_ms, upstream_ms,
+watermark_ms }` in whole milliseconds, measured wall-clock: `total_ms` is the
+whole tool call; `upstream_ms` is the time during which at least one request to
+ServiceNow other than a watermark read was in flight (retry waits included);
+`watermark_ms` is the same for the cache's watermark reads. Overlapping
+requests are counted once, not summed, so each figure is at most `total_ms`,
+though the two can overlap each other and add up to more than it. A hit reports
+`upstream_ms: 0` and the watermark round trip it still costs. Both fields hold
+only numbers and those four words, and appear whether or not the cache is on
+(`timing` always, `cache` only when a cacheable read happened). Each tool's
+`outputSchema` grows by about 400 characters for them.
+
 If a table's watermark cannot be used, its reads go straight upstream, without
 a watermark request, for a while: 15 minutes when the cause persists (an
 incomplete or future-dated watermark, a 403 or 404), 30 seconds when it may not

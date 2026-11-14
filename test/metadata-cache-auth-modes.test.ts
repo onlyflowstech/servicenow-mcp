@@ -342,7 +342,15 @@ describe.each([
     const second = await query(client);
     const hit = calls().slice(afterMiss);
 
-    expect(second.structuredContent).toEqual(first.structuredContent);
+    // The same answer, except for what the call reports about itself (#21).
+    const answer = (result: Awaited<ReturnType<typeof query>>) => {
+      const { metadata, ...rest } = result.structuredContent as { metadata: object };
+      const { cache, timing, ...stable } = metadata as Record<string, unknown>;
+      return { cache, timing, answer: { ...rest, metadata: stable } };
+    };
+    expect(answer(second).answer).toEqual(answer(first).answer);
+    expect([answer(first).cache, answer(second).cache]).toEqual(["miss", "hit"]);
+    expect(answer(second).timing).toMatchObject({ upstream_ms: 0 });
     expect(calls().filter((call) => call.kind === "read")).toHaveLength(1);
     expect(hit).toEqual([
       { host, method: "GET", path: "/api/now/table/sys_dictionary", kind: "watermark", scheme },

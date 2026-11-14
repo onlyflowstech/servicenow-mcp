@@ -232,6 +232,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -510,6 +545,41 @@
               },
               "required": [
                 "truncated"
+              ],
+              "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
               ],
               "additionalProperties": false
             }
@@ -873,6 +943,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -1103,6 +1208,41 @@
               },
               "required": [
                 "truncated"
+              ],
+              "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
               ],
               "additionalProperties": false
             }
@@ -1967,6 +2107,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -2494,6 +2669,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -2766,6 +2976,41 @@
               },
               "required": [
                 "truncated"
+              ],
+              "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
               ],
               "additionalProperties": false
             }
@@ -4184,6 +4429,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -4405,6 +4685,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -4624,6 +4939,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -4834,6 +5184,41 @@
               },
               "required": [
                 "truncated"
+              ],
+              "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
               ],
               "additionalProperties": false
             }
@@ -5060,6 +5445,41 @@
               },
               "required": [
                 "truncated"
+              ],
+              "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
               ],
               "additionalProperties": false
             }
@@ -6353,6 +6773,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -6611,6 +7066,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -6813,6 +7303,41 @@
               },
               "required": [
                 "truncated"
+              ],
+              "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
               ],
               "additionalProperties": false
             }
@@ -7028,6 +7553,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -7241,6 +7801,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -7452,6 +8047,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -7661,6 +8291,41 @@
               },
               "required": [
                 "truncated"
+              ],
+              "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
               ],
               "additionalProperties": false
             }
@@ -9077,6 +9742,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -9339,6 +10039,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -9554,6 +10289,41 @@
               },
               "required": [
                 "truncated"
+              ],
+              "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
               ],
               "additionalProperties": false
             }
@@ -9821,6 +10591,41 @@
                 "truncated"
               ],
               "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -10035,6 +10840,41 @@
               },
               "required": [
                 "truncated"
+              ],
+              "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
               ],
               "additionalProperties": false
             }
