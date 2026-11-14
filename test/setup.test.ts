@@ -21,6 +21,7 @@ import {
   authorizeTableAccess,
   authorizeTableAccessPlan,
   createTableAccessPolicy,
+  TablePolicyError,
   type TableAccessPolicy,
   type TableAccessPolicyInput,
 } from "../src/table-policy.js";
@@ -843,6 +844,23 @@ describe("setup grant", () => {
       await grant(["--read", "sys_script_include", "--tools", "sn_codesearch"]);
 
       expect(toolsOn("sys_script_include")).toEqual(["sn_codesearch", "sn_query"]);
+    });
+
+    it("leaves code search inert on a default-granted table that is not a code table", async () => {
+      await grant(["--read", "incident"]);
+      expect(toolsOn("incident")).toContain("sn_codesearch");
+
+      // A search names only code tables, so the binding on incident reaches nothing.
+      for (const table of ["incident", "INCIDENT", " incident "]) {
+        expect(() => resolveToolTableAccess("sn_codesearch", { search_term: "x", table })).toThrow(
+          TablePolicyError
+        );
+      }
+      // A search with no table needs every code table, none of which is granted.
+      const plan = resolveToolTableAccess("sn_codesearch", { search_term: "x" });
+      expect(() =>
+        authorizeTableAccessPlan(persistedPolicy(), plan.requests, "sn_codesearch")
+      ).toThrow(/denied by policy/u);
     });
 
     it("lists code search in the grant help", async () => {
