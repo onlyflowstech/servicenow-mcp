@@ -133,15 +133,23 @@ interface CacheEntry {
   readonly data: Jsonish | null;
   readonly status: number;
   readonly headers: readonly [string, string][];
+  /** Estimated retained size: the serialized body plus key and header overhead. */
+  readonly bytes: number;
 }
 
 interface ScopeState {
   readonly entries: Map<string, CacheEntry>;
   /** Table -> epoch ms until which its reads pass through without a watermark. */
   readonly uncacheable: Map<string, number>;
+  /** Sum of `bytes` over `entries`. */
+  bytes: number;
+  /** Set once the scope is evicted, so a call still holding it stores nothing. */
+  detached: boolean;
 }
 
 const SCOPED_CACHES = new Map<string, ScopeState>();
+/** Sum of every scope's `bytes`; kept in step by storeEntry and removeEntry. */
+let totalCachedBytes = 0;
 const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 /** sys_updated_on as returned with sysparm_display_value=false (UTC). */
 const STORED_DATE_TIME = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/u;
@@ -154,6 +162,21 @@ const MAX_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  * so both are capped and evicted in least-recently-used order. */
 export const MAX_METADATA_CACHE_SCOPES = 64;
 export const MAX_METADATA_CACHE_ENTRIES_PER_SCOPE = 512;
+/**
+ * Byte bounds. The entry count is not a memory bound: a code-table entry holds
+ * a whole response of script bodies, up to the client's 1 MiB ceiling, so 512
+ * of them would retain about half a GiB in one scope. A response larger than
+ * the entry cap is returned but never kept (and any older entry under its key
+ * is dropped); a scope over its budget evicts its least recently used entries;
+ * the whole cache over its budget evicts from the least recently used scope
+ * first. Sizes are estimates (serialized body plus key and header overhead),
+ * not heap measurements.
+ */
+export const MAX_METADATA_CACHE_ENTRY_BYTES = 512 * 1024;
+export const MAX_METADATA_CACHE_SCOPE_BYTES = 32 * 1024 * 1024;
+export const MAX_METADATA_CACHE_TOTAL_BYTES = 128 * 1024 * 1024;
+/** Fixed allowance per entry for the frozen record, watermark and map slot. */
+const ENTRY_OVERHEAD_BYTES = 512;
 /** How long a table goes uncached after its watermark proved unusable; never
  * longer than the cache TTL. */
 export const STRUCTURAL_UNCACHEABLE_MS = 15 * 60 * 1000;
@@ -304,9 +327,14 @@ async function cachedGetWithMeta<T>(
     watermark !== undefined &&
     sameWatermark(existing.watermark, watermark)
   ) {
-    // Re-insert to mark the entry most recently used for eviction order.
-    cache.delete(key);
-    cache.set(key, existing);
+    // Re-insert to mark the entry most recently used for eviction order. Only
+    // while it is still the one stored: another call may have evicted or
+    // replaced it during the awaits above, and putting it back would hold
+    // bytes the byte totals no longer count.
+    if (cache.get(key) === existing) {
+      cache.delete(key);
+      cache.set(key, existing);
+    }
     return cloneCachedResult<T>(existing);
   }
 
@@ -315,7 +343,7 @@ async function cachedGetWithMeta<T>(
   // refetch leaves the entry until it is replaced -- if these rows cannot be
   // kept, the old ones are still correct against any later watermark read that
   // matches theirs, so they serve again once the table is cacheable again.
-  if (forceRecache) cache.delete(key);
+  if (forceRecache) removeEntry(state, key);
   const fresh = await operations.getWithMeta<T>(path, cleanParams);
   // Only a materialized 200 body is reusable. A 204 carries no rows, and a
   // failed read throws before reaching here, so nothing negative is cached.
@@ -323,19 +351,91 @@ async function cachedGetWithMeta<T>(
   if (fresh.status !== 200 || fresh.data === null || watermark === undefined) {
     return fresh;
   }
-  cache.delete(key);
-  cache.set(
+  // Serialize once: the string is both the size measure and the copy's source.
+  const serialized = JSON.stringify(fresh.data);
+  const bodyBytes = Buffer.byteLength(serialized, "utf8");
+  if (bodyBytes > MAX_METADATA_CACHE_ENTRY_BYTES) {
+    // Too big to keep. The older entry under this key is now known stale or
+    // superseded, so free it rather than let its body sit until eviction.
+    removeEntry(state, key);
+    return fresh;
+  }
+  const headers = Object.freeze([...fresh.headers.entries()]);
+  storeEntry(
+    state,
     key,
     Object.freeze({
       expiresAt: now + config.ttlMs,
       watermark,
-      data: cloneJson(fresh.data),
+      data: JSON.parse(serialized) as Jsonish,
       status: fresh.status,
-      headers: Object.freeze([...fresh.headers.entries()]),
-    })
+      headers,
+      bytes:
+        bodyBytes +
+        key.length +
+        headers.reduce((sum, [name, value]) => sum + name.length + value.length, 0) +
+        ENTRY_OVERHEAD_BYTES,
+    }),
+    now
   );
-  evictOldest(cache, MAX_METADATA_CACHE_ENTRIES_PER_SCOPE);
   return fresh;
+}
+
+/**
+ * Estimated bytes retained for one scope, or for the whole cache when no scope
+ * is given. For tests and diagnostics; the cache never reads it.
+ */
+export function metadataCacheBytes(scope?: string): number {
+  if (scope === undefined) return totalCachedBytes;
+  return SCOPED_CACHES.get(scope)?.bytes ?? 0;
+}
+
+/** Drop one entry and release its bytes from the scope and the global total. */
+function removeEntry(state: ScopeState, key: string): void {
+  const entry = state.entries.get(key);
+  if (entry === undefined) return;
+  state.entries.delete(key);
+  state.bytes -= entry.bytes;
+  if (!state.detached) totalCachedBytes -= entry.bytes;
+}
+
+/**
+ * Insert an entry, then enforce every bound. Expired entries at the old end
+ * go first, since they can never be served again; the walk stops at the first
+ * live entry, so it examines only what it removes plus one. Then the entry
+ * count, the scope's byte budget and the global byte budget, each evicting
+ * least recently used first.
+ */
+function storeEntry(state: ScopeState, key: string, entry: CacheEntry, now: number): void {
+  if (state.detached) return;
+  removeEntry(state, key);
+  for (const [oldKey, oldEntry] of state.entries) {
+    if (oldEntry.expiresAt > now) break;
+    removeEntry(state, oldKey);
+  }
+  state.entries.set(key, entry);
+  state.bytes += entry.bytes;
+  totalCachedBytes += entry.bytes;
+  evictEntries(state, (candidate) =>
+    candidate.entries.size > MAX_METADATA_CACHE_ENTRIES_PER_SCOPE ||
+    candidate.bytes > MAX_METADATA_CACHE_SCOPE_BYTES
+  );
+  // Over the global budget: the least recently used scope gives up entries
+  // first (SCOPED_CACHES iterates in recency order, oldest first). A scope
+  // emptied this way stays registered; it holds no bytes.
+  for (const scopeState of SCOPED_CACHES.values()) {
+    if (totalCachedBytes <= MAX_METADATA_CACHE_TOTAL_BYTES) break;
+    evictEntries(scopeState, () => totalCachedBytes > MAX_METADATA_CACHE_TOTAL_BYTES);
+  }
+}
+
+/** Evict a scope's oldest entries while `over` holds. */
+function evictEntries(state: ScopeState, over: (state: ScopeState) => boolean): void {
+  while (over(state)) {
+    const oldest = state.entries.keys().next();
+    if (oldest.done) return;
+    removeEntry(state, oldest.value);
+  }
 }
 
 function callWatermark(
@@ -507,9 +607,18 @@ function stateForScope(scope: string): ScopeState {
     SCOPED_CACHES.set(scope, existing);
     return existing;
   }
-  const next: ScopeState = Object.freeze({ entries: new Map(), uncacheable: new Map() });
+  const next: ScopeState = { entries: new Map(), uncacheable: new Map(), bytes: 0, detached: false };
   SCOPED_CACHES.set(scope, next);
-  evictOldest(SCOPED_CACHES, MAX_METADATA_CACHE_SCOPES);
+  while (SCOPED_CACHES.size > MAX_METADATA_CACHE_SCOPES) {
+    const oldest = SCOPED_CACHES.entries().next();
+    if (oldest.done) break;
+    const [oldScope, oldState] = oldest.value;
+    SCOPED_CACHES.delete(oldScope);
+    totalCachedBytes -= oldState.bytes;
+    oldState.entries.clear();
+    oldState.bytes = 0;
+    oldState.detached = true;
+  }
   return next;
 }
 
