@@ -63,40 +63,61 @@ export async function handler(
     const warnings: string[] = [];
     const failures: unknown[] = [];
 
-    for (const target of targets) {
-      try {
-        const fallbackFields = resolveReadableFields(target.table, {
-          fields: `sys_id,name,${target.field}`,
-        });
-        const readableFields =
-          preparedReadableFields(args, target.table) ?? fallbackFields;
-        const resp = await client.get(`/api/now/table/${target.table}`, {
-          sysparm_query: `${escapeQueryValue(target.field)}LIKE${escapeQueryValue(args.search_term)}`,
-          sysparm_fields: `sys_id,name,${target.field}`,
-          sysparm_limit: String(windowLimit),
-          sysparm_offset: "0",
-          sysparm_orderby: "sys_id",
-        });
-
-        const filtered = filterReadableRecord(resp.result || [], readableFields);
-        const records = Array.isArray(filtered) ? filtered : [];
-        for (const r of records) {
-          if (typeof r !== "object" || r === null || Array.isArray(r)) continue;
-          const record = r as Record<string, unknown>;
-          allResults.push({
-            table: target.table,
-            table_label: target.label,
-            sys_id: record.sys_id,
-            name: record.name || "unnamed",
-            snippet: record[target.field]
-              ? truncate(String(record[target.field]), 200)
-              : "",
+    // The per-table reads are independent, so they run together instead of one
+    // round trip after another (each also costs a watermark read when the
+    // table is cached). The upstream client's per-origin limiter bounds how
+    // many are in flight, and its per-call cumulative byte budget still caps
+    // what they read between them; both are shared, not per table. Results,
+    // warnings and failures are merged in target order after the join, so the
+    // output does not depend on which request finished first. One difference
+    // from a serial loop: if the cumulative byte budget runs out, the table
+    // that gets the error is whichever read crossed it, no longer always the
+    // last one.
+    const outcomes = await Promise.all(
+      targets.map(async (target) => {
+        try {
+          const fallbackFields = resolveReadableFields(target.table, {
+            fields: `sys_id,name,${target.field}`,
           });
+          const readableFields =
+            preparedReadableFields(args, target.table) ?? fallbackFields;
+          const resp = await client.get(`/api/now/table/${target.table}`, {
+            sysparm_query: `${escapeQueryValue(target.field)}LIKE${escapeQueryValue(args.search_term)}`,
+            sysparm_fields: `sys_id,name,${target.field}`,
+            sysparm_limit: String(windowLimit),
+            sysparm_offset: "0",
+            sysparm_orderby: "sys_id",
+          });
+
+          const filtered = filterReadableRecord(resp.result || [], readableFields);
+          const records = Array.isArray(filtered) ? filtered : [];
+          const matches: Array<Record<string, unknown>> = [];
+          for (const r of records) {
+            if (typeof r !== "object" || r === null || Array.isArray(r)) continue;
+            const record = r as Record<string, unknown>;
+            matches.push({
+              table: target.table,
+              table_label: target.label,
+              sys_id: record.sys_id,
+              name: record.name || "unnamed",
+              snippet: record[target.field]
+                ? truncate(String(record[target.field]), 200)
+                : "",
+            });
+          }
+          return { matches } as const;
+        } catch (error) {
+          // Tables can fail (ACL issues, etc.) -- report, don't hide
+          return { error } as const;
         }
-      } catch (error) {
-        // Tables can fail (ACL issues, etc.) -- report, don't hide
-        failures.push(error);
-        warnings.push(`${target.table}: ${formatError(error)}`);
+      })
+    );
+    for (const [index, outcome] of outcomes.entries()) {
+      if ("error" in outcome) {
+        failures.push(outcome.error);
+        warnings.push(`${targets[index].table}: ${formatError(outcome.error)}`);
+      } else {
+        allResults.push(...outcome.matches);
       }
     }
 
