@@ -3905,7 +3905,8 @@
                   ],
                   "additionalProperties": false
                 }
-              ]
+              ],
+              "description": "One condition or group. Example: {type:\"text\",field:\"name\",operator:\"contains\",value:\"fleet\"}. A list is not accepted."
             },
             "order_by": {
               "minItems": 1,
@@ -7705,6 +7706,7 @@
           "type": "object",
           "properties": {
             "filter": {
+              "description": "One condition or group, or a list read as AND. Example: [{type:\"equality\",field:\"active\",operator:\"eq\",value:true},{type:\"text\",field:\"name\",operator:\"contains\",value:\"fleet\"}]",
               "anyOf": [
                 {
                   "anyOf": [

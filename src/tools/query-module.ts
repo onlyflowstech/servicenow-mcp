@@ -47,6 +47,13 @@ import {
   type ToolDefinition,
 } from "./tool-module.js";
 
+// Only this tool reads a list filter as AND (sn_batch does not), so the
+// example lives here and not in the shared schema text.
+const STRUCTURED_FILTER_TOOL_EXAMPLE =
+  'Filter example (a list means AND): structured_query={filter:[{type:"equality",' +
+  'field:"active",operator:"eq",value:true},{type:"text",field:"name",' +
+  'operator:"contains",value:"fleet"}]}. OR: {type:"group",operator:"or",conditions:[...]}.';
+
 export const definition = Object.freeze({
   name: "sn_query",
   description:
@@ -56,7 +63,8 @@ export const definition = Object.freeze({
     "(default) uses the table's safe default field set and " +
     "response_format=\"detailed\" returns all policy-approved readable fields " +
     "(same as fields=\"all\"). Responses larger than max_response_bytes are truncated " +
-    "by dropping whole records from the tail, with a hint for fetching the rest.",
+    "by dropping whole records from the tail, with a hint for fetching the rest. " +
+    STRUCTURED_FILTER_TOOL_EXAMPLE,
   annotations: Object.freeze({
     title: "Query records",
     readOnlyHint: true,

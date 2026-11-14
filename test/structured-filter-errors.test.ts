@@ -73,13 +73,15 @@ describe("structured_query.filter errors reach the client (#18)", () => {
     expect(connected.post).not.toHaveBeenCalled();
   });
 
-  it("adds nothing to what tools/list advertises", async () => {
+  it("adds no error text to what tools/list advertises", async () => {
     const connected = await harness();
     const { tools } = await connected.client.listTools();
     for (const name of ["sn_query", "sn_batch"]) {
       const advertised = JSON.stringify(tools.find((tool) => tool.name === name));
-      expect(advertised).not.toContain("fleet");
+      // The advertised `filter` text is the short example from #19; the longer
+      // error message, with its depth limit and group form, is never advertised.
       expect(advertised).not.toContain("levels deep");
+      expect(advertised).not.toContain("Combine");
     }
     // The custom text is an error message only; the schema itself still rejects.
     expect(structuredQueryFilterSchema.safeParse("x").success).toBe(false);

@@ -161,13 +161,13 @@ describe("sn_batch keeps its write filter strict (#17)", () => {
     expect(structuredQuerySchema.safeParse({ filter: ACTIVE }).success).toBe(true);
   });
 
-  it("tells a tool-list client nothing new about either tool", async () => {
+  it("never tells an sn_batch client that a list works", async () => {
     const connected = await harness();
     const { tools } = await connected.client.listTools();
-    for (const name of ["sn_query", "sn_batch"]) {
-      const advertised = JSON.stringify(tools.find((tool) => tool.name === name));
-      expect(advertised).not.toContain("treated as AND");
-      expect(advertised).not.toContain("implicit");
-    }
+    const advertised = JSON.stringify(tools.find((tool) => tool.name === "sn_batch"));
+    expect(advertised).not.toContain("treated as AND");
+    expect(advertised).not.toContain("implicit");
+    expect(advertised).not.toMatch(/list (means|read as) AND/);
+    // The advertised text for sn_query is checked in filter-examples.test.ts.
   });
 });

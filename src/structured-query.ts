@@ -291,10 +291,30 @@ export const structuredQueryOrderSchema = z
   })
   .strict();
 
-function structuredQueryObjectSchemaFor(filter: z.ZodType<StructuredQueryFilter>) {
+/**
+ * What the advertised `filter` property says, one per tool kind. They are
+ * short on purpose: `filter` is advertised once per tool that takes a
+ * structured query, and every character is paid for in each `tools/list`.
+ * The two are not interchangeable: only the read tool takes a list, so the
+ * write tool's text must not offer one.
+ */
+export const STRUCTURED_FILTER_DESCRIPTION =
+  "One condition or group. Example: " +
+  '{type:"text",field:"name",operator:"contains",value:"fleet"}. ' +
+  "A list is not accepted.";
+
+export const STRUCTURED_FILTER_LIST_DESCRIPTION =
+  "One condition or group, or a list read as AND. Example: " +
+  '[{type:"equality",field:"active",operator:"eq",value:true},' +
+  '{type:"text",field:"name",operator:"contains",value:"fleet"}]';
+
+function structuredQueryObjectSchemaFor(
+  filter: z.ZodType<StructuredQueryFilter>,
+  description: string
+) {
   return z
     .object({
-      filter: filter.optional(),
+      filter: filter.describe(description).optional(),
       order_by: boundedArray(structuredQueryOrderSchema, MAX_STRUCTURED_QUERY_ORDER_COUNT, {
         min: 1,
       }).optional(),
@@ -325,7 +345,7 @@ export const STRUCTURED_QUERY_STRUCTURAL_LIMIT_MESSAGE =
  * bounds rejects a query the compiler would accept.
  */
 export const structuredQuerySchema = withStructuralCheck(
-  structuredQueryObjectSchemaFor(structuredQueryFilterSchema),
+  structuredQueryObjectSchemaFor(structuredQueryFilterSchema, STRUCTURED_FILTER_DESCRIPTION),
   (value) =>
     structuredQueryShapeWithinLimits(value)
       ? undefined
@@ -341,7 +361,8 @@ export const structuredQuerySchema = withStructuralCheck(
  */
 export const structuredQueryReadSchema = withStructuralCheck(
   structuredQueryObjectSchemaFor(
-    structuredQueryListFilterSchema as unknown as z.ZodType<StructuredQueryFilter>
+    structuredQueryListFilterSchema as unknown as z.ZodType<StructuredQueryFilter>,
+    STRUCTURED_FILTER_LIST_DESCRIPTION
   ),
   (value) =>
     structuredQueryShapeWithinLimits(value, { allowListFilter: true })
