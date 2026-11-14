@@ -221,10 +221,25 @@ const structuredQueryGroupLevelThreeSchema = structuredQueryGroupSchema(
   structuredQueryFilterLevelTwoSchema
 );
 
-export const structuredQueryFilterSchema: z.ZodType<StructuredQueryFilter> = z.union([
-  structuredLeafConditionSchema,
-  structuredQueryGroupLevelThreeSchema,
-]);
+const FILTER_EXAMPLE = "{type:'text', field:'name', operator:'contains', value:'fleet'}";
+const GROUP_EXAMPLE = "{type:'group', operator:'and', conditions:[...]}";
+
+/**
+ * What a rejected `filter` says. The MCP SDK validates input before any
+ * handler runs and reports a union failure as one generic line, so the shape
+ * and a working example go here, on the union itself. A custom message adds
+ * nothing to the advertised JSON Schema. Fixed text: it never includes any
+ * part of the rejected value.
+ */
+export const STRUCTURED_FILTER_ERROR_MESSAGE =
+  `filter must be one condition or group object. Example: ${FILTER_EXAMPLE}. ` +
+  `Combine conditions with ${GROUP_EXAMPLE}; groups nest at most ` +
+  `${MAX_STRUCTURED_QUERY_NESTING} levels deep. A list is not accepted here.`;
+
+export const structuredQueryFilterSchema: z.ZodType<StructuredQueryFilter> = z.union(
+  [structuredLeafConditionSchema, structuredQueryGroupLevelThreeSchema],
+  { error: STRUCTURED_FILTER_ERROR_MESSAGE }
+);
 
 export const structuredQueryOrderSchema = z
   .object({
