@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`sn_query` no longer stops paging after page 2 (#1).** The tool sends
+  `sysparm_no_count`, so ServiceNow's `X-Total-Count` header holds the size of
+  the response (the page plus the one sentinel row), not the table. The handler
+  trusted it: `total` echoed the rows fetched, and `has_more` turned false from
+  page 2 on, with thousands of rows unread. `has_more` and `next_offset` now
+  come from the sentinel row alone, so they stay true until the last page.
+  **`total` is no longer returned by `sn_query`** (the output schema already
+  made it optional); counting would need a COUNT query on every call, which
+  `sysparm_no_count` exists to avoid. Page on `has_more` and `next_offset`, or
+  call `sn_aggregate` with `COUNT` when the table size matters.
+- **A read grant now allows code search (#2).** `servicenow-mcp-setup grant
+  --read <table>` binds `sn_codesearch` along with `sn_query`, `sn_get`,
+  `sn_aggregate` and `sn_schema`, so `--read sys_script_include` is enough to
+  search script includes; before, every code search on such a profile was
+  denied unless `--tools sn_codesearch` was passed. It is checked per code
+  table (`sys_script`, `sys_script_include`, `sys_ui_script`,
+  `sys_script_client`, `sys_ws_operation`), does nothing on other tables, and
+  field policy still decides the script field exactly as it does for
+  `sn_query`. **Profiles saved before this change are not rewritten:** a target
+  keeps the tool list it was saved with, so run `servicenow-mcp-setup grant
+  --profile <name> --read <code table>` again to add the default tools, or add
+  just this one with `--tools sn_codesearch`. Neither removes a tool.
+
+### Changed
+
+- **Code tables are in the default metadata cache.** `sys_script`,
+  `sys_script_include`, `sys_ui_script`, `sys_script_client` and
+  `sys_ws_operation` now cache like the other system-level metadata tables,
+  under the same per-credential scope and watermark freshness, so a repeated
+  `sn_codesearch` or `sn_query` of them skips the payload while the table is
+  unchanged (one watermark read still runs per call). A profile that sets its
+  own `metadataCache.tables` or `SN_METADATA_CACHE_TABLES` replaces the default
+  list and must name these tables to cache them. `sn_codesearch` has no
+  `force_recache` flag.
+
 ### Security
 
 - **HTTP transport rejects a backslash in the request path.** A request whose
