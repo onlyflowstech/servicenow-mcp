@@ -170,6 +170,30 @@ describe("the field suggestion in a truncation hint", () => {
     expect(hint).toContain('fields="sys_id,name"');
   });
 
+  it("never names a sensitive field, and falls back to sys_id when nothing else is usable", async () => {
+    const rows = scriptRows(22, 450).map((row) => ({
+      sys_id: row.sys_id,
+      user_password: row.script,
+      u_secret: row.script,
+      script: row.script,
+    }));
+    const withPassword = await directHint(
+      { table: "u_widget", limit: 22 },
+      rows,
+      { u_widget: { defaults: ["user_password", "script"], readable: ["sys_id", "user_password", "script"] } }
+    );
+    expect(withPassword).not.toContain("user_password");
+    expect(withPassword).toContain('fields="sys_id"');
+    const withSecret = await directHint(
+      { table: "u_widget", limit: 22 },
+      rows,
+      { u_widget: { defaults: ["script", "u_secret"], readable: ["sys_id", "script", "u_secret"] } }
+    );
+    expect(withSecret).not.toContain("u_secret");
+    expect(withSecret).not.toContain("script");
+    expect(withSecret).toContain('fields="sys_id"');
+  });
+
   it("falls back to sys_id alone when the policy names no display field", async () => {
     const policy = { u_widget: { defaults: ["script"], readable: ["sys_id", "script", "kind"] } };
     const hint = await directHint({ table: "u_widget", limit: 22 }, scriptRows(22, 450), policy);

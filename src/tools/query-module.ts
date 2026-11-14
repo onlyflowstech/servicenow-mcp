@@ -13,6 +13,7 @@ import {
 import {
   fieldSelectionToSysparmFields,
   isAllFieldSelection,
+  isSensitiveFieldName,
   filterReadableRecord,
   preparedReadableFields,
   resolveReadableFields,
@@ -208,7 +209,8 @@ function isLargeField(field: string): boolean {
  * configured default fields without the large ones, at most
  * {@link SUGGESTED_FIELD_LIMIT}. When that leaves nothing but sys_id, sys_id
  * plus the table's display field if its readable fields name one, else sys_id
- * alone. Every name comes from the field policy, never from the caller.
+ * alone. Every name comes from the field policy, never from the caller, and a
+ * name on the sensitive-field blocklist is never suggested.
  * Returns undefined when the suggestion would not narrow what was requested
  * or the policy cannot be resolved.
  */
@@ -216,7 +218,8 @@ function suggestedFields(table: string): readonly string[] | undefined {
   try {
     const defaults = resolveReadableFields(table);
     if (isAllFieldSelection(defaults)) return undefined;
-    const usable = (field: string) => FIELD_NAME.test(field);
+    const usable = (field: string) =>
+      FIELD_NAME.test(field) && !isSensitiveFieldName(field);
     let suggestion = defaults
       .filter((field) => usable(field) && !isLargeField(field))
       .slice(0, SUGGESTED_FIELD_LIMIT);
