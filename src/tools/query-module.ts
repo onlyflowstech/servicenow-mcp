@@ -303,23 +303,18 @@ function enforceByteBudget(
 
   const fetched = results.length;
   const offset = args.offset ?? 0;
-  const upstreamHasMore = payload.has_more === true;
-  const declaredNextOffset = payload.next_offset;
-  const upstreamNextOffset =
-    typeof declaredNextOffset === "number" &&
-    Number.isSafeInteger(declaredNextOffset) &&
-    declaredNextOffset > offset
-      ? declaredNextOffset
-      : offset + args.limit;
   const shrinkAdvice = shrinkAdviceFor(args);
   const build = (keep: number): Record<string, unknown> => {
     const dropped = fetched - keep;
     const out: Record<string, unknown> = { record_count: keep };
-    // Keep the authoritative post-window continuation even when this local
-    // byte budget cannot retain a row. The shared envelope separately marks
-    // same-offset recovery for rows dropped from the consumed window.
-    out.has_more = upstreamHasMore;
-    if (out.has_more) out.next_offset = upstreamNextOffset;
+    // Rows were dropped, so rows exist that this response does not hold:
+    // has_more is true whatever lies beyond the window. The rows returned are
+    // a prefix of the window, so offset + keep is the first row not returned,
+    // and following next_offset re-reads the dropped rows before anything
+    // later. With no row returned the same offset cannot advance: next_offset
+    // is left out and the request has to change (see the hint).
+    out.has_more = true;
+    if (keep > 0) out.next_offset = offset + keep;
     out.truncated = true;
     out.dropped_records = dropped;
     // Keep the recovery hint compact enough that a zero-record production
@@ -333,9 +328,6 @@ function enforceByteBudget(
       total: fetched,
       offset,
       advice: shrinkAdvice,
-      ...(upstreamHasMore
-        ? { resume: { offset: upstreamNextOffset, limit: args.limit } }
-        : {}),
     });
     out.results = results.slice(0, keep);
     return out;

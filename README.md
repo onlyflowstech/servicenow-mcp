@@ -692,7 +692,7 @@ in this section is needed to use this server.
 
 | Tool | Description |
 |------|-------------|
-| `sn_query` | Query an approved table with structured filters, field selection, pagination, and sorting; bounded raw reads require an explicit policy rule. Paging runs on `has_more` and `next_offset`, which can end early if ServiceNow ACLs strip rows from a page; cross-check with `sn_aggregate` `COUNT` |
+| `sn_query` | Query an approved table with structured filters, field selection, pagination, and sorting; bounded raw reads require an explicit policy rule. Paging runs on `has_more` and `next_offset`, which can end early if ServiceNow ACLs strip rows from a page; cross-check with `sn_aggregate` `COUNT`. A page cut to fit `max_response_bytes` keeps the same contract: see [Paging when a response is cut to size](#paging-when-a-response-is-cut-to-size) |
 | `sn_get` | Get a single record by sys_id from an approved table |
 | `sn_create` | Create a record on any table granted for writes, using only field-policy-approved writable fields, including the journal fields `comments` and `work_notes`; `incident` additionally requires a bounded `short_description` |
 | `sn_update` | Update one record selected by exact `sys_id` on any table granted for writes, using only field-policy-approved writable fields; `comments` and `work_notes` append a journal entry |
@@ -930,6 +930,37 @@ run, never in the cache, even on a cached table.
 identity, and effective policy, so a repeat call costs no request at all. They
 are not revalidated in that window; `force_recache: true` refreshes them, and
 `schemaCacheTtlMs` / `SN_SCHEMA_CACHE_TTL_MS` (up to 1 hour) changes the window.
+
+### Paging when a response is cut to size
+
+A read that does not fit `max_response_bytes` (or, for a result with more than
+1,000 rows, the record limit) is cut by dropping whole rows from the tail, so
+the rows that come back are always a prefix of the page you asked for. For the
+list tools, `has_more` and `next_offset` count the rows that were dropped:
+
+| Field | Meaning |
+|-------|---------|
+| `record_count` | Rows in `results`. |
+| `truncated`, `dropped_records` | `sn_query` sets them when rows were dropped for size, and says how many; every list tool reports the same in `metadata.truncation`. |
+| `has_more` | True when rows were dropped for size **or** rows exist past the page: rows exist that this response did not contain. A response that came back empty because its rows were too large says `has_more: true`, not "no results". |
+| `next_offset` | `offset + record_count`: the first row not returned. Following it re-reads the dropped rows before anything later, so a client that only follows `next_offset` sees every row exactly once. |
+
+When **no row fit**, there is nothing to continue after, so `next_offset` is
+left out and `metadata.pagination.recovery` is
+`adjust_request_and_retry_same_offset`: `has_more: true` with no `next_offset`
+means the request must change (fewer `fields`, a lower `limit`, or a higher
+`max_response_bytes`; `sn_get` reads one row). The `hint` says which.
+
+This holds for `sn_query`, `sn_syslog`, `sn_schema`, `sn_relationships`,
+`sn_codesearch`, `sn_discover`, `sn_attach` (list) and `sn_atf`, whose `offset`
+is a row offset into the rows they return. Any other collection result that is cut to size
+(for example `sn_aggregate`) reports `has_more: true` with no `next_offset`.
+A page that lost no rows to size is unchanged: `has_more` and `next_offset`
+come from the row after the page, and `next_offset` is `offset + limit`.
+
+Before this change `next_offset` after a cut page was `offset + limit`, which
+skipped the dropped rows, and a cut last page reported `has_more: false` with
+`record_count: 0`.
 
 ### Unrestricted field selection (`fields=all`, `response_format=detailed`)
 

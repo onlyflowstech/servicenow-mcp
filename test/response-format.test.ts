@@ -206,16 +206,15 @@ describe("sn_query max_response_bytes truncation", () => {
     expect(Number(match![2])).toBe(10);
     expect(payload.hint).not.toContain("total");
     expect(payload.total).toBeUndefined();
-    // Continue only at the authoritative upstream window boundary. Re-fetch
-    // the current offset with a narrower response to recover dropped rows.
-    expect(payload.hint).toContain("offset=15");
-    expect(payload.hint).toContain("limit=10");
+    // Continue at the first row not returned, so nothing is skipped; or
+    // re-fetch the window's offset with a narrower response to get every row.
+    expect(payload.hint).toContain(`continue offset=${5 + kept}`);
     expect(payload.hint).toContain("recover offset=5");
     // The caller chose the fields, so the hint does not pick others for them.
     expect(payload.hint).not.toContain('fields="');
     expect(payload.hint).toContain("a lower limit");
     expect(payload.hint).toContain("max_response_bytes");
-    expect(payload.next_offset).toBe(15);
+    expect(payload.next_offset).toBe(5 + kept);
     expect(payload.has_more).toBe(true);
   });
 
@@ -310,12 +309,15 @@ describe("sn_query max_response_bytes truncation", () => {
     );
     const payload = parseText(result);
     expect(payload.record_count).toBe(0);
-    expect(payload.next_offset).toBe(5);
+    // Rows exist that this response lacks, but no offset can advance: the
+    // request has to change, so there is no next_offset to follow.
     expect(payload.has_more).toBe(true);
+    expect(payload).not.toHaveProperty("next_offset");
     expect(payload.hint).not.toContain("Fetch the rest");
     expect(payload.hint).toContain("row too large");
     expect(payload.hint).toContain("recover offset=4");
-    expect(payload.hint).toContain("resume offset=5");
+    expect(payload.hint).not.toContain("continue offset");
+    expect(payload.hint).not.toContain("resume");
     expect(payload.hint).toContain("sn_get");
     expect(payload.hint).toContain("max_response_bytes");
     // A lower limit cannot help when a single row is over budget.

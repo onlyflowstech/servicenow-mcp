@@ -14,7 +14,7 @@ import {
   MAX_RESPONSE_BYTES_MIN,
 } from "../utils.js";
 import { canonicalHttpsOrigin } from "./markdown.js";
-import { refreshTruncationHint } from "./truncation-hint.js";
+import { refreshTruncationHint, restateContinuationHint } from "./truncation-hint.js";
 import { withResolvedProfileOutput } from "./tool-module.js";
 
 export const DEFAULT_RESULT_RECORD_LIMIT = 1_000;
@@ -39,13 +39,21 @@ const offsetPaginationSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    // has_more means rows exist that this response did not contain. Normally
+    // next_offset points at the first of them. When rows were dropped for
+    // size and not one fit, no offset can advance: `recovery` then marks that
+    // the request itself must change, and next_offset is left out.
     if (
       value.has_more &&
-      (value.next_offset === undefined || value.next_offset <= value.offset)
+      (value.next_offset === undefined
+        ? value.recovery === undefined
+        : value.next_offset <= value.offset)
     ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "next_offset must advance beyond offset when has_more is true",
+        message:
+          "next_offset must advance beyond offset when has_more is true, " +
+          "unless recovery says the request must change",
         path: ["next_offset"],
       });
     }
@@ -746,11 +754,23 @@ function synchronizePagingFields(
       target.has_more = pagination.has_more;
     }
     if (pagination.has_more && pagination.next_offset !== undefined) {
-      if (Object.hasOwn(target, "next_offset")) {
+      // A tool that reports has_more reports where to continue, even when
+      // the fit created the continuation (rows dropped for size).
+      if (Object.hasOwn(target, "next_offset") || Object.hasOwn(target, "has_more")) {
         target.next_offset = pagination.next_offset;
       }
     } else if (Object.hasOwn(target, "next_offset")) {
       delete target.next_offset;
+    }
+    if (pagination.has_more && typeof target.hint === "string") {
+      // The tool wrote its continuation from the page it fetched; if the fit
+      // dropped rows, the first row not returned is where to continue.
+      target.hint = restateContinuationHint(target.hint, {
+        offset: pagination.offset,
+        ...(pagination.next_offset === undefined
+          ? {}
+          : { nextOffset: pagination.next_offset }),
+      });
     }
     if (Object.hasOwn(target, "truncated")) {
       target.truncated = truncation.truncated;
@@ -767,9 +787,6 @@ function synchronizePagingFields(
           target.hint = refreshTruncationHint(target.hint, {
             dropped: truncation.dropped_records,
             returned: pagination.returned,
-            ...(pagination.has_more && pagination.next_offset !== undefined
-              ? { resume: { offset: pagination.next_offset, limit: pagination.limit } }
-              : {}),
           });
         }
       }
@@ -857,16 +874,24 @@ export function envelopeCompatibilityResult(
   const explicitNextOffset = numericObjectField(data, "next_offset");
   const legacyTruncated = booleanObjectField(data, "truncated") === true;
   const priorDropped = numericObjectField(data, "dropped_records") ?? 0;
+  // A tool that dropped rows for size says so (truncated, dropped_records):
+  // rows exist that its response does not hold, so there is more to fetch.
+  const droppedForSize = collection && legacyTruncated && priorDropped > 0;
   let hasMore =
     collection &&
     (originalCount > returned ||
       explicitHasMore === true ||
+      droppedForSize ||
       (explicitHasMore === undefined && returned >= limit));
   let nextOffset: number | undefined;
   let recovery: "adjust_request_and_retry_same_offset" | undefined =
     legacyTruncated ? "adjust_request_and_retry_same_offset" : undefined;
   if (hasMore) {
-    if (explicitNextOffset !== undefined && explicitNextOffset > offset) {
+    if (droppedForSize && returned > 0) {
+      // The rows returned are a prefix of the window, so the first row not
+      // returned is the one to continue at; nothing is skipped.
+      nextOffset = offset + returned;
+    } else if (explicitNextOffset !== undefined && explicitNextOffset > offset) {
       nextOffset = explicitNextOffset;
     } else if (originalCount > returned && returned > 0) {
       nextOffset = offset + returned;
@@ -875,6 +900,10 @@ export function envelopeCompatibilityResult(
       // window, not merely the delivered rows, is authoritative. Advancing by
       // the effective limit prevents ACL-filtered windows from being replayed.
       nextOffset = offset + limit;
+    } else if (droppedForSize) {
+      // Not one row fit: has_more stays true, no offset can advance, and the
+      // request has to change.
+      recovery = "adjust_request_and_retry_same_offset";
     } else {
       hasMore = false;
       recovery = "adjust_request_and_retry_same_offset";
@@ -935,13 +964,15 @@ function renderEnvelopeText(envelope: MutableEnvelope): string {
   const pagination = envelope.metadata.pagination;
   const continuation =
     pagination.mode === "offset" && pagination.has_more
-      ? ` More records are available at offset ${pagination.next_offset}.`
+      ? pagination.next_offset === undefined
+        ? " More records are available, but none fit."
+        : ` More records are available at offset ${pagination.next_offset}.`
       : "";
   const recovery =
     pagination.mode === "offset" && pagination.recovery !== undefined
-      ? pagination.has_more
-        ? ` To recover records dropped from the current window, adjust the request and retry offset ${pagination.offset}; use offset ${pagination.next_offset} only to resume after the consumed window.`
-        : ` No automatic post-window continuation is available; adjust the request and retry offset ${pagination.offset}.`
+      ? pagination.has_more && pagination.next_offset !== undefined
+        ? ` Rows were dropped from the current window; next_offset is the first row not returned, or adjust the request and retry offset ${pagination.offset} to get them in one response.`
+        : ` No row fit; adjust the request (fewer fields, a lower limit or a higher max_response_bytes) and retry offset ${pagination.offset}.`
       : "";
   const truncated = envelope.metadata.truncation.truncated
     ? ` Output was truncated by ${envelope.metadata.truncation.reason}.`
@@ -1071,7 +1102,7 @@ export function finalizeEnvelopeResult(
   options: EnvelopeTextRenderOptions = {}
 ): CallToolResult | undefined {
   envelopeTextRenderersSealed = true;
-  const summarized = finalizeSummaryResult(result);
+  const summarized = finalizeSummaryResult(result, tool);
   const renderer =
     tool === undefined ? undefined : ENVELOPE_TEXT_RENDERERS.get(tool);
   if (
@@ -1102,9 +1133,37 @@ export function finalizeEnvelopeResult(
     : summarized;
 }
 
+/**
+ * The tools whose `offset` argument is a row offset into the collection they
+ * return, so that `offset + rows returned` is the first row not returned. For
+ * these a fit that drops rows for size can offer that offset as
+ * `next_offset`. Any other collection still reports `has_more`, but with no
+ * offset to give: the request has to change.
+ */
+const OFFSET_PAGED_TOOLS: ReadonlySet<string> = new Set([
+  "sn_query",
+  "sn_syslog",
+  "sn_schema",
+  "sn_relationships",
+  "sn_codesearch",
+  "sn_discover",
+  "sn_attach",
+  "sn_atf",
+]);
+
+/**
+ * Fit the result to its byte limit by dropping whole rows from the tail.
+ * Rows dropped for size mean rows exist that the response does not hold, so
+ * `has_more` is true; the rows returned are a prefix of the window, so a
+ * paged tool continues at `offset + rows returned` and loses nothing, and
+ * when no row fits there is no offset to give. With no `tool` (a caller that
+ * does not say which), the offset is offered as for a paged tool.
+ */
 function finalizeSummaryResult(
-  result: CallToolResult
+  result: CallToolResult,
+  tool?: string
 ): CallToolResult | undefined {
+  const offsetPaged = tool === undefined || OFFSET_PAGED_TOOLS.has(tool);
   if (!isMutableEnvelope(result.structuredContent)) return result;
   const sourceEnvelope = JSON.parse(
     JSON.stringify(result.structuredContent)
@@ -1128,8 +1187,14 @@ function finalizeSummaryResult(
       if (probe.metadata.pagination.mode === "offset") {
         probe.metadata.pagination.returned = count;
         if (count < originalRecordCount) {
-          probe.metadata.pagination.recovery =
-            "adjust_request_and_retry_same_offset";
+          const paging = probe.metadata.pagination;
+          paging.recovery = "adjust_request_and_retry_same_offset";
+          paging.has_more = true;
+          if (offsetPaged && count > 0) {
+            paging.next_offset = paging.offset + count;
+          } else {
+            delete paging.next_offset;
+          }
         }
       }
       applyByteTruncation(

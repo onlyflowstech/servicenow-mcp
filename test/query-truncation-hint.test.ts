@@ -68,9 +68,9 @@ async function directHint(
 
 describe("truncation hint text", () => {
   const variants: TruncationHintParts[] = [
-    { dropped: 3, total: 20, offset: 0, advice: 'fields="sys_id,name"', resume: { offset: 20, limit: 20 } },
+    { dropped: 3, total: 20, offset: 0, advice: 'fields="sys_id,name"' },
     { dropped: 3, total: 20, offset: 40, advice: LOWER_LIMIT_ADVICE },
-    { dropped: 20, total: 20, offset: 5, advice: 'response_format="concise"', resume: { offset: 25, limit: 20 } },
+    { dropped: 20, total: 20, offset: 5, advice: 'response_format="concise"' },
     { dropped: 1, total: 1, offset: 0, advice: LOWER_LIMIT_ADVICE },
     { dropped: 22, total: 22, offset: 0, advice: 'fields="sys_id"' },
   ];
@@ -82,7 +82,6 @@ describe("truncation hint text", () => {
       refreshTruncationHint(hint, {
         dropped: parts.dropped,
         returned: parts.total - parts.dropped,
-        ...(parts.resume === undefined ? {} : { resume: parts.resume }),
       })
     ).toBe(hint);
   });
@@ -93,17 +92,17 @@ describe("truncation hint text", () => {
       total: 22,
       offset: 0,
       advice: LOWER_LIMIT_ADVICE,
-      resume: { offset: 22, limit: 22 },
     });
     expect(hint).toContain("Dropped 2/22;");
+    expect(hint).toContain("continue offset=20;");
     expect(hint).toContain("a lower limit or a higher max_response_bytes");
     const refreshed = refreshTruncationHint(hint, { dropped: 22, returned: 0 });
     expect(refreshed).toContain("Dropped 22/22; row too large;");
     expect(refreshed).toContain(", or sn_get");
     // A lower limit cannot help when no row fits.
     expect(refreshed).not.toContain("lower limit");
-    expect(refreshed).toContain("no post-window continuation");
-    expect(refreshed).not.toContain("resume");
+    // Nothing is left to continue after: the request has to change.
+    expect(refreshed).not.toContain("continue");
   });
 
   it("leaves text it did not write alone", () => {

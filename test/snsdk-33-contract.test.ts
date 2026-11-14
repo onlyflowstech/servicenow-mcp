@@ -221,18 +221,71 @@ describe("SNSDK-33 strict production envelopes", () => {
       profile: PROFILE,
       metadata: {
         truncation: { truncated: true, reason: "byte_limit" },
+        // Rows were dropped for size, so rows exist this response lacks. With
+        // no row left there is no offset to continue at.
         pagination: {
           mode: "offset",
-          has_more: false,
+          has_more: true,
           offset: 7,
+          returned: 0,
           recovery: "adjust_request_and_retry_same_offset",
         },
       },
     });
     expect(
+      (result.structuredContent as { metadata: { pagination: object } }).metadata.pagination
+    ).not.toHaveProperty("next_offset");
+    expect(
       productionToolOutputSchemas.sn_query.safeParse(result.structuredContent)
         .success
     ).toBe(true);
+  });
+
+  it("continues at the first row not returned when the fit keeps some rows", () => {
+    const results = Array.from({ length: 20 }, (_, index) => ({
+      sys_id: String(index).padStart(32, "0"),
+      description: "x".repeat(40),
+    }));
+    const result = finalized(
+      "sn_query",
+      { limit: 20, offset: 7, max_response_bytes: 2_000 },
+      { record_count: results.length, has_more: false, results }
+    );
+    const structured = productionToolOutputSchemas.sn_query.parse(
+      result.structuredContent
+    );
+    const returned = structured.data.results.length;
+    expect(returned).toBeGreaterThan(0);
+    expect(returned).toBeLessThan(20);
+    expect(structured.metadata.pagination).toMatchObject({
+      has_more: true,
+      offset: 7,
+      returned,
+      next_offset: 7 + returned,
+      recovery: "adjust_request_and_retry_same_offset",
+    });
+    // The tool reported has_more false; the fit created the continuation, and
+    // data carries it beside has_more.
+    expect(structured.data).toMatchObject({ has_more: true, next_offset: 7 + returned });
+  });
+
+  it("gives a collection tool with no offset argument has_more but no next_offset", () => {
+    // 600 rows of about 250 bytes do not fit the default 100000-byte limit.
+    const results = Array.from({ length: 600 }, (_, index) => ({
+      sys_id: String(index).padStart(32, "0"),
+      note: "x".repeat(200),
+    }));
+    const adapted = envelopeCompatibilityResult("sn_nl", {}, textResult({ results }));
+    const result = finalizeEnvelopeResult(enrichSuccessfulResult(adapted, PROFILE), "sn_nl");
+    const structured = result?.structuredContent as unknown as {
+      metadata: { pagination: Record<string, unknown>; truncation: { truncated: boolean } };
+    };
+    expect(structured.metadata.truncation.truncated).toBe(true);
+    expect(structured.metadata.pagination).toMatchObject({
+      has_more: true,
+      recovery: "adjust_request_and_retry_same_offset",
+    });
+    expect(structured.metadata.pagination).not.toHaveProperty("next_offset");
   });
 
   it("caps collection records before return with deterministic continuation", () => {
@@ -347,9 +400,11 @@ describe("SNSDK-33 strict production envelopes", () => {
     const structured = productionToolOutputSchemas.sn_query.parse(
       result.structuredContent
     );
+    // No row came back, yet rows exist: has_more stays true, and with no row
+    // to continue after there is no next_offset: the request must change.
     expect(structured.data).toMatchObject({
       record_count: 0,
-      has_more: false,
+      has_more: true,
       truncated: true,
       dropped_records: 1,
       results: [],
@@ -359,12 +414,16 @@ describe("SNSDK-33 strict production envelopes", () => {
       mode: "offset",
       offset: 9,
       returned: 0,
-      has_more: false,
+      has_more: true,
       recovery: "adjust_request_and_retry_same_offset",
     });
+    expect(structured.metadata.pagination).not.toHaveProperty("next_offset");
   });
 
-  it("preserves authoritative upstream continuation through side-effect-free byte fitting", () => {
+  it("continues at the first row not returned through side-effect-free byte fitting", () => {
+    // The tool kept 4 rows of a 20-row window starting at 10 and dropped 3
+    // for size; its own next_offset (30) is the post-window continuation,
+    // which would skip every dropped row.
     const data = {
       record_count: 4,
       has_more: true,
@@ -378,7 +437,7 @@ describe("SNSDK-33 strict production envelopes", () => {
     };
     const adapted = envelopeCompatibilityResult(
       "sn_query",
-      { limit: 20, offset: 10, max_response_bytes: 1_000 },
+      { limit: 20, offset: 10, max_response_bytes: 2_600 },
       textResult(data)
     );
     const enriched = enrichSuccessfulResult(adapted, PROFILE);
@@ -391,19 +450,20 @@ describe("SNSDK-33 strict production envelopes", () => {
       result?.structuredContent
     );
     const returned = structured.data.results.length;
+    expect(returned).toBeGreaterThan(0);
     expect(returned).toBeLessThan(4);
     expect(structured.metadata.pagination).toMatchObject({
       mode: "offset",
       offset: 10,
       returned,
       has_more: true,
-      next_offset: 30,
+      next_offset: 10 + returned,
       recovery: "adjust_request_and_retry_same_offset",
     });
     expect(structured.data).toMatchObject({
       record_count: returned,
       has_more: true,
-      next_offset: 30,
+      next_offset: 10 + returned,
       truncated: true,
       dropped_records: 3 + 4 - returned,
     });
@@ -438,7 +498,7 @@ describe("SNSDK-33 strict production envelopes", () => {
     );
   });
 
-  it("keeps byte-limit continuation monotonic for an unrepresentable record", () => {
+  it("reports has_more without next_offset for an unrepresentable record", () => {
     const data = {
       record_count: 1,
       has_more: false,
@@ -455,13 +515,15 @@ describe("SNSDK-33 strict production envelopes", () => {
       result.structuredContent
     );
     expect(structured.data.results).toEqual([]);
+    // One row exists and none fits: more to fetch, but no offset advances.
     expect(structured.metadata.pagination).toMatchObject({
       mode: "offset",
       offset: 41,
       returned: 0,
-      has_more: false,
+      has_more: true,
       recovery: "adjust_request_and_retry_same_offset",
     });
+    expect(structured.metadata.pagination).not.toHaveProperty("next_offset");
     expect(structured.metadata.truncation).toMatchObject({
       truncated: true,
       reason: "byte_limit",
@@ -469,7 +531,7 @@ describe("SNSDK-33 strict production envelopes", () => {
     });
   });
 
-  it("drops an intact row only for production-wrapper envelope overhead and exposes recovery plus resume", async () => {
+  it("drops an intact row only for production-wrapper envelope overhead and says the request must change", async () => {
     const description = "whole-record-canary-" + "x".repeat(580);
     // limit 1 plus the sentinel row that proves a continuation exists.
     const records = [
@@ -489,11 +551,13 @@ describe("SNSDK-33 strict production envelopes", () => {
       result.structuredContent
     );
     expect(structured.data.results).toEqual([]);
+    // The row was dropped, so the sentinel's continuation (offset 42) would
+    // skip it: more rows exist, and no offset can advance.
     expect(structured.data).toMatchObject({
       record_count: 0,
       has_more: true,
-      next_offset: 42,
     });
+    expect(structured.data).not.toHaveProperty("next_offset");
     // The legacy handler did not truncate; only the registered production
     // wrapper needed to remove the row to fit its envelope overhead.
     expect(structured.data).not.toHaveProperty("truncated");
@@ -504,9 +568,9 @@ describe("SNSDK-33 strict production envelopes", () => {
       offset: 41,
       returned: 0,
       has_more: true,
-      next_offset: 42,
       recovery: "adjust_request_and_retry_same_offset",
     });
+    expect(structured.metadata.pagination).not.toHaveProperty("next_offset");
     expect(structured.metadata.truncation).toEqual({
       truncated: true,
       reason: "byte_limit",
@@ -517,8 +581,8 @@ describe("SNSDK-33 strict production envelopes", () => {
     expect(summary?.type).toBe("text");
     if (summary?.type !== "text") throw new TypeError("expected text summary");
     expect(summary.text).toContain("retry offset 41");
-    expect(summary.text).toContain("offset 42 only to resume");
-    expect(summary.text).not.toContain("No automatic continuation");
+    expect(summary.text).toContain("No row fit");
+    expect(summary.text).not.toContain("offset 42");
     expect(JSON.stringify(result)).not.toContain("...[truncated");
   });
 });

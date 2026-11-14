@@ -1190,7 +1190,7 @@ describe.each(clientFactories)(
       }
     });
 
-    it("preserves recovery and post-window resume when handler fitting keeps zero rows", async () => {
+    it("says the request must change, with no next_offset, when handler fitting keeps zero rows", async () => {
       const records = [
         {
           sys_id: "1".repeat(32),
@@ -1232,7 +1232,6 @@ describe.each(clientFactories)(
           data: {
             record_count: 0,
             has_more: true,
-            next_offset: 42,
             truncated: true,
             dropped_records: 1,
             results: [],
@@ -1245,7 +1244,6 @@ describe.each(clientFactories)(
               offset: 41,
               returned: 0,
               has_more: true,
-              next_offset: 42,
               recovery: "adjust_request_and_retry_same_offset",
             },
             truncation: {
@@ -1258,8 +1256,16 @@ describe.each(clientFactories)(
         const summary = result.content[0];
         expect(summary?.type).toBe("text");
         if (summary?.type !== "text") throw new TypeError("expected text summary");
+        // No row fit: more rows exist, no offset can advance, so the request
+        // has to change.
+        const structured = result.structuredContent as {
+          data: Record<string, unknown>;
+          metadata: { pagination: Record<string, unknown> };
+        };
+        expect(structured.data).not.toHaveProperty("next_offset");
+        expect(structured.metadata.pagination).not.toHaveProperty("next_offset");
         expect(summary.text).toContain("retry offset 41");
-        expect(summary.text).toContain("offset 42 only to resume");
+        expect(summary.text).toContain("No row fit");
         expect(JSON.stringify(result)).not.toContain("whole-record-canary");
         expect(getWithMeta).toHaveBeenCalledWith(
           "/api/now/table/incident",
