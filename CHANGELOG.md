@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Release candidates publish to `next`.** A `vX.Y.Z-rc.N` tag (cut on the
+  `test` branch by convention) now publishes to the `next` dist-tag. Stable and
+  `-dev.N` tags are unchanged, and every other prerelease suffix is still
+  rejected.
+
 ### Security
 
 - **Container base image.** The runtime base,
