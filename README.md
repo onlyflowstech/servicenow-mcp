@@ -858,7 +858,11 @@ watermark is unchanged. Set `metadataCache.ttlMs` and
 list you set replaces the default list, so name the code tables in it to keep
 caching them. `sn_query`, `sn_get`, and `sn_schema` accept `force_recache: true`
 to refresh metadata; `sn_codesearch` has no such flag, so a change the
-watermark cannot see shows there after at most one TTL.
+watermark cannot see shows there after at most one TTL. A cold `sn_get` of a
+code-table record costs two requests (the watermark, then the record), and
+`sn_batch` and `sn_aggregate` reads are never cached. Memory is bounded: a
+response over 512 KiB is not cached, one credential scope keeps at most 32 MiB
+and the whole cache 128 MiB, evicting the least recently used first.
 
 **Freshness is checked against the instance, in every auth mode.** Before each
 fetch the cache reads a watermark in one small request: the table's row count

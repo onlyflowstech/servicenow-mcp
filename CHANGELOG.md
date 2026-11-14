@@ -42,7 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged (one watermark read still runs per call). A profile that sets its
   own `metadataCache.tables` or `SN_METADATA_CACHE_TABLES` replaces the default
   list and must name these tables to cache them. `sn_codesearch` has no
-  `force_recache` flag.
+  `force_recache` flag. `sn_get` of a record in these tables is cached too, and
+  a cold one costs 2 requests (a watermark read, then the record); `sn_batch`
+  and `sn_aggregate` reads are not cached. The cache is also bounded by bytes
+  now: a response over 512 KiB is not kept, each credential scope holds at most
+  32 MiB and the whole cache 128 MiB (least recently used out first), and
+  expired entries are dropped as new ones are stored. A no-table
+  `sn_codesearch` reads its five tables concurrently, within the client's
+  existing request limit.
 
 ### Security
 
