@@ -4151,7 +4151,7 @@
                   "additionalProperties": false
                 }
               ],
-              "description": "One condition or group. Example: {type:\"text\",field:\"name\",operator:\"contains\",value:\"fleet\"}. A list is not accepted."
+              "description": "One condition or group. Example: {type:\"equality\",field:\"sys_id\",operator:\"eq\",value:\"<32 hex>\"}. A list is not accepted."
             },
             "order_by": {
               "minItems": 1,

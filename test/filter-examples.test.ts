@@ -72,6 +72,12 @@ describe("working filter examples in tools/list (#19)", () => {
     expect(description).not.toMatch(/list|AND/);
     const example = /Example: (\{.*?\})\./.exec(String(filter?.description))?.[1];
     expect(example).toBeDefined();
+    // A destructive tool's example must select narrowly on any table. A field
+    // such as `name` is missing from task tables, ServiceNow drops a condition
+    // on a field the table lacks, and the filter would then match every row.
+    const condition = parseExample(example!) as { field: string; type: string; operator: string };
+    expect(condition.field).toMatch(/^sys_/);
+    expect([condition.type, condition.operator]).toEqual(["equality", "eq"]);
     const dryRun = await connected.client.callTool({
       name: "sn_batch",
       arguments: {
@@ -114,7 +120,7 @@ describe("tools/list size ledger (#19)", () => {
         "sn_atf_results": 13494,
         "sn_atf_run": 8273,
         "sn_attach": 4771,
-        "sn_batch": 14896,
+        "sn_batch": 14899,
         "sn_codesearch": 3736,
         "sn_create": 3707,
         "sn_delete": 3373,
@@ -131,7 +137,7 @@ describe("tools/list size ledger (#19)", () => {
         "sn_schema": 3599,
         "sn_syslog": 4324,
         "sn_update": 3742,
-        "total": 142833,
+        "total": 142836,
       }
     `);
   });

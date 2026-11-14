@@ -297,10 +297,15 @@ export const structuredQueryOrderSchema = z
  * structured query, and every character is paid for in each `tools/list`.
  * The two are not interchangeable: only the read tool takes a list, so the
  * write tool's text must not offer one.
+ *
+ * The write tool's example filters on `sys_id`, a field every table has. A
+ * field the table lacks is dropped by ServiceNow, which would make the filter
+ * match every row, so an example for a destructive tool must not use a field
+ * such as `name` that task tables do not have.
  */
 export const STRUCTURED_FILTER_DESCRIPTION =
   "One condition or group. Example: " +
-  '{type:"text",field:"name",operator:"contains",value:"fleet"}. ' +
+  '{type:"equality",field:"sys_id",operator:"eq",value:"<32 hex>"}. ' +
   "A list is not accepted.";
 
 export const STRUCTURED_FILTER_LIST_DESCRIPTION =
