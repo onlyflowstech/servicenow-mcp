@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`sn_codesearch` accepts `field: "name"` and `field: "sys_id"`.** The search
+  appended its field to a fixed `sys_id,name,<field>` list, so a field already in
+  the list became a duplicate and the policy check refused it with
+  `invalid_field_selection` before any request. The projection now lists each
+  field once, in the access check and in the read. A `field` that names more
+  than one field (`"name,script"`) is refused instead of silently searching the
+  first.
+- **`sn_codesearch` pages in a stable order.** It sent `sysparm_orderby`, which
+  is not a Table API parameter, so the order of its windows was not guaranteed
+  and an offset could skip or repeat a record. The order is now part of the
+  encoded query (`^ORDERBYsys_id`), as `sn_query` does it.
 - **A response that passes the byte cap is reported as too large, with the
   remedy, by every tool.** A read that went over the 1 MiB response limit, or
   over the call's cumulative upstream budget, used to reach the caller as "The

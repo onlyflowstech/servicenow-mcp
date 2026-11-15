@@ -154,7 +154,7 @@ describe("sn_codesearch through the cache", () => {
     // The search itself reached the instance once; the second call paid only
     // the watermark read that proves the entry is still current.
     expect(fullReads).toHaveLength(1);
-    expect(fullReads[0].params.sysparm_query).toBe("scriptLIKEneedle");
+    expect(fullReads[0].params.sysparm_query).toBe("scriptLIKEneedle^ORDERBYsys_id");
     expect(watermarkReads).toEqual(["sys_script_include", "sys_script_include"]);
   });
 
@@ -223,8 +223,8 @@ describe("sn_codesearch through the cache", () => {
     await codesearchHandler(second, call(), config, undefined as never);
 
     expect(fullReads.map((read) => read.params.sysparm_query)).toEqual([
-      "scriptLIKEneedle",
-      "scriptLIKEhaystack",
+      "scriptLIKEneedle^ORDERBYsys_id",
+      "scriptLIKEhaystack^ORDERBYsys_id",
     ]);
   });
 });

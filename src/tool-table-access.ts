@@ -48,27 +48,16 @@ import {
   canonicalFlowViewArgs,
 } from "./tools/flow-view-contracts.js";
 import { flowViewFieldSelection } from "./tools/flow-view-policy.js";
+import {
+  CODE_SEARCH_TARGETS,
+  codeSearchTarget,
+  searchProjection,
+} from "./code-search-targets.js";
 
 export interface ToolTableAccessResolution {
   readonly args: Record<string, unknown>;
   readonly requests: readonly TableAccessRequest[];
 }
-
-const CODE_TABLES = Object.freeze([
-  "sys_script",
-  "sys_script_include",
-  "sys_ui_script",
-  "sys_script_client",
-  "sys_ws_operation",
-]);
-
-const CODE_FIELDS: Readonly<Record<string, string>> = Object.freeze({
-  sys_script: "script",
-  sys_script_include: "script",
-  sys_ui_script: "script",
-  sys_script_client: "script",
-  sys_ws_operation: "operation_script",
-});
 
 const HEALTH_TABLES = Object.freeze({
   version: ["sys_properties"],
@@ -297,35 +286,39 @@ function codeSearchResolution(
   args: Record<string, unknown>
 ): ToolTableAccessResolution {
   if (args.table !== undefined) {
-    const target = requiredTable(args.table);
-    if (!Object.hasOwn(CODE_FIELDS, target)) throw new TablePolicyError();
-    const field = resolveReadableFields(target, {
-      fields: args.field ?? CODE_FIELDS[target],
-    })[0];
-    const fields = resolveReadableFields(target, {
-      fields: `sys_id,name,${field}`,
+    const table = requiredTable(args.table);
+    const target = codeSearchTarget(table);
+    if (target === undefined) throw new TablePolicyError();
+    const selected = resolveReadableFields(table, {
+      fields: args.field ?? target.defaultField,
+    });
+    // Exactly one searched field: a list would silently search only its first.
+    if (selected.length !== 1) throw new FieldPolicyError("invalid_field_selection");
+    const field = selected[0]!;
+    const fields = resolveReadableFields(table, {
+      fields: searchProjection(target.nameField, field).join(","),
     });
     return resolution(
       prepareAdditionalReadFieldArguments(
-        withFieldPolicyArgumentValues(args, { table: target, field }),
-        target,
+        withFieldPolicyArgumentValues(args, { table, field }),
+        table,
         fields.join(",")
       ),
-      [read(target)]
+      [read(table)]
     );
   }
   if (args.field !== undefined) {
     throw new FieldPolicyError("invalid_field_selection");
   }
   let prepared = args;
-  for (const target of CODE_TABLES) {
+  for (const target of CODE_SEARCH_TARGETS) {
     prepared = prepareAdditionalReadFieldArguments(
       prepared,
-      target,
-      `sys_id,name,${CODE_FIELDS[target]}`
+      target.table,
+      searchProjection(target.nameField, target.defaultField).join(",")
     );
   }
-  return resolution(prepared, CODE_TABLES.map(read));
+  return resolution(prepared, CODE_SEARCH_TARGETS.map((target) => read(target.table)));
 }
 
 function discoveryResolution(

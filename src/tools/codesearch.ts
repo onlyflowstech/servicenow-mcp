@@ -9,6 +9,7 @@ import {
 } from "../field-policy.js";
 import { ok, escapeQueryValue, formatError, truncate, withWarnings } from "../utils.js";
 import { createCommonToolError } from "../tool-error.js";
+import { searchProjection } from "../code-search-targets.js";
 
 export const definition = {
   name: "sn_codesearch",
@@ -76,17 +77,22 @@ export async function handler(
     const outcomes = await Promise.all(
       targets.map(async (target) => {
         try {
+          // The identifier, the name and the searched field, each once: the
+          // searched field may itself be the name or the identifier.
+          const projection = searchProjection("name", target.field).join(",");
           const fallbackFields = resolveReadableFields(target.table, {
-            fields: `sys_id,name,${target.field}`,
+            fields: projection,
           });
           const readableFields =
             preparedReadableFields(args, target.table) ?? fallbackFields;
           const resp = await client.get(`/api/now/table/${target.table}`, {
-            sysparm_query: `${escapeQueryValue(target.field)}LIKE${escapeQueryValue(args.search_term)}`,
-            sysparm_fields: `sys_id,name,${target.field}`,
+            // `sysparm_orderby` is not a Table API parameter; ordering is part
+            // of the encoded query. Without it the window is not a stable
+            // prefix of the table, and an offset can skip or repeat a record.
+            sysparm_query: `${escapeQueryValue(target.field)}LIKE${escapeQueryValue(args.search_term)}^ORDERBYsys_id`,
+            sysparm_fields: projection,
             sysparm_limit: String(windowLimit),
             sysparm_offset: "0",
-            sysparm_orderby: "sys_id",
           });
 
           const filtered = filterReadableRecord(resp.result || [], readableFields);

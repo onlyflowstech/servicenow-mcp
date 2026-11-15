@@ -122,7 +122,7 @@ describe("encoded-query injection is neutralized", () => {
       client,
       config
     );
-    expect(queryOfCall(get)).toBe(`scriptLIKE${NEUTRALIZED}`);
+    expect(queryOfCall(get)).toBe(`scriptLIKE${NEUTRALIZED}^ORDERBYsys_id`);
   });
 
   it("sn_schema table name", async () => {
