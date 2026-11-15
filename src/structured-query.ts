@@ -197,8 +197,14 @@ export type StructuredQueryFilter = StructuredLeafCondition | StructuredQueryGro
  * written out again, and `tools/list` carries the whole nest of three group
  * levels several times over. The converter runs once per tool, so each tool's
  * `inputSchema` holds the definitions it refers to. An id is registered
- * globally and may belong to one schema instance only. */
-const SCHEMA_IDS = Object.freeze({ condition: "Condition", filter: "Filter" });
+ * globally and may belong to one schema instance only. The names carry the
+ * module's own prefix because a client may merge `definitions` across tools or
+ * servers, where a bare `Filter` could collide with another server's.
+ */
+const SCHEMA_IDS = Object.freeze({
+  condition: "StructuredQueryCondition",
+  filter: "StructuredQueryFilter",
+});
 
 const structuredLeafConditionSchema = z
   .union([

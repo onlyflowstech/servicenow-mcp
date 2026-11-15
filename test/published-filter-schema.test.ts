@@ -113,14 +113,17 @@ describe("the published filter (#33)", () => {
     const tools = await listed(await harness());
     for (const name of ["sn_query", "sn_batch"]) {
       const schema = tools.get(name)!.inputSchema;
-      expect(Object.keys(schema.definitions as Json).sort(), name).toEqual(["Condition", "Filter"]);
+      expect(Object.keys(schema.definitions as Json).sort(), name).toEqual(["StructuredQueryCondition", "StructuredQueryFilter"]);
       const refs = refsIn(schema);
       expect(refs.length, name).toBeGreaterThan(0);
       for (const ref of refs) {
         expect(resolve(schema, ref), `${name} ${ref}`).toBeDefined();
       }
       // Both pieces are used, and the leaf union is written out nowhere else.
-      expect(new Set(refs), name).toEqual(new Set(["#/definitions/Condition", "#/definitions/Filter"]));
+      expect(new Set(refs), name).toEqual(new Set([
+        "#/definitions/StructuredQueryCondition",
+        "#/definitions/StructuredQueryFilter",
+      ]));
       expect(JSON.stringify(schema).match(/"const":"equality"/gu), name).toHaveLength(1);
     }
   });

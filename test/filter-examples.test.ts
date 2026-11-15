@@ -120,7 +120,7 @@ describe("tools/list size ledger (#19)", () => {
         "sn_atf_results": 13413,
         "sn_atf_run": 8192,
         "sn_attach": 4690,
-        "sn_batch": 8223,
+        "sn_batch": 8328,
         "sn_codesearch": 3655,
         "sn_create": 3626,
         "sn_delete": 3292,
@@ -132,12 +132,12 @@ describe("tools/list size ledger (#19)", () => {
         "sn_incident_add_work_note": 3278,
         "sn_nl": 3588,
         "sn_profile": 3299,
-        "sn_query": 10124,
+        "sn_query": 10244,
         "sn_relationships": 4292,
         "sn_schema": 3518,
         "sn_syslog": 4243,
         "sn_update": 3661,
-        "total": 127965,
+        "total": 128190,
       }
     `);
   });
@@ -156,16 +156,16 @@ describe("tools/list size ledger (#19)", () => {
     const outputSchemas = tools.reduce((sum, tool) => sum + size(tool.outputSchema ?? {}), 0);
     expect({ modelVisible, outputSchemas }).toMatchInlineSnapshot(`
       {
-        "modelVisible": 39719,
+        "modelVisible": 39944,
         "outputSchemas": 83684,
       }
     `);
   });
 
-  it("publishes the filter once: the sn_query entry stays under 10,200 characters (#33)", async () => {
+  it("publishes the filter once: the sn_query entry stays under 10,300 characters (#33)", async () => {
     const connected = await harness();
     const { tools } = await connected.client.listTools();
     const entry = tools.find((tool) => tool.name === "sn_query");
-    expect(JSON.stringify(entry).length).toBeLessThan(10_200);
+    expect(JSON.stringify(entry).length).toBeLessThan(10_300);
   });
 });

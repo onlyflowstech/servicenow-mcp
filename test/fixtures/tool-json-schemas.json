@@ -3034,7 +3034,7 @@
               "description": "One condition or group. Example: {type:\"equality\",field:\"sys_id\",operator:\"eq\",value:\"<32 hex>\"}. A list is not accepted.",
               "allOf": [
                 {
-                  "$ref": "#/definitions/Filter"
+                  "$ref": "#/definitions/StructuredQueryFilter"
                 }
               ]
             },
@@ -3110,10 +3110,10 @@
       ],
       "additionalProperties": false,
       "definitions": {
-        "Filter": {
+        "StructuredQueryFilter": {
           "anyOf": [
             {
-              "$ref": "#/definitions/Condition"
+              "$ref": "#/definitions/StructuredQueryCondition"
             },
             {
               "type": "object",
@@ -3136,7 +3136,7 @@
                   "items": {
                     "anyOf": [
                       {
-                        "$ref": "#/definitions/Condition"
+                        "$ref": "#/definitions/StructuredQueryCondition"
                       },
                       {
                         "type": "object",
@@ -3159,7 +3159,7 @@
                             "items": {
                               "anyOf": [
                                 {
-                                  "$ref": "#/definitions/Condition"
+                                  "$ref": "#/definitions/StructuredQueryCondition"
                                 },
                                 {
                                   "type": "object",
@@ -3180,7 +3180,7 @@
                                       "maxItems": 32,
                                       "type": "array",
                                       "items": {
-                                        "$ref": "#/definitions/Condition"
+                                        "$ref": "#/definitions/StructuredQueryCondition"
                                       }
                                     }
                                   },
@@ -3215,7 +3215,7 @@
             }
           ]
         },
-        "Condition": {
+        "StructuredQueryCondition": {
           "anyOf": [
             {
               "type": "object",
@@ -7586,11 +7586,11 @@
                   "maxItems": 32,
                   "type": "array",
                   "items": {
-                    "$ref": "#/definitions/Filter"
+                    "$ref": "#/definitions/StructuredQueryFilter"
                   }
                 },
                 {
-                  "$ref": "#/definitions/Filter"
+                  "$ref": "#/definitions/StructuredQueryFilter"
                 }
               ]
             },
@@ -7687,10 +7687,10 @@
       ],
       "additionalProperties": false,
       "definitions": {
-        "Filter": {
+        "StructuredQueryFilter": {
           "anyOf": [
             {
-              "$ref": "#/definitions/Condition"
+              "$ref": "#/definitions/StructuredQueryCondition"
             },
             {
               "type": "object",
@@ -7713,7 +7713,7 @@
                   "items": {
                     "anyOf": [
                       {
-                        "$ref": "#/definitions/Condition"
+                        "$ref": "#/definitions/StructuredQueryCondition"
                       },
                       {
                         "type": "object",
@@ -7736,7 +7736,7 @@
                             "items": {
                               "anyOf": [
                                 {
-                                  "$ref": "#/definitions/Condition"
+                                  "$ref": "#/definitions/StructuredQueryCondition"
                                 },
                                 {
                                   "type": "object",
@@ -7757,7 +7757,7 @@
                                       "maxItems": 32,
                                       "type": "array",
                                       "items": {
-                                        "$ref": "#/definitions/Condition"
+                                        "$ref": "#/definitions/StructuredQueryCondition"
                                       }
                                     }
                                   },
@@ -7792,7 +7792,7 @@
             }
           ]
         },
-        "Condition": {
+        "StructuredQueryCondition": {
           "anyOf": [
             {
               "type": "object",
