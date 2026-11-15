@@ -910,6 +910,19 @@ export function withCallMetadata(
   };
 }
 
+/**
+ * The tools whose handler reads one row past the page it was asked for (limit
+ * + 1) and hands that row back with the page. It is not a result: it only
+ * says another page exists, so the envelope cuts it, reports `has_more`, and
+ * does not count it as dropped. A tool not listed here that returns more rows
+ * than the limit has rows cut by the limit, and that is reported.
+ */
+const LOOK_AHEAD_TOOLS: ReadonlySet<string> = new Set([
+  "sn_codesearch",
+  "sn_discover",
+  "sn_aggregate",
+]);
+
 export function envelopeCompatibilityResult(
   name: ProductionToolName,
   args: Readonly<Record<string, unknown>>,
@@ -965,7 +978,11 @@ export function envelopeCompatibilityResult(
       recovery = "adjust_request_and_retry_same_offset";
     }
   }
-  const droppedByRecordLimit = originalCount - returned;
+  // The look-ahead row was read to find out whether more exists, not to be
+  // returned: it is not a dropped record. Rows past it still are.
+  const lookAheadRow =
+    LOOK_AHEAD_TOOLS.has(name) && originalCount > returned ? 1 : 0;
+  const droppedByRecordLimit = originalCount - returned - lookAheadRow;
   const droppedRecords = priorDropped + droppedByRecordLimit;
   const truncation: MutableMetadata["truncation"] =
     legacyTruncated || droppedByRecordLimit > 0

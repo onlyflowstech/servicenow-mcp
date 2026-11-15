@@ -149,6 +149,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the table and tool of that one call and nothing else of the profile's rules;
   a table name that is not a valid identifier still gets the fixed sentence.
   `grant --help` now says `--tools` adds to a table's tools.
+- **A page with more results no longer reports truncation.** `sn_codesearch`,
+  `sn_discover` and `sn_aggregate` (with `group_by`) read one row past the page
+  to learn whether another page exists. That row is not part of the result, but
+  the response counted it as a dropped record, so every page that had a next
+  page also said `metadata.truncation: {truncated: true, reason:
+  "record_limit", dropped_records: 1}`, which reads as data loss when none was
+  lost. `has_more` and `next_offset` are unchanged (`next_offset` is still
+  `offset + record_count`), and `metadata.truncation` is now `{truncated:
+  false}` for such a page. It still reports rows dropped to fit the response
+  size (`byte_limit`), now counting only the rows of the page that were dropped,
+  not the extra one, and rows a tool itself cut.
 
 ### Removed
 
