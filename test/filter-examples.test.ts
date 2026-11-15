@@ -120,7 +120,7 @@ describe("tools/list size ledger (#19)", () => {
         "sn_atf_results": 13413,
         "sn_atf_run": 8192,
         "sn_attach": 4690,
-        "sn_batch": 14818,
+        "sn_batch": 8223,
         "sn_codesearch": 3655,
         "sn_create": 3626,
         "sn_delete": 3292,
@@ -132,13 +132,40 @@ describe("tools/list size ledger (#19)", () => {
         "sn_incident_add_work_note": 3278,
         "sn_nl": 3588,
         "sn_profile": 3299,
-        "sn_query": 16574,
+        "sn_query": 10063,
         "sn_relationships": 4292,
         "sn_schema": 3518,
         "sn_syslog": 4243,
         "sn_update": 3661,
-        "total": 140887,
+        "total": 127781,
       }
     `);
+  });
+
+  // What a model reads (name, description, input schema) apart from the output
+  // schemas, which a client may keep out of the model's context.
+  it("keeps the model-visible part and the output schemas at their recorded sizes", async () => {
+    const connected = await harness();
+    const { tools } = await connected.client.listTools();
+    const size = (value: unknown) => JSON.stringify(value).length;
+    const modelVisible = tools.reduce(
+      (sum, tool) =>
+        sum + size({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }),
+      0
+    );
+    const outputSchemas = tools.reduce((sum, tool) => sum + size(tool.outputSchema ?? {}), 0);
+    expect({ modelVisible, outputSchemas }).toMatchInlineSnapshot(`
+      {
+        "modelVisible": 39535,
+        "outputSchemas": 83684,
+      }
+    `);
+  });
+
+  it("publishes the filter once: the sn_query entry stays under 10,200 characters (#33)", async () => {
+    const connected = await harness();
+    const { tools } = await connected.client.listTools();
+    const entry = tools.find((tool) => tool.name === "sn_query");
+    expect(JSON.stringify(entry).length).toBeLessThan(10_200);
   });
 });

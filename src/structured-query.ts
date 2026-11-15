@@ -190,14 +190,27 @@ export interface StructuredQueryGroup {
 
 export type StructuredQueryFilter = StructuredLeafCondition | StructuredQueryGroup;
 
-const structuredLeafConditionSchema = z.union([
-  equalityConditionSchema,
-  setConditionSchema,
-  scalarRangeConditionSchema,
-  betweenRangeConditionSchema,
-  textConditionSchema,
-  nullConditionSchema,
-]);
+/**
+ * The registry ids below ({@link SCHEMA_IDS}) make the JSON Schema converter
+ * publish the leaf union and the filter union once, under `definitions`, and
+ * refer to them with `$ref` wherever they recur. Without them every use is
+ * written out again, and `tools/list` carries the whole nest of three group
+ * levels several times over. The converter runs once per tool, so each tool's
+ * `inputSchema` holds the definitions it refers to. An id is registered
+ * globally and may belong to one schema instance only.
+ */
+const SCHEMA_IDS = Object.freeze({ condition: "Condition", filter: "Filter" });
+
+const structuredLeafConditionSchema = z
+  .union([
+    equalityConditionSchema,
+    setConditionSchema,
+    scalarRangeConditionSchema,
+    betweenRangeConditionSchema,
+    textConditionSchema,
+    nullConditionSchema,
+  ])
+  .meta({ id: SCHEMA_IDS.condition });
 
 function structuredQueryGroupSchema<FilterSchema extends z.ZodType>(
   filterSchema: FilterSchema
@@ -312,9 +325,9 @@ const LEAF_SHAPES: Readonly<Record<string, LeafShape>> = Object.freeze({
 const CONDITION_TYPES = [...Object.keys(LEAF_SHAPES), "group"];
 
 /**
- * A list filter is wrapped into a synthetic AND group before the union runs.
- * These sets let the diagnosis name the caller's own positions (`filter[1]`)
- * instead of positions inside a group the caller never wrote. The path
+ * A rejected list filter is wrapped into a synthetic AND group before it is
+ * diagnosed. These sets let the diagnosis name the caller's own positions
+ * (`filter[1]`) instead of positions inside a group the caller never wrote. The path
  * indexes always come from loops over the list, never from caller text.
  */
 const listFilterWrappers = new WeakSet<object>();
@@ -478,47 +491,78 @@ function filterErrorMessage(input: unknown, fallback: string): string {
   }
 }
 
-function structuredQueryFilterUnion(message: string): z.ZodType<StructuredQueryFilter> {
-  return z.union(
-    [structuredLeafConditionSchema, structuredQueryGroupLevelThreeSchema],
-    { error: (issue) => filterErrorMessage(issue.input, message) }
-  );
+/**
+ * The filter every structured query takes: one condition, or a group nested at
+ * most {@link MAX_STRUCTURED_QUERY_NESTING} levels. Both tools publish it by
+ * reference. `sn_query` also reads a list of it (see below), `sn_batch` never.
+ */
+export const structuredQueryFilterSchema: z.ZodType<StructuredQueryFilter> = z
+  .union([structuredLeafConditionSchema, structuredQueryGroupLevelThreeSchema], {
+    error: (issue) => filterErrorMessage(issue.input, STRUCTURED_FILTER_ERROR_MESSAGE),
+  })
+  .meta({ id: SCHEMA_IDS.filter });
+
+/** Group levels beneath a node: 0 for a leaf, 1 for a group of leaves, and so on. */
+function groupLevels(node: StructuredQueryFilter): number {
+  if (node.type !== "group") return 0;
+  let deepest = 0;
+  for (const child of node.conditions) deepest = Math.max(deepest, groupLevels(child));
+  return deepest + 1;
 }
 
-export const structuredQueryFilterSchema: z.ZodType<StructuredQueryFilter> =
-  structuredQueryFilterUnion(STRUCTURED_FILTER_ERROR_MESSAGE);
+/**
+ * A list read as an implicit AND: one element is that element, two or more
+ * become a top-level `and` group, which takes one of the
+ * {@link MAX_STRUCTURED_QUERY_NESTING} group levels. Each element has already
+ * passed the filter schema (up to three levels), so what is left to check is
+ * that a 2+ list's elements leave that level free; the check reads the parsed
+ * elements, whose depth the schema has bounded.
+ */
+const structuredQueryListFilterBranch = z
+  .array(structuredQueryFilterSchema)
+  .min(1)
+  .max(MAX_STRUCTURED_QUERY_CONDITIONS)
+  .transform((elements, context): StructuredQueryFilter => {
+    const [only] = elements;
+    if (elements.length === 1 && only !== undefined) return only;
+    if (elements.some((element) => groupLevels(element) >= MAX_STRUCTURED_QUERY_NESTING)) {
+      context.issues.push({ code: "custom", message: STRUCTURED_FILTER_LIST_ERROR_MESSAGE, input: elements });
+      return z.NEVER;
+    }
+    return { type: "group", operator: "and", conditions: elements };
+  });
 
 /**
- * Read a list as an implicit AND: one element is that element, two or more
- * become a top-level `and` group, which takes one of the
- * {@link MAX_STRUCTURED_QUERY_NESTING} group levels. The static group schema
- * then enforces the depth limit on the wrapped tree like any other, so a list
- * that would need one level too many fails with the filter message. An empty
- * list has no meaning and gets its own message. Anything that is not a list
- * passes through untouched.
+ * What a rejected `sn_query` filter says. The list branch and the plain
+ * branch each fail with their own issues, which the union reports as one; this
+ * puts the walk's message in their place. The caller's own list is wrapped the
+ * way a 2+ list is read, and the wrapper is flagged, so the walk names the
+ * caller's positions (`filter[1]`) instead of positions inside a group the
+ * caller never wrote. An empty list has no meaning and gets its own message.
  */
-const structuredQueryListFilterSchema = z.preprocess(
-  (value: unknown, context) => {
-    if (!Array.isArray(value)) return value;
-    if (value.length === 0) {
-      context.addIssue({
-        code: "custom",
-        message: STRUCTURED_FILTER_EMPTY_LIST_MESSAGE,
-        input: value,
-        continue: false,
-      });
-      return value;
-    }
-    if (value.length === 1) {
-      const only: unknown = value[0];
-      if (isPlainRecord(only)) listFilterSingles.add(only);
-      return only;
-    }
-    const wrapper = { type: "group", operator: "and", conditions: value };
-    listFilterWrappers.add(wrapper);
-    return wrapper;
-  },
-  structuredQueryFilterUnion(STRUCTURED_FILTER_LIST_ERROR_MESSAGE)
+function listFilterErrorMessage(input: unknown): string {
+  if (!Array.isArray(input)) {
+    return filterErrorMessage(input, STRUCTURED_FILTER_LIST_ERROR_MESSAGE);
+  }
+  if (input.length === 0) return STRUCTURED_FILTER_EMPTY_LIST_MESSAGE;
+  if (input.length === 1) {
+    const only: unknown = input[0];
+    if (isPlainRecord(only)) listFilterSingles.add(only);
+    return filterErrorMessage(only, STRUCTURED_FILTER_LIST_ERROR_MESSAGE);
+  }
+  const wrapper = { type: "group", operator: "and", conditions: input };
+  listFilterWrappers.add(wrapper);
+  return filterErrorMessage(wrapper, STRUCTURED_FILTER_LIST_ERROR_MESSAGE);
+}
+
+/**
+ * The filter of a tool that only reads: the same filter, or a list of it. The
+ * published schema has both: an array of {@link structuredQueryFilterSchema}
+ * and the filter itself, as `anyOf`.
+ */
+const structuredQueryListFilterSchema = z.union(
+  [structuredQueryListFilterBranch, structuredQueryFilterSchema],
+  { error: (issue) => listFilterErrorMessage(issue.input) }
 );
 
 export const structuredQueryOrderSchema = z
@@ -556,7 +600,7 @@ function structuredQueryObjectSchemaFor(
 ) {
   return z
     .object({
-      filter: filter.describe(description).optional(),
+      filter: filter.optional().describe(description),
       order_by: boundedArray(structuredQueryOrderSchema, MAX_STRUCTURED_QUERY_ORDER_COUNT, {
         min: 1,
       }).optional(),

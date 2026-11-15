@@ -3031,1106 +3031,12 @@
           "type": "object",
           "properties": {
             "filter": {
-              "anyOf": [
+              "description": "One condition or group. Example: {type:\"equality\",field:\"sys_id\",operator:\"eq\",value:\"<32 hex>\"}. A list is not accepted.",
+              "allOf": [
                 {
-                  "anyOf": [
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "equality"
-                        },
-                        "field": {
-                          "type": "string",
-                          "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                        },
-                        "operator": {
-                          "type": "string",
-                          "enum": [
-                            "eq",
-                            "neq"
-                          ]
-                        },
-                        "value": {
-                          "anyOf": [
-                            {
-                              "type": "string",
-                              "minLength": 1,
-                              "maxLength": 512
-                            },
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "boolean"
-                            }
-                          ]
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "field",
-                        "operator",
-                        "value"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "set"
-                        },
-                        "field": {
-                          "type": "string",
-                          "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                        },
-                        "operator": {
-                          "type": "string",
-                          "enum": [
-                            "in",
-                            "not_in"
-                          ]
-                        },
-                        "values": {
-                          "minItems": 1,
-                          "maxItems": 20,
-                          "type": "array",
-                          "items": {
-                            "anyOf": [
-                              {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 512
-                              },
-                              {
-                                "type": "number"
-                              },
-                              {
-                                "type": "boolean"
-                              }
-                            ]
-                          }
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "field",
-                        "operator",
-                        "values"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "range"
-                        },
-                        "field": {
-                          "type": "string",
-                          "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                        },
-                        "operator": {
-                          "type": "string",
-                          "enum": [
-                            "gt",
-                            "gte",
-                            "lt",
-                            "lte"
-                          ]
-                        },
-                        "value": {
-                          "anyOf": [
-                            {
-                              "type": "string",
-                              "minLength": 1,
-                              "maxLength": 512
-                            },
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "boolean"
-                            }
-                          ]
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "field",
-                        "operator",
-                        "value"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "range"
-                        },
-                        "field": {
-                          "type": "string",
-                          "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                        },
-                        "operator": {
-                          "type": "string",
-                          "const": "between"
-                        },
-                        "lower": {
-                          "anyOf": [
-                            {
-                              "type": "string",
-                              "minLength": 1,
-                              "maxLength": 512
-                            },
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "boolean"
-                            }
-                          ]
-                        },
-                        "upper": {
-                          "anyOf": [
-                            {
-                              "type": "string",
-                              "minLength": 1,
-                              "maxLength": 512
-                            },
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "boolean"
-                            }
-                          ]
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "field",
-                        "operator",
-                        "lower",
-                        "upper"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "text"
-                        },
-                        "field": {
-                          "type": "string",
-                          "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                        },
-                        "operator": {
-                          "type": "string",
-                          "enum": [
-                            "contains",
-                            "not_contains",
-                            "starts_with",
-                            "ends_with"
-                          ]
-                        },
-                        "value": {
-                          "type": "string",
-                          "minLength": 1,
-                          "maxLength": 512
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "field",
-                        "operator",
-                        "value"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "null"
-                        },
-                        "field": {
-                          "type": "string",
-                          "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                        },
-                        "operator": {
-                          "type": "string",
-                          "enum": [
-                            "is_null",
-                            "is_not_null"
-                          ]
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "field",
-                        "operator"
-                      ],
-                      "additionalProperties": false
-                    }
-                  ]
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "type": {
-                      "type": "string",
-                      "const": "group"
-                    },
-                    "operator": {
-                      "type": "string",
-                      "enum": [
-                        "and",
-                        "or"
-                      ]
-                    },
-                    "conditions": {
-                      "minItems": 1,
-                      "maxItems": 32,
-                      "type": "array",
-                      "items": {
-                        "anyOf": [
-                          {
-                            "anyOf": [
-                              {
-                                "type": "object",
-                                "properties": {
-                                  "type": {
-                                    "type": "string",
-                                    "const": "equality"
-                                  },
-                                  "field": {
-                                    "type": "string",
-                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                  },
-                                  "operator": {
-                                    "type": "string",
-                                    "enum": [
-                                      "eq",
-                                      "neq"
-                                    ]
-                                  },
-                                  "value": {
-                                    "anyOf": [
-                                      {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": 512
-                                      },
-                                      {
-                                        "type": "number"
-                                      },
-                                      {
-                                        "type": "boolean"
-                                      }
-                                    ]
-                                  }
-                                },
-                                "required": [
-                                  "type",
-                                  "field",
-                                  "operator",
-                                  "value"
-                                ],
-                                "additionalProperties": false
-                              },
-                              {
-                                "type": "object",
-                                "properties": {
-                                  "type": {
-                                    "type": "string",
-                                    "const": "set"
-                                  },
-                                  "field": {
-                                    "type": "string",
-                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                  },
-                                  "operator": {
-                                    "type": "string",
-                                    "enum": [
-                                      "in",
-                                      "not_in"
-                                    ]
-                                  },
-                                  "values": {
-                                    "minItems": 1,
-                                    "maxItems": 20,
-                                    "type": "array",
-                                    "items": {
-                                      "anyOf": [
-                                        {
-                                          "type": "string",
-                                          "minLength": 1,
-                                          "maxLength": 512
-                                        },
-                                        {
-                                          "type": "number"
-                                        },
-                                        {
-                                          "type": "boolean"
-                                        }
-                                      ]
-                                    }
-                                  }
-                                },
-                                "required": [
-                                  "type",
-                                  "field",
-                                  "operator",
-                                  "values"
-                                ],
-                                "additionalProperties": false
-                              },
-                              {
-                                "type": "object",
-                                "properties": {
-                                  "type": {
-                                    "type": "string",
-                                    "const": "range"
-                                  },
-                                  "field": {
-                                    "type": "string",
-                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                  },
-                                  "operator": {
-                                    "type": "string",
-                                    "enum": [
-                                      "gt",
-                                      "gte",
-                                      "lt",
-                                      "lte"
-                                    ]
-                                  },
-                                  "value": {
-                                    "anyOf": [
-                                      {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": 512
-                                      },
-                                      {
-                                        "type": "number"
-                                      },
-                                      {
-                                        "type": "boolean"
-                                      }
-                                    ]
-                                  }
-                                },
-                                "required": [
-                                  "type",
-                                  "field",
-                                  "operator",
-                                  "value"
-                                ],
-                                "additionalProperties": false
-                              },
-                              {
-                                "type": "object",
-                                "properties": {
-                                  "type": {
-                                    "type": "string",
-                                    "const": "range"
-                                  },
-                                  "field": {
-                                    "type": "string",
-                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                  },
-                                  "operator": {
-                                    "type": "string",
-                                    "const": "between"
-                                  },
-                                  "lower": {
-                                    "anyOf": [
-                                      {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": 512
-                                      },
-                                      {
-                                        "type": "number"
-                                      },
-                                      {
-                                        "type": "boolean"
-                                      }
-                                    ]
-                                  },
-                                  "upper": {
-                                    "anyOf": [
-                                      {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": 512
-                                      },
-                                      {
-                                        "type": "number"
-                                      },
-                                      {
-                                        "type": "boolean"
-                                      }
-                                    ]
-                                  }
-                                },
-                                "required": [
-                                  "type",
-                                  "field",
-                                  "operator",
-                                  "lower",
-                                  "upper"
-                                ],
-                                "additionalProperties": false
-                              },
-                              {
-                                "type": "object",
-                                "properties": {
-                                  "type": {
-                                    "type": "string",
-                                    "const": "text"
-                                  },
-                                  "field": {
-                                    "type": "string",
-                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                  },
-                                  "operator": {
-                                    "type": "string",
-                                    "enum": [
-                                      "contains",
-                                      "not_contains",
-                                      "starts_with",
-                                      "ends_with"
-                                    ]
-                                  },
-                                  "value": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "maxLength": 512
-                                  }
-                                },
-                                "required": [
-                                  "type",
-                                  "field",
-                                  "operator",
-                                  "value"
-                                ],
-                                "additionalProperties": false
-                              },
-                              {
-                                "type": "object",
-                                "properties": {
-                                  "type": {
-                                    "type": "string",
-                                    "const": "null"
-                                  },
-                                  "field": {
-                                    "type": "string",
-                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                  },
-                                  "operator": {
-                                    "type": "string",
-                                    "enum": [
-                                      "is_null",
-                                      "is_not_null"
-                                    ]
-                                  }
-                                },
-                                "required": [
-                                  "type",
-                                  "field",
-                                  "operator"
-                                ],
-                                "additionalProperties": false
-                              }
-                            ]
-                          },
-                          {
-                            "type": "object",
-                            "properties": {
-                              "type": {
-                                "type": "string",
-                                "const": "group"
-                              },
-                              "operator": {
-                                "type": "string",
-                                "enum": [
-                                  "and",
-                                  "or"
-                                ]
-                              },
-                              "conditions": {
-                                "minItems": 1,
-                                "maxItems": 32,
-                                "type": "array",
-                                "items": {
-                                  "anyOf": [
-                                    {
-                                      "anyOf": [
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "type": {
-                                              "type": "string",
-                                              "const": "equality"
-                                            },
-                                            "field": {
-                                              "type": "string",
-                                              "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                            },
-                                            "operator": {
-                                              "type": "string",
-                                              "enum": [
-                                                "eq",
-                                                "neq"
-                                              ]
-                                            },
-                                            "value": {
-                                              "anyOf": [
-                                                {
-                                                  "type": "string",
-                                                  "minLength": 1,
-                                                  "maxLength": 512
-                                                },
-                                                {
-                                                  "type": "number"
-                                                },
-                                                {
-                                                  "type": "boolean"
-                                                }
-                                              ]
-                                            }
-                                          },
-                                          "required": [
-                                            "type",
-                                            "field",
-                                            "operator",
-                                            "value"
-                                          ],
-                                          "additionalProperties": false
-                                        },
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "type": {
-                                              "type": "string",
-                                              "const": "set"
-                                            },
-                                            "field": {
-                                              "type": "string",
-                                              "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                            },
-                                            "operator": {
-                                              "type": "string",
-                                              "enum": [
-                                                "in",
-                                                "not_in"
-                                              ]
-                                            },
-                                            "values": {
-                                              "minItems": 1,
-                                              "maxItems": 20,
-                                              "type": "array",
-                                              "items": {
-                                                "anyOf": [
-                                                  {
-                                                    "type": "string",
-                                                    "minLength": 1,
-                                                    "maxLength": 512
-                                                  },
-                                                  {
-                                                    "type": "number"
-                                                  },
-                                                  {
-                                                    "type": "boolean"
-                                                  }
-                                                ]
-                                              }
-                                            }
-                                          },
-                                          "required": [
-                                            "type",
-                                            "field",
-                                            "operator",
-                                            "values"
-                                          ],
-                                          "additionalProperties": false
-                                        },
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "type": {
-                                              "type": "string",
-                                              "const": "range"
-                                            },
-                                            "field": {
-                                              "type": "string",
-                                              "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                            },
-                                            "operator": {
-                                              "type": "string",
-                                              "enum": [
-                                                "gt",
-                                                "gte",
-                                                "lt",
-                                                "lte"
-                                              ]
-                                            },
-                                            "value": {
-                                              "anyOf": [
-                                                {
-                                                  "type": "string",
-                                                  "minLength": 1,
-                                                  "maxLength": 512
-                                                },
-                                                {
-                                                  "type": "number"
-                                                },
-                                                {
-                                                  "type": "boolean"
-                                                }
-                                              ]
-                                            }
-                                          },
-                                          "required": [
-                                            "type",
-                                            "field",
-                                            "operator",
-                                            "value"
-                                          ],
-                                          "additionalProperties": false
-                                        },
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "type": {
-                                              "type": "string",
-                                              "const": "range"
-                                            },
-                                            "field": {
-                                              "type": "string",
-                                              "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                            },
-                                            "operator": {
-                                              "type": "string",
-                                              "const": "between"
-                                            },
-                                            "lower": {
-                                              "anyOf": [
-                                                {
-                                                  "type": "string",
-                                                  "minLength": 1,
-                                                  "maxLength": 512
-                                                },
-                                                {
-                                                  "type": "number"
-                                                },
-                                                {
-                                                  "type": "boolean"
-                                                }
-                                              ]
-                                            },
-                                            "upper": {
-                                              "anyOf": [
-                                                {
-                                                  "type": "string",
-                                                  "minLength": 1,
-                                                  "maxLength": 512
-                                                },
-                                                {
-                                                  "type": "number"
-                                                },
-                                                {
-                                                  "type": "boolean"
-                                                }
-                                              ]
-                                            }
-                                          },
-                                          "required": [
-                                            "type",
-                                            "field",
-                                            "operator",
-                                            "lower",
-                                            "upper"
-                                          ],
-                                          "additionalProperties": false
-                                        },
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "type": {
-                                              "type": "string",
-                                              "const": "text"
-                                            },
-                                            "field": {
-                                              "type": "string",
-                                              "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                            },
-                                            "operator": {
-                                              "type": "string",
-                                              "enum": [
-                                                "contains",
-                                                "not_contains",
-                                                "starts_with",
-                                                "ends_with"
-                                              ]
-                                            },
-                                            "value": {
-                                              "type": "string",
-                                              "minLength": 1,
-                                              "maxLength": 512
-                                            }
-                                          },
-                                          "required": [
-                                            "type",
-                                            "field",
-                                            "operator",
-                                            "value"
-                                          ],
-                                          "additionalProperties": false
-                                        },
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "type": {
-                                              "type": "string",
-                                              "const": "null"
-                                            },
-                                            "field": {
-                                              "type": "string",
-                                              "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                            },
-                                            "operator": {
-                                              "type": "string",
-                                              "enum": [
-                                                "is_null",
-                                                "is_not_null"
-                                              ]
-                                            }
-                                          },
-                                          "required": [
-                                            "type",
-                                            "field",
-                                            "operator"
-                                          ],
-                                          "additionalProperties": false
-                                        }
-                                      ]
-                                    },
-                                    {
-                                      "type": "object",
-                                      "properties": {
-                                        "type": {
-                                          "type": "string",
-                                          "const": "group"
-                                        },
-                                        "operator": {
-                                          "type": "string",
-                                          "enum": [
-                                            "and",
-                                            "or"
-                                          ]
-                                        },
-                                        "conditions": {
-                                          "minItems": 1,
-                                          "maxItems": 32,
-                                          "type": "array",
-                                          "items": {
-                                            "anyOf": [
-                                              {
-                                                "type": "object",
-                                                "properties": {
-                                                  "type": {
-                                                    "type": "string",
-                                                    "const": "equality"
-                                                  },
-                                                  "field": {
-                                                    "type": "string",
-                                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                                  },
-                                                  "operator": {
-                                                    "type": "string",
-                                                    "enum": [
-                                                      "eq",
-                                                      "neq"
-                                                    ]
-                                                  },
-                                                  "value": {
-                                                    "anyOf": [
-                                                      {
-                                                        "type": "string",
-                                                        "minLength": 1,
-                                                        "maxLength": 512
-                                                      },
-                                                      {
-                                                        "type": "number"
-                                                      },
-                                                      {
-                                                        "type": "boolean"
-                                                      }
-                                                    ]
-                                                  }
-                                                },
-                                                "required": [
-                                                  "type",
-                                                  "field",
-                                                  "operator",
-                                                  "value"
-                                                ],
-                                                "additionalProperties": false
-                                              },
-                                              {
-                                                "type": "object",
-                                                "properties": {
-                                                  "type": {
-                                                    "type": "string",
-                                                    "const": "set"
-                                                  },
-                                                  "field": {
-                                                    "type": "string",
-                                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                                  },
-                                                  "operator": {
-                                                    "type": "string",
-                                                    "enum": [
-                                                      "in",
-                                                      "not_in"
-                                                    ]
-                                                  },
-                                                  "values": {
-                                                    "minItems": 1,
-                                                    "maxItems": 20,
-                                                    "type": "array",
-                                                    "items": {
-                                                      "anyOf": [
-                                                        {
-                                                          "type": "string",
-                                                          "minLength": 1,
-                                                          "maxLength": 512
-                                                        },
-                                                        {
-                                                          "type": "number"
-                                                        },
-                                                        {
-                                                          "type": "boolean"
-                                                        }
-                                                      ]
-                                                    }
-                                                  }
-                                                },
-                                                "required": [
-                                                  "type",
-                                                  "field",
-                                                  "operator",
-                                                  "values"
-                                                ],
-                                                "additionalProperties": false
-                                              },
-                                              {
-                                                "type": "object",
-                                                "properties": {
-                                                  "type": {
-                                                    "type": "string",
-                                                    "const": "range"
-                                                  },
-                                                  "field": {
-                                                    "type": "string",
-                                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                                  },
-                                                  "operator": {
-                                                    "type": "string",
-                                                    "enum": [
-                                                      "gt",
-                                                      "gte",
-                                                      "lt",
-                                                      "lte"
-                                                    ]
-                                                  },
-                                                  "value": {
-                                                    "anyOf": [
-                                                      {
-                                                        "type": "string",
-                                                        "minLength": 1,
-                                                        "maxLength": 512
-                                                      },
-                                                      {
-                                                        "type": "number"
-                                                      },
-                                                      {
-                                                        "type": "boolean"
-                                                      }
-                                                    ]
-                                                  }
-                                                },
-                                                "required": [
-                                                  "type",
-                                                  "field",
-                                                  "operator",
-                                                  "value"
-                                                ],
-                                                "additionalProperties": false
-                                              },
-                                              {
-                                                "type": "object",
-                                                "properties": {
-                                                  "type": {
-                                                    "type": "string",
-                                                    "const": "range"
-                                                  },
-                                                  "field": {
-                                                    "type": "string",
-                                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                                  },
-                                                  "operator": {
-                                                    "type": "string",
-                                                    "const": "between"
-                                                  },
-                                                  "lower": {
-                                                    "anyOf": [
-                                                      {
-                                                        "type": "string",
-                                                        "minLength": 1,
-                                                        "maxLength": 512
-                                                      },
-                                                      {
-                                                        "type": "number"
-                                                      },
-                                                      {
-                                                        "type": "boolean"
-                                                      }
-                                                    ]
-                                                  },
-                                                  "upper": {
-                                                    "anyOf": [
-                                                      {
-                                                        "type": "string",
-                                                        "minLength": 1,
-                                                        "maxLength": 512
-                                                      },
-                                                      {
-                                                        "type": "number"
-                                                      },
-                                                      {
-                                                        "type": "boolean"
-                                                      }
-                                                    ]
-                                                  }
-                                                },
-                                                "required": [
-                                                  "type",
-                                                  "field",
-                                                  "operator",
-                                                  "lower",
-                                                  "upper"
-                                                ],
-                                                "additionalProperties": false
-                                              },
-                                              {
-                                                "type": "object",
-                                                "properties": {
-                                                  "type": {
-                                                    "type": "string",
-                                                    "const": "text"
-                                                  },
-                                                  "field": {
-                                                    "type": "string",
-                                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                                  },
-                                                  "operator": {
-                                                    "type": "string",
-                                                    "enum": [
-                                                      "contains",
-                                                      "not_contains",
-                                                      "starts_with",
-                                                      "ends_with"
-                                                    ]
-                                                  },
-                                                  "value": {
-                                                    "type": "string",
-                                                    "minLength": 1,
-                                                    "maxLength": 512
-                                                  }
-                                                },
-                                                "required": [
-                                                  "type",
-                                                  "field",
-                                                  "operator",
-                                                  "value"
-                                                ],
-                                                "additionalProperties": false
-                                              },
-                                              {
-                                                "type": "object",
-                                                "properties": {
-                                                  "type": {
-                                                    "type": "string",
-                                                    "const": "null"
-                                                  },
-                                                  "field": {
-                                                    "type": "string",
-                                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                                  },
-                                                  "operator": {
-                                                    "type": "string",
-                                                    "enum": [
-                                                      "is_null",
-                                                      "is_not_null"
-                                                    ]
-                                                  }
-                                                },
-                                                "required": [
-                                                  "type",
-                                                  "field",
-                                                  "operator"
-                                                ],
-                                                "additionalProperties": false
-                                              }
-                                            ]
-                                          }
-                                        }
-                                      },
-                                      "required": [
-                                        "type",
-                                        "operator",
-                                        "conditions"
-                                      ],
-                                      "additionalProperties": false
-                                    }
-                                  ]
-                                }
-                              }
-                            },
-                            "required": [
-                              "type",
-                              "operator",
-                              "conditions"
-                            ],
-                            "additionalProperties": false
-                          }
-                        ]
-                      }
-                    }
-                  },
-                  "required": [
-                    "type",
-                    "operator",
-                    "conditions"
-                  ],
-                  "additionalProperties": false
+                  "$ref": "#/definitions/Filter"
                 }
-              ],
-              "description": "One condition or group. Example: {type:\"equality\",field:\"sys_id\",operator:\"eq\",value:\"<32 hex>\"}. A list is not accepted."
+              ]
             },
             "order_by": {
               "minItems": 1,
@@ -4202,7 +3108,366 @@
         "action",
         "profile"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "definitions": {
+        "Filter": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Condition"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "group"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "and",
+                    "or"
+                  ]
+                },
+                "conditions": {
+                  "minItems": 1,
+                  "maxItems": 32,
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/Condition"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "const": "group"
+                          },
+                          "operator": {
+                            "type": "string",
+                            "enum": [
+                              "and",
+                              "or"
+                            ]
+                          },
+                          "conditions": {
+                            "minItems": 1,
+                            "maxItems": 32,
+                            "type": "array",
+                            "items": {
+                              "anyOf": [
+                                {
+                                  "$ref": "#/definitions/Condition"
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "type": {
+                                      "type": "string",
+                                      "const": "group"
+                                    },
+                                    "operator": {
+                                      "type": "string",
+                                      "enum": [
+                                        "and",
+                                        "or"
+                                      ]
+                                    },
+                                    "conditions": {
+                                      "minItems": 1,
+                                      "maxItems": 32,
+                                      "type": "array",
+                                      "items": {
+                                        "$ref": "#/definitions/Condition"
+                                      }
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "operator",
+                                    "conditions"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "operator",
+                          "conditions"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "type",
+                "operator",
+                "conditions"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "Condition": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "equality"
+                },
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,79}$"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "eq",
+                    "neq"
+                  ]
+                },
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "field",
+                "operator",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "set"
+                },
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,79}$"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "in",
+                    "not_in"
+                  ]
+                },
+                "values": {
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      }
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "type",
+                "field",
+                "operator",
+                "values"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "range"
+                },
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,79}$"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "gt",
+                    "gte",
+                    "lt",
+                    "lte"
+                  ]
+                },
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "field",
+                "operator",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "range"
+                },
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,79}$"
+                },
+                "operator": {
+                  "type": "string",
+                  "const": "between"
+                },
+                "lower": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ]
+                },
+                "upper": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "field",
+                "operator",
+                "lower",
+                "upper"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "text"
+                },
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,79}$"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "contains",
+                    "not_contains",
+                    "starts_with",
+                    "ends_with"
+                  ]
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "type",
+                "field",
+                "operator",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "null"
+                },
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,79}$"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "is_null",
+                    "is_not_null"
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "field",
+                "operator"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      }
     },
     "outputSchema": {
       "type": "object",
@@ -8317,1101 +7582,15 @@
               "description": "One condition or group, or a list read as AND. Example: [{type:\"equality\",field:\"active\",operator:\"eq\",value:true},{type:\"text\",field:\"name\",operator:\"contains\",value:\"fleet\"}]",
               "anyOf": [
                 {
-                  "anyOf": [
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "equality"
-                        },
-                        "field": {
-                          "type": "string",
-                          "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                        },
-                        "operator": {
-                          "type": "string",
-                          "enum": [
-                            "eq",
-                            "neq"
-                          ]
-                        },
-                        "value": {
-                          "anyOf": [
-                            {
-                              "type": "string",
-                              "minLength": 1,
-                              "maxLength": 512
-                            },
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "boolean"
-                            }
-                          ]
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "field",
-                        "operator",
-                        "value"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "set"
-                        },
-                        "field": {
-                          "type": "string",
-                          "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                        },
-                        "operator": {
-                          "type": "string",
-                          "enum": [
-                            "in",
-                            "not_in"
-                          ]
-                        },
-                        "values": {
-                          "minItems": 1,
-                          "maxItems": 20,
-                          "type": "array",
-                          "items": {
-                            "anyOf": [
-                              {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 512
-                              },
-                              {
-                                "type": "number"
-                              },
-                              {
-                                "type": "boolean"
-                              }
-                            ]
-                          }
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "field",
-                        "operator",
-                        "values"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "range"
-                        },
-                        "field": {
-                          "type": "string",
-                          "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                        },
-                        "operator": {
-                          "type": "string",
-                          "enum": [
-                            "gt",
-                            "gte",
-                            "lt",
-                            "lte"
-                          ]
-                        },
-                        "value": {
-                          "anyOf": [
-                            {
-                              "type": "string",
-                              "minLength": 1,
-                              "maxLength": 512
-                            },
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "boolean"
-                            }
-                          ]
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "field",
-                        "operator",
-                        "value"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "range"
-                        },
-                        "field": {
-                          "type": "string",
-                          "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                        },
-                        "operator": {
-                          "type": "string",
-                          "const": "between"
-                        },
-                        "lower": {
-                          "anyOf": [
-                            {
-                              "type": "string",
-                              "minLength": 1,
-                              "maxLength": 512
-                            },
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "boolean"
-                            }
-                          ]
-                        },
-                        "upper": {
-                          "anyOf": [
-                            {
-                              "type": "string",
-                              "minLength": 1,
-                              "maxLength": 512
-                            },
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "boolean"
-                            }
-                          ]
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "field",
-                        "operator",
-                        "lower",
-                        "upper"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "text"
-                        },
-                        "field": {
-                          "type": "string",
-                          "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                        },
-                        "operator": {
-                          "type": "string",
-                          "enum": [
-                            "contains",
-                            "not_contains",
-                            "starts_with",
-                            "ends_with"
-                          ]
-                        },
-                        "value": {
-                          "type": "string",
-                          "minLength": 1,
-                          "maxLength": 512
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "field",
-                        "operator",
-                        "value"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "null"
-                        },
-                        "field": {
-                          "type": "string",
-                          "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                        },
-                        "operator": {
-                          "type": "string",
-                          "enum": [
-                            "is_null",
-                            "is_not_null"
-                          ]
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "field",
-                        "operator"
-                      ],
-                      "additionalProperties": false
-                    }
-                  ]
+                  "minItems": 1,
+                  "maxItems": 32,
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/Filter"
+                  }
                 },
                 {
-                  "type": "object",
-                  "properties": {
-                    "type": {
-                      "type": "string",
-                      "const": "group"
-                    },
-                    "operator": {
-                      "type": "string",
-                      "enum": [
-                        "and",
-                        "or"
-                      ]
-                    },
-                    "conditions": {
-                      "minItems": 1,
-                      "maxItems": 32,
-                      "type": "array",
-                      "items": {
-                        "anyOf": [
-                          {
-                            "anyOf": [
-                              {
-                                "type": "object",
-                                "properties": {
-                                  "type": {
-                                    "type": "string",
-                                    "const": "equality"
-                                  },
-                                  "field": {
-                                    "type": "string",
-                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                  },
-                                  "operator": {
-                                    "type": "string",
-                                    "enum": [
-                                      "eq",
-                                      "neq"
-                                    ]
-                                  },
-                                  "value": {
-                                    "anyOf": [
-                                      {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": 512
-                                      },
-                                      {
-                                        "type": "number"
-                                      },
-                                      {
-                                        "type": "boolean"
-                                      }
-                                    ]
-                                  }
-                                },
-                                "required": [
-                                  "type",
-                                  "field",
-                                  "operator",
-                                  "value"
-                                ],
-                                "additionalProperties": false
-                              },
-                              {
-                                "type": "object",
-                                "properties": {
-                                  "type": {
-                                    "type": "string",
-                                    "const": "set"
-                                  },
-                                  "field": {
-                                    "type": "string",
-                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                  },
-                                  "operator": {
-                                    "type": "string",
-                                    "enum": [
-                                      "in",
-                                      "not_in"
-                                    ]
-                                  },
-                                  "values": {
-                                    "minItems": 1,
-                                    "maxItems": 20,
-                                    "type": "array",
-                                    "items": {
-                                      "anyOf": [
-                                        {
-                                          "type": "string",
-                                          "minLength": 1,
-                                          "maxLength": 512
-                                        },
-                                        {
-                                          "type": "number"
-                                        },
-                                        {
-                                          "type": "boolean"
-                                        }
-                                      ]
-                                    }
-                                  }
-                                },
-                                "required": [
-                                  "type",
-                                  "field",
-                                  "operator",
-                                  "values"
-                                ],
-                                "additionalProperties": false
-                              },
-                              {
-                                "type": "object",
-                                "properties": {
-                                  "type": {
-                                    "type": "string",
-                                    "const": "range"
-                                  },
-                                  "field": {
-                                    "type": "string",
-                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                  },
-                                  "operator": {
-                                    "type": "string",
-                                    "enum": [
-                                      "gt",
-                                      "gte",
-                                      "lt",
-                                      "lte"
-                                    ]
-                                  },
-                                  "value": {
-                                    "anyOf": [
-                                      {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": 512
-                                      },
-                                      {
-                                        "type": "number"
-                                      },
-                                      {
-                                        "type": "boolean"
-                                      }
-                                    ]
-                                  }
-                                },
-                                "required": [
-                                  "type",
-                                  "field",
-                                  "operator",
-                                  "value"
-                                ],
-                                "additionalProperties": false
-                              },
-                              {
-                                "type": "object",
-                                "properties": {
-                                  "type": {
-                                    "type": "string",
-                                    "const": "range"
-                                  },
-                                  "field": {
-                                    "type": "string",
-                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                  },
-                                  "operator": {
-                                    "type": "string",
-                                    "const": "between"
-                                  },
-                                  "lower": {
-                                    "anyOf": [
-                                      {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": 512
-                                      },
-                                      {
-                                        "type": "number"
-                                      },
-                                      {
-                                        "type": "boolean"
-                                      }
-                                    ]
-                                  },
-                                  "upper": {
-                                    "anyOf": [
-                                      {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": 512
-                                      },
-                                      {
-                                        "type": "number"
-                                      },
-                                      {
-                                        "type": "boolean"
-                                      }
-                                    ]
-                                  }
-                                },
-                                "required": [
-                                  "type",
-                                  "field",
-                                  "operator",
-                                  "lower",
-                                  "upper"
-                                ],
-                                "additionalProperties": false
-                              },
-                              {
-                                "type": "object",
-                                "properties": {
-                                  "type": {
-                                    "type": "string",
-                                    "const": "text"
-                                  },
-                                  "field": {
-                                    "type": "string",
-                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                  },
-                                  "operator": {
-                                    "type": "string",
-                                    "enum": [
-                                      "contains",
-                                      "not_contains",
-                                      "starts_with",
-                                      "ends_with"
-                                    ]
-                                  },
-                                  "value": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "maxLength": 512
-                                  }
-                                },
-                                "required": [
-                                  "type",
-                                  "field",
-                                  "operator",
-                                  "value"
-                                ],
-                                "additionalProperties": false
-                              },
-                              {
-                                "type": "object",
-                                "properties": {
-                                  "type": {
-                                    "type": "string",
-                                    "const": "null"
-                                  },
-                                  "field": {
-                                    "type": "string",
-                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                  },
-                                  "operator": {
-                                    "type": "string",
-                                    "enum": [
-                                      "is_null",
-                                      "is_not_null"
-                                    ]
-                                  }
-                                },
-                                "required": [
-                                  "type",
-                                  "field",
-                                  "operator"
-                                ],
-                                "additionalProperties": false
-                              }
-                            ]
-                          },
-                          {
-                            "type": "object",
-                            "properties": {
-                              "type": {
-                                "type": "string",
-                                "const": "group"
-                              },
-                              "operator": {
-                                "type": "string",
-                                "enum": [
-                                  "and",
-                                  "or"
-                                ]
-                              },
-                              "conditions": {
-                                "minItems": 1,
-                                "maxItems": 32,
-                                "type": "array",
-                                "items": {
-                                  "anyOf": [
-                                    {
-                                      "anyOf": [
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "type": {
-                                              "type": "string",
-                                              "const": "equality"
-                                            },
-                                            "field": {
-                                              "type": "string",
-                                              "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                            },
-                                            "operator": {
-                                              "type": "string",
-                                              "enum": [
-                                                "eq",
-                                                "neq"
-                                              ]
-                                            },
-                                            "value": {
-                                              "anyOf": [
-                                                {
-                                                  "type": "string",
-                                                  "minLength": 1,
-                                                  "maxLength": 512
-                                                },
-                                                {
-                                                  "type": "number"
-                                                },
-                                                {
-                                                  "type": "boolean"
-                                                }
-                                              ]
-                                            }
-                                          },
-                                          "required": [
-                                            "type",
-                                            "field",
-                                            "operator",
-                                            "value"
-                                          ],
-                                          "additionalProperties": false
-                                        },
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "type": {
-                                              "type": "string",
-                                              "const": "set"
-                                            },
-                                            "field": {
-                                              "type": "string",
-                                              "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                            },
-                                            "operator": {
-                                              "type": "string",
-                                              "enum": [
-                                                "in",
-                                                "not_in"
-                                              ]
-                                            },
-                                            "values": {
-                                              "minItems": 1,
-                                              "maxItems": 20,
-                                              "type": "array",
-                                              "items": {
-                                                "anyOf": [
-                                                  {
-                                                    "type": "string",
-                                                    "minLength": 1,
-                                                    "maxLength": 512
-                                                  },
-                                                  {
-                                                    "type": "number"
-                                                  },
-                                                  {
-                                                    "type": "boolean"
-                                                  }
-                                                ]
-                                              }
-                                            }
-                                          },
-                                          "required": [
-                                            "type",
-                                            "field",
-                                            "operator",
-                                            "values"
-                                          ],
-                                          "additionalProperties": false
-                                        },
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "type": {
-                                              "type": "string",
-                                              "const": "range"
-                                            },
-                                            "field": {
-                                              "type": "string",
-                                              "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                            },
-                                            "operator": {
-                                              "type": "string",
-                                              "enum": [
-                                                "gt",
-                                                "gte",
-                                                "lt",
-                                                "lte"
-                                              ]
-                                            },
-                                            "value": {
-                                              "anyOf": [
-                                                {
-                                                  "type": "string",
-                                                  "minLength": 1,
-                                                  "maxLength": 512
-                                                },
-                                                {
-                                                  "type": "number"
-                                                },
-                                                {
-                                                  "type": "boolean"
-                                                }
-                                              ]
-                                            }
-                                          },
-                                          "required": [
-                                            "type",
-                                            "field",
-                                            "operator",
-                                            "value"
-                                          ],
-                                          "additionalProperties": false
-                                        },
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "type": {
-                                              "type": "string",
-                                              "const": "range"
-                                            },
-                                            "field": {
-                                              "type": "string",
-                                              "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                            },
-                                            "operator": {
-                                              "type": "string",
-                                              "const": "between"
-                                            },
-                                            "lower": {
-                                              "anyOf": [
-                                                {
-                                                  "type": "string",
-                                                  "minLength": 1,
-                                                  "maxLength": 512
-                                                },
-                                                {
-                                                  "type": "number"
-                                                },
-                                                {
-                                                  "type": "boolean"
-                                                }
-                                              ]
-                                            },
-                                            "upper": {
-                                              "anyOf": [
-                                                {
-                                                  "type": "string",
-                                                  "minLength": 1,
-                                                  "maxLength": 512
-                                                },
-                                                {
-                                                  "type": "number"
-                                                },
-                                                {
-                                                  "type": "boolean"
-                                                }
-                                              ]
-                                            }
-                                          },
-                                          "required": [
-                                            "type",
-                                            "field",
-                                            "operator",
-                                            "lower",
-                                            "upper"
-                                          ],
-                                          "additionalProperties": false
-                                        },
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "type": {
-                                              "type": "string",
-                                              "const": "text"
-                                            },
-                                            "field": {
-                                              "type": "string",
-                                              "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                            },
-                                            "operator": {
-                                              "type": "string",
-                                              "enum": [
-                                                "contains",
-                                                "not_contains",
-                                                "starts_with",
-                                                "ends_with"
-                                              ]
-                                            },
-                                            "value": {
-                                              "type": "string",
-                                              "minLength": 1,
-                                              "maxLength": 512
-                                            }
-                                          },
-                                          "required": [
-                                            "type",
-                                            "field",
-                                            "operator",
-                                            "value"
-                                          ],
-                                          "additionalProperties": false
-                                        },
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "type": {
-                                              "type": "string",
-                                              "const": "null"
-                                            },
-                                            "field": {
-                                              "type": "string",
-                                              "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                            },
-                                            "operator": {
-                                              "type": "string",
-                                              "enum": [
-                                                "is_null",
-                                                "is_not_null"
-                                              ]
-                                            }
-                                          },
-                                          "required": [
-                                            "type",
-                                            "field",
-                                            "operator"
-                                          ],
-                                          "additionalProperties": false
-                                        }
-                                      ]
-                                    },
-                                    {
-                                      "type": "object",
-                                      "properties": {
-                                        "type": {
-                                          "type": "string",
-                                          "const": "group"
-                                        },
-                                        "operator": {
-                                          "type": "string",
-                                          "enum": [
-                                            "and",
-                                            "or"
-                                          ]
-                                        },
-                                        "conditions": {
-                                          "minItems": 1,
-                                          "maxItems": 32,
-                                          "type": "array",
-                                          "items": {
-                                            "anyOf": [
-                                              {
-                                                "type": "object",
-                                                "properties": {
-                                                  "type": {
-                                                    "type": "string",
-                                                    "const": "equality"
-                                                  },
-                                                  "field": {
-                                                    "type": "string",
-                                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                                  },
-                                                  "operator": {
-                                                    "type": "string",
-                                                    "enum": [
-                                                      "eq",
-                                                      "neq"
-                                                    ]
-                                                  },
-                                                  "value": {
-                                                    "anyOf": [
-                                                      {
-                                                        "type": "string",
-                                                        "minLength": 1,
-                                                        "maxLength": 512
-                                                      },
-                                                      {
-                                                        "type": "number"
-                                                      },
-                                                      {
-                                                        "type": "boolean"
-                                                      }
-                                                    ]
-                                                  }
-                                                },
-                                                "required": [
-                                                  "type",
-                                                  "field",
-                                                  "operator",
-                                                  "value"
-                                                ],
-                                                "additionalProperties": false
-                                              },
-                                              {
-                                                "type": "object",
-                                                "properties": {
-                                                  "type": {
-                                                    "type": "string",
-                                                    "const": "set"
-                                                  },
-                                                  "field": {
-                                                    "type": "string",
-                                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                                  },
-                                                  "operator": {
-                                                    "type": "string",
-                                                    "enum": [
-                                                      "in",
-                                                      "not_in"
-                                                    ]
-                                                  },
-                                                  "values": {
-                                                    "minItems": 1,
-                                                    "maxItems": 20,
-                                                    "type": "array",
-                                                    "items": {
-                                                      "anyOf": [
-                                                        {
-                                                          "type": "string",
-                                                          "minLength": 1,
-                                                          "maxLength": 512
-                                                        },
-                                                        {
-                                                          "type": "number"
-                                                        },
-                                                        {
-                                                          "type": "boolean"
-                                                        }
-                                                      ]
-                                                    }
-                                                  }
-                                                },
-                                                "required": [
-                                                  "type",
-                                                  "field",
-                                                  "operator",
-                                                  "values"
-                                                ],
-                                                "additionalProperties": false
-                                              },
-                                              {
-                                                "type": "object",
-                                                "properties": {
-                                                  "type": {
-                                                    "type": "string",
-                                                    "const": "range"
-                                                  },
-                                                  "field": {
-                                                    "type": "string",
-                                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                                  },
-                                                  "operator": {
-                                                    "type": "string",
-                                                    "enum": [
-                                                      "gt",
-                                                      "gte",
-                                                      "lt",
-                                                      "lte"
-                                                    ]
-                                                  },
-                                                  "value": {
-                                                    "anyOf": [
-                                                      {
-                                                        "type": "string",
-                                                        "minLength": 1,
-                                                        "maxLength": 512
-                                                      },
-                                                      {
-                                                        "type": "number"
-                                                      },
-                                                      {
-                                                        "type": "boolean"
-                                                      }
-                                                    ]
-                                                  }
-                                                },
-                                                "required": [
-                                                  "type",
-                                                  "field",
-                                                  "operator",
-                                                  "value"
-                                                ],
-                                                "additionalProperties": false
-                                              },
-                                              {
-                                                "type": "object",
-                                                "properties": {
-                                                  "type": {
-                                                    "type": "string",
-                                                    "const": "range"
-                                                  },
-                                                  "field": {
-                                                    "type": "string",
-                                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                                  },
-                                                  "operator": {
-                                                    "type": "string",
-                                                    "const": "between"
-                                                  },
-                                                  "lower": {
-                                                    "anyOf": [
-                                                      {
-                                                        "type": "string",
-                                                        "minLength": 1,
-                                                        "maxLength": 512
-                                                      },
-                                                      {
-                                                        "type": "number"
-                                                      },
-                                                      {
-                                                        "type": "boolean"
-                                                      }
-                                                    ]
-                                                  },
-                                                  "upper": {
-                                                    "anyOf": [
-                                                      {
-                                                        "type": "string",
-                                                        "minLength": 1,
-                                                        "maxLength": 512
-                                                      },
-                                                      {
-                                                        "type": "number"
-                                                      },
-                                                      {
-                                                        "type": "boolean"
-                                                      }
-                                                    ]
-                                                  }
-                                                },
-                                                "required": [
-                                                  "type",
-                                                  "field",
-                                                  "operator",
-                                                  "lower",
-                                                  "upper"
-                                                ],
-                                                "additionalProperties": false
-                                              },
-                                              {
-                                                "type": "object",
-                                                "properties": {
-                                                  "type": {
-                                                    "type": "string",
-                                                    "const": "text"
-                                                  },
-                                                  "field": {
-                                                    "type": "string",
-                                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                                  },
-                                                  "operator": {
-                                                    "type": "string",
-                                                    "enum": [
-                                                      "contains",
-                                                      "not_contains",
-                                                      "starts_with",
-                                                      "ends_with"
-                                                    ]
-                                                  },
-                                                  "value": {
-                                                    "type": "string",
-                                                    "minLength": 1,
-                                                    "maxLength": 512
-                                                  }
-                                                },
-                                                "required": [
-                                                  "type",
-                                                  "field",
-                                                  "operator",
-                                                  "value"
-                                                ],
-                                                "additionalProperties": false
-                                              },
-                                              {
-                                                "type": "object",
-                                                "properties": {
-                                                  "type": {
-                                                    "type": "string",
-                                                    "const": "null"
-                                                  },
-                                                  "field": {
-                                                    "type": "string",
-                                                    "pattern": "^[a-z][a-z0-9_]{0,79}$"
-                                                  },
-                                                  "operator": {
-                                                    "type": "string",
-                                                    "enum": [
-                                                      "is_null",
-                                                      "is_not_null"
-                                                    ]
-                                                  }
-                                                },
-                                                "required": [
-                                                  "type",
-                                                  "field",
-                                                  "operator"
-                                                ],
-                                                "additionalProperties": false
-                                              }
-                                            ]
-                                          }
-                                        }
-                                      },
-                                      "required": [
-                                        "type",
-                                        "operator",
-                                        "conditions"
-                                      ],
-                                      "additionalProperties": false
-                                    }
-                                  ]
-                                }
-                              }
-                            },
-                            "required": [
-                              "type",
-                              "operator",
-                              "conditions"
-                            ],
-                            "additionalProperties": false
-                          }
-                        ]
-                      }
-                    }
-                  },
-                  "required": [
-                    "type",
-                    "operator",
-                    "conditions"
-                  ],
-                  "additionalProperties": false
+                  "$ref": "#/definitions/Filter"
                 }
               ]
             },
@@ -9506,7 +7685,366 @@
         "table",
         "profile"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "definitions": {
+        "Filter": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Condition"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "group"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "and",
+                    "or"
+                  ]
+                },
+                "conditions": {
+                  "minItems": 1,
+                  "maxItems": 32,
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/Condition"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "const": "group"
+                          },
+                          "operator": {
+                            "type": "string",
+                            "enum": [
+                              "and",
+                              "or"
+                            ]
+                          },
+                          "conditions": {
+                            "minItems": 1,
+                            "maxItems": 32,
+                            "type": "array",
+                            "items": {
+                              "anyOf": [
+                                {
+                                  "$ref": "#/definitions/Condition"
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "type": {
+                                      "type": "string",
+                                      "const": "group"
+                                    },
+                                    "operator": {
+                                      "type": "string",
+                                      "enum": [
+                                        "and",
+                                        "or"
+                                      ]
+                                    },
+                                    "conditions": {
+                                      "minItems": 1,
+                                      "maxItems": 32,
+                                      "type": "array",
+                                      "items": {
+                                        "$ref": "#/definitions/Condition"
+                                      }
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "operator",
+                                    "conditions"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "operator",
+                          "conditions"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "type",
+                "operator",
+                "conditions"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "Condition": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "equality"
+                },
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,79}$"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "eq",
+                    "neq"
+                  ]
+                },
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "field",
+                "operator",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "set"
+                },
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,79}$"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "in",
+                    "not_in"
+                  ]
+                },
+                "values": {
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      }
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "type",
+                "field",
+                "operator",
+                "values"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "range"
+                },
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,79}$"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "gt",
+                    "gte",
+                    "lt",
+                    "lte"
+                  ]
+                },
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "field",
+                "operator",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "range"
+                },
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,79}$"
+                },
+                "operator": {
+                  "type": "string",
+                  "const": "between"
+                },
+                "lower": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ]
+                },
+                "upper": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "field",
+                "operator",
+                "lower",
+                "upper"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "text"
+                },
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,79}$"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "contains",
+                    "not_contains",
+                    "starts_with",
+                    "ends_with"
+                  ]
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "type",
+                "field",
+                "operator",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "null"
+                },
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,79}$"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "is_null",
+                    "is_not_null"
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "field",
+                "operator"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      }
     },
     "outputSchema": {
       "type": "object",
