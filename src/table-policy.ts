@@ -78,6 +78,23 @@ const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 const TOOL_NAME = /^sn_[a-z0-9_]{1,61}$/u;
 const TABLE_ALLOWLIST_WILDCARD = "*";
 
+/**
+ * Tables a "*" grant never covers. An allowlist reaches one of these only
+ * when it names the table, for read and for write alike. Their rows hold the
+ * old and new values of other tables' fields, comments and work notes, so a
+ * blanket grant is not a deliberate choice to expose them.
+ *
+ * Every entry is also a built-in system table (SYSTEM_TABLES in
+ * field-policy.ts), which a test enforces. The list is deliberately short:
+ * it applies to these tables only, and no other table's reach changes.
+ */
+export const NAMED_ONLY_TABLES: readonly string[] = Object.freeze([
+  "sys_audit",
+  "sys_journal_field",
+]);
+
+const NAMED_ONLY_SET: ReadonlySet<string> = new Set(NAMED_ONLY_TABLES);
+
 const ISSUED_TABLE_POLICY_ERRORS = new WeakSet<object>();
 const ISSUED_TABLE_POLICIES = new WeakSet<object>();
 
@@ -85,6 +102,8 @@ const ISSUED_TABLE_POLICIES = new WeakSet<object>();
  * Why a table was refused, in the terms an operator can act on.
  *
  * - `not_granted`: the profile's allowlist for the operation does not name it.
+ * - `named_only`: the allowlist grants "*" but the table is covered only when
+ *   named, so the grant that lifts the denial is one that names it.
  * - `tool_not_bound`: the allowlist names it, but this tool is not among the
  *   tools its target permits.
  * - `unsupported_table`: the tool does not work on that table at all, so no
@@ -94,6 +113,7 @@ const ISSUED_TABLE_POLICIES = new WeakSet<object>();
  */
 export type TablePolicyDenialReason =
   | "not_granted"
+  | "named_only"
   | "tool_not_bound"
   | "unsupported_table"
   | "none_granted";
@@ -137,6 +157,7 @@ function safeDenialDetail(candidate: TablePolicyDenialDetail): TablePolicyDenial
     const reason = candidate.reason;
     if (
       reason !== "not_granted" &&
+      reason !== "named_only" &&
       reason !== "tool_not_bound" &&
       reason !== "unsupported_table" &&
       reason !== "none_granted"
@@ -196,6 +217,12 @@ export function tablePolicyDenialMessage(error: TablePolicyError): string {
         ? `${DENIED_PREFIX}.`
         : `${DENIED_PREFIX}: this profile has no ${operation ?? "read"} grant on "${table}" ` +
             `that allows ${tool}. To allow it, run: ${grant(table)}, ${restart}.`;
+    case "named_only":
+      return table === undefined || tool === undefined
+        ? `${DENIED_PREFIX}.`
+        : `${DENIED_PREFIX}: a "*" grant does not cover "${table}". This profile has no ` +
+            `${operation ?? "read"} grant on "${table}" that allows ${tool}. ` +
+            `To allow it, run: ${grant(table)}, ${restart}.`;
     case "tool_not_bound":
       return table === undefined || tool === undefined
         ? `${DENIED_PREFIX}.`
@@ -304,11 +331,23 @@ export function authorizeTableAccess(
       operation === "read"
         ? policy.readTables
         : policy.writeTables;
-    const denied = (reason: "not_granted" | "tool_not_bound"): TablePolicyError =>
+    const denied = (
+      reason: "not_granted" | "named_only" | "tool_not_bound"
+    ): TablePolicyError =>
       new TablePolicyError({ reason, operation, table, tool: authorizedTool });
-    if (!allowlistGrantsTable(allowlist, table)) throw denied("not_granted");
+    if (!allowlistGrantsTable(allowlist, table)) {
+      // A "*" grant is present but does not reach this table: say so, because
+      // "no grant" would read as though the wildcard were missing.
+      throw denied(
+        allowlistGrantsAllTables(allowlist) && NAMED_ONLY_SET.has(table)
+          ? "named_only"
+          : "not_granted"
+      );
+    }
     const target = policy.targets.find((entry) => entry.table === table);
     if (!target) {
+      // The table passed allowlistGrantsTable above, so under "*" it is
+      // either covered by it or, for a named-only table, named.
       if (allowlistGrantsAllTables(allowlist)) return table;
       throw denied("not_granted");
     }
@@ -487,8 +526,13 @@ function allowlistGrantsAllTables(allowlist: readonly string[]): boolean {
   return allowlist.includes(TABLE_ALLOWLIST_WILDCARD);
 }
 
+/**
+ * Whether an allowlist reaches a table: by name, or through "*" for every
+ * table except the named-only ones.
+ */
 function allowlistGrantsTable(allowlist: readonly string[], table: string): boolean {
-  return allowlistGrantsAllTables(allowlist) || allowlist.includes(table);
+  if (allowlist.includes(table)) return true;
+  return allowlistGrantsAllTables(allowlist) && !NAMED_ONLY_SET.has(table);
 }
 
 function normalizeTargetKind(candidate: unknown): TableAccessTargetKind {
