@@ -43,6 +43,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A truncation hint says which `max_response_bytes` is for the next row and
+  which for the whole page (#37).** The hint's budget was measured for the
+  next row only, but a bare `max_response_bytes=1500` read as a value for the
+  page: live, a 50-row read at 1000 bytes said 1500 and following it returned
+  one row. The hint now reads `... or max_response_bytes=1500 (fits the next
+  row) or max_response_bytes=15400 (fits all 50)`. The page figure is measured
+  the same way as the next-row one, is never smaller than it, and is left out
+  when the page would exceed the effective maximum (1,000,000, or a raw-read
+  rule's `maxResponseBytes`) and when one row was dropped (the next row is then
+  the rest of the page). The bare figure is gone, so a client that matched
+  `max_response_bytes=<n>.` at the end of the hint must match the labelled
+  form; the count still equals `dropped_records`, and the hint stays within its
+  600 characters. `sn_schema`'s `fields_only` text now says it lists the
+  table's own fields only, and that inherited fields need the full schema; it
+  costs 68 characters in `tools/list` (`sn_schema` 3518 to 3586, total 128190
+  to 128258).
 - **The list form of `structured_query.filter` is in the published `tools/list`
   schema, and `tools/list` is smaller (#33).** `sn_query` read a list filter,
   and its descriptions tell clients to send one, but the schema it published
@@ -155,6 +171,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A repeated read of a small cached-table response is one request, not a
+  watermark and a read (#36).** A cache hit costs one watermark round trip, so
+  for a small response a hit cost about what a plain read did and a miss cost
+  two requests. A read of a cacheable table whose response is under 32 KiB is
+  no longer kept: the selector is remembered as small, per credential scope,
+  for one cache TTL (at most 512 selectors, least recently used out), and its
+  later reads go straight to ServiceNow with no watermark. `metadata.cache`
+  says `miss` for them; `bypass` stays for `force_recache`. A direct read that
+  comes back at 32 KiB or more forgets the mark, so the selector is cached
+  from the next read. Responses of 32 KiB and up are cached, checked and
+  bounded as before. Measured on a dev instance: a 6 KB read 490 ms before (a
+  hit), 81 ms after; a 17 KB read 489 ms before, 98 ms. The threshold is a
+  size, not a time: `sys_dictionary` there has a watermark of about 0.5 s, and
+  even a 66 KB read was faster uncached. `metadataCache.smallReadBytes` sets
+  the threshold per profile (0 keeps every response).
 - **`has_more` and `next_offset` count rows dropped for size (#28). Contract
   change for truncated pages.** A page cut to fit `max_response_bytes` kept
   `has_more` and `next_offset` for the rows beyond the page, so a client that
