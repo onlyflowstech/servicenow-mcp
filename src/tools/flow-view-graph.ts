@@ -988,6 +988,21 @@ export function fitFlowGraphToBudget(graph: FlowGraph, targetBytes: number): num
 }
 
 /**
+ * Add the fields that restate what the text carries: the root flow record and
+ * the sentence for each warning code. Both are small and bounded, and neither
+ * is traded for anything, so they are added after the budget fit.
+ */
+export function attachFlowMirrors(graph: FlowGraph): void {
+  delete graph.ref;
+  delete graph.warning_details;
+  const root = graph.flows[0];
+  if (root !== undefined && SYS_ID.test(root.sys_id)) graph.ref = { table: "sys_hub_flow", sys_id: root.sys_id };
+  if (graph.warnings.length > 0) {
+    graph.warning_details = graph.warnings.map((code) => ({ code, message: FLOW_WARNING_TEXT[code] }));
+  }
+}
+
+/**
  * Put the Mermaid diagram into the graph once the graph is final, so it shows
  * the nodes that survived the budget. The diagram is derived from `nodes` and
  * `edges`, so it is the first thing given up: when the graph and the diagram
@@ -1099,13 +1114,6 @@ export function buildFlowGraph(input: FlowGraphBuildInput): FlowGraph {
   }
   graph.limits_hit = sortedLimits([...builder.limits, ...graph.limits_hit]);
   graph.warnings = sortedWarnings(builder.warnings);
-  if (graph.warnings.length > 0) {
-    graph.warning_details = graph.warnings.map((code) => ({ code, message: FLOW_WARNING_TEXT[code] }));
-  }
-  const rootHeader = graph.flows[0];
-  if (rootHeader !== undefined && SYS_ID.test(rootHeader.sys_id)) {
-    graph.ref = { table: "sys_hub_flow", sys_id: rootHeader.sys_id };
-  }
   // Flow headers keep a call site only while that node survives.
   const ids = new Set(graph.nodes.map((node) => node.id));
   for (const flow of graph.flows) {
@@ -1115,6 +1123,10 @@ export function buildFlowGraph(input: FlowGraphBuildInput): FlowGraph {
 
   const target = Math.floor(options.max_response_bytes * L.STRUCTURED_SHARE);
   fitFlowGraphToBudget(graph, target);
+  // What the text shows beyond the graph is added once the graph is final, so
+  // it never costs a node or an input value: a graph just under the budget
+  // stays whole.
+  attachFlowMirrors(graph);
   if (options.format !== "outline") attachFlowDiagram(graph, target);
   return graph;
 }

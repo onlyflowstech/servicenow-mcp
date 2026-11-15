@@ -112,6 +112,48 @@ describe("the flow graph's diagram", () => {
   });
 });
 
+describe("ref and warning_details and the response budget", () => {
+  const warned = (max: number): FlowGraph => {
+    const root = flow(150, false);
+    return buildFlowGraph({
+      root: { ...root, warnings: ["subflow_cycle", "flow_version_unknown", "orphan_steps", "label_cache_unavailable"] },
+      options: { depth: 1, include_inputs: true, max_nodes: 150, format: "outline", max_response_bytes: max },
+    });
+  };
+  /** The graph without what the text-mirroring fields add. */
+  const core = (graph: FlowGraph): FlowGraph => {
+    const copy = { ...graph };
+    delete copy.ref;
+    delete copy.warning_details;
+    delete copy.diagram;
+    return copy;
+  };
+
+  it("never cost a node: a flow that just fits the budget without them is not halved", () => {
+    const whole = warned(1_000_000);
+    expect(whole.nodes).toHaveLength(150);
+    expect(whole.warning_details).toHaveLength(4);
+    const size = bytes(core(whole));
+    // The structured share is exactly the size of the graph without them.
+    const max = Math.ceil(size / FLOW_VIEW_LIMITS.STRUCTURED_SHARE);
+    expect(Math.floor(max * FLOW_VIEW_LIMITS.STRUCTURED_SHARE)).toBe(size);
+    expect(bytes(whole) - size).toBeGreaterThan(300);
+    const graph = warned(max);
+    expect(graph.nodes).toHaveLength(150);
+    expect(graph.limits_hit).not.toContain("response_bytes");
+    expect(graph.ref).toEqual(whole.ref);
+    expect(graph.warning_details).toEqual(whole.warning_details);
+    expect(core(graph)).toEqual(core(whole));
+  });
+
+  it("are still there when the graph is cut to fit", () => {
+    const graph = warned(10_000);
+    expect(graph.limits_hit).toContain("response_bytes");
+    expect(graph.ref).toEqual({ table: "sys_hub_flow", sys_id: ROOT });
+    expect(graph.warning_details?.map((detail) => detail.code)).toEqual(graph.warnings);
+  });
+});
+
 describe("the diagram and the response budget", () => {
   const target = (maxResponseBytes: number): number => Math.floor(maxResponseBytes * FLOW_VIEW_LIMITS.STRUCTURED_SHARE);
 
