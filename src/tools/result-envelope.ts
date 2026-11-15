@@ -713,7 +713,10 @@ function effectiveOrder(
     case "sn_relationships":
       return ["depth_first", "relationship_sys_id"];
     case "sn_codesearch":
-      return ["table", "sys_id"];
+      // One table: its own sys_id order. Several: each table's first match
+      // (script includes first), then each table's second, and so on; `round`
+      // is that turn, a position and not a field of the rows.
+      return typeof args.table === "string" ? ["sys_id"] : ["round", "table", "sys_id"];
     case "sn_discover":
       return args.type === "apps" ? ["source", "sys_id"] : ["sys_id"];
     case "sn_aggregate":

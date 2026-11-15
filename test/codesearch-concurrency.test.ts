@@ -119,12 +119,18 @@ describe("sn_codesearch per-table reads", () => {
     expect(searches).toEqual([]);
   });
 
-  it("returns results in table order whichever read finishes first", async () => {
+  it("returns results in the fixed table order, script includes first, whichever read finishes first", async () => {
     const { call } = harness({
       delays: { sys_script: 60, sys_script_include: 45, sys_ui_script: 30, sys_script_client: 15, sys_ws_operation: 1 },
     });
     const results = parseText(await call()) as Array<{ table: string }>;
-    expect(results.map((row) => row.table)).toEqual([...TABLES].sort());
+    expect(results.map((row) => row.table)).toEqual([
+      "sys_script_include",
+      "sys_script",
+      "sys_ui_script",
+      "sys_script_client",
+      "sys_ws_operation",
+    ]);
   });
 
   it("reports warnings in target order, and the other tables still return", async () => {

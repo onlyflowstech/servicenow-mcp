@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
+import { fakeInstance, scriptWith, sysId } from "./code-search-fake.js";
 import { callError, closeHarnesses, harness, type Harness } from "./structured-filter-harness.js";
 
 afterEach(closeHarnesses);
@@ -30,7 +31,7 @@ async function search(connected: Harness, args: Record<string, unknown>) {
   return result.structuredContent as unknown as {
     data: { results: Array<Record<string, unknown>>; warnings?: string[] };
     metadata: {
-      pagination: { has_more: boolean; next_offset?: number; returned: number };
+      pagination: { has_more: boolean; next_offset?: number; returned: number; order_by?: string[] };
       truncation: { truncated: boolean };
     };
   };
@@ -140,5 +141,48 @@ describe("the snippet", () => {
     connected.get.mockResolvedValue({ result: [{ sys_id: id(1), name: "N", script: "" }] });
     const { data } = await search(connected, { search_term: "x", table: "sys_script_include" });
     expect(data.results[0]).toMatchObject({ snippet: "" });
+  });
+});
+
+describe("paging through the server", () => {
+  const order = ["sys_script_include", "sys_script", "sys_ui_script", "sys_script_client", "sys_ws_operation"];
+
+  function instance(perTable: number) {
+    return fakeInstance(
+      Object.fromEntries(
+        order.map((table, salt) => [
+          table,
+          Array.from({ length: perTable }, (_, index) => ({
+            sys_id: sysId(index, salt),
+            name: `${table}-${index}`,
+            script: scriptWith("needle", 300),
+            operation_script: scriptWith("needle", 300),
+          })),
+        ])
+      )
+    );
+  }
+
+  it("says where the next page starts, and the order is interleaved across tables", async () => {
+    const connected = await harness([], { codeTables: true });
+    connected.get.mockImplementation(instance(30).get as never);
+    const first = await search(connected, { search_term: "needle", limit: 20 });
+    expect(first.data.results).toHaveLength(20);
+    expect(first.data.results.slice(0, 5).map((row) => row.table)).toEqual(order);
+    expect(first.metadata.pagination).toMatchObject({ has_more: true, next_offset: 20, returned: 20 });
+    expect(first.metadata.pagination).toMatchObject({ order_by: ["round", "table", "sys_id"] });
+
+    const second = await search(connected, { search_term: "needle", limit: 20, offset: 20 });
+    const seen = new Set(
+      [...first.data.results, ...second.data.results].map((row) => `${row.table}:${row.sys_id}`)
+    );
+    expect(seen.size).toBe(40);
+  });
+
+  it("orders a one-table search by sys_id alone", async () => {
+    const connected = await harness([], { codeTables: true });
+    connected.get.mockImplementation(instance(30).get as never);
+    const page = await search(connected, { search_term: "needle", table: "sys_script", limit: 5 });
+    expect(page.metadata.pagination).toMatchObject({ order_by: ["sys_id"] });
   });
 });

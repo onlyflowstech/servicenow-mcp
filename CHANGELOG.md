@@ -24,6 +24,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A large code search returns results instead of failing.** `sn_codesearch`
+  read the full script of `limit + 1` rows from every table it searched, so
+  above about 100 rows (150, 200 and 300 failed every time on an instance of
+  6,500 script includes) it passed the 1 MiB response cap, and with no `table`
+  the five tables shared one budget. It now reads the rows without their
+  scripts and then the scripts of the rows it returns only, 50 at a time, each
+  batch in its own response scope; a batch that is still too large is halved,
+  and a script too large to read on its own leaves that row with an empty
+  snippet and `note: "script too large to preview"`. A search of one table with
+  `limit` 49 or less still reads the scripts with the rows, in one request.
+  Reads also send `sysparm_no_count`, so the instance skips a row count it never
+  used. If the rows alone pass the cap, the error is the too-large message.
+- **A code search with no `table` no longer fills page 1 with one table.**
+  Results were sorted by table name, so the first table (business rules)
+  filled the page whenever it had `limit` or more matches and script includes
+  appeared only after paging past every one of them. The tables now take turns:
+  each table's first match (script includes first, then business rules, UI
+  scripts, client scripts, scripted REST operations), then each table's second,
+  and so on, each in `sys_id` order. The order depends only on the data, and
+  `offset` pages through it without skipping or repeating a row. The result
+  metadata's `order_by` is `["round", "table", "sys_id"]` for this search and
+  `["sys_id"]` for a search of one table.
 - **A code search snippet shows the text around the match.** It was the first
   200 characters of the script, which rarely showed why the record matched. It
   is now about 200 characters centred on the first case-insensitive match, with

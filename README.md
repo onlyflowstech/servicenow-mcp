@@ -716,7 +716,7 @@ in this section is needed to use this server.
 | `sn_relationships` | CMDB CI graph traversal — upstream/downstream/both, configurable depth |
 | `sn_attach` | List attachments, return downloads as inline base64, and upload inline base64 content; never touches a host filesystem path |
 | `sn_syslog` | Query system logs with severity/source/time filters |
-| `sn_codesearch` | Search business rules, script includes, client scripts, etc. Part of the default read grant, so a plain read grant on a code table allows it |
+| `sn_codesearch` | Search business rules, script includes, client scripts, etc., with a snippet around each match ([Code search](#code-search)). Part of the default read grant, so a plain read grant on a code table allows it |
 | `sn_discover` | Discover tables, scoped apps, store apps, plugins |
 
 ### Testing & Automation
@@ -842,6 +842,39 @@ Two failure modes are worth knowing:
 **`maxBodyBytes` is not operator-configurable.** `src/http-entrypoint.ts`
 builds the request policy with only `allowedHosts` and `allowedOrigins`, so the
 limit is always 1 MiB and no environment variable changes it.
+
+### Code search
+
+`sn_codesearch {search_term, table?, field?, limit?, offset?}` finds records
+whose script contains the text, in the business rules, script includes, UI
+scripts, client scripts and scripted REST operations of the instance. Each row
+is `{table, table_label, sys_id, name, snippet, line}`: `snippet` is about 200
+characters of the script centred on the first match (`...` marks a cut) and
+`line` is the line that match is on. The comparison is the instance's
+case-insensitive `LIKE`; if the text holds no literal match for the term, the
+snippet is the head of the script and the row has no `line`.
+
+- **One table or all.** With `table`, one table is searched (and `field` can
+  name another field of it, such as `name`). With none, all five code tables
+  are searched.
+- **A page is shared among the tables.** A search of several tables takes turns:
+  each table's first match (script includes first, then business rules, UI
+  scripts, client scripts, scripted REST operations), then each table's second,
+  and so on, each table in `sys_id` order. No table crowds the others off page
+  1, and the order depends only on the data, so `offset` and `next_offset` page
+  through it exactly. A table with few matches leaves its share to the others.
+- **Large pages degrade, they do not fail.** A script can be hundreds of
+  kilobytes, so a page of them does not fit one response. A search of one table
+  with `limit` 49 or less reads the scripts with the rows, in one request (and
+  falls back to the two steps below if that page passes the cap). A larger page, or a search of several tables, first finds the rows without
+  their scripts and then reads the scripts of the rows it returns, 50 at a time,
+  halving a batch that is still too large. A script too large to read even on
+  its own gives its row an empty `snippet` and `note: "script too large to
+  preview"`; read it with `sn_get`. If the rows alone pass the response cap, the
+  error says the response was too large and to lower `limit` or `offset`.
+- **The scripts are still field-policy readable fields.** The search reads the
+  identifier, the name and the searched field of each table, each subject to the
+  profile's field policy, and the sensitive-name rules apply to `field`.
 
 ### Metadata cache
 
