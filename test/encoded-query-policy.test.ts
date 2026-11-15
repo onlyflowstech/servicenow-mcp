@@ -164,6 +164,7 @@ describe("SNSDK-32 encoded-query policy construction", () => {
     expect(authorize("active=true", {}, loaded)).toEqual({
       query: "active=true",
       outputFields: ["active"],
+      maxResponseBytes: 100_000,
     });
     for (const raw of ["", "not json", "[]", "null"]) {
       expect(() =>
@@ -196,6 +197,7 @@ describe("SNSDK-32 bounded encoded-read parser", () => {
     expect(authorize(query)).toEqual({
       query,
       outputFields: ["active"],
+      maxResponseBytes: 100_000,
     });
   });
 

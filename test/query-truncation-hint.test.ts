@@ -106,7 +106,10 @@ describe("truncation hint text", () => {
   it.each(variants)("renders and parses back: %j", (parts, text) => {
     const hint = renderTruncationHint(parts);
     expect(hint).toBe(text);
-    expect(parseTruncationHint(hint)).toEqual(parts);
+    // An over-maximum hint names the cap it was written with.
+    expect(parseTruncationHint(hint)).toEqual(
+      Number.isFinite(parts.neededBytes) ? parts : { ...parts, capBytes: 1_000_000 }
+    );
     expect(
       refreshTruncationHint(hint, {
         dropped: parts.dropped,

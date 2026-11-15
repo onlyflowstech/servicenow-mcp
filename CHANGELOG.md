@@ -64,8 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields="sys_id,name" or max_response_bytes=31500.` The `limit` is the number
   of rows that fit. The `max_response_bytes` is measured where the envelope
   refits the result, with its own cost in it, and holds at least the next row;
-  if no budget up to 1,000,000 could, the hint says so and offers fields and
-  `sn_get`. A caller's own `fields` list is offered back without its large
+  if no budget up to 1,000,000 (or up to the `maxResponseBytes` of the raw-read
+  rule that approved a raw `query`, when that is lower) could, the hint says
+  the next row exceeds that maximum, names it, and offers fields and `sn_get`. A caller's own `fields` list is offered back without its large
   fields (such as `script`); a list with none gets the `limit` and the budget,
   and a read of `fields=all` gets the table's short default list. Only fields
   the profile may read are named, never a sensitive one. The count still equals

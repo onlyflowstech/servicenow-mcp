@@ -35,14 +35,19 @@ const NEEDED_BYTES_STEP = 100;
 /**
  * `max_response_bytes` that would hold the next row: the measured size of the
  * response with that row (`measured`) plus a small margin, rounded up to a
- * whole {@link NEEDED_BYTES_STEP}, and always above the budget just used
- * (`current`). Infinity when that is more than the largest budget the schema
- * accepts: no value of `max_response_bytes` would hold the row.
+ * whole {@link NEEDED_BYTES_STEP} (but never past `cap`), and always above the
+ * budget just used (`current`). Infinity when that is more than `cap`: no
+ * value the caller may use would hold the row. `cap` is the largest budget the
+ * schema accepts, or less when a raw-read rule holds the call to a smaller one.
  */
-export function neededResponseBytes(measured: number, current: number): number {
+export function neededResponseBytes(
+  measured: number,
+  current: number,
+  cap: number = MAX_RESPONSE_BYTES_MAX
+): number {
   const padded = Math.max(measured + NEEDED_BYTES_SLACK, current + 1, MAX_RESPONSE_BYTES_MIN);
-  const rounded = Math.ceil(padded / NEEDED_BYTES_STEP) * NEEDED_BYTES_STEP;
-  return rounded > MAX_RESPONSE_BYTES_MAX ? Number.POSITIVE_INFINITY : rounded;
+  if (padded > cap) return Number.POSITIVE_INFINITY;
+  return Math.min(Math.ceil(padded / NEEDED_BYTES_STEP) * NEEDED_BYTES_STEP, cap);
 }
 
 export interface TruncationHintParts {
@@ -67,6 +72,12 @@ export interface TruncationHintParts {
    * Infinity when that is more than the maximum budget.
    */
   readonly neededBytes: number;
+  /**
+   * The largest `max_response_bytes` the caller may use, named when the next
+   * row exceeds it. Defaults to the schema maximum; a raw-read rule can set a
+   * smaller one. Only read back from a hint's "exceeds the maximum" clause.
+   */
+  readonly capBytes?: number;
 }
 
 /** What a hint names for the rows that fit: the continuation and the `limit` to use. */
@@ -76,7 +87,9 @@ function returnedRows(parts: TruncationHintParts): number {
 
 const EMPTY_CLAUSE = "row too large";
 const SN_GET_OPTION = "sn_get";
-const OVER_MAXIMUM_CLAUSE = `the next row exceeds the maximum max_response_bytes (${MAX_RESPONSE_BYTES_MAX})`;
+function overMaximumClause(cap: number): string {
+  return `the next row exceeds the maximum max_response_bytes (${cap})`;
+}
 
 function renderHint(parts: TruncationHintParts, withAdvice: boolean): string {
   const returned = returnedRows(parts);
@@ -91,7 +104,7 @@ function renderHint(parts: TruncationHintParts, withAdvice: boolean): string {
   const clauses = [`Dropped ${parts.dropped}/${parts.total}`];
   if (empty) clauses.push(EMPTY_CLAUSE);
   else clauses.push(`continue offset=${parts.offset + returned} limit=${returned}`);
-  if (over) clauses.push(OVER_MAXIMUM_CLAUSE);
+  if (over) clauses.push(overMaximumClause(parts.capBytes ?? MAX_RESPONSE_BYTES_MAX));
   if (options.length > 0) {
     clauses.push(`retry offset=${parts.offset} with ${options.join(" or ")}`);
   }
@@ -115,6 +128,15 @@ const RETRY_CLAUSE = /^retry offset=(\d+) with (.+)$/u;
 const ADVICE_OPTION =
   /^(?:fields="[a-z][a-z0-9_]*(?:,[a-z][a-z0-9_]*)*"|response_format="concise")$/u;
 const BYTES_OPTION = /^max_response_bytes=([1-9]\d{3,6})$/u;
+const OVER_MAXIMUM = /^the next row exceeds the maximum max_response_bytes \(([1-9]\d{3,6})\)$/u;
+
+/** A byte value the schema could accept: 1000 to 1,000,000. */
+function budgetValue(digits: string | undefined): number | undefined {
+  const value = Number(digits);
+  return Number.isSafeInteger(value) && value >= MAX_RESPONSE_BYTES_MIN && value <= MAX_RESPONSE_BYTES_MAX
+    ? value
+    : undefined;
+}
 
 /** Read back a hint {@link renderTruncationHint} wrote; anything else is undefined. */
 export function parseTruncationHint(hint: string): TruncationHintParts | undefined {
@@ -141,7 +163,11 @@ export function parseTruncationHint(hint: string): TruncationHintParts | undefin
     offset = Number(next[1]) - returned;
   }
   let neededBytes: number | undefined;
-  if (clauses[index] === OVER_MAXIMUM_CLAUSE) {
+  let capBytes: number | undefined;
+  const over = OVER_MAXIMUM.exec(clauses[index] ?? "");
+  if (over !== null) {
+    capBytes = budgetValue(over[1]);
+    if (capBytes === undefined) return undefined;
     neededBytes = Number.POSITIVE_INFINITY;
     index += 1;
   }
@@ -156,8 +182,9 @@ export function parseTruncationHint(hint: string): TruncationHintParts | undefin
     for (const option of (retry[2] ?? "").split(" or ")) {
       const bytes = BYTES_OPTION.exec(option);
       if (bytes !== null) {
-        if (neededBytes !== undefined) return undefined;
-        neededBytes = Number(bytes[1]);
+        const value = budgetValue(bytes[1]);
+        if (neededBytes !== undefined || value === undefined) return undefined;
+        neededBytes = value;
       } else if (ADVICE_OPTION.test(option) && advice === undefined) {
         advice = option;
       } else if (option === SN_GET_OPTION && !sawSnGet) {
@@ -183,6 +210,7 @@ export function parseTruncationHint(hint: string): TruncationHintParts | undefin
     offset,
     ...(advice === undefined ? {} : { advice }),
     neededBytes,
+    ...(capBytes === undefined ? {} : { capBytes }),
   };
 }
 
@@ -198,6 +226,8 @@ export function refreshTruncationHint(
     readonly dropped: number;
     readonly returned: number;
     readonly neededBytes?: number;
+    /** The cap to name if the next row exceeds it; else the one the hint named. */
+    readonly capBytes?: number;
   }
 ): string {
   const parts = parseTruncationHint(hint);
@@ -208,6 +238,9 @@ export function refreshTruncationHint(
     offset: parts.offset,
     ...(parts.advice === undefined ? {} : { advice: parts.advice }),
     neededBytes: final.neededBytes ?? parts.neededBytes,
+    ...(final.capBytes ?? parts.capBytes) === undefined
+      ? {}
+      : { capBytes: (final.capBytes ?? parts.capBytes) as number },
   });
 }
 

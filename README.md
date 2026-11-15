@@ -974,8 +974,10 @@ Dropped 14/22; continue offset=8 limit=8; retry offset=0 with fields="sys_id,nam
   fields or a larger budget. `max_response_bytes=31500` is measured from the
   response itself (the rows plus the envelope's own metadata), rounded up, and
   is enough to hold at least the next row. When even that would be more than
-  the 1,000,000-byte maximum, the hint says the next row exceeds the maximum
-  and offers only fields and `sn_get`.
+  the 1,000,000-byte maximum (or the `maxResponseBytes` of the raw-read rule
+  that approved a raw `query`, when that is lower), the hint says the next row
+  exceeds that maximum, names it, and offers only fields and `sn_get`. It never
+  names a budget the policy would deny.
 - `fields=...` appears when it helps: the table's short default list for a
   read of the defaults or of `all`, or your own list without its large fields
   (for example `script`) when you chose one. It only ever names fields your

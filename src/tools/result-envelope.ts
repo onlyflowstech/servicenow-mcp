@@ -388,6 +388,11 @@ export interface EnvelopeTextRenderContext {
 /** Trusted coordinator inputs to text rendering; never part of structuredContent. */
 export interface EnvelopeTextRenderOptions {
   readonly instanceOrigin?: string;
+  /**
+   * The most `max_response_bytes` this call may use when a raw-read rule holds
+   * it below the schema maximum; a truncation hint never offers more.
+   */
+  readonly maxResponseBytesCap?: number;
 }
 
 /**
@@ -759,7 +764,8 @@ function synchronizePagingFields(
   pagination: MutableMetadata["pagination"],
   truncation: MutableMetadata["truncation"],
   depth = 0,
-  neededBytes?: number
+  neededBytes?: number,
+  capBytes?: number
 ): void {
   if (
     pagination.mode !== "offset" ||
@@ -815,6 +821,7 @@ function synchronizePagingFields(
             dropped: truncation.dropped_records,
             returned: pagination.returned,
             ...(neededBytes === undefined ? {} : { neededBytes }),
+            ...(capBytes === undefined ? {} : { capBytes }),
           });
         }
       }
@@ -830,7 +837,8 @@ function synchronizePagingFields(
       pagination,
       truncation,
       depth + 1,
-      neededBytes
+      neededBytes,
+      capBytes
     );
   }
 }
@@ -1136,7 +1144,7 @@ export function finalizeEnvelopeResult(
   options: EnvelopeTextRenderOptions = {}
 ): CallToolResult | undefined {
   envelopeTextRenderersSealed = true;
-  const summarized = finalizeSummaryResult(result, tool);
+  const summarized = finalizeSummaryResult(result, tool, options.maxResponseBytesCap);
   const renderer =
     tool === undefined ? undefined : ENVELOPE_TEXT_RENDERERS.get(tool);
   if (
@@ -1195,7 +1203,8 @@ const OFFSET_PAGED_TOOLS: ReadonlySet<string> = new Set([
  */
 function finalizeSummaryResult(
   result: CallToolResult,
-  tool?: string
+  tool?: string,
+  byteCap: number = MAX_RESPONSE_BYTES_MAX
 ): CallToolResult | undefined {
   const offsetPaged = tool === undefined || OFFSET_PAGED_TOOLS.has(tool);
   if (!isMutableEnvelope(result.structuredContent)) return result;
@@ -1217,7 +1226,8 @@ function finalizeSummaryResult(
       restated.metadata.pagination,
       restated.metadata.truncation,
       0,
-      neededResponseBytes(toolHint.neededBytes + overhead, maximum)
+      neededResponseBytes(toolHint.neededBytes + overhead, maximum, byteCap),
+      byteCap
     );
     const restatedCandidate = candidateResult(result, restated);
     // The larger number can add a digit; if that tips the result over its
@@ -1262,7 +1272,8 @@ function finalizeSummaryResult(
         probe.metadata.pagination,
         probe.metadata.truncation,
         0,
-        neededBytes
+        neededBytes,
+        byteCap
       );
       return probe;
     };
@@ -1293,7 +1304,7 @@ function finalizeSummaryResult(
     // The budget that would hold one more row is measured here, with the
     // envelope's own cost in it, not guessed.
     const withNextRow = candidateResult(result, envelopeForCount(kept + 1, widest));
-    const needed = neededResponseBytes(resultBytes(withNextRow), maximum);
+    const needed = neededResponseBytes(resultBytes(withNextRow), maximum, byteCap);
     const restated = candidateResult(result, envelopeForCount(kept, needed));
     return resultBytes(restated) <= maximum ? restated : candidate;
   }

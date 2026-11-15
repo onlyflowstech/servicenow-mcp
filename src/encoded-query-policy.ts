@@ -116,6 +116,8 @@ export interface RawEncodedReadRequest {
 export interface AuthorizedRawEncodedReadPlan {
   readonly query: string;
   readonly outputFields: readonly string[];
+  /** The most `max_response_bytes` the approving rule lets this read use. */
+  readonly maxResponseBytes: number;
 }
 
 const ISSUED_ENCODED_QUERY_POLICIES = new WeakSet<object>();
@@ -202,10 +204,32 @@ export function authorizeRawEncodedRead(
     validateOrderBy(rule, request.orderBy);
     const outputFields = validateOutputFields(rule, request.outputFields);
     const query = parseEncodedQuery(request.query, rule);
-    return Object.freeze({ query, outputFields });
+    return Object.freeze({ query, outputFields, maxResponseBytes: rule.maxResponseBytes });
   } catch (error) {
     if (error instanceof EncodedQueryPolicyError) throw error;
     throw new EncodedQueryPolicyError("invalid_query");
+  }
+}
+
+/**
+ * The `max_response_bytes` cap a raw `sn_query` read of `table` is held to, or
+ * undefined when no rule covers it (a structured read has no such cap). Used
+ * only to keep advice inside what the policy would accept; it authorizes
+ * nothing.
+ */
+export function rawReadResponseByteCap(
+  policy: unknown,
+  tool: string,
+  table: unknown
+): number | undefined {
+  try {
+    if (tool !== "sn_query" || !isIssuedPolicy(policy)) return undefined;
+    const normalized = normalizeTableName(table);
+    return policy.rules.find(
+      (candidate) => candidate.tool === tool && candidate.table === normalized
+    )?.maxResponseBytes;
+  } catch {
+    return undefined;
   }
 }
 

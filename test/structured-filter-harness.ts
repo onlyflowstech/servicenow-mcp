@@ -58,6 +58,8 @@ export interface HarnessOptions {
     path: string,
     params: Record<string, string> | undefined
   ) => Promise<{ data: unknown; status: number; headers: Headers }>;
+  /** Raw-read rules, as the effective policy's `encodedQueryAccess`. */
+  readonly encodedQueryAccess?: { readonly rules: readonly Record<string, unknown>[] };
   /** Also grant sn_codesearch (and reads) on the five code tables. */
   readonly codeTables?: boolean;
 }
@@ -143,7 +145,14 @@ export async function harness(
       }),
     },
     effectivePolicyProvider: {
-      resolve: () => ({ id: "structured-filter", revision: "test", tableAccess }),
+      resolve: () => ({
+        id: "structured-filter",
+        revision: "test",
+        tableAccess,
+        ...(options.encodedQueryAccess === undefined
+          ? {}
+          : { encodedQueryAccess: options.encodedQueryAccess as never }),
+      }),
     },
     auditSink: { write: () => {}, writePreContext: () => {} },
   };

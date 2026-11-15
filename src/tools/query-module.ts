@@ -336,7 +336,8 @@ function defaultFieldList(table: string): string | undefined {
 function enforceByteBudget(
   payload: Record<string, unknown>,
   results: unknown[],
-  args: z.infer<typeof schema>
+  args: z.infer<typeof schema>,
+  byteCap: number
 ): Record<string, unknown> {
   const maxBytes = args.max_response_bytes;
   if (results.length === 0 || serializedBytes(payload) <= maxBytes) return payload;
@@ -373,6 +374,7 @@ function enforceByteBudget(
       offset,
       ...(shrinkAdvice === undefined ? {} : { advice: shrinkAdvice }),
       neededBytes,
+      capBytes: byteCap,
     });
     out.results = results.slice(0, keep);
     return out;
@@ -399,7 +401,11 @@ function enforceByteBudget(
   // The budget that would hold one more row. The widest hint is what was
   // measured, so the number is never too small once the real, shorter hint
   // replaces it.
-  const needed = neededResponseBytes(serializedBytes(build(keep + 1, WIDEST)), maxBytes);
+  const needed = neededResponseBytes(
+    serializedBytes(build(keep + 1, WIDEST)),
+    maxBytes,
+    byteCap
+  );
   return build(keep, needed);
 }
 
@@ -533,7 +539,15 @@ async function executeQuery(
         typeof payload.hint === "string" ? `${payload.hint} ${notice}` : notice;
     }
     payload.results = results;
-    return ok(enforceByteBudget(payload, results, args));
+    // A raw read is held to its rule's byte cap, so the hint never offers more.
+    return ok(
+      enforceByteBudget(
+        payload,
+        results,
+        args,
+        Math.min(rawPlan?.maxResponseBytes ?? MAX_RESPONSE_BYTES_MAX, MAX_RESPONSE_BYTES_MAX)
+      )
+    );
   } catch (error) {
     throw error;
   }

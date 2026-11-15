@@ -32,6 +32,7 @@ import {
 import {
   ENCODED_QUERY_MIGRATION_MESSAGE,
   isEncodedQueryPolicyError,
+  rawReadResponseByteCap,
 } from "../encoded-query-policy.js";
 import { isCredentialSourceDescriptor } from "../profile-credentials.js";
 import {
@@ -741,7 +742,12 @@ function registerStandardTool(
         binding,
         tool.definition.name,
         request.metadata,
-        context.correlationId
+        context.correlationId,
+        rawReadResponseByteCap(
+          context.effectivePolicy.encodedQueryAccess,
+          tool.definition.name,
+          authorizedArgs.query === undefined ? undefined : authorizedArgs.table
+        )
       );
     }
   );
@@ -1219,7 +1225,8 @@ function finalizeHandlerInvocation(
   profile: ExecutionContext["profile"],
   tool: string,
   request: RequestMetadata,
-  correlationId: string
+  correlationId: string,
+  maxResponseBytesCap?: number
 ): CallToolResult {
   try {
     const guarded = guardedHandlerResult(candidate);
@@ -1238,7 +1245,8 @@ function finalizeHandlerInvocation(
       metrics,
       canonicalProfile,
       tool,
-      profile.instance
+      profile.instance,
+      maxResponseBytesCap
     );
     if (!enriched) {
       return handlerResultFailure(
@@ -1332,7 +1340,8 @@ function validateSuccessfulModuleResult(
   metrics: CallMetrics,
   canonicalProfile: string,
   tool: string,
-  instanceOrigin: string
+  instanceOrigin: string,
+  maxResponseBytesCap?: number
 ): CallToolResult | undefined {
   try {
     // Cache status and timing are the dispatcher's to report: whatever a
@@ -1345,7 +1354,10 @@ function validateSuccessfulModuleResult(
       structuredContent: parsed.data,
     };
     // The instance origin feeds only renderer context, never structuredContent.
-    const finalized = finalizeEnvelopeResult(validated, tool, { instanceOrigin });
+    const finalized = finalizeEnvelopeResult(validated, tool, {
+      instanceOrigin,
+      ...(maxResponseBytesCap === undefined ? {} : { maxResponseBytesCap }),
+    });
     if (!finalized) return undefined;
     const finalParsed = outputSchema.safeParse(finalized.structuredContent);
     if (!finalParsed.success) return undefined;
