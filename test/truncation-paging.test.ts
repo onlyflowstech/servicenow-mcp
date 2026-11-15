@@ -387,6 +387,36 @@ describe("the shared envelope applies the same rule to every collection tool (#2
     });
   });
 
+  it("words the summary by whether any row came back, for a tool with no offset", () => {
+    const text = (rowCount: number, size: number) => {
+      const adapted = envelopeCompatibilityResult("sn_nl", {}, {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              results: Array.from({ length: rowCount }, (_, index) => ({
+                sys_id: sysId(index),
+                note: "x".repeat(size),
+              })),
+            }),
+          },
+        ],
+      });
+      const result = finalizeEnvelopeResult(enrichSuccessfulResult(adapted, profile), "sn_nl");
+      const block = result?.content[0];
+      return block?.type === "text" ? block.text : "";
+    };
+    // Some rows fit: the text never says none did.
+    const some = text(600, 200);
+    expect(some).toContain("this result has no offset to continue at");
+    expect(some).toContain("Rows were dropped from the current window; adjust the request");
+    expect(some).not.toMatch(/none fit|No row fit/u);
+    // One row too large for the budget: none fit.
+    const none = text(1, 120_000);
+    expect(none).toContain("but none fit");
+    expect(none).toContain("No row fit");
+  });
+
   it("gives a collection with no offset argument has_more and no next_offset", () => {
     const { metadata } = fit("sn_nl", {}, { results: big(600) });
     expect(metadata.truncation.truncated).toBe(true);

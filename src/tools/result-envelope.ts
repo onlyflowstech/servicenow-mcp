@@ -1004,17 +1004,22 @@ function isMutableEnvelope(candidate: unknown): candidate is MutableEnvelope {
 
 function renderEnvelopeText(envelope: MutableEnvelope): string {
   const pagination = envelope.metadata.pagination;
+  const noRowFit = pagination.mode === "offset" && pagination.returned === 0;
   const continuation =
     pagination.mode === "offset" && pagination.has_more
-      ? pagination.next_offset === undefined
-        ? " More records are available, but none fit."
-        : ` More records are available at offset ${pagination.next_offset}.`
+      ? pagination.next_offset !== undefined
+        ? ` More records are available at offset ${pagination.next_offset}.`
+        : noRowFit
+          ? " More records are available, but none fit."
+          : " More records are available; this result has no offset to continue at."
       : "";
   const recovery =
     pagination.mode === "offset" && pagination.recovery !== undefined
       ? pagination.has_more && pagination.next_offset !== undefined
         ? ` Rows were dropped from the current window; next_offset is the first row not returned, or adjust the request and retry offset ${pagination.offset} to get them in one response.`
-        : ` No row fit; adjust the request (fewer fields, a lower limit or a higher max_response_bytes) and retry offset ${pagination.offset}.`
+        : noRowFit
+          ? ` No row fit; adjust the request (fewer fields, a lower limit or a higher max_response_bytes) and retry offset ${pagination.offset}.`
+          : ` Rows were dropped from the current window; adjust the request (fewer fields, a lower limit or a higher max_response_bytes) and retry offset ${pagination.offset}.`
       : "";
   const truncated = envelope.metadata.truncation.truncated
     ? ` Output was truncated by ${envelope.metadata.truncation.reason}.`

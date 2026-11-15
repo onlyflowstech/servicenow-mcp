@@ -958,6 +958,11 @@ is a row offset into the rows they return. Any other collection result that is c
 A page that lost no rows to size is unchanged: `has_more` and `next_offset`
 come from the row after the page, and `next_offset` is `offset + limit`.
 
+A client that follows `next_offset` should also pass the `limit` the hint names
+(`continue offset=8 limit=8`): at the original `limit` each page asks
+ServiceNow for that many rows and the cut drops most of them again, so the same
+rows are fetched many times over.
+
 Before this change `next_offset` after a cut page was `offset + limit`, which
 skipped the dropped rows, and a cut last page reported `has_more: false` with
 `record_count: 0`.
