@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { ServiceNowResponseTooLargeError } from "../src/client.js";
 import {
   BASIC_AUTH_401_HINT,
   MAX_TOOL_ERROR_RETRY_AFTER_SECONDS,
   createBasicAuthRestrictedError,
+  createFilterFieldsTooLargeError,
+  createUnknownFilterFieldError,
   boundedRetryAfterSeconds,
   createCommonToolError,
   createToolError,
@@ -28,6 +31,11 @@ const CASES: ReadonlyArray<
   ["rate_limit", "retry_later", "ServiceNow rate limit was exceeded."],
   ["timeout", "retry_if_safe_and_idempotent", "The ServiceNow request timed out."],
   ["upstream", "retry_if_safe_and_idempotent", "ServiceNow could not complete the request."],
+  [
+    "too_large",
+    "retry_after_correction",
+    "The response was too large to return in one call. Lower limit, request fewer fields, or narrow the query, then retry.",
+  ],
   ["internal", "do_not_retry", "The operation failed unexpectedly."],
 ];
 
@@ -210,3 +218,84 @@ describe("basic-auth restriction error", () => {
     expect(trustedToolErrorDescriptor(mixed)?.reason).toBeUndefined();
   });
 });
+
+describe("a response that passed its byte limit", () => {
+  const TOO_LARGE_MESSAGE =
+    "The response was too large to return in one call. Lower limit, request fewer fields, " +
+    "or narrow the query, then retry. Error category: too_large. " +
+    "Retry after correcting the request or configuration.";
+
+  it("is reported as too_large, with a remedy, for the response cap and the call's budget", () => {
+    for (const message of [
+      "raw response exceeds configured byte limit",
+      "cumulative upstream response exceeds configured byte limit",
+    ]) {
+      const error = new ServiceNowResponseTooLargeError(message);
+      expect(safeToolErrorDescriptor(error)).toEqual({
+        category: "too_large",
+        message:
+          "The response was too large to return in one call. Lower limit, request fewer fields, or narrow the query, then retry.",
+        retry: "retry_after_correction",
+      });
+      expect(formatToolError(error)).toBe(TOO_LARGE_MESSAGE);
+      // The text is fixed: nothing of the raw message reaches the caller.
+      expect(formatToolError(error)).not.toContain(message);
+    }
+  });
+
+  it("never replaces a trusted error that is about a too-large read, the unknown-field error or the basic-auth hint", () => {
+    const filterFields = createFilterFieldsTooLargeError();
+    expect(safeToolErrorDescriptor(filterFields)).toMatchObject({
+      category: "upstream",
+      reason: "filter_fields_too_large",
+    });
+    expect(formatToolError(filterFields)).toContain("Lower limit and try again.");
+    expect(formatToolError(filterFields)).not.toContain("too_large");
+    expect(safeToolErrorDescriptor(createUnknownFilterFieldError("u_nope"))).toMatchObject({
+      category: "not_found",
+      reason: "unknown_filter_field",
+    });
+    expect(formatToolError(createBasicAuthRestrictedError())).toContain(BASIC_AUTH_401_HINT);
+    expect(safeToolErrorDescriptor(createBasicAuthRestrictedError()).category).toBe("authentication");
+  });
+
+  it("keeps its unissued status for callers that must treat an over-budget response as an unknown outcome", () => {
+    expect(trustedToolErrorDescriptor(new ServiceNowResponseTooLargeError("x"))).toBeUndefined();
+  });
+
+  it("is not forged by a look-alike error or a hostile object", () => {
+    const lookAlike = new RangeError("raw response exceeds configured byte limit");
+    lookAlike.name = "ServiceNowResponseTooLargeError";
+    expect(safeToolErrorDescriptor(lookAlike).category).toBe("internal");
+    expect(safeToolErrorDescriptor(new RangeError("Maximum call stack size exceeded")).category).toBe(
+      "internal"
+    );
+    const trap = vi.fn(() => {
+      throw new Error("RAW_TRAP_SECRET");
+    });
+    const hostile = new Proxy(new ServiceNowResponseTooLargeError("x"), {
+      get: trap,
+      getPrototypeOf: trap,
+      has: trap,
+    });
+    expect(safeToolErrorDescriptor(hostile).category).toBe("internal");
+    expect(trap).not.toHaveBeenCalled();
+  });
+
+  it("survives an aggregate of the same failure and loses to a different one", () => {
+    const sameFailure = createCommonToolError([
+      new ServiceNowResponseTooLargeError("a"),
+      new ServiceNowResponseTooLargeError("b"),
+    ]);
+    expect(trustedToolErrorDescriptor(sameFailure)).toMatchObject({
+      category: "too_large",
+      retry: "retry_after_correction",
+    });
+    const mixed = createCommonToolError([
+      new ServiceNowResponseTooLargeError("a"),
+      createToolError("timeout", "retry_if_safe_and_idempotent"),
+    ]);
+    expect(trustedToolErrorDescriptor(mixed)?.category).toBe("internal");
+  });
+});
+

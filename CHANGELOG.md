@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A response that passes the byte cap is reported as too large, with the
+  remedy, by every tool.** A read that went over the 1 MiB response limit, or
+  over the call's cumulative upstream budget, used to reach the caller as "The
+  operation failed unexpectedly. Error category: internal. Retry unchanged is
+  not recommended." It now reads "The response was too large to return in one
+  call. Lower limit, request fewer fields, or narrow the query, then retry.
+  Error category: too_large. Retry after correcting the request or
+  configuration." The new `too_large` category is also what audit records and
+  the HTTP tool-call metrics report as `errorCategory`. The mapping is made once,
+  where an error becomes the caller's message, so it covers every tool that
+  reads through the client. A write whose response is over the cap is still
+  treated as an unknown outcome, as before.
+
 ### Removed
 
 - Planning documents that were not part of the published package are no longer

@@ -724,6 +724,7 @@ function safeToolErrorCategory(value: unknown): ToolErrorCategory {
     value !== "rate_limit" &&
     value !== "timeout" &&
     value !== "upstream" &&
+    value !== "too_large" &&
     value !== "internal"
   ) {
     throw new TypeError("tool error category is invalid");

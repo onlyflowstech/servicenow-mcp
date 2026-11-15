@@ -15,6 +15,7 @@ import {
   type StructuredHttpEvent,
 } from "../src/http-observability.js";
 import { createToolError } from "../src/tool-error.js";
+import { ServiceNowResponseTooLargeError } from "../src/client.js";
 
 class FakeClock implements HttpObservabilityClock {
   value = 0;
@@ -297,6 +298,27 @@ describe("structured bounded HTTP observability", () => {
       retryAfterSeconds: 17,
     });
     expect(JSON.stringify(events)).not.toContain(secret);
+  });
+
+  it("records a response that passed its byte cap as the too_large category", () => {
+    const { observability } = eventHarness();
+    const record = createAuditRecord({
+      outcome: "handler_error",
+      reason: "handler_threw",
+      tool: "sn_query",
+      request: {
+        correlationId: "too-large-correlation",
+        identity: { ownerId: "owner-one", clientId: "client-one" },
+      },
+      profile: { name: "alpha", instance: "https://example.service-now.com" },
+      error: new ServiceNowResponseTooLargeError("raw response exceeds configured byte limit"),
+    });
+
+    expect(observability.beginTool().finish(record)).toMatchObject({
+      outcome: "handler_error",
+      errorCategory: "too_large",
+      retry: "retry_after_correction",
+    });
   });
 
   it("drops hostile or inconsistent event inputs without leaking or throwing", () => {

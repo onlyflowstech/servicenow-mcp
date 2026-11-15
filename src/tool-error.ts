@@ -8,6 +8,8 @@
  * @module tool-error
  */
 
+import { isIssuedResponseTooLargeError } from "./response-too-large.js";
+
 /** Exact stable categories exposed to MCP callers. */
 export type ToolErrorCategory =
   | "authentication"
@@ -17,6 +19,7 @@ export type ToolErrorCategory =
   | "rate_limit"
   | "timeout"
   | "upstream"
+  | "too_large"
   | "internal";
 
 /** Bounded retry decisions; callers never receive arbitrary retry prose. */
@@ -59,6 +62,9 @@ const CATEGORY_MESSAGES: Readonly<Record<ToolErrorCategory, string>> =
     rate_limit: "ServiceNow rate limit was exceeded.",
     timeout: "The ServiceNow request timed out.",
     upstream: "ServiceNow could not complete the request.",
+    too_large:
+      "The response was too large to return in one call. Lower limit, request " +
+      "fewer fields, or narrow the query, then retry.",
     internal: "The operation failed unexpectedly.",
   });
 
@@ -75,6 +81,11 @@ const TOOL_ERROR_PROVENANCE = new WeakMap<object, ToolErrorDescriptor>();
 const INTERNAL_DESCRIPTOR: ToolErrorDescriptor = descriptor(
   "internal",
   "do_not_retry"
+);
+
+const TOO_LARGE_DESCRIPTOR: ToolErrorDescriptor = descriptor(
+  "too_large",
+  "retry_after_correction"
 );
 
 const HTML_RESPONSE_MESSAGE =
@@ -253,11 +264,23 @@ export function trustedToolErrorDescriptor(
 }
 
 /**
- * Normalize any thrown value without inspecting it. Unissued errors always
- * become the fixed internal category, including hostile Proxies and getters.
+ * Normalize any thrown value without inspecting it. An unissued error becomes
+ * the fixed internal category, including hostile Proxies and getters, except
+ * the client's own byte-limit error, which is a request the caller can change
+ * and so is reported as `too_large`. Both checks are provenance lookups that
+ * run no code of the candidate.
+ *
+ * This is the one place a thrown byte-limit error is given a public category:
+ * every tool boundary, audit record and aggregate failure reads it from here.
+ * `trustedToolErrorDescriptor` is deliberately unchanged, so a caller that
+ * treats an unreadable or over-budget response as an unknown outcome (a bulk
+ * write, the cache's structural-failure rule) keeps doing so.
  */
 export function safeToolErrorDescriptor(candidate: unknown): ToolErrorDescriptor {
-  return trustedToolErrorDescriptor(candidate) ?? INTERNAL_DESCRIPTOR;
+  return (
+    trustedToolErrorDescriptor(candidate) ??
+    (isIssuedResponseTooLargeError(candidate) ? TOO_LARGE_DESCRIPTOR : INTERNAL_DESCRIPTOR)
+  );
 }
 
 /** Render one deterministic client-safe sentence sequence. */

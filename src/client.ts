@@ -35,6 +35,12 @@ import {
   type ToolErrorCategory,
   type ToolErrorRetry,
 } from "./tool-error.js";
+import {
+  ServiceNowResponseTooLargeError,
+  isServiceNowResponseTooLarge,
+} from "./response-too-large.js";
+
+export { ServiceNowResponseTooLargeError, isServiceNowResponseTooLarge };
 
 /** @deprecated Inspect trusted tool-error provenance instead of raw fields. */
 export type ServiceNowError = Error;
@@ -762,23 +768,6 @@ async function readBoundedResponseBody(
     reader.releaseLock();
   }
   return Buffer.concat(chunks, total);
-}
-
-/**
- * A response, or a request scope's cumulative upstream JSON, passed its byte
- * limit. A RangeError, as before, so existing handling is unchanged; the
- * class lets callers tell it apart from any other RangeError.
- */
-export class ServiceNowResponseTooLargeError extends RangeError {
-  constructor(message: string) {
-    super(message);
-    this.name = "ServiceNowResponseTooLargeError";
-  }
-}
-
-/** True when a request failed because a response or its scope passed a byte limit. */
-export function isServiceNowResponseTooLarge(error: unknown): boolean {
-  return error instanceof ServiceNowResponseTooLargeError;
 }
 
 class ServiceNowRequestCancelledError extends Error {
