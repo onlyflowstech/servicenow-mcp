@@ -144,21 +144,113 @@ describe("sn_query reads a list filter as an implicit AND (#17)", () => {
   });
 });
 
+describe("a fault inside a list element keeps its own message (#33)", () => {
+  // The texts below are what 53d39ea (before the list was published) answers
+  // for the same fault in the same list. A fault that is only a check (a bad
+  // field name, a control character, an over-long value) used to be reported
+  // by the filter's own union; the list branch must not turn it into the
+  // generic list message. Only the path differs: base pointed into the group
+  // it wrapped the list in (`filter.conditions[1].field`), the message now
+  // names the caller's own position (`filter[1].field`).
+  const FIELD = "field must be a canonical ServiceNow field name";
+  const CONTROL = "query values must not contain control or separator characters";
+  const LONG = "Too big: expected string to have <=512 characters";
+  const OPERATOR =
+    'a "text" condition needs operator one of contains, not_contains, starts_with, ends_with';
+  const faults: ReadonlyArray<readonly [string, unknown, string, string | undefined]> = [
+    ["bad field name", { ...ACTIVE, field: "1bad" }, FIELD, "field"],
+    ["control character", { ...NAMED, value: "a\u0001b" }, CONTROL, "value"],
+    ["over-long value", { ...NAMED, value: "x".repeat(600) }, LONG, "value"],
+    ["bad operator", { ...NAMED, operator: "between" }, OPERATOR, undefined],
+  ];
+  const GENERIC = "treated as AND";
+
+  for (const [label, fault, text, key] of faults) {
+    it(`names ${label} at the caller's position, as base did`, async () => {
+      const connected = await harness();
+      const where = async (filter: unknown) =>
+        callError(connected, "sn_query", { table: "incident", structured_query: { filter } });
+      const positions: ReadonlyArray<readonly [string, unknown, string]> = [
+        ["a one-element list", [fault], "filter[0]"],
+        ["the second of a list", [ACTIVE, fault], "filter[1]"],
+        ["a group inside a list", [ACTIVE, group("or", ACTIVE, fault)], "filter[1].conditions[1]"],
+      ];
+      for (const [place, filter, path] of positions) {
+        const message = await where(filter);
+        expect(message, place).toContain(text);
+        expect(message, place).not.toContain(GENERIC);
+        // A check names its own key; a walk message leads with the position.
+        expect(message, place).toContain(
+          key === undefined ? `${path}: ` : `structured_query.${path}.${key}`
+        );
+        // Fixed text only: nothing the caller sent comes back.
+        expect(message, place).not.toContain("1bad");
+        expect(message, place).not.toContain("\u0001");
+        expect(message, place).not.toContain("x".repeat(20));
+      }
+      expect(connected.getWithMeta).not.toHaveBeenCalled();
+    });
+  }
+
+  it("says the same for the fault alone, not in a list", async () => {
+    const connected = await harness();
+    for (const [label, fault, text] of faults) {
+      const message = await callError(connected, "sn_query", {
+        table: "incident",
+        structured_query: { filter: fault },
+      });
+      expect(message, label).toContain(text);
+    }
+  });
+});
+
 describe("sn_batch keeps its write filter strict (#17)", () => {
   it("rejects a list filter through the server, before any lookup or write", async () => {
     const connected = await harness();
-    for (const filter of [[ACTIVE], [ACTIVE, NAMED], []]) {
-      const message = await callError(connected, "sn_batch", {
+    // Every way the tool can reach the instance: reads (`get`, `getWithMeta`)
+    // and writes (`post`, `patch`, `put`, `delete`).
+    const reaches = () =>
+      [
+        connected.get,
+        connected.getWithMeta,
+        connected.post,
+        connected.patch,
+        connected.put,
+        connected.delete,
+      ].reduce((sum, method) => sum + method.mock.calls.length, 0);
+    let rejected = 0;
+    for (const action of ["update", "delete"] as const) {
+      for (const confirm of [undefined, true]) {
+        for (const filter of [[ACTIVE], [ACTIVE, NAMED], []]) {
+          const message = await callError(connected, "sn_batch", {
+            table: "incident",
+            action,
+            ...(action === "update" ? { fields: { state: "2" } } : {}),
+            ...(confirm === undefined ? {} : { confirm }),
+            structured_query: { filter },
+          });
+          expect(message).toContain(STRUCTURED_FILTER_ERROR_MESSAGE);
+          rejected += 1;
+        }
+      }
+    }
+    expect(rejected).toBe(12);
+    expect(reaches()).toBe(0);
+
+    // The control: the same call with one object does reach the instance
+    // (a lookup through `get`), so a count of zero above means something.
+    const accepted = await connected.client.callTool({
+      name: "sn_batch",
+      arguments: {
+        profile: "p",
         table: "incident",
         action: "update",
         fields: { state: "2" },
-        confirm: true,
-        structured_query: { filter },
-      });
-      expect(message).toContain(STRUCTURED_FILTER_ERROR_MESSAGE);
-    }
-    expect(connected.getWithMeta).not.toHaveBeenCalled();
-    expect(connected.post).not.toHaveBeenCalled();
+        structured_query: { filter: ACTIVE },
+      },
+    });
+    expect(accepted.isError).toBeUndefined();
+    expect(reaches()).toBeGreaterThan(0);
   });
 
   it("keeps the shared strict schema from reading a list", () => {

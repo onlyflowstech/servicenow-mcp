@@ -197,8 +197,7 @@ export type StructuredQueryFilter = StructuredLeafCondition | StructuredQueryGro
  * written out again, and `tools/list` carries the whole nest of three group
  * levels several times over. The converter runs once per tool, so each tool's
  * `inputSchema` holds the definitions it refers to. An id is registered
- * globally and may belong to one schema instance only.
- */
+ * globally and may belong to one schema instance only. */
 const SCHEMA_IDS = Object.freeze({ condition: "Condition", filter: "Filter" });
 
 const structuredLeafConditionSchema = z
@@ -511,34 +510,13 @@ function groupLevels(node: StructuredQueryFilter): number {
 }
 
 /**
- * A list read as an implicit AND: one element is that element, two or more
- * become a top-level `and` group, which takes one of the
- * {@link MAX_STRUCTURED_QUERY_NESTING} group levels. Each element has already
- * passed the filter schema (up to three levels), so what is left to check is
- * that a 2+ list's elements leave that level free; the check reads the parsed
- * elements, whose depth the schema has bounded.
- */
-const structuredQueryListFilterBranch = z
-  .array(structuredQueryFilterSchema)
-  .min(1)
-  .max(MAX_STRUCTURED_QUERY_CONDITIONS)
-  .transform((elements, context): StructuredQueryFilter => {
-    const [only] = elements;
-    if (elements.length === 1 && only !== undefined) return only;
-    if (elements.some((element) => groupLevels(element) >= MAX_STRUCTURED_QUERY_NESTING)) {
-      context.issues.push({ code: "custom", message: STRUCTURED_FILTER_LIST_ERROR_MESSAGE, input: elements });
-      return z.NEVER;
-    }
-    return { type: "group", operator: "and", conditions: elements };
-  });
-
-/**
  * What a rejected `sn_query` filter says. The list branch and the plain
- * branch each fail with their own issues, which the union reports as one; this
- * puts the walk's message in their place. The caller's own list is wrapped the
- * way a 2+ list is read, and the wrapper is flagged, so the walk names the
- * caller's positions (`filter[1]`) instead of positions inside a group the
- * caller never wrote. An empty list has no meaning and gets its own message.
+ * branch each fail with their own issues; when neither survives, the union
+ * reports one failure and this puts the walk's message in its place. The
+ * caller's own list is wrapped the way a 2+ list is read, and the wrapper is
+ * flagged, so the walk names the caller's positions (`filter[1]`) instead of
+ * positions inside a group the caller never wrote. An empty list has no
+ * meaning and gets its own message.
  */
 function listFilterErrorMessage(input: unknown): string {
   if (!Array.isArray(input)) {
@@ -556,14 +534,51 @@ function listFilterErrorMessage(input: unknown): string {
 }
 
 /**
- * The filter of a tool that only reads: the same filter, or a list of it. The
- * published schema has both: an array of {@link structuredQueryFilterSchema}
- * and the filter itself, as `anyOf`.
+ * The filter of a tool that only reads: the same filter, or a list of it,
+ * read as an implicit AND. One element is that element, two or more become a
+ * top-level `and` group, which takes one of the
+ * {@link MAX_STRUCTURED_QUERY_NESTING} group levels.
+ *
+ * The union is the published schema: an array of
+ * {@link structuredQueryFilterSchema} (1 to 32) and the filter itself, as
+ * `anyOf`. The wrap and the depth check come after it, as a transform, which
+ * the converter leaves out. That order matters for messages: a fault inside a
+ * list element that is only a check (a bad field name, a control character,
+ * an over-long value) leaves the array branch standing, so the union passes
+ * that one issue on, with its own fixed text at the caller's list position.
+ * A fault that fails every branch (a bad operator, a wrong type) is named by
+ * the walk in {@link listFilterErrorMessage}.
+ *
+ * Each element has already passed the filter schema (up to three levels), so
+ * what is left to check for a 2+ list is that no element uses all of them,
+ * which would put the wrapper one level too deep. The check reads parsed
+ * elements, whose depth the schema has bounded.
  */
-const structuredQueryListFilterSchema = z.union(
-  [structuredQueryListFilterBranch, structuredQueryFilterSchema],
-  { error: (issue) => listFilterErrorMessage(issue.input) }
-);
+const structuredQueryListFilterSchema = z
+  .union(
+    [
+      z
+        .array(structuredQueryFilterSchema)
+        .min(1, STRUCTURED_FILTER_EMPTY_LIST_MESSAGE)
+        .max(MAX_STRUCTURED_QUERY_CONDITIONS),
+      structuredQueryFilterSchema,
+    ],
+    { error: (issue) => listFilterErrorMessage(issue.input) }
+  )
+  .transform((value, context): StructuredQueryFilter => {
+    if (!Array.isArray(value)) return value;
+    const [only] = value;
+    if (value.length === 1 && only !== undefined) return only;
+    if (value.some((element) => groupLevels(element) >= MAX_STRUCTURED_QUERY_NESTING)) {
+      context.issues.push({
+        code: "custom",
+        message: listFilterErrorMessage(value),
+        input: value,
+      });
+      return z.NEVER;
+    }
+    return { type: "group", operator: "and", conditions: value };
+  });
 
 export const structuredQueryOrderSchema = z
   .object({

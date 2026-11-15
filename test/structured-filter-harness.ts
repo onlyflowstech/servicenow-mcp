@@ -44,6 +44,11 @@ export interface Harness {
   readonly server: { isConnected(): boolean; close(): Promise<void> };
   readonly getWithMeta: ReturnType<typeof vi.fn>;
   readonly post: ReturnType<typeof vi.fn>;
+  /** The other client methods a tool can reach; a write tool's lookups use `get`. */
+  readonly get: ReturnType<typeof vi.fn>;
+  readonly patch: ReturnType<typeof vi.fn>;
+  readonly put: ReturnType<typeof vi.fn>;
+  readonly delete: ReturnType<typeof vi.fn>;
 }
 
 const open: Harness[] = [];
@@ -87,10 +92,17 @@ export async function harness(
       : { data: { result: records }, status: 200, headers: new Headers() }
   );
   const post = vi.fn(async () => ({ serviced_requests: [], unserviced_requests: [] }));
+  const get = vi.fn(async () => ({ result: [] }));
+  const patch = vi.fn(async () => ({ result: {} }));
+  const put = vi.fn(async () => ({ result: {} }));
+  const remove = vi.fn(async () => ({ status: 204 }));
   const serviceNowClient = {
     getWithMeta,
     post,
-    get: vi.fn(async () => ({ result: [] })),
+    get,
+    patch,
+    put,
+    delete: remove,
   } as unknown as ServiceNowClient;
   const profileManager = {
     getProfile: vi.fn(() => ({
@@ -165,7 +177,7 @@ export async function harness(
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   await client.connect(clientTransport);
-  const connected: Harness = { client, server, getWithMeta, post };
+  const connected: Harness = { client, server, getWithMeta, post, get, patch, put, delete: remove };
   open.push(connected);
   return connected;
 }
