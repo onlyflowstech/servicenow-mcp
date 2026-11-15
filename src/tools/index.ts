@@ -1369,9 +1369,9 @@ function validateSuccessfulModuleResult(
     ) {
       return undefined;
     }
-    // Cache status and timing go in last, and only if they still fit: the
-    // result is fitted to its byte limit without them, so they never cost a
-    // record, a field or the result itself.
+    // Cache status and timing go in last and are not counted against the byte
+    // limit: the result is fitted to it without them, so they never cost a
+    // record or a field, and they are never dropped.
     return withCallMetadata(
       {
         content: [{ type: "text", text: block.text }],

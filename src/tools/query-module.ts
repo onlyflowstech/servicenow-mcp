@@ -123,7 +123,7 @@ function compatibleInputSchema() {
           "tail (the JSON is never mangled) and the response gains truncated: " +
           "true, has_more: true and a hint with the dropped count and the " +
           "offset, limit, max_response_bytes, fields or response_format to " +
-          "retry with."
+          "retry with. Cache and timing metadata (under 100 bytes) are not counted."
       ),
     limit: z
       .number()

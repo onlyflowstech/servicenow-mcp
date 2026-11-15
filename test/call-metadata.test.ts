@@ -203,7 +203,18 @@ describe("metadata.timing", () => {
 });
 
 describe("the byte limit", () => {
-  it("is fitted without the fields, which are added only when they still fit", async () => {
+  const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+
+  /** The same response with cache and timing taken out of its metadata. */
+  function withoutFields(result: { structuredContent?: unknown } & Record<string, unknown>) {
+    const content = result.structuredContent as { metadata: Record<string, unknown> };
+    const { cache, timing, ...bare } = content.metadata;
+    void cache;
+    void timing;
+    return { ...result, structuredContent: { ...content, metadata: bare } };
+  }
+
+  it("fits the result without counting the fields, which are always added after", async () => {
     const records = Array.from({ length: 6 }, (_, index) => ({
       sys_id: String(index).repeat(32),
       short_description: `row ${index} ${"x".repeat(120)}`,
@@ -215,30 +226,116 @@ describe("the byte limit", () => {
         arguments: { profile: "p", table: "incident", fields: "sys_id,short_description", max_response_bytes: maxBytes },
       });
     const roomy = await call(100_000);
-    const { cache, timing, ...bare } = (roomy.structuredContent as { metadata: Record<string, unknown> }).metadata;
-    expect(timing).toBeDefined();
-    expect(cache).toBeUndefined();
-    const withoutFields = {
-      ...roomy,
-      structuredContent: { ...roomy.structuredContent, metadata: bare },
-    };
-    const bareBytes = Buffer.byteLength(JSON.stringify(withoutFields), "utf8");
+    const bareBytes = bytes(withoutFields(roomy));
     expect(bareBytes).toBeGreaterThan(1_000);
 
-    // Room for the result but not for the fields: every row is kept, the fields are dropped.
-    const tight = await call(bareBytes + 10);
-    expect(tight.isError).toBeUndefined();
-    const tightContent = tight.structuredContent as { data: { record_count: number }; metadata: Record<string, unknown> };
-    expect(tightContent.data.record_count).toBe(6);
-    expect(tightContent.metadata).not.toHaveProperty("timing");
-    expect(tightContent.metadata).not.toHaveProperty("cache");
+    // Room for the rows and not for the fields: every row is kept, and the
+    // fields are there anyway, past the limit by their own size.
+    for (const slack of [0, 10, 40, 300]) {
+      const result = await call(bareBytes + slack);
+      expect(result.isError).toBeUndefined();
+      const content = result.structuredContent as { data: { record_count: number }; metadata: Record<string, unknown> };
+      expect(content.data.record_count, `slack ${slack}`).toBe(6);
+      expect(content.metadata, `slack ${slack}`).toHaveProperty("timing");
+      expect(bytes(result) - bareBytes, `slack ${slack}`).toBeLessThan(100);
+    }
+  });
 
-    // With room for both, both are there and no row is lost.
-    const fits = await call(bareBytes + 300);
-    const fitsContent = fits.structuredContent as { data: { record_count: number }; metadata: Record<string, unknown> };
-    expect(fitsContent.data.record_count).toBe(6);
-    expect(fitsContent.metadata).toHaveProperty("timing");
-    expect(Buffer.byteLength(JSON.stringify(fits), "utf8")).toBeLessThanOrEqual(bareBytes + 300);
+  it("keeps cache and timing on every response of a budget sweep, truncated or not", async () => {
+    // About 380 bytes a row, so that the slack under a budget takes every
+    // value from 0 to a row's size, which is what made the fields drop.
+    const rows = Array.from({ length: 22 }, (_, index) => ({
+      sys_id: String(index % 10).repeat(32),
+      name: `Util${index}`,
+      script: `/* ${"x".repeat(300)} */`,
+    }));
+    instanceCounter += 1;
+    const connected = await harness(rows, {
+      instance: `https://call-metadata-sweep-${instanceCounter}.service-now.com`,
+      metadataCache: {},
+      upstream: async (_path, params) => {
+        const watermark = params?.sysparm_query === "ORDERBYDESCsys_updated_on";
+        return {
+          data: { result: watermark ? [{ ...NEWEST }] : rows },
+          status: 200,
+          headers: new Headers(
+            watermark
+              ? { "x-total-count": "22", date: "Sun, 15 Nov 2026 12:00:00 GMT" }
+              : { "x-total-count": "22" }
+          ),
+        };
+      },
+      codeTables: true,
+    });
+    const budgets = [
+      ...Array.from({ length: 276 }, (_, index) => 1_000 + index * 29),
+      1_000, 1_001, 20_000, 100_000,
+    ];
+    let truncated = 0;
+    let whole = 0;
+    let largestFields = 0;
+    for (const budget of budgets) {
+      const result = await connected.client.callTool({
+        name: "sn_query",
+        arguments: { profile: "p", table: "sys_script_include", limit: 22, max_response_bytes: budget },
+      });
+      expect(result.isError, `budget ${budget}`).toBeUndefined();
+      const content = result.structuredContent as {
+        metadata: { cache?: unknown; timing?: Record<string, unknown>; truncation: { truncated: boolean } };
+      };
+      expect(["hit", "miss"], `budget ${budget}`).toContain(content.metadata.cache);
+      expect(Object.keys(content.metadata.timing ?? {}).sort(), `budget ${budget}`).toEqual([
+        "total_ms", "upstream_ms", "watermark_ms",
+      ]);
+      // Over the limit by at most the two fields, and never by more.
+      const fieldsBytes = bytes(result) - bytes(withoutFields(result));
+      expect(fieldsBytes, `budget ${budget}`).toBeGreaterThan(0);
+      expect(fieldsBytes, `budget ${budget}`).toBeLessThan(100);
+      expect(bytes(result) - fieldsBytes, `budget ${budget}`).toBeLessThanOrEqual(budget);
+      expect(bytes(result), `budget ${budget}`).toBeLessThanOrEqual(budget + fieldsBytes);
+      largestFields = Math.max(largestFields, fieldsBytes);
+      if (content.metadata.truncation.truncated) truncated += 1;
+      else whole += 1;
+    }
+    // The sweep covers both kinds, and the truncated ones are most of it.
+    expect(truncated).toBeGreaterThan(200);
+    expect(whole).toBeGreaterThan(0);
+    expect(largestFields).toBeLessThan(100);
+  });
+
+  it("says in each byte budget's description that cache and timing are not counted", async () => {
+    const connected = await harness();
+    const { tools } = await connected.client.listTools();
+    for (const name of ["sn_query", "sn_get", "sn_flow_view"]) {
+      const properties = tools.find((tool) => tool.name === name)!.inputSchema.properties as Record<string, { description?: string }>;
+      expect(properties.max_response_bytes?.description, name).toContain(
+        "Cache and timing metadata (under 100 bytes) are not counted."
+      );
+    }
+  });
+
+  it("keeps the fields on a response truncated down to the 1000-byte minimum, and leaves the fit alone", async () => {
+    const rows = Array.from({ length: 22 }, (_, index) => ({
+      sys_id: String(index % 10).repeat(32),
+      name: `Util${index}`,
+      script: `/* ${"x".repeat(300)} */`,
+    }));
+    const connected = await harness(rows);
+    const call = (maxBytes: number) =>
+      connected.client.callTool({
+        name: "sn_query",
+        arguments: { profile: "p", table: "sys_script_include", limit: 22, max_response_bytes: maxBytes },
+      });
+    const minimum = await call(1_000);
+    const content = minimum.structuredContent as {
+      data: { record_count: number };
+      metadata: { timing?: unknown; truncation: { truncated: boolean }; limits: { max_bytes: number } };
+    };
+    expect(content.metadata.truncation.truncated).toBe(true);
+    expect(content.metadata.limits.max_bytes).toBe(1_000);
+    expect(content.metadata.timing).toBeDefined();
+    // The fit never saw the fields: it is what it was for the same budget.
+    expect(bytes(withoutFields(minimum))).toBeLessThanOrEqual(1_000);
   });
 });
 

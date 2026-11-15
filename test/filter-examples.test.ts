@@ -125,19 +125,19 @@ describe("tools/list size ledger (#19)", () => {
         "sn_create": 3626,
         "sn_delete": 3292,
         "sn_discover": 3473,
-        "sn_flow_view": 14862,
-        "sn_get": 4684,
+        "sn_flow_view": 14924,
+        "sn_get": 4745,
         "sn_health": 3127,
         "sn_incident_add_comment": 3280,
         "sn_incident_add_work_note": 3278,
         "sn_nl": 3588,
         "sn_profile": 3299,
-        "sn_query": 10063,
+        "sn_query": 10124,
         "sn_relationships": 4292,
         "sn_schema": 3518,
         "sn_syslog": 4243,
         "sn_update": 3661,
-        "total": 127781,
+        "total": 127965,
       }
     `);
   });
@@ -156,7 +156,7 @@ describe("tools/list size ledger (#19)", () => {
     const outputSchemas = tools.reduce((sum, tool) => sum + size(tool.outputSchema ?? {}), 0);
     expect({ modelVisible, outputSchemas }).toMatchInlineSnapshot(`
       {
-        "modelVisible": 39535,
+        "modelVisible": 39719,
         "outputSchemas": 83684,
       }
     `);

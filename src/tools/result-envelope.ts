@@ -861,13 +861,15 @@ export function withoutCallMetadata(result: CallToolResult): CallToolResult {
 
 /**
  * Add what the call reports about itself to a finished result's envelope
- * metadata, only if the result still fits its own byte limit with it.
+ * metadata. The two fields are not counted against the result's byte limit.
  *
- * The fields are diagnostics, so they never cost the caller anything else: the
- * result is fitted to its limit first, exactly as before, and gets them only
- * when they fit as well. A result that is not an envelope, or whose size
- * cannot be checked, comes back untouched. Costs one serialization of the
- * result, the same one the limit check itself makes.
+ * They are diagnostics, so they never cost the caller anything: the result is
+ * fitted to its limit first, exactly as before, with the fit, the paging
+ * fields and the truncation hint knowing nothing about them, and the fields
+ * are added after. A successful response therefore carries them always, on the
+ * calls where the timing matters most (a truncated one is often fitted to
+ * within a few bytes of the limit), and may exceed the limit by their size,
+ * under 100 bytes. A result that is not an envelope comes back untouched.
  */
 export function withCallMetadata(
   handlerResult: CallToolResult,
@@ -879,6 +881,7 @@ export function withCallMetadata(
   if (typeof content !== "object" || content === null) return result;
   const metadata = (content as { metadata?: unknown }).metadata;
   if (typeof metadata !== "object" || metadata === null) return result;
+  // Only an envelope has limits; anything else is not this function's to annotate.
   const maxBytes = (metadata as { limits?: { max_bytes?: unknown } }).limits?.max_bytes;
   if (typeof maxBytes !== "number") return result;
   const added = callMetadataSchema.safeParse({
@@ -886,14 +889,13 @@ export function withCallMetadata(
     timing: snapshot.timing,
   });
   if (!added.success) return result;
-  const annotated: CallToolResult = {
+  return {
     ...result,
     structuredContent: {
       ...content,
       metadata: { ...metadata, ...added.data },
     },
   };
-  return resultBytes(annotated) <= maxBytes ? annotated : result;
 }
 
 export function envelopeCompatibilityResult(
