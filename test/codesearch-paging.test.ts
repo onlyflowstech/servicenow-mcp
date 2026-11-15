@@ -258,7 +258,7 @@ describe("a search across tables", () => {
     for (const read of fake.finds()) {
       expect(read.params).toMatchObject({ sysparm_offset: "0", sysparm_limit: "41" });
       expect(read.params.sysparm_fields).toBe(
-        { sys_module: "sys_id,path", sys_variable_value: "sys_id,document_key" }[read.table] ?? "sys_id,name"
+        { sys_module: "sys_id,path", sys_variable_value: "sys_id,document_key,document" }[read.table] ?? "sys_id,name"
       );
       expect(read.params.sysparm_query).toMatch(
         /^((document=sys_atf_step\^variableENDSWITHscript\^value)|script|operation_script|content)LIKEneedle\^ORDERBYsys_id$/u
@@ -317,11 +317,13 @@ describe("the script reads by id are bounded for the whole call", () => {
     const { rows: found } = await run(fake, { table: "sys_script_include", limit });
     expect(byIdRequests(fake)).toBeLessThanOrEqual(12);
     expect(byIdBytes(fake)).toBeLessThanOrEqual(8 * MIB);
-    // The call never fails and keeps the order: every row is there, a prefix has snippets.
+    // The call never fails and keeps the order: every row is there. Which rows
+    // have a snippet when the budget runs out depends on how the concurrent
+    // batches finish (often the later rows are the empty ones, not always).
     expect(found).toHaveLength(limit + 1);
-    const withSnippet = found.map((row) => row.snippet !== "");
-    const firstEmpty = withSnippet.indexOf(false);
-    expect(withSnippet.slice(0, firstEmpty === -1 ? 0 : firstEmpty).every(Boolean)).toBe(true);
+    expect(found.map((row) => row.sys_id)).toEqual(
+      [...found.map((row) => row.sys_id)].sort((a, b) => a.localeCompare(b))
+    );
   });
 
   it("says how many rows have no snippet, and what to do, when the budget is spent", async () => {

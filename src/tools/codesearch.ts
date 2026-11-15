@@ -18,6 +18,7 @@ import {
   CODE_SEARCH_TARGETS,
   codeSearchReads,
   codeSearchTarget,
+  findProjection,
   searchProjection,
   type CodeSearchTarget,
 } from "../code-search-targets.js";
@@ -294,10 +295,10 @@ async function findMatches(
 ): Promise<Match[]> {
   const { target, field } = selected;
   const wanted = inline
-    ? searchProjection(target.nameField, field)
-    : searchProjection(target.nameField, target.nameField);
+    ? findProjection(target, target.nameField, field)
+    : findProjection(target, target.nameField, target.nameField);
   const fallback = resolveReadableFields(target.queryTable, {
-    fields: searchProjection(target.nameField, field).join(","),
+    fields: findProjection(target, target.nameField, field).join(","),
   });
   const readableFields = preparedReadableFields(args, target.queryTable) ?? fallback;
   const likeField = `${escapeQueryValue(field)}LIKE${term}`;
@@ -320,6 +321,11 @@ async function findMatches(
   for (const candidate of Array.isArray(filtered) ? filtered : []) {
     if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) continue;
     const record = candidate as Record<string, unknown>;
+    // Defence in depth: the query already restricts these rows, and a row that
+    // does not say so itself is dropped rather than shown.
+    if (target.guard !== undefined && referenceId(record[target.guard.field], false) !== target.guard.value) {
+      continue;
+    }
     // The name column is also what was searched when the caller searches it.
     const searched = inline || field === target.nameField || field === "sys_id";
     const sysId = String(record.sys_id ?? "");
@@ -364,9 +370,12 @@ function interleave(perTable: readonly (readonly Match[])[]): Match[] {
  * A first batch of more than a few rows is read alone, and what it learns is kept: a batch that
  * passes the cap makes the next ones half its size (a clean, small answer lets
  * the size grow again), instead of every batch starting at 50 and failing. A
- * batch of one that passes the cap marks its row. Rows are read in page order,
- * so a spent budget leaves the later rows without a snippet. Any other failure
- * leaves those rows without a snippet and says why.
+ * batch of one that passes the cap marks its row. Batches are taken in page
+ * order but up to four run at once and finish in any order, so which rows are
+ * left without a snippet when the budget is spent depends on how the batches
+ * finished: it is often, but not always, the later rows. Every row is still
+ * returned, in order. Any other failure leaves those rows without a snippet and
+ * says why.
  */
 async function readBodies(
   client: ServiceNowOperations,
@@ -617,10 +626,11 @@ async function readByIds(
 }
 
 /** A reference's id, whether the instance sent it bare or as `{ value }`. */
-function referenceId(value: unknown): string | undefined {
+function referenceId(value: unknown, requireSysId = true): string | undefined {
   const candidate =
     typeof value === "object" && value !== null ? (value as { value?: unknown }).value : value;
-  return typeof candidate === "string" && SYS_ID.test(candidate) ? candidate : undefined;
+  if (typeof candidate !== "string") return undefined;
+  return !requireSysId || SYS_ID.test(candidate) ? candidate : undefined;
 }
 
 function scalar(value: unknown): string | undefined {

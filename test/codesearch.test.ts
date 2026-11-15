@@ -597,7 +597,7 @@ describe("ATF step scripts", () => {
     const fake = atfInstance();
     connected.get.mockImplementation(fake.get as never);
     await search(connected, { search_term: "needle", table: "sys_atf_step", limit: 60 });
-    expect(fake.finds()[0]!.params).toMatchObject({ sysparm_fields: "sys_id,document_key", sysparm_limit: "61" });
+    expect(fake.finds()[0]!.params).toMatchObject({ sysparm_fields: "sys_id,document_key,document", sysparm_limit: "61" });
     const [bodies] = fake.bodies();
     expect(bodies).toMatchObject({ table: "sys_variable_value" });
     expect(bodies!.params.sysparm_fields).toBe("sys_id,value");
@@ -673,6 +673,40 @@ describe("ATF step scripts", () => {
     expect(data.warnings![0]).not.toContain("RAW_DETAIL");
     // The malformed id never reaches a query.
     expect(JSON.stringify(fake.reads.map((read) => read.params))).not.toContain("not-a-sys-id");
+  });
+
+  it("drops a row that is not an ATF step's, in case the instance ignored the condition", async () => {
+    const connected = await harness([], { tableAccess: atfGrants() });
+    const fake = atfInstance();
+    const stepsAndTests = fake.get.getMockImplementation()!;
+    connected.get.mockImplementation((async (path: string, params: Record<string, string>) => {
+      if (path.endsWith("/sys_variable_value") && !(params.sysparm_query ?? "").startsWith("sys_idIN")) {
+        // An instance that returned another owner's script and a row with no document.
+        return {
+          result: [
+            { sys_id: sysId(1), document: "sys_atf_step", document_key: STEP_1, value: "needle in a step" },
+            { sys_id: sysId(2), document: "sc_cat_item", document_key: "c".repeat(32), value: "needle in a catalog script" },
+            { sys_id: sysId(3), document_key: STEP_3, value: "needle with no document" },
+            { sys_id: sysId(4), document: "sys_atf_step", document_key: STEP_3, value: "needle in another step" },
+          ],
+        };
+      }
+      return stepsAndTests(path, params);
+    }) as never);
+    const { data } = await search(connected, { search_term: "needle", table: "sys_atf_step" });
+    expect(data.results.map((row) => row.sys_id)).toEqual([STEP_1, STEP_3]);
+    expect(JSON.stringify(data)).not.toContain("catalog");
+    // The by-id step read names only the kept steps.
+    const stepRead = fake.reads.find((read) => read.table === "sys_atf_step")!;
+    expect(stepRead.params.sysparm_query).toBe(`sys_idIN${STEP_1},${STEP_3}`);
+  });
+
+  it("asks for the document with the value rows", async () => {
+    const connected = await harness([], { tableAccess: atfGrants() });
+    const fake = atfInstance();
+    connected.get.mockImplementation(fake.get as never);
+    await search(connected, { search_term: "needle", table: "sys_atf_step" });
+    expect(fake.finds()[0]!.params.sysparm_fields).toBe("sys_id,document_key,value,document");
   });
 
   it("names two matches of one step with one read of the step", async () => {

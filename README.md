@@ -865,11 +865,15 @@ snippet is the head of the script and the row has no `line`.
   policy does not let the profile read its script field. The call fails only when
   none can be read, and the error says why.
 - **ES modules** are `sys_module`: the script is its `content` column and a row
-  is named by its `path`, because the table has no `name`. It is a system table
-  like the other code tables, so a profile holds it by name
-  (`servicenow-mcp-setup grant --profile dev --read sys_module`, or a read
-  wildcard), it is cached by default like them, and `fields=all` reads `content`.
-  A default `sn_query` of it lists `sys_id`, `path` and `sys_updated_on`.
+  is named by its `path`, because the table has no `name`. A profile reads it
+  once the table policy allows it: `servicenow-mcp-setup grant --profile dev
+  --read sys_module`, or a read wildcard. It is cached by default like the other
+  code tables, and `fields=all` reads `content`. A default `sn_query` of it lists
+  `sys_id`, `path` and `sys_updated_on`. `sys_module` is a built-in system table
+  (the 24th), so a `"*"` entry in the field policy does not narrow it: a profile
+  whose `"*"` entry limits `readable` and that can read `sys_module` now reads
+  `content`, where it did not before. To narrow it, name it in `fieldPolicy`
+  (`"sys_module": { "readable": ["sys_id", "path"] }`).
 - **ATF step scripts** are searched with `table: "sys_atf_step"`. A step's script
   is not a column of the step but the value of its script input, a row of
   `sys_variable_value`. The search reads only the rows whose `document` is

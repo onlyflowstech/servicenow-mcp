@@ -55,7 +55,7 @@ import {
   CODE_SEARCH_TARGETS,
   codeSearchReads,
   codeSearchTarget,
-  searchProjection,
+  findProjection,
   type CodeSearchTarget,
 } from "./code-search-targets.js";
 
@@ -390,7 +390,7 @@ function codeSearchPlan(
     args,
     target.queryTable,
     resolveReadableFields(target.queryTable, {
-      fields: searchProjection(target.nameField, field).join(","),
+      fields: findProjection(target, target.nameField, field).join(","),
     }).join(",")
   );
   for (const lookup of target.lookups) {

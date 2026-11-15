@@ -37,6 +37,12 @@ export interface CodeSearchTarget {
   readonly lookups: readonly CodeSearchLookup[];
   /** The searched field cannot be chosen: a caller's `field` is refused. */
   readonly fixedField: boolean;
+  /**
+   * A field every row must carry this value in, checked on the rows returned.
+   * The fixed query already says so; this is the same condition read back, so a
+   * row the instance returned in spite of it is dropped, not shown.
+   */
+  readonly guard?: { readonly field: string; readonly value: string };
 }
 
 /**
@@ -68,6 +74,7 @@ export const CODE_SEARCH_TARGETS: readonly CodeSearchTarget[] = Object.freeze([
       Object.freeze({ table: "sys_atf_test", fields: Object.freeze(["sys_id", "name"]) }),
     ]),
     fixedField: true,
+    guard: Object.freeze({ field: "document", value: "sys_atf_step" }),
   }),
 ]);
 
@@ -109,4 +116,16 @@ export function codeSearchReads(target: CodeSearchTarget): readonly string[] {
  */
 export function searchProjection(nameField: string, field: string): readonly string[] {
   return Object.freeze([...new Set(["sys_id", nameField, field])]);
+}
+
+/** What a find reads: the projection above, and the guard field when the target has one. */
+export function findProjection(
+  target: CodeSearchTarget,
+  nameField: string,
+  field: string
+): readonly string[] {
+  const base = searchProjection(nameField, field);
+  return target.guard === undefined
+    ? base
+    : Object.freeze([...new Set([...base, target.guard.field])]);
 }
