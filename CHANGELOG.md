@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A code search snippet shows the text around the match.** It was the first
+  200 characters of the script, which rarely showed why the record matched. It
+  is now about 200 characters centred on the first case-insensitive match, with
+  `...` where text was cut, and each row gains `line`, the line the match is on.
+  When the text holds no literal match (the instance's comparison can be looser
+  than a literal one) the snippet is the head of the script, as before, with no
+  `line`.
 - **`sn_codesearch` accepts `field: "name"` and `field: "sys_id"`.** The search
   appended its field to a fixed `sys_id,name,<field>` list, so a field already in
   the list became a duplicate and the policy check refused it with

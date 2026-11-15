@@ -7,9 +7,10 @@ import {
   preparedReadableFields,
   resolveReadableFields,
 } from "../field-policy.js";
-import { ok, escapeQueryValue, formatError, truncate, withWarnings } from "../utils.js";
+import { ok, escapeQueryValue, formatError, withWarnings } from "../utils.js";
 import { createCommonToolError } from "../tool-error.js";
 import { searchProjection } from "../code-search-targets.js";
+import { snippetAround } from "../code-search-snippet.js";
 
 export const definition = {
   name: "sn_codesearch",
@@ -36,6 +37,13 @@ interface SearchTarget {
   table: string;
   field: string;
   label: string;
+}
+
+/** The snippet (and the line it is on) for one row's searched value. */
+function snippetFields(value: unknown, term: string): { snippet: string; line?: number } {
+  if (!value) return { snippet: "" };
+  const { text, line } = snippetAround(String(value), term);
+  return line === undefined ? { snippet: text } : { snippet: text, line };
 }
 
 export async function handler(
@@ -106,9 +114,7 @@ export async function handler(
               table_label: target.label,
               sys_id: record.sys_id,
               name: record.name || "unnamed",
-              snippet: record[target.field]
-                ? truncate(String(record[target.field]), 200)
-                : "",
+              ...snippetFields(record[target.field], escapeQueryValue(args.search_term)),
             });
           }
           return { matches } as const;

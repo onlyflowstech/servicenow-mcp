@@ -102,3 +102,43 @@ describe("searching a field the projection already holds", () => {
     expect(connected.get).not.toHaveBeenCalled();
   });
 });
+
+describe("the snippet", () => {
+  const body = `${"// padding line\n".repeat(60)}var found = new GlideRecord('needle_table');\n${"// more padding\n".repeat(60)}`;
+
+  it("shows the text around the first match, about 200 characters, with its line", async () => {
+    const connected = await harness([], { codeTables: true });
+    connected.get.mockResolvedValue({ result: [{ sys_id: id(1), name: "Fleet", script: body }] });
+    const { data } = await search(connected, { search_term: "GlideRecord", table: "sys_script_include" });
+    const row = data.results[0]!;
+    const snippet = String(row.snippet);
+    expect(snippet).toContain("new GlideRecord('needle_table')");
+    expect(snippet.startsWith("...")).toBe(true);
+    expect(snippet.endsWith("...")).toBe(true);
+    expect(snippet.length).toBe(200 + 6);
+    expect(row.line).toBe(61);
+  });
+
+  it("matches the term as the query sent it, with the caret removed", async () => {
+    const connected = await harness([], { codeTables: true });
+    connected.get.mockResolvedValue({ result: [{ sys_id: id(1), name: "N", script: "a ab c" }] });
+    const { data } = await search(connected, { search_term: "a^b", table: "sys_script_include" });
+    expect(reads(connected)[0]!.params.sysparm_query).toBe("scriptLIKEab^ORDERBYsys_id");
+    expect(data.results[0]).toMatchObject({ snippet: "a ab c", line: 1 });
+  });
+
+  it("is the head, with no line, when the term is not found in the text", async () => {
+    const connected = await harness([], { codeTables: true });
+    connected.get.mockResolvedValue({ result: [{ sys_id: id(1), name: "N", script: "caf\u00e9 only" }] });
+    const { data } = await search(connected, { search_term: "cafe", table: "sys_script_include" });
+    expect(data.results[0]).toMatchObject({ snippet: "caf\u00e9 only" });
+    expect(data.results[0]).not.toHaveProperty("line");
+  });
+
+  it("is empty for a row with no body", async () => {
+    const connected = await harness([], { codeTables: true });
+    connected.get.mockResolvedValue({ result: [{ sys_id: id(1), name: "N", script: "" }] });
+    const { data } = await search(connected, { search_term: "x", table: "sys_script_include" });
+    expect(data.results[0]).toMatchObject({ snippet: "" });
+  });
+});
