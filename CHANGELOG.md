@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads through the client. A write whose response is over the cap is still
   treated as an unknown outcome, as before.
 
+- **A table-policy denial names the table, the tool and the grant that lifts it.**
+  It used to say only "Table access was denied by policy." Now, for example,
+  `Table access was denied by policy: "sys_script_include" is granted to this
+  profile, but not for sn_codesearch. To allow it, run: servicenow-mcp-setup
+  grant --profile <profile> --read sys_script_include --tools sn_codesearch,
+  then restart the MCP client.` The text says whether the table is missing from
+  the profile or only the tool is, and uses `--write` for a write. It carries
+  the table and tool of that one call and nothing else of the profile's rules;
+  a table name that is not a valid identifier still gets the fixed sentence.
+  `grant --help` now says `--tools` adds to a table's tools.
+
 ### Removed
 
 - Planning documents that were not part of the published package are no longer

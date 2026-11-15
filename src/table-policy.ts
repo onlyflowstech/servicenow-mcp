@@ -81,13 +81,137 @@ const TABLE_ALLOWLIST_WILDCARD = "*";
 const ISSUED_TABLE_POLICY_ERRORS = new WeakSet<object>();
 const ISSUED_TABLE_POLICIES = new WeakSet<object>();
 
-/** Generic denial error; it never contains the table or policy contents. */
+/**
+ * Why a table was refused, in the terms an operator can act on.
+ *
+ * - `not_granted`: the profile's allowlist for the operation does not name it.
+ * - `tool_not_bound`: the allowlist names it, but this tool is not among the
+ *   tools its target permits.
+ * - `unsupported_table`: the tool does not work on that table at all, so no
+ *   grant would help.
+ * - `none_granted`: a search that reads a fixed set of tables may read none
+ *   of them under this profile.
+ */
+export type TablePolicyDenialReason =
+  | "not_granted"
+  | "tool_not_bound"
+  | "unsupported_table"
+  | "none_granted";
+
+/**
+ * What a denial may say about itself. Every value is a canonical identifier
+ * the caller already sent or the profile already holds: a table name that
+ * passed normalizeTableName, the registered tool's name, and a fixed word for
+ * the operation and reason. Nothing here is policy contents beyond the one
+ * decision being explained to the profile's own caller.
+ */
+export interface TablePolicyDenialDetail {
+  readonly reason: TablePolicyDenialReason;
+  readonly operation?: TableAccessOperation;
+  readonly table?: string;
+  readonly tool?: string;
+  /** For `none_granted`: the fixed tables the tool would have read. */
+  readonly tables?: readonly string[];
+}
+
+/**
+ * Denial error. It never contains the profile's allowlists or targets. When a
+ * denial is raised with detail, the client text can name the table and tool
+ * and say which grant is missing; without it the text is the fixed sentence.
+ */
 export class TablePolicyError extends Error {
-  constructor() {
+  readonly detail: TablePolicyDenialDetail | undefined;
+
+  constructor(detail?: TablePolicyDenialDetail) {
     super("Table access denied by policy");
     this.name = "TablePolicyError";
+    this.detail = detail === undefined ? undefined : safeDenialDetail(detail);
     ISSUED_TABLE_POLICY_ERRORS.add(this);
     Object.freeze(this);
+  }
+}
+
+/** Keep only well-formed, bounded values, so a bad detail degrades to the fixed text. */
+function safeDenialDetail(candidate: TablePolicyDenialDetail): TablePolicyDenialDetail | undefined {
+  try {
+    const reason = candidate.reason;
+    if (
+      reason !== "not_granted" &&
+      reason !== "tool_not_bound" &&
+      reason !== "unsupported_table" &&
+      reason !== "none_granted"
+    ) {
+      return undefined;
+    }
+    const operation =
+      candidate.operation === "read" || candidate.operation === "write"
+        ? candidate.operation
+        : undefined;
+    const table = safeIdentifier(candidate.table, TABLE_NAME);
+    const tool = safeIdentifier(candidate.tool, TOOL_NAME);
+    const tables = Array.isArray(candidate.tables)
+      ? Object.freeze(
+          candidate.tables
+            .map((entry) => safeIdentifier(entry, TABLE_NAME))
+            .filter((entry): entry is string => entry !== undefined)
+            .slice(0, 16)
+        )
+      : undefined;
+    return Object.freeze({
+      reason,
+      ...(operation === undefined ? {} : { operation }),
+      ...(table === undefined ? {} : { table }),
+      ...(tool === undefined ? {} : { tool }),
+      ...(tables === undefined || tables.length === 0 ? {} : { tables }),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function safeIdentifier(candidate: unknown, pattern: RegExp): string | undefined {
+  return typeof candidate === "string" && pattern.test(candidate) ? candidate : undefined;
+}
+
+const DENIED_PREFIX = "Table access was denied by policy";
+
+/**
+ * The text a caller sees for a table denial, with the correlation id left to
+ * the caller. It keeps the phrase "denied by policy" that denial classifiers
+ * match on, and, when the error carries detail, names the table and the tool
+ * and the one `grant` command that lifts it. `<profile>` stays a placeholder:
+ * the profile name is the caller's own input, and the operator knows it.
+ */
+export function tablePolicyDenialMessage(error: TablePolicyError): string {
+  const detail = error.detail;
+  if (detail === undefined) return `${DENIED_PREFIX}.`;
+  const { operation, table, tool } = detail;
+  const grant = (name: string): string =>
+    `servicenow-mcp-setup grant --profile <profile> --${operation ?? "read"} ${name}` +
+    `${tool === undefined ? "" : ` --tools ${tool}`}`;
+  const restart = "then restart the MCP client";
+  switch (detail.reason) {
+    case "not_granted":
+      return table === undefined || tool === undefined
+        ? `${DENIED_PREFIX}.`
+        : `${DENIED_PREFIX}: this profile has no ${operation ?? "read"} grant on "${table}" ` +
+            `that allows ${tool}. To allow it, run: ${grant(table)}, ${restart}.`;
+    case "tool_not_bound":
+      return table === undefined || tool === undefined
+        ? `${DENIED_PREFIX}.`
+        : `${DENIED_PREFIX}: "${table}" is granted to this profile, but not for ${tool}. ` +
+            `To allow it, run: ${grant(table)}, ${restart}. The tools already allowed on ` +
+            `that table stay allowed.`;
+    case "unsupported_table":
+      return table === undefined || tool === undefined
+        ? `${DENIED_PREFIX}.`
+        : `${DENIED_PREFIX}: ${tool} does not support table "${table}", so no grant allows it.`;
+    case "none_granted":
+      return tool === undefined
+        ? `${DENIED_PREFIX}.`
+        : `${DENIED_PREFIX}: this profile does not allow ${tool} to read any of the tables ` +
+            `it searches${detail.tables === undefined ? "" : ` (${detail.tables.join(", ")})`}. ` +
+            `To allow one, run: ${grant("<table>")}, ${restart}.`;
   }
 }
 
@@ -180,16 +304,18 @@ export function authorizeTableAccess(
       operation === "read"
         ? policy.readTables
         : policy.writeTables;
-    if (!allowlistGrantsTable(allowlist, table)) throw new TablePolicyError();
+    const denied = (reason: "not_granted" | "tool_not_bound"): TablePolicyError =>
+      new TablePolicyError({ reason, operation, table, tool: authorizedTool });
+    if (!allowlistGrantsTable(allowlist, table)) throw denied("not_granted");
     const target = policy.targets.find((entry) => entry.table === table);
     if (!target) {
       if (allowlistGrantsAllTables(allowlist)) return table;
-      throw new TablePolicyError();
+      throw denied("not_granted");
     }
-    if (!target.tools.includes(authorizedTool)) throw new TablePolicyError();
+    if (!target.tools.includes(authorizedTool)) throw denied("tool_not_bound");
     for (const relatedTable of target.relatedTables) {
       if (!allowlistGrantsTable(allowlist, relatedTable)) {
-        throw new TablePolicyError();
+        throw denied("not_granted");
       }
     }
     return table;

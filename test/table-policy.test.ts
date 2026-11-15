@@ -7,6 +7,7 @@ import {
   createTableAccessPolicy,
   normalizeTableName,
   tableAccessPolicyFromEnvironment,
+  tablePolicyDenialMessage,
 } from "../src/table-policy.js";
 import { resolveToolTableAccess } from "../src/tool-table-access.js";
 
@@ -547,5 +548,99 @@ describe("complete registered-tool table plans", () => {
       TablePolicyError
     );
     expect(() => resolveToolTableAccess("sn_future", {})).toThrow(TablePolicyError);
+  });
+});
+
+describe("denial detail", () => {
+  const policy = createTableAccessPolicy({
+    readTables: ["sys_script_include", "incident"],
+    targets: [
+      {
+        table: "sys_script_include",
+        kind: "canonical",
+        tools: ["sn_query"],
+        closureComplete: true,
+        relatedTables: ["sys_script_include"],
+      },
+      {
+        table: "incident",
+        kind: "canonical",
+        tools: ["sn_query"],
+        closureComplete: true,
+        relatedTables: ["incident"],
+      },
+    ],
+  });
+
+  function denial(request: Parameters<typeof authorizeTableAccess>[1], tool: string) {
+    try {
+      authorizeTableAccess(policy, request, tool);
+    } catch (error) {
+      return error as TablePolicyError;
+    }
+    throw new Error("expected a denial");
+  }
+
+  it("says whether the table is missing or only the tool is", () => {
+    expect(denial({ operation: "read", table: "problem" }, "sn_codesearch").detail).toEqual({
+      reason: "not_granted",
+      operation: "read",
+      table: "problem",
+      tool: "sn_codesearch",
+    });
+    expect(
+      denial({ operation: "read", table: "SYS_SCRIPT_INCLUDE" }, "sn_codesearch").detail
+    ).toEqual({
+      reason: "tool_not_bound",
+      operation: "read",
+      table: "sys_script_include",
+      tool: "sn_codesearch",
+    });
+    expect(denial({ operation: "write", table: "incident" }, "sn_update").detail?.reason).toBe(
+      "not_granted"
+    );
+  });
+
+  it("renders text that names the table, the tool and the grant, and only those", () => {
+    const text = tablePolicyDenialMessage(
+      denial({ operation: "read", table: "sys_script_include" }, "sn_codesearch")
+    );
+    expect(text).toBe(
+      'Table access was denied by policy: "sys_script_include" is granted to this profile, ' +
+        "but not for sn_codesearch. To allow it, run: servicenow-mcp-setup grant --profile " +
+        "<profile> --read sys_script_include --tools sn_codesearch, then restart the MCP " +
+        "client. The tools already allowed on that table stay allowed."
+    );
+    expect(text).not.toContain("incident");
+  });
+
+  it("keeps the fixed sentence without detail, and drops a malformed detail", () => {
+    expect(tablePolicyDenialMessage(new TablePolicyError())).toBe(
+      "Table access was denied by policy."
+    );
+    const hostile = new TablePolicyError({
+      reason: "not_granted",
+      operation: "read",
+      table: "Bad Table; <script>",
+      tool: "sn_codesearch ; rm",
+    });
+    expect(tablePolicyDenialMessage(hostile)).toBe("Table access was denied by policy.");
+    const unknown = new TablePolicyError({ reason: "other" as never });
+    expect(unknown.detail).toBeUndefined();
+    expect(Object.isFrozen(hostile)).toBe(true);
+  });
+
+  it("describes a search that may read none of its fixed tables", () => {
+    const text = tablePolicyDenialMessage(
+      new TablePolicyError({
+        reason: "none_granted",
+        operation: "read",
+        tool: "sn_codesearch",
+        tables: ["sys_script", "sys_script_include"],
+      })
+    );
+    expect(text).toContain("does not allow sn_codesearch to read any of the tables it searches");
+    expect(text).toContain("(sys_script, sys_script_include)");
+    expect(text).toContain("--read <table> --tools sn_codesearch");
   });
 });

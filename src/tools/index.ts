@@ -68,7 +68,11 @@ import {
   type ProfileManager,
 } from "../profile-manager.js";
 import type { McpServerRegistrationSurface } from "../server.js";
-import { authorizeTableAccessPlan } from "../table-policy.js";
+import {
+  authorizeTableAccessPlan,
+  isTablePolicyError,
+  tablePolicyDenialMessage,
+} from "../table-policy.js";
 import { StructuredQueryError } from "../structured-query.js";
 import { createToolError, formatToolError } from "../tool-error.js";
 import { err } from "../utils.js";
@@ -585,7 +589,7 @@ function registerStandardTool(
                     ? `${writeValueDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
                     : atfExecutionDenied
                       ? `${atfPolicyDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
-                      : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
+                      : `${tableDenialMessage(error)} Correlation ID: ${context.correlationId}.`
         );
       }
 
@@ -922,7 +926,7 @@ function registerProfileDiagnostic(
               ? `${writeValueDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
               : atfExecutionDenied
                 ? `${atfPolicyDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
-                : `Table access was denied by policy. Correlation ID: ${context.correlationId}.`
+                : `${tableDenialMessage(error)} Correlation ID: ${context.correlationId}.`
         );
       }
 
@@ -1295,6 +1299,18 @@ function handlerResultFailure(
     request
   );
   return correlatedToolError(error, correlationId);
+}
+
+/**
+ * The denial text for a table-access failure. An issued denial that carries
+ * detail names the table and the tool and the grant that lifts it; anything
+ * else (a malformed table name, a failure that is not a denial) keeps the
+ * fixed sentence, which says nothing about the request.
+ */
+function tableDenialMessage(error: unknown): string {
+  return isTablePolicyError(error)
+    ? tablePolicyDenialMessage(error)
+    : "Table access was denied by policy.";
 }
 
 function correlatedToolError(

@@ -1120,6 +1120,15 @@ profile's field policy still decides the script field: `sn_codesearch` is
 denied on a code table whose script field is not readable, exactly as `sn_query`
 is for that field.
 
+A call the table policy refuses says which table and which tool were refused, and
+whether the table is missing from the profile or only the tool is, and it gives
+the command that lifts it: `Table access was denied by policy: "sys_script_include"
+is granted to this profile, but not for sn_codesearch. To allow it, run:
+servicenow-mcp-setup grant --profile <profile> --read sys_script_include --tools
+sn_codesearch`. `--tools` adds to the tools a table already has, so that command
+removes nothing. The message names only the table and the tool of that call,
+never the rest of the profile's rules.
+
 Allowlist entries may be exact table names or the literal `*` to allow every
 table for that operation. Table names are trimmed, lowercased, deduplicated,
 and must be valid ServiceNow identifiers.

@@ -195,7 +195,7 @@ describe("SNSDK-29 registry enforcement", () => {
     });
     expect(tableDenied.isError).toBe(true);
     expect(responseText(tableDenied)).toMatch(
-      /^ERROR: Table access was denied by policy\./u
+      /^ERROR: Table access was denied by policy[.:]/u
     );
     expect(connected.records.at(-1)).toMatchObject({
       tool: "sn_query",
@@ -497,7 +497,7 @@ describe("SNSDK-29 registry enforcement", () => {
 
     expect(denied.isError).toBe(true);
     expect(responseText(denied)).toMatch(
-      /^ERROR: Table access was denied by policy\./u
+      /^ERROR: Table access was denied by policy[.:]/u
     );
     expect(connected.getConfig).not.toHaveBeenCalled();
     expect(connected.getClient).not.toHaveBeenCalled();
@@ -557,7 +557,7 @@ describe("SNSDK-29 registry enforcement", () => {
 
     expect(result.isError).toBe(true);
     expect(responseText(result)).toMatch(
-      /^ERROR: Table access was denied by policy\. Correlation ID: policy-\d+\.$/u
+      /^ERROR: Table access was denied by policy: this profile has no read grant on "problem" that allows sn_query\. To allow it, run: servicenow-mcp-setup grant --profile <profile> --read problem --tools sn_query, then restart the MCP client\. Correlation ID: policy-\d+\.$/u
     );
     expect(connected.getConfig).not.toHaveBeenCalled();
     expect(connected.getClient).not.toHaveBeenCalled();
@@ -569,6 +569,96 @@ describe("SNSDK-29 registry enforcement", () => {
       reason: "table_access_denied",
       profile: "policy",
     });
+  });
+
+  it("names the table and the tool a denial is about, and the one grant that lifts it", async () => {
+    const connected = await harness({
+      readTables: ["incident", "sys_script_include", "u_secret_thing"],
+      targets: [
+        {
+          table: "incident",
+          kind: "canonical",
+          tools: ["sn_query"],
+          closureComplete: true,
+          relatedTables: ["incident"],
+        },
+        {
+          table: "sys_script_include",
+          kind: "canonical",
+          tools: ["sn_query"],
+          closureComplete: true,
+          relatedTables: ["sys_script_include"],
+        },
+        {
+          table: "u_secret_thing",
+          kind: "canonical",
+          tools: ["sn_query"],
+          closureComplete: true,
+          relatedTables: ["u_secret_thing"],
+        },
+      ],
+    });
+
+    // A table the profile holds, but not for this tool: the tool is the gap.
+    const unbound = await connected.client.callTool({
+      name: "sn_codesearch",
+      arguments: { profile: "policy", search_term: "x", table: "sys_script_include" },
+    });
+    expect(unbound.isError).toBe(true);
+    const unboundText = responseText(unbound);
+    expect(unboundText).toContain('"sys_script_include" is granted to this profile, but not for sn_codesearch');
+    expect(unboundText).toContain(
+      "servicenow-mcp-setup grant --profile <profile> --read sys_script_include --tools sn_codesearch"
+    );
+    expect(unboundText).toContain("tools already allowed on that table stay allowed");
+
+    // A table the profile does not hold at all.
+    const absent = await connected.client.callTool({
+      name: "sn_query",
+      arguments: { profile: "policy", table: "problem" },
+    });
+    const absentText = responseText(absent);
+    expect(absentText).toContain('no read grant on "problem" that allows sn_query');
+    expect(absentText).toContain("--read problem --tools sn_query");
+
+    // Nothing of the profile's other tables or targets is in either message.
+    for (const text of [unboundText, absentText]) {
+      expect(text).not.toContain("u_secret_thing");
+      expect(text).not.toContain("incident");
+      expect(text).not.toContain("relatedTables");
+      expect(text).toMatch(/Correlation ID: policy-\d+\.$/u);
+    }
+    expect(connected.getConfig).not.toHaveBeenCalled();
+    expect(connected.getClient).not.toHaveBeenCalled();
+  });
+
+  it("points a write denial at --write, and never echoes a malformed table name", async () => {
+    const connected = await harness({ readTables: ["incident"] });
+    const write = await connected.client.callTool({
+      name: "sn_update",
+      arguments: {
+        profile: "policy",
+        table: "incident",
+        sys_id: "11111111111111111111111111111111",
+        fields: { state: "2" },
+      },
+    });
+    expect(responseText(write)).toContain(
+      'no write grant on "incident" that allows sn_update. To allow it, run: ' +
+        "servicenow-mcp-setup grant --profile <profile> --write incident --tools sn_update"
+    );
+
+    // A name that is not a table identifier is refused before any table
+    // decision exists, so the text is the fixed sentence and says nothing of it.
+    const malformed = await connected.client.callTool({
+      name: "sn_query",
+      arguments: { profile: "policy", table: "Bad Table; DROP" },
+    });
+    expect(malformed.isError).toBe(true);
+    expect(responseText(malformed)).toMatch(
+      /^ERROR: Table access was denied by policy\. Correlation ID: policy-\d+\.$/u
+    );
+    expect(responseText(malformed)).not.toContain("DROP");
   });
 
   it("does not infer write permission from an allowed read", async () => {
