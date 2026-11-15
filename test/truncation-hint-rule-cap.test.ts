@@ -199,23 +199,34 @@ describe("the hint stays within a raw-read rule's byte cap", () => {
             };
             const hint = renderTruncationHint(base);
             // What the fit renders as this form's probe: the same parts, widest.
-            const widest = renderTruncationHint({
-              ...base,
-              widest: true,
-              neededBytes: Number.POSITIVE_INFINITY,
-              ...("allBytes" in real ? { allBytes: Number.POSITIVE_INFINITY } : {}),
-            });
-            const label = `advice ${advice?.length} ${dropped}/${total} ${JSON.stringify(real)} withoutAdvice ${withoutAdvice}: ${hint.length} against widest ${widest.length}`;
-            expect(widest.length, label).toBeGreaterThanOrEqual(hint.length);
-            expect(hint.length, label).toBeLessThanOrEqual(600);
-            // The same choice for both: the advice is in both or in neither.
-            expect(hint.includes("fields="), label).toBe(widest.includes("fields="));
-            compared += 1;
+            // The probe of the form this text is in: with the page figure when
+            // the form has one, and without it when it does not. The fullest
+            // form's probe has it even where the real text has none, because
+            // the page is over the cap (a real hint with no page figure, which
+            // is longer when the advice is kept, against a probe that has one).
+            const probes = [
+              { ...("allBytes" in real ? { allBytes: Number.POSITIVE_INFINITY } : {}) },
+              { allBytes: Number.POSITIVE_INFINITY },
+            ];
+            for (const probe of probes) {
+              const widest = renderTruncationHint({
+                ...base,
+                widest: true,
+                neededBytes: Number.POSITIVE_INFINITY,
+                ...(probe.allBytes === undefined ? { allBytes: undefined } : probe),
+              } as never);
+              const label = `advice ${advice?.length} ${dropped}/${total} ${JSON.stringify(real)} withoutAdvice ${withoutAdvice} probe ${JSON.stringify(probe)}: ${hint.length} against widest ${widest.length}`;
+              expect(widest.length, label).toBeGreaterThanOrEqual(hint.length);
+              expect(hint.length, label).toBeLessThanOrEqual(600);
+              // The same choice for both: the advice is in both or in neither.
+              expect(hint.includes("fields="), label).toBe(widest.includes("fields="));
+              compared += 1;
+            }
           }
         }
       }
     }
-    expect(compared).toBeGreaterThan(500);
+    expect(compared).toBeGreaterThan(1_000);
   });
 
   it("never names a value above the cap, or says exceeds beside a fits-all figure, with about 440 characters of advice (security R1)", async () => {
@@ -246,6 +257,45 @@ describe("the hint stays within a raw-read rule's byte cap", () => {
     // the 600 limit in the widest form, so it is left out everywhere.
     expect(withAdvice).toBe(0);
   });
+
+  it("never returns a sizing probe's text under a rule cap, with 390 to 430 characters of advice (security R1, round 4b)", async () => {
+    // Twelve fields, so the page is over the 5000 cap and the hint has no page
+    // figure, while the probe of the fullest form always has one.
+    let hints = 0;
+    let withAdvice = 0;
+    for (const nameLength of [34, 35, 36, 37]) {
+      const names = Array.from({ length: 11 }, (_, i) =>
+        `u_${String(i).padStart(2, "0")}_${"f".repeat(60)}`.slice(0, nameLength)
+      );
+      const caught = { ...RULE, fields: ["sys_id", "name", "script", ...names] };
+      const fields = ["script", ...names].join(",");
+      for (let size = 150; size <= 1_500; size += 10) {
+        const data = Array.from({ length: 12 }, (_, i) => ({
+          sys_id: i.toString(16).padStart(32, "0"),
+          script: "x".repeat(size),
+          ...Object.fromEntries(names.map((name) => [name, "v"])),
+        }));
+        const { first } = await rawRead(data, { fields, limit: 12, max_response_bytes: CAP }, caught);
+        expect(first.isError, JSON.stringify(first.content)).toBeUndefined();
+        const hint = (first.structuredContent as { data: { hint?: string } }).data.hint;
+        if (typeof hint !== "string") continue;
+        hints += 1;
+        if (hint.includes('fields="')) withAdvice += 1;
+        const label = `names ${nameLength} size ${size}: ${hint.replace(/fields="[^"]*"/u, 'fields="..."')}`;
+        expect(Math.max(0, ...named(hint)), label).toBeLessThanOrEqual(CAP);
+        // The clause that says the next row cannot fit never sits beside a figure.
+        if (hint.includes("exceeds the maximum")) {
+          expect(hint, label).not.toContain("(fits the next row)");
+          expect(hint, label).not.toContain("(fits all");
+        }
+        expect(parseTruncationHint(hint), label).toBeDefined();
+      }
+    }
+    expect(hints).toBeGreaterThan(400);
+    // About 390 to 430 characters of advice: the edge where a probe and the
+    // real text can disagree about keeping it.
+    expect(withAdvice).toBeLessThan(hints);
+  }, 120_000);
 
   it("is still offered up to the schema maximum when no rule caps the call", async () => {
     const wide = { ...RULE, maxResponseBytes: 100_000 };

@@ -160,17 +160,20 @@ function renderHint(parts: TruncationHintParts, withAdvice: boolean): string {
 export function renderTruncationHint(parts: TruncationHintParts): string {
   // Whether the advice fits is decided once, from the widest rendering of
   // these parts (the "exceeds the maximum" clause with a 7-digit next-row
-  // figure, and a 7-digit page figure when these parts have one: no real
-  // figures make a longer text). A fit sizes rows with that widest
-  // text and then swaps in the real one, so the two must make the same choice:
-  // if the widest dropped the advice and the real text kept it, the real text
-  // could be hundreds of characters longer than the one the rows were sized for.
+  // figure, and a 7-digit page figure: no real figures make a longer text). A
+  // fit sizes rows with that widest text and then swaps in the real one, so the
+  // two must make the same choice: if the widest dropped the advice and the
+  // real text kept it, the real text could be hundreds of characters longer
+  // than the one the rows were sized for. The page figure is always in this
+  // text, whether or not the real text has one (it has none when the page is
+  // over the cap, and a form without it is sized with the same decision), so
+  // the choice depends only on what the probe and the real text share.
   const widest = renderHint(
     {
       ...parts,
       widest: true,
       neededBytes: Number.POSITIVE_INFINITY,
-      ...(parts.allBytes === undefined ? {} : { allBytes: Number.POSITIVE_INFINITY }),
+      allBytes: Number.POSITIVE_INFINITY,
     },
     true
   );
