@@ -164,6 +164,25 @@ describe("truncation hint text", () => {
     expect(refreshTruncationHint(hint, { dropped: 12, returned: 10 })).toContain(
       "max_response_bytes=5300 (fits all 22)"
     );
+    // A tight fit leaves the advice out, and the hint still parses.
+    const advised = renderTruncationHint({
+      dropped: 12,
+      total: 22,
+      offset: 0,
+      advice: 'fields="sys_id,name"',
+      neededBytes: 7_300,
+      allBytes: 9_100,
+    });
+    const bare = refreshTruncationHint(advised, {
+      dropped: 12,
+      returned: 10,
+      allBytes: null,
+      withoutAdvice: true,
+    });
+    expect(bare).toBe(
+      "Dropped 12/22; continue offset=10 limit=10; retry offset=0 with max_response_bytes=7300 (fits the next row)."
+    );
+    expect(parseTruncationHint(bare)).toMatchObject({ dropped: 12, total: 22, neededBytes: 7_300 });
     // One row left to drop: the next row is the rest of the window.
     expect(refreshTruncationHint(hint, { dropped: 1, returned: 21 })).toBe(
       "Dropped 1/22; continue offset=21 limit=21; retry offset=0 with max_response_bytes=5000 (fits the next row)."

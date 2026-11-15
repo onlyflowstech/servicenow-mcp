@@ -43,6 +43,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`sn_query` no longer fails with an internal error at the smallest byte
+  budgets (#39, a regression from the labelled hint, #37).** A truncated read
+  at `max_response_bytes` 1000 with a wide row (eight fields including a long
+  `description`, limit 50) returned `The operation failed unexpectedly` every
+  time: the envelope's metadata leaves room for little beside the counts at
+  that budget, and the fuller labelled hint no longer fitted even with no row.
+  When no row fits beside the whole hint, the fit now leaves out the
+  whole-page figure and then the field advice, keeping the next-row figure, so
+  the result is a normal truncated one (`has_more: true`, no `next_offset`,
+  `recovery` set, a hint that parses and equals `dropped_records`). The hint
+  never names a value above the effective maximum.
 - **A truncation hint says which `max_response_bytes` is for the next row and
   which for the whole page (#37).** The hint's budget was measured for the
   next row only, but a bare `max_response_bytes=1500` read as a value for the

@@ -288,6 +288,8 @@ export function refreshTruncationHint(
      * more than the maximum (so it is left out), absent to keep the hint's own.
      */
     readonly allBytes?: number | null;
+    /** Leave the field advice out, as a fit does when the result is too tight to carry it. */
+    readonly withoutAdvice?: boolean;
     /** The cap to name if the next row exceeds it; else the one the hint named. */
     readonly capBytes?: number;
   }
@@ -298,7 +300,7 @@ export function refreshTruncationHint(
     dropped: final.dropped,
     total: final.dropped + final.returned,
     offset: parts.offset,
-    ...(parts.advice === undefined ? {} : { advice: parts.advice }),
+    ...(parts.advice === undefined || final.withoutAdvice === true ? {} : { advice: parts.advice }),
     neededBytes: final.neededBytes ?? parts.neededBytes,
     ...(final.allBytes === null || (final.allBytes ?? parts.allBytes) === undefined
       ? {}

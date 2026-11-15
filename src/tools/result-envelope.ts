@@ -766,7 +766,8 @@ function synchronizePagingFields(
   depth = 0,
   neededBytes?: number,
   capBytes?: number,
-  allBytes?: number | null
+  allBytes?: number | null,
+  withoutAdvice?: boolean
 ): void {
   if (
     pagination.mode !== "offset" ||
@@ -823,6 +824,7 @@ function synchronizePagingFields(
             returned: pagination.returned,
             ...(neededBytes === undefined ? {} : { neededBytes }),
             ...(allBytes === undefined ? {} : { allBytes }),
+            ...(withoutAdvice === true ? { withoutAdvice } : {}),
             ...(capBytes === undefined ? {} : { capBytes }),
           });
         }
@@ -841,7 +843,8 @@ function synchronizePagingFields(
       depth + 1,
       neededBytes,
       capBytes,
-      allBytes
+      allBytes,
+      withoutAdvice
     );
   }
 }
@@ -1274,7 +1277,8 @@ function finalizeSummaryResult(
     const envelopeForCount = (
       count: number,
       neededBytes?: number,
-      allBytes?: number | null
+      allBytes?: number | null,
+      withoutAdvice?: boolean
     ): MutableEnvelope => {
       const probe = JSON.parse(JSON.stringify(sourceEnvelope)) as MutableEnvelope;
       const probeRecords = collectionArray(probe.data);
@@ -1306,23 +1310,48 @@ function finalizeSummaryResult(
         0,
         neededBytes,
         byteCap,
-        allBytes
+        allBytes,
+        withoutAdvice
       );
       return probe;
     };
     const widest = Number.POSITIVE_INFINITY;
-    let low = 0;
-    let high = originalRecordCount;
+    // The forms the hint can take while fitting, fullest first. The labelled
+    // hint is longer than the bare one was, and at the smallest budgets the
+    // envelope's own metadata leaves room for little more than the counts: if
+    // no row fits beside the fullest form, the page figure goes, then the
+    // field advice, which is the least that still names the next row's budget.
+    // Each form's widest text is what rows are sized with, and the real text
+    // is rendered in the same form, so it is never longer than the probe.
+    const forms: ReadonlyArray<{ all: number | null; withoutAdvice: boolean }> =
+      toolHint === undefined
+        ? [{ all: widest, withoutAdvice: false }]
+        : [
+            { all: widest, withoutAdvice: false },
+            { all: null, withoutAdvice: false },
+            { all: null, withoutAdvice: true },
+          ];
     let best = -1;
-    while (low <= high) {
-      const midpoint = Math.floor((low + high) / 2);
-      const probe = candidateResult(result, envelopeForCount(midpoint, widest, widest));
-      if (resultBytes(probe) <= maximum) {
-        best = midpoint;
-        low = midpoint + 1;
-      } else {
-        high = midpoint - 1;
+    let form = forms[0] as (typeof forms)[number];
+    for (const candidateForm of forms) {
+      form = candidateForm;
+      let low = 0;
+      let high = originalRecordCount;
+      best = -1;
+      while (low <= high) {
+        const midpoint = Math.floor((low + high) / 2);
+        const probe = candidateResult(
+          result,
+          envelopeForCount(midpoint, widest, form.all, form.withoutAdvice)
+        );
+        if (resultBytes(probe) <= maximum) {
+          best = midpoint;
+          low = midpoint + 1;
+        } else {
+          high = midpoint - 1;
+        }
       }
+      if (best >= 0) break;
     }
     // Collections are fitted only by removing complete rows. In particular,
     // never shorten a field merely to force one row into the envelope: callers
@@ -1330,13 +1359,16 @@ function finalizeSummaryResult(
     // while next_offset (when present) remains the separately authoritative
     // post-window resume point.
     const kept = Math.max(best, 0);
-    envelope = envelopeForCount(kept, widest, widest);
+    envelope = envelopeForCount(kept, widest, form.all, form.withoutAdvice);
     candidate = candidateResult(result, envelope);
     if (resultBytes(candidate) > maximum) return undefined;
     if (toolHint === undefined || kept >= originalRecordCount) return candidate;
     // The budget that would hold one more row is measured here, with the
     // envelope's own cost in it, not guessed.
-    const withNextRow = candidateResult(result, envelopeForCount(kept + 1, widest, widest));
+    const withNextRow = candidateResult(
+      result,
+      envelopeForCount(kept + 1, widest, form.all, form.withoutAdvice)
+    );
     const needed = neededResponseBytes(resultBytes(withNextRow), maximum, byteCap);
     // The rows the tool already dropped are not here to measure, so the whole
     // window is its payload size, which the tool measured, plus what this
@@ -1345,7 +1377,12 @@ function finalizeSummaryResult(
     const overhead = resultBytes(candidate) - Buffer.byteLength(JSON.stringify(envelope.data), "utf8");
     const restated = candidateResult(
       result,
-      envelopeForCount(kept, needed, wholeWindowBytes(toolHint, overhead, maximum, byteCap))
+      envelopeForCount(
+        kept,
+        needed,
+        form.all === null ? null : wholeWindowBytes(toolHint, overhead, maximum, byteCap),
+        form.withoutAdvice
+      )
     );
     return resultBytes(restated) <= maximum ? restated : candidate;
   }
