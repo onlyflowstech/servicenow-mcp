@@ -138,7 +138,7 @@ async function connect() {
           tableAccess: { readTables: ["*"], writeTables: ["*"] },
           // Any explicit setting turns the cache on under NODE_ENV=test, as it
           // is by default in production; sys_flow* is a default pattern.
-          metadataCache: { ttlMs: 24 * 60 * 60 * 1000 },
+          metadataCache: { ttlMs: 24 * 60 * 60 * 1000, smallReadBytes: 0 },
         },
       },
     }),

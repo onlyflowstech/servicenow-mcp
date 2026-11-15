@@ -98,7 +98,7 @@ function upstream() {
   } as unknown as ServiceNowOperations;
   /** A fresh wrapper per call, as the dispatcher builds one per tool call. */
   const call = (identity = "identity-a") =>
-    createCachedServiceNowOperations(base, `${instance}|${identity}`, {}) as unknown as Parameters<
+    createCachedServiceNowOperations(base, `${instance}|${identity}`, { smallReadBytes: 0 }) as unknown as Parameters<
       typeof codesearchHandler
     >[1];
   return { call, tableFor, watermarkReads, fullReads };

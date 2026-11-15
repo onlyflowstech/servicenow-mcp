@@ -53,7 +53,7 @@ function upstream() {
   } as unknown as ServiceNowOperations;
   /** One wrapper per tool call, as the dispatcher builds them. */
   const read = (scope: string, id: string, size: number, extra: Record<string, string> = {}, ttlMs = 60_000) =>
-    createCachedServiceNowOperations(base, scope, { ttlMs }).getWithMeta("/api/now/table/sys_dictionary", {
+    createCachedServiceNowOperations(base, scope, { ttlMs, smallReadBytes: 0 }).getWithMeta("/api/now/table/sys_dictionary", {
       id,
       size: String(size),
       ...extra,

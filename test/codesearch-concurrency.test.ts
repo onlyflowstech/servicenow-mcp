@@ -81,7 +81,9 @@ function harness(options: { denied?: readonly string[]; delays?: Partial<Record<
       createCachedServiceNowOperations(
         createServiceNowOperations(client),
         `${instance}|identity`,
-        {}
+        // The fixture's few-hundred-byte pages are below the default
+        // threshold, which would keep them out of the cache this test warms.
+        { smallReadBytes: 0 }
       ) as never,
       config,
       undefined as never

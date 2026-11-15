@@ -241,7 +241,8 @@ const GRANTS = Object.freeze({
 });
 // Any explicit setting turns either cache on under NODE_ENV=test; production
 // runs with both on by default, and with this TTL.
-const METADATA_CACHE = Object.freeze({ ttlMs: 24 * 60 * 60 * 1000 });
+// smallReadBytes 0: these fixtures' bodies are far below the default threshold.
+const METADATA_CACHE = Object.freeze({ ttlMs: 24 * 60 * 60 * 1000, smallReadBytes: 0 });
 const SCHEMA_CACHE_TTL_MS = 300_000;
 
 const openClients: Client[] = [];

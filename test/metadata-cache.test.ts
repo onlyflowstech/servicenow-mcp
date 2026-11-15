@@ -13,6 +13,7 @@ import {
   DEFAULT_METADATA_CACHE_TABLES,
   FORCE_RECACHE_PARAM,
   MAX_METADATA_CACHE_ENTRIES_PER_SCOPE,
+  SMALL_READ_BYTES,
   STRUCTURAL_UNCACHEABLE_MS,
   TRANSIENT_UNCACHEABLE_MS,
   createCachedServiceNowOperations,
@@ -48,9 +49,10 @@ function isWatermarkRead(params: Record<string, string> | undefined): boolean {
  * read: `newest` is the ORDERBYDESCsys_updated_on row as stored, `count` the
  * X-Total-Count header, `serverDate` the Date header. Tests mutate it to
  * simulate writes. `getWithMeta` records full reads only; watermark reads go
- * to `watermark`.
+ * to `watermark`. `padBytes` widens each full read's body, which the cache
+ * only keeps from SMALL_READ_BYTES up.
  */
-function operations() {
+function operations(padBytes = 0) {
   const table: {
     newest: TableRow | undefined;
     count: string | undefined;
@@ -75,7 +77,14 @@ function operations() {
     } as RequestResult<unknown>;
   });
   const getWithMeta = vi.fn(async (path: string, params?: Record<string, string>) => {
-    return result({ result: [{ sys_id: `${path}:${params?.sysparm_fields ?? "all"}` }] });
+    return result({
+      result: [
+        {
+          sys_id: `${path}:${params?.sysparm_fields ?? "all"}`,
+          ...(padBytes > 0 ? { pad: "x".repeat(padBytes) } : {}),
+        },
+      ],
+    });
   });
   const base = {
     get: vi.fn(),
@@ -91,6 +100,16 @@ function operations() {
 }
 
 /**
+ * The fixtures' bodies are a few bytes, far under SMALL_READ_BYTES, which the
+ * cache would not keep. Most tests are about freshness, scoping and bounds,
+ * not size, so they keep every response; a test about the threshold passes
+ * its own `smallReadBytes`.
+ */
+function keepingAll(config: MetadataCacheConfigInput | undefined): MetadataCacheConfigInput | undefined {
+  return config === undefined ? undefined : { smallReadBytes: 0, ...config };
+}
+
+/**
  * Each read is its own tool call: the dispatcher builds one wrapper per call,
  * and the wrapper memoizes watermarks for the call's lifetime.
  */
@@ -101,7 +120,7 @@ function perCall(
 ): Pick<ServiceNowOperations, "getWithMeta"> {
   return {
     getWithMeta: (path, params) =>
-      createCachedServiceNowOperations(base, scope, config).getWithMeta(path, params),
+      createCachedServiceNowOperations(base, scope, keepingAll(config)).getWithMeta(path, params),
   };
 }
 
@@ -282,11 +301,17 @@ describe("metadata cache", () => {
   });
 
   it("applies the production default TTL and table set when config is empty", async () => {
-    const { base, getWithMeta } = operations();
-    const cached = perCall(base, "https://default.service-now.com|fp", {});
+    // Padded to the default threshold: with an empty config the cache keeps
+    // only responses of SMALL_READ_BYTES and up.
+    const { base, getWithMeta } = operations(SMALL_READ_BYTES);
+    const read = () =>
+      createCachedServiceNowOperations(base, "https://default.service-now.com|fp", {}).getWithMeta(
+        "/api/now/table/sys_dictionary",
+        { sysparm_fields: "element" }
+      );
 
-    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "element" });
-    await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "element" });
+    await read();
+    await read();
 
     expect(getWithMeta).toHaveBeenCalledTimes(1);
   });
@@ -405,7 +430,7 @@ describe("metadata cache", () => {
       const cached = createCachedServiceNowOperations(
         base,
         "https://clientcreds.service-now.com|fp",
-        {}
+        { smallReadBytes: 0 }
       );
 
       await cached.getWithMeta("/api/now/table/sys_dictionary", { sysparm_fields: "sys_id" });
@@ -656,7 +681,7 @@ describe("metadata cache: one watermark per table per tool call", () => {
   it("reads each table's watermark once across a multi-hop walk", async () => {
     // resolveTableHierarchy reads sys_db_object once per hop in one call.
     const { base, watermark, getWithMeta } = operations();
-    const call = createCachedServiceNowOperations(base, "https://walk.service-now.com|fp", { ttlMs: 60_000 });
+    const call = createCachedServiceNowOperations(base, "https://walk.service-now.com|fp", keepingAll({ ttlMs: 60_000 }));
 
     for (const name of ["cmdb_ci_linux_server", "cmdb_ci_server", "cmdb_ci_computer", "cmdb_ci"]) {
       await call.getWithMeta("/api/now/table/sys_db_object", { sysparm_query: `name=${name}` });
@@ -672,7 +697,7 @@ describe("metadata cache: one watermark per table per tool call", () => {
 
   it("shares one in-flight watermark read between concurrent reads", async () => {
     const { base, watermark } = operations();
-    const call = createCachedServiceNowOperations(base, "https://concurrent.service-now.com|fp", { ttlMs: 60_000 });
+    const call = createCachedServiceNowOperations(base, "https://concurrent.service-now.com|fp", keepingAll({ ttlMs: 60_000 }));
 
     await Promise.all(
       ["a", "b", "c"].map((name) =>
@@ -693,7 +718,7 @@ describe("metadata cache: one watermark per table per tool call", () => {
         return null;
       });
       (base as unknown as Record<string, unknown>)[method] = write;
-      const call = createCachedServiceNowOperations(base, `https://write-${method}.service-now.com|fp`, { ttlMs: 60_000 });
+      const call = createCachedServiceNowOperations(base, `https://write-${method}.service-now.com|fp`, keepingAll({ ttlMs: 60_000 }));
       const selector = { sysparm_query: "name=incident" };
 
       await call.getWithMeta("/api/now/table/sys_db_object", selector);
@@ -712,7 +737,7 @@ describe("metadata cache: one watermark per table per tool call", () => {
     (base as unknown as Record<string, unknown>).patch = vi.fn(async () => {
       throw new Error("rejected");
     });
-    const call = createCachedServiceNowOperations(base, "https://write-fails.service-now.com|fp", { ttlMs: 60_000 });
+    const call = createCachedServiceNowOperations(base, "https://write-fails.service-now.com|fp", keepingAll({ ttlMs: 60_000 }));
 
     await call.getWithMeta("/api/now/table/sys_db_object", { sysparm_query: "name=a" });
     await expect(call.patch("/api/now/table/sys_db_object/x", {})).rejects.toThrow("rejected");
@@ -726,7 +751,7 @@ describe("metadata cache: one watermark per table per tool call", () => {
     const scope = "https://newcall.service-now.com|fp";
 
     for (let call = 0; call < 3; call += 1) {
-      await createCachedServiceNowOperations(base, scope, { ttlMs: 60_000 })
+      await createCachedServiceNowOperations(base, scope, keepingAll({ ttlMs: 60_000 }))
         .getWithMeta("/api/now/table/sys_db_object", { sysparm_query: "name=incident" });
     }
 

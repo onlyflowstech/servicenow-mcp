@@ -58,7 +58,8 @@ async function cachedServer(delayMs = 0) {
   instanceCounter += 1;
   const connected = await harness(undefined, {
     instance: `https://call-metadata-${instanceCounter}.service-now.com`,
-    metadataCache: {},
+    // Keep every response: the fixtures' pages are far below SMALL_READ_BYTES.
+    metadataCache: { smallReadBytes: 0 },
     upstream: double.upstream,
     codeTables: true,
   });
@@ -252,7 +253,8 @@ describe("the byte limit", () => {
     instanceCounter += 1;
     const connected = await harness(rows, {
       instance: `https://call-metadata-sweep-${instanceCounter}.service-now.com`,
-      metadataCache: {},
+      // Keep every response: the fixtures' pages are far below SMALL_READ_BYTES.
+    metadataCache: { smallReadBytes: 0 },
       upstream: async (_path, params) => {
         const watermark = params?.sysparm_query === "ORDERBYDESCsys_updated_on";
         return {

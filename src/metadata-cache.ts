@@ -26,12 +26,16 @@
  * watermark refreshes recency for eviction but never extends expiresAt, so the
  * entry still expires on schedule and forces a genuine refetch.
  *
- * Two memos keep the watermark from costing more than it saves. Within one
+ * Three memos keep the watermark from costing more than it saves. Within one
  * tool call each table's watermark is read once, however many reads of the
  * table the call makes. Across calls, a table whose watermark proved unusable
  * is read straight through, without a watermark, for a while: long for causes
  * that persist (an incomplete or future-dated watermark, a 4xx), short for
- * transient ones (429, 5xx, timeouts, network).
+ * transient ones (429, 5xx, timeouts, network). And a read whose response is
+ * small (see SMALL_READ_BYTES) is not kept at all: a hit costs a watermark
+ * round trip, about what the plain read costs, so keeping it saves nothing.
+ * The key is remembered as small for one TTL, and its later reads go straight
+ * upstream in a single request.
  *
  * @module metadata-cache
  */
@@ -105,11 +109,17 @@ export const DEFAULT_METADATA_CACHE_TABLES = Object.freeze([
 export interface MetadataCacheConfigInput {
   readonly ttlMs?: number;
   readonly tables?: readonly string[];
+  /**
+   * A response smaller than this many bytes is not cached; its key reads
+   * straight through. Defaults to SMALL_READ_BYTES; 0 caches every response.
+   */
+  readonly smallReadBytes?: number;
 }
 
 export interface MetadataCacheConfig {
   readonly ttlMs: number;
   readonly tables: readonly string[];
+  readonly smallReadBytes: number;
 }
 
 type Jsonish = Awaited<ReturnType<Response["json"]>>;
@@ -149,6 +159,13 @@ interface ScopeState {
   readonly entries: Map<string, CacheEntry>;
   /** Table -> epoch ms until which its reads pass through without a watermark. */
   readonly uncacheable: Map<string, number>;
+  /**
+   * Cache key -> epoch ms until which the key's response is known to be below
+   * SMALL_READ_BYTES, so its reads pass through without a watermark. Held in
+   * least-recently-used order, bounded by MAX_SMALL_READ_KEYS_PER_SCOPE, and
+   * never longer than one TTL from the read that measured the response.
+   */
+  readonly small: Map<string, number>;
   /** Sum of `bytes` over `entries`. */
   bytes: number;
   /** Set once the scope is evicted, so a call still holding it stores nothing. */
@@ -189,6 +206,37 @@ const ENTRY_OVERHEAD_BYTES = 512;
  * longer than the cache TTL. */
 export const STRUCTURAL_UNCACHEABLE_MS = 15 * 60 * 1000;
 export const TRANSIENT_UNCACHEABLE_MS = 30 * 1000;
+/**
+ * A response smaller than this (serialized body bytes) is not worth caching.
+ *
+ * A hit still costs one watermark round trip, so the cache saves time only
+ * when the plain read of the rows costs more than that round trip, and the
+ * plain read grows with the payload while the watermark does not. Live
+ * measurement (a 2026-11 sweep on a dev instance, read-only, n = 1 per point,
+ * so indicative): the watermark of sys_script_include cost about 90 ms; its
+ * plain reads cost about 75 ms at 2 KB and 110 ms at 96 KB (hit: 96 ms). On
+ * sys_dictionary, whose watermark costs about 490 ms because the table is
+ * huge, plain reads cost 75, 86, 180 and 218 ms at 6, 17, 33 and 66 KB, so a
+ * hit lost at every size tried. The crossover is therefore somewhere between
+ * about 20 KB and 50 KB, depending on the table, and below it the cache only
+ * adds a request on a miss and holds memory for nothing.
+ *
+ * 32 KiB sits in that band. Putting it a little high or low costs a few
+ * milliseconds per read either way, because near the crossover a hit and a
+ * plain read cost about the same; what matters is that the many small reads
+ * (a few KB) go back to one request. The threshold is a size, not a time, so
+ * it cannot follow a table whose watermark is unusually expensive; a
+ * per-table rule would need the measured watermark and upstream times.
+ */
+export const SMALL_READ_BYTES = 32 * 1024;
+/** Most keys one scope remembers as small; the least recently used go first. */
+export const MAX_SMALL_READ_KEYS_PER_SCOPE = MAX_METADATA_CACHE_ENTRIES_PER_SCOPE;
+/**
+ * Longest cache key remembered as small. A longer key (a very long query) is
+ * simply never memoized, so each read of it pays its watermark as before; this
+ * keeps the memo at a few MiB per scope however callers phrase their queries.
+ */
+export const MAX_SMALL_READ_KEY_LENGTH = 2048;
 
 interface MetadataCacheEnvironment {
   readonly SN_METADATA_CACHE_TTL_MS?: string;
@@ -216,6 +264,7 @@ export function createMetadataCacheConfig(
   return Object.freeze({
     ttlMs: validateTtlMs(input?.ttlMs ?? DEFAULT_METADATA_CACHE_TTL_MS),
     tables: normalizeTablePatterns(input?.tables ?? DEFAULT_METADATA_CACHE_TABLES),
+    smallReadBytes: validateSmallReadBytes(input?.smallReadBytes ?? SMALL_READ_BYTES),
   });
 }
 
@@ -310,8 +359,8 @@ async function cachedGetWithMeta<T>(
   if (uncacheableUntil !== undefined) {
     if (!forceRecache && uncacheableUntil > now) {
       // The cache cannot serve this table right now, so the rows come from
-      // ServiceNow: a miss.
-      recordCacheOutcome("miss");
+      // ServiceNow.
+      recordReadThrough();
       return operations.getWithMeta<T>(path, cleanParams);
     }
     // Expired, or the caller asked for a refresh: try the watermark again.
@@ -321,6 +370,14 @@ async function cachedGetWithMeta<T>(
 
   const cache = state.entries;
   const key = cacheKey(path, cleanParams);
+  const smallUntil = state.small.get(key);
+  if (smallUntil !== undefined) {
+    if (!forceRecache && smallUntil > now) {
+      return readSmallThrough(operations, state, key, smallUntil, config, path, cleanParams);
+    }
+    // Expired, or the caller asked for a refresh: measure the response again.
+    state.small.delete(key);
+  }
   const existing = cache.get(key);
 
   // Read on a miss too, and always before the rows. An update landing between
@@ -369,6 +426,17 @@ async function cachedGetWithMeta<T>(
   // Serialize once: the string is both the size measure and the copy's source.
   const serialized = JSON.stringify(fresh.data);
   const bodyBytes = Buffer.byteLength(serialized, "utf8");
+  if (bodyBytes < config.smallReadBytes) {
+    // Not worth keeping: a hit would cost a watermark round trip, about what
+    // this read cost. Remember the key as small so its next reads are one
+    // plain request, and free any older, larger entry under it.
+    removeEntry(state, key);
+    markSmall(state, key, now + config.ttlMs);
+    return fresh;
+  }
+  // A key another call marked small while this read was in flight is large
+  // now, as far as this read can tell.
+  state.small.delete(key);
   if (bodyBytes > MAX_METADATA_CACHE_ENTRY_BYTES) {
     // Too big to keep. The older entry under this key is now known stale or
     // superseded, so free it rather than let its body sit until eviction.
@@ -394,6 +462,56 @@ async function cachedGetWithMeta<T>(
     now
   );
   return fresh;
+}
+
+/**
+ * Count a read the cache did not serve and did not keep: the rows come from
+ * ServiceNow, in one request, without a watermark. Reported as a miss, which
+ * is what it is to the caller; a distinct outcome for it (#30) would change
+ * only this function.
+ */
+function recordReadThrough(): void {
+  recordCacheOutcome("miss");
+}
+
+/**
+ * Read a key remembered as small: one plain request, no watermark. If the
+ * response has since grown to the threshold or beyond, forget the mark, so the
+ * next read of the key takes the cached path and keeps it.
+ *
+ * The mark's expiry is not extended: it is one TTL from the read that measured
+ * the response, so a key is re-measured at least once per TTL.
+ */
+async function readSmallThrough<T>(
+  operations: ServiceNowOperations,
+  state: ScopeState,
+  key: string,
+  smallUntil: number,
+  config: MetadataCacheConfig,
+  path: string,
+  params: Record<string, string> | undefined
+): Promise<RequestResult<T>> {
+  // Most recently used, with the expiry it already had.
+  state.small.delete(key);
+  state.small.set(key, smallUntil);
+  recordReadThrough();
+  const fresh = await operations.getWithMeta<T>(path, params);
+  if (
+    fresh.status === 200 &&
+    fresh.data !== null &&
+    Buffer.byteLength(JSON.stringify(fresh.data), "utf8") >= config.smallReadBytes
+  ) {
+    state.small.delete(key);
+  }
+  return fresh;
+}
+
+/** Remember a key as small until `until`, within the memo's bounds. */
+function markSmall(state: ScopeState, key: string, until: number): void {
+  if (state.detached || key.length > MAX_SMALL_READ_KEY_LENGTH) return;
+  state.small.delete(key);
+  state.small.set(key, until);
+  evictOldest(state.small, MAX_SMALL_READ_KEYS_PER_SCOPE);
 }
 
 /**
@@ -623,7 +741,13 @@ function stateForScope(scope: string): ScopeState {
     SCOPED_CACHES.set(scope, existing);
     return existing;
   }
-  const next: ScopeState = { entries: new Map(), uncacheable: new Map(), bytes: 0, detached: false };
+  const next: ScopeState = {
+    entries: new Map(),
+    uncacheable: new Map(),
+    small: new Map(),
+    bytes: 0,
+    detached: false,
+  };
   SCOPED_CACHES.set(scope, next);
   while (SCOPED_CACHES.size > MAX_METADATA_CACHE_SCOPES) {
     const oldest = SCOPED_CACHES.entries().next();
@@ -632,6 +756,7 @@ function stateForScope(scope: string): ScopeState {
     SCOPED_CACHES.delete(oldScope);
     totalCachedBytes -= oldState.bytes;
     oldState.entries.clear();
+    oldState.small.clear();
     oldState.bytes = 0;
     oldState.detached = true;
   }
@@ -666,6 +791,20 @@ function validateTtlMs(value: unknown): number {
     value > MAX_CACHE_TTL_MS
   ) {
     throw new TypeError(`metadata cache TTL must be between 1 and ${MAX_CACHE_TTL_MS}`);
+  }
+  return value;
+}
+
+function validateSmallReadBytes(value: unknown): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > MAX_METADATA_CACHE_ENTRY_BYTES
+  ) {
+    throw new TypeError(
+      `metadata cache smallReadBytes must be between 0 and ${MAX_METADATA_CACHE_ENTRY_BYTES}`
+    );
   }
   return value;
 }

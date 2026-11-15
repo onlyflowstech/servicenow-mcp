@@ -886,11 +886,27 @@ A tool call reads each table's watermark once, however many times it reads the
 table, until the call writes. A hierarchy walk reads `sys_db_object` once for
 the whole chain. An empty table caches like any other.
 
+**Small responses are not cached.** A hit costs a round trip about the size of
+a plain read, so a response under 32 KiB (serialized body) saves nothing and is
+not kept. The first read of such a selector costs the watermark and the read,
+as before; the server then remembers that selector as small, for one TTL, and
+reads it again in a single request with no watermark. If a later read of it
+comes back at 32 KiB or more, it is cached from the next read on. Large reads,
+such as script bodies, are cached and checked exactly as above, and
+`force_recache: true` still reads the watermark and refreshes. The memory is
+per credential scope, holds at most 512 selectors (least recently used out),
+and costs no cached bytes. A call that read a small selector this way reports
+`miss`. On a table whose watermark is slow (`sys_dictionary` on a large
+instance: about 0.5 s against a 0.1 to 0.2 s read in one measurement) even a
+large read may be faster uncached; the threshold is a size, not a time. A
+profile's `metadataCache.smallReadBytes` sets the threshold (0 caches every
+response; at most 512 KiB).
+
 **Seeing what the cache did.** Every successful response carries two optional
 fields in `structuredContent.metadata`. `cache` says how the call's cacheable
 reads were served: `hit` (all from the cache), `miss` (from ServiceNow: nothing
-cached yet, the watermark moved, the entry expired, or the table could not be
-cached just then), `bypass` (a `force_recache: true` refresh), or `mixed` (the
+cached yet, the watermark moved, the entry expired, the table could not be
+cached just then, or the response is small and not kept), `bypass` (a `force_recache: true` refresh), or `mixed` (the
 call made several cacheable reads with different outcomes, such as an
 `sn_codesearch` with no `table` over the five code tables). It is absent when
 the call read no cache-eligible table. `timing` is `{ total_ms, upstream_ms,
