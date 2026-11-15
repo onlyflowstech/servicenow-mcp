@@ -1343,13 +1343,19 @@ startup configuration. File-backed profile example:
 `run`/`run-suite` return migration guidance; use `sn_atf_run` with an explicit
 `atf.execute` profile grant. Typed ATF steps use the authenticated native form
 to save and verify inputs and output references without ACL changes or an
-installed application. A `record_query` or `record_validation` step reads its
-table on the server, so `sn_atf_author` needs a read grant on that table (a
-named-only table must be named), checks the fields in its conditions against the
-field policy (plain fields only, no dot-walks), and refuses
-`enforce_security: false`; leave it out and it stays `true`. The server's table
-grants do not govern steps that run through the UI as the impersonated user, nor
-suites authored in the instance, and `atf.execute` stays opt-in. See
+installed application. `sn_atf_author` checks each step that names a table
+against the profile's grants: a `record_query`, `record_validation`,
+`field_values_validation` or `open_existing_record` step needs a read grant on its
+table, and an `open_new_form` or `set_field_values` step a write grant (a
+named-only table must be named, for either). The conditions of the three steps
+that have them may use only the operators that compare a field with a literal
+(`=`, `!=`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`, `STARTSWITH`, `ENDSWITH`,
+`IN`, `NOT IN`, `ISEMPTY`, `ISNOTEMPTY`, `BETWEEN`), name plain fields the field
+policy lets the profile read (no dot-walks), and a refused term refuses the whole
+call. `record_query` and `record_validation` also refuse
+`enforce_security: false`; leave it out and it stays `true`. The impersonated
+user's ACLs still apply on top of all this. Suites authored in the instance are
+not checked by the server's table grants, and `atf.execute` stays opt-in. See
 [ATF workflow](docs/ATF-WORKFLOW.md).
 
 #### Field policy

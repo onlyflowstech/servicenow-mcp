@@ -6,7 +6,7 @@ import definitions from "./atf-step-definitions.json";
 import { AtfPolicyError } from "../atf-policy.js";
 import { serviceNowSysIdSchema as id } from "../servicenow-identifiers.js";
 import { FieldPolicyError, prepareWriteFieldArguments, resolveReadableFields } from "../field-policy.js";
-import { normalizeTableName } from "../table-policy.js";
+import { normalizeTableName, type TableAccessRequest } from "../table-policy.js";
 import { prepareWriteFieldValues } from "../write-value-policy.js";
 import { createToolError, trustedToolErrorDescriptor } from "../tool-error.js";
 import type { ServiceNowToolHandlerServices } from "./tool-module.js";
@@ -57,35 +57,93 @@ export const stepRequestSchema = z.object({ type: z.string().min(1).max(80), inp
 export interface PreparedStep { type: string; definition: Definition; inputs: Record<string, string>; order: number }
 export const STEP_READ_TABLES = ["sys_atf_test", "sys_atf_step", "sys_atf_step_config", "var_dictionary", "sys_variable_value", "sys_element_mapping"];
 /**
- * Steps that read records of a table the author names, on the server, with no
- * form or user session in between. Their `table` is checked against the
- * profile's read grants, their conditions against its field policy, and their
- * ACL enforcement cannot be turned off. The other table-taking steps run through
- * the UI as the impersonated user, so the server's grants do not govern them.
+ * What a step type does with the table it names, so the profile's grants can
+ * decide it before anything is written. `read` steps look at records of the
+ * table, `write` steps create or change them through a form. Every type listed
+ * here has its table added to the access plan with that operation, and its
+ * conditions (when it has any) checked against the table's field policy.
+ *
+ * `aclSetting` names an input whose explicit `false` is refused: the two server
+ * steps always enforce ACLs. A step type that is not listed names no table, or
+ * none the server's grants are meant to decide.
  */
-const RECORD_READ_STEPS: ReadonlySet<string> = new Set(["record_query", "record_validation"]);
-const CONDITION_TERM = /^(?:ORDERBYDESC|ORDERBY|GROUPBY|NQ|OR)?(?<field>[a-z][a-z0-9_.]*)(?:[A-Z=!<>].*)?$/su;
+interface StepTableRule {
+  readonly access: "read" | "write";
+  readonly table: string;
+  readonly conditions?: string;
+  readonly aclSetting?: string;
+}
+const STEP_TABLE_RULES: Readonly<Record<string, StepTableRule>> = Object.freeze({
+  record_query: { access: "read", table: "table", conditions: "field_values", aclSetting: "enforce_security" },
+  record_validation: { access: "read", table: "table", conditions: "field_values", aclSetting: "enforce_security" },
+  field_values_validation: { access: "read", table: "table", conditions: "conditions" },
+  open_existing_record: { access: "read", table: "table" },
+  open_new_form: { access: "write", table: "table" },
+  set_field_values: { access: "write", table: "table" },
+});
+/** Operators a condition may use, longest first so a prefix never shadows its longer form. */
+const CONDITION_OPERATORS = ["NOT LIKE", "NOT IN", "ISNOTEMPTY", "ISEMPTY", "STARTSWITH", "ENDSWITH", "BETWEEN", "LIKE", "IN", "!=", "<=", ">=", "=", "<", ">"] as const;
+const UNARY_CONDITION_OPERATORS: ReadonlySet<string> = new Set(["ISNOTEMPTY", "ISEMPTY"]);
+const CONDITION_TERM = /^(?<prefix>ORDERBYDESC|ORDERBY|GROUPBY|NQ|OR)?(?<field>[a-z][a-z0-9_.]*)(?<rest>.*)$/su;
 /**
- * Check the field of every condition against the table's readable set. A
- * condition on a field the profile may not read would report that field's value
- * as a pass or a fail, so it is refused like a read of it. A dot-walk, a pasted
- * step output standing for the whole condition, or a term this check does not
- * recognise is refused too: none can be checked against one table.
+ * Check every term of a condition string against the table's field policy.
+ *
+ * A condition on a field the profile may not read would report that field's
+ * value as a pass or a fail, so it is refused like a read of it. Only the
+ * operators that compare a field with a literal are allowed: an operator that
+ * takes a second field (SAMEAS, GT_FIELD, MORETHAN and the like) or a dynamic
+ * value (DYNAMIC, VALCHANGES, CHANGESFROM) would test a field this check does
+ * not see, so it is refused with the rest. No date operator is allowed: the ones
+ * that take no field argument need a script value, which is refused anyway, and
+ * a plain date comparison is `<`, `>` or BETWEEN. A dot-walk, a pasted step
+ * output standing for the whole condition, and a term this check does not
+ * recognise are refused too: none can be checked against one table.
  */
 function checkConditionFields(table: string, conditions: string): void {
   if (conditions === "") return;
   for (const term of conditions.split("^")) {
     if (term === "EQ" || term === "NQ") continue;
-    const field = CONDITION_TERM.exec(term)?.groups?.field;
-    if (field === undefined || field.includes(".")) {
+    const groups = CONDITION_TERM.exec(term)?.groups;
+    const field = groups?.field;
+    if (groups === undefined || field === undefined || field.includes(".")) {
+      throw new FieldPolicyError("invalid_field_selection");
+    }
+    const rest = groups.rest ?? "";
+    const ordering = groups.prefix === "ORDERBY" || groups.prefix === "ORDERBYDESC" || groups.prefix === "GROUPBY";
+    if (ordering ? rest !== "" : !conditionOperatorAllowed(rest)) {
       throw new FieldPolicyError("invalid_field_selection");
     }
     resolveReadableFields(table, { fields: field });
   }
 }
+/** True when `rest` (an operator and its value) uses an allowed operator with a literal value. */
+function conditionOperatorAllowed(rest: string): boolean {
+  const operator = CONDITION_OPERATORS.find(candidate => rest.startsWith(candidate));
+  if (operator === undefined) return false;
+  const value = rest.slice(operator.length);
+  if (UNARY_CONDITION_OPERATORS.has(operator)) return value === "";
+  // "IN" must not be the start of INSTANCEOF, which takes a class, not a list.
+  if ((operator === "IN" || operator === "NOT IN") && /^STANCEOF/u.test(value)) return false;
+  return true;
+}
+/**
+ * The checks that depend on a step's type and inputs. Returns the table access
+ * the step needs, for the plan. Further per-step checks belong here.
+ */
+function checkStepTable(type: string, inputs: Record<string, string>): TableAccessRequest[] {
+  const rule = Object.hasOwn(STEP_TABLE_RULES, type) ? STEP_TABLE_RULES[type] : undefined;
+  if (rule === undefined) return [];
+  // An explicit false is refused, not rewritten: the author learns why. Left
+  // out, the catalog default (true) applies.
+  if (rule.aclSetting !== undefined && inputs[rule.aclSetting] === "false") throw new AtfPolicyError("acl_enforcement_required");
+  const table = normalizeTableName(inputs[rule.table]);
+  if (rule.conditions !== undefined) checkConditionFields(table, inputs[rule.conditions] ?? "");
+  return [{ operation: rule.access, table }];
+}
 export function prepareSteps(args: Record<string, unknown>, allowScripts: boolean) {
   const testId = id.parse(args.test_sys_id);
   const requests = boundedArray(stepRequestSchema, MAX_ATF_AUTHOR_STEPS, { min: 1 }).parse(args.steps);
+  const stepAccess: TableAccessRequest[] = [];
   const steps: PreparedStep[] = requests.map((request, index) => {
     if (!Object.hasOwn(catalog, request.type)) throw new Error("Unknown ATF step type");
     const definition = catalog[request.type];
@@ -93,12 +151,7 @@ export function prepareSteps(args: Record<string, unknown>, allowScripts: boolea
     const values = z.object(Object.fromEntries(definition.inputs.map(input => [input.element, inputSchema(input)]))).strict().parse(request.inputs);
     const inputs = Object.fromEntries(definition.inputs.map(input => [input.element, values[input.element] === undefined ? "" : typeof values[input.element] === "object" ? JSON.stringify(values[input.element]) : String(values[input.element])]));
     if (definition.inputs.some(input => input.internal_type !== "script" && /javascript\s*:/iu.test(inputs[input.element]))) throw new Error("Script expressions are not allowed in ordinary step inputs");
-    if (RECORD_READ_STEPS.has(request.type)) {
-      // An explicit false is refused, not rewritten: the author learns why. Left
-      // out, the catalog default (true) applies.
-      if (inputs.enforce_security === "false") throw new AtfPolicyError("acl_enforcement_required");
-      checkConditionFields(normalizeTableName(inputs.table), inputs.field_values);
-    }
+    stepAccess.push(...checkStepTable(request.type, inputs));
     if (request.type === "rest_send_request_inbound" && (!inputs.end_point.startsWith("/api/") || inputs.end_point.includes("\\") || inputs.end_point.includes("#"))) throw new Error("Inbound REST endpoints must be instance-relative /api/ paths");
     const order = Number(args.start_order ?? 100) + index;
     const fields = { test: testId, sys_scope: "global", step_config: definition.step_config, order, active: true, description: definition.name };
@@ -115,13 +168,16 @@ export function prepareSteps(args: Record<string, unknown>, allowScripts: boolea
     }
     return { type: request.type, definition, inputs, order };
   });
-  // Each record step reads the table it names, so the profile's read grants (a
-  // named-only table included) decide it before anything is written.
-  const stepTables = [...new Set(steps.filter(step => RECORD_READ_STEPS.has(step.type)).map(step => normalizeTableName(step.inputs.table)))];
-  return { args: { ...prepareAtfReads(args, STEP_READ_TABLES), preparedSteps: steps }, requests: [
-    ...[...new Set([...STEP_READ_TABLES, ...stepTables])].map(table => ({ operation: "read" as const, table })),
+  // Each table-taking step needs the table it names (read, or write for a form
+  // that creates records), so the profile's grants (a named-only table included)
+  // decide it before anything is written.
+  const planned = new Map<string, TableAccessRequest>();
+  for (const request of [
+    ...STEP_READ_TABLES.map(table => ({ operation: "read" as const, table })),
+    ...stepAccess,
     ...["sys_atf_step", "sys_variable_value", "sys_element_mapping"].map(table => ({ operation: "write" as const, table })),
-  ] };
+  ]) planned.set(`${request.operation}:${request.table}`, request);
+  return { args: { ...prepareAtfReads(args, STEP_READ_TABLES), preparedSteps: steps }, requests: [...planned.values()] };
 }
 function inputMatches(input: Input, actual: string, expected: string): boolean {
   if (input.internal_type === "boolean") return (actual === "1" ? "true" : actual === "0" ? "false" : actual) === expected;
