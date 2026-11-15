@@ -8,7 +8,7 @@ import { CallMetrics } from "../src/call-metrics.js";
 import {
   FORCE_RECACHE_PARAM,
   MAX_SMALL_READ_KEYS_PER_SCOPE,
-  MAX_SMALL_READ_KEY_LENGTH,
+  SMALL_READ_KEY_RAW_LENGTH,
   SMALL_READ_BYTES,
   createCachedServiceNowOperations,
   createMetadataCacheConfig,
@@ -269,15 +269,40 @@ describe("metadata cache: small responses", () => {
     expect(watermark).toHaveBeenCalledTimes(afterFill + 1);
   });
 
-  it("does not remember a key longer than the limit, so such reads keep paying the watermark", async () => {
+  it("remembers a long key by its digest: 2,100- and 8,000-character selectors cost one watermark in total", async () => {
+    const { base, watermark, fullReads } = upstream();
+    const scope = nextScope();
+    for (const length of [2_100, 8_000]) {
+      const long = { sysparm_fields: "sys_id", sysparm_query: "a".repeat(length) };
+      for (let call = 0; call < 3; call += 1) {
+        expect(await read(base, scope, long)).toBe("miss");
+      }
+    }
+    // One watermark per selector, on its first read; the repeats are plain reads.
+    expect(watermark).toHaveBeenCalledTimes(2);
+    expect(fullReads).toHaveBeenCalledTimes(6);
+    expect(metadataCacheBytes(scope)).toBe(0);
+  });
+
+  it("treats the memo's keys at the raw-length boundary alike, and keeps long ones distinct", async () => {
     const { base, watermark } = upstream();
     const scope = nextScope();
-    const long = { sysparm_fields: "sys_id", sysparm_query: "a".repeat(MAX_SMALL_READ_KEY_LENGTH) };
-
-    await read(base, scope, long);
-    await read(base, scope, long);
+    // The cache key is JSON around the selector; pad it to either side of the limit.
+    const overhead = JSON.stringify({ path: PATH, params: { sysparm_fields: "sys_id", sysparm_query: "" } }).length;
+    const atLimit = { sysparm_fields: "sys_id", sysparm_query: "b".repeat(SMALL_READ_KEY_RAW_LENGTH - overhead) };
+    const overLimit = { sysparm_fields: "sys_id", sysparm_query: "b".repeat(SMALL_READ_KEY_RAW_LENGTH - overhead + 1) };
+    for (const params of [atLimit, overLimit]) {
+      await read(base, scope, params);
+      await read(base, scope, params);
+    }
     expect(watermark).toHaveBeenCalledTimes(2);
-    expect(metadataCacheBytes(scope)).toBe(0);
+
+    // Two long selectors that differ in one character are separate keys.
+    const one = { sysparm_fields: "sys_id", sysparm_query: `${"c".repeat(3_000)}1` };
+    const other = { sysparm_fields: "sys_id", sysparm_query: `${"c".repeat(3_000)}2` };
+    await read(base, scope, one);
+    await read(base, scope, other);
+    expect(watermark).toHaveBeenCalledTimes(4);
   });
 
   it("expires the memory with the cache TTL, and a direct read does not extend it", async () => {

@@ -47,6 +47,8 @@ import {
   type RequestResult,
   type ServiceNowOperations,
 } from "./client.js";
+import { createHash } from "node:crypto";
+
 import { parsePositiveIntegerEnv } from "./config.js";
 import { trustedToolErrorDescriptor } from "./tool-error.js";
 
@@ -232,11 +234,14 @@ export const SMALL_READ_BYTES = 32 * 1024;
 /** Most keys one scope remembers as small; the least recently used go first. */
 export const MAX_SMALL_READ_KEYS_PER_SCOPE = MAX_METADATA_CACHE_ENTRIES_PER_SCOPE;
 /**
- * Longest cache key remembered as small. A longer key (a very long query) is
- * simply never memoized, so each read of it pays its watermark as before; this
- * keeps the memo at a few MiB per scope however callers phrase their queries.
+ * Longest cache key the small-read memo holds as it is; a longer one is held
+ * by its sha256 hex digest, so the memo stays at 512 short strings per scope
+ * however long a caller's query is, and a long selector is remembered like any
+ * other. Two keys that collide would only make one of them read through once
+ * more than needed (or, for a small mark on a large key, be re-measured), so a
+ * collision costs a request, never a wrong answer.
  */
-export const MAX_SMALL_READ_KEY_LENGTH = 2048;
+export const SMALL_READ_KEY_RAW_LENGTH = 128;
 
 interface MetadataCacheEnvironment {
   readonly SN_METADATA_CACHE_TTL_MS?: string;
@@ -370,13 +375,14 @@ async function cachedGetWithMeta<T>(
 
   const cache = state.entries;
   const key = cacheKey(path, cleanParams);
-  const smallUntil = state.small.get(key);
+  const smallKey = smallReadKey(key);
+  const smallUntil = state.small.get(smallKey);
   if (smallUntil !== undefined) {
     if (!forceRecache && smallUntil > now) {
-      return readSmallThrough(operations, state, key, smallUntil, config, path, cleanParams);
+      return readSmallThrough(operations, state, smallKey, smallUntil, config, path, cleanParams);
     }
     // Expired, or the caller asked for a refresh: measure the response again.
-    state.small.delete(key);
+    state.small.delete(smallKey);
   }
   const existing = cache.get(key);
 
@@ -431,12 +437,12 @@ async function cachedGetWithMeta<T>(
     // this read cost. Remember the key as small so its next reads are one
     // plain request, and free any older, larger entry under it.
     removeEntry(state, key);
-    markSmall(state, key, now + config.ttlMs);
+    markSmall(state, smallKey, now + config.ttlMs);
     return fresh;
   }
   // A key another call marked small while this read was in flight is large
   // now, as far as this read can tell.
-  state.small.delete(key);
+  state.small.delete(smallKey);
   if (bodyBytes > MAX_METADATA_CACHE_ENTRY_BYTES) {
     // Too big to keep. The older entry under this key is now known stale or
     // superseded, so free it rather than let its body sit until eviction.
@@ -508,10 +514,15 @@ async function readSmallThrough<T>(
 
 /** Remember a key as small until `until`, within the memo's bounds. */
 function markSmall(state: ScopeState, key: string, until: number): void {
-  if (state.detached || key.length > MAX_SMALL_READ_KEY_LENGTH) return;
+  if (state.detached) return;
   state.small.delete(key);
   state.small.set(key, until);
   evictOldest(state.small, MAX_SMALL_READ_KEYS_PER_SCOPE);
+}
+
+/** The memo's key for a cache key: the key itself when short, else its sha256 hex. */
+function smallReadKey(key: string): string {
+  return key.length <= SMALL_READ_KEY_RAW_LENGTH ? key : createHash("sha256").update(key).digest("hex");
 }
 
 /**
