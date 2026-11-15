@@ -205,7 +205,7 @@ describe("high-level tool discovery", () => {
     sn_query: ["display_value", "fields", "force_recache", "limit", "max_response_bytes", "offset", "orderby", "profile", "query", "response_format", "structured_query", "table"],
     sn_relationships: ["ci_name", "class", "depth", "direction", "impact", "limit", "offset", "profile", "sys_id", "type"],
     sn_schema: ["fields_only", "force_recache", "limit", "offset", "profile", "table"],
-    sn_syslog: ["fields", "level", "limit", "message", "offset", "profile", "since", "source"],
+    sn_syslog: ["after_cursor", "fields", "level", "limit", "message", "offset", "profile", "since", "source", "tail"],
     sn_update: ["fields", "profile", "sys_id", "table"],
   };
 

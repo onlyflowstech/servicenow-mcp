@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`sn_syslog` can tail the system log.** `tail: true` returns the newest
+  entries, oldest first, with a `cursor`; each later call with `after_cursor`
+  returns only the entries created after it, oldest first, with a new `cursor`,
+  so a caller no longer re-reads a window and removes duplicates by hand. The
+  cursor holds the creation second and the row's `sys_id`, so entries that share
+  a second are neither skipped nor repeated, and it is bound to the `level`,
+  `source` and `message` filters it was issued for. A malformed, oversized or
+  altered cursor, or one used with other filters, is refused with a fixed message
+  that never repeats it. When more entries are waiting than `limit` allows (or the
+  response is cut to fit its size limit), the call returns `has_more: true` and a
+  cursor at the last entry returned. Tail reads never use the metadata cache,
+  carry no total count and no `next_offset`, and follow the same table and field
+  policy as any `sn_syslog` read; a call without `tail` or `after_cursor` is
+  unchanged. The two new inputs and the `cursor` output add about 340 characters
+  to the `sn_syslog` entry in `tools/list`.
+
 ### Changed
 
 - **`sys_audit` and `sys_journal_field` are no longer covered by a `"*"` table

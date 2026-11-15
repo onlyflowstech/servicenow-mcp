@@ -211,9 +211,7 @@ export function resolveToolTableAccess(
       case "sn_syslog":
         authorizeReadQuery(encodedQueryAccess, "sn_syslog", "syslog", args);
         return resolution(
-          prepareReadFieldArguments(args, "syslog", {
-            exposeFieldsArgument: true,
-          }),
+          syslogFieldArguments(args),
           [read("syslog")]
         );
       case "sn_codesearch":
@@ -374,6 +372,28 @@ function codeSearchResolution(
     });
   }
   return resolution(prepared, granted.map((name) => read(name)));
+}
+
+/**
+ * The fields an sn_syslog call may read. A tail also reads the two that give a
+ * row its place in the log (sys_id and sys_created_on), whatever `fields` asks
+ * for, and they are checked like any other: a policy that does not let the
+ * profile read them refuses the tail instead of handing out a cursor that
+ * could not be kept in step with the rows.
+ */
+function syslogFieldArguments(
+  args: Record<string, unknown>
+): Record<string, unknown> {
+  const prepared = prepareReadFieldArguments(args, "syslog", {
+    exposeFieldsArgument: true,
+  });
+  if (args.tail !== true && args.after_cursor === undefined) return prepared;
+  const selected = prepared.fields;
+  if (typeof selected !== "string" || selected === "all") return prepared;
+  const wanted = new Set(selected.split(","));
+  wanted.add("sys_id");
+  wanted.add("sys_created_on");
+  return prepareAdditionalReadFieldArguments(prepared, "syslog", [...wanted].join(","));
 }
 
 /**

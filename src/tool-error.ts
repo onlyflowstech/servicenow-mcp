@@ -40,7 +40,8 @@ export type ToolErrorReason =
   | "redirected"
   | "basic_auth_restricted"
   | "unknown_filter_field"
-  | "filter_fields_too_large";
+  | "filter_fields_too_large"
+  | "invalid_cursor";
 
 export interface ToolErrorDescriptor {
   readonly category: ToolErrorCategory;
@@ -221,6 +222,27 @@ export function createFilterFieldsTooLargeError(): Error {
     message:
       "The response was too large once the fields used by the filter were " +
       "included. Lower limit and try again.",
+    retry: "retry_after_correction",
+  });
+}
+
+/**
+ * Issue the trusted error for a tail request that cannot be served: a cursor
+ * that is malformed, oversized or issued for different filters, or an offset
+ * sent with a tail. The text is fixed, so a rejected cursor is never echoed,
+ * and for a cursor it does not say which of the three it was.
+ */
+export function createInvalidCursorError(problem: "cursor" | "offset" = "cursor"): Error {
+  return issue({
+    category: "conflict",
+    reason: "invalid_cursor",
+    message:
+      problem === "offset"
+        ? "offset cannot be used with tail or after_cursor; a tail pages by cursor."
+        : "The after_cursor cannot be used. It is malformed, or it was issued " +
+          "for a different level, source or message filter. Repeat the original " +
+          "filters with the cursor from the last call, or start a new tail with " +
+          "tail=true.",
     retry: "retry_after_correction",
   });
 }

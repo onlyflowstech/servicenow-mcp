@@ -8874,6 +8874,15 @@
           "description": "Fields to return (default: sys_id,level,source,message,sys_created_on)",
           "type": "string"
         },
+        "tail": {
+          "description": "Start a tail: newest entries plus a cursor",
+          "type": "boolean"
+        },
+        "after_cursor": {
+          "description": "Cursor from the last call. Same level/source/message; since ignored",
+          "type": "string",
+          "maxLength": 128
+        },
         "profile": {
           "type": "string",
           "minLength": 1,
@@ -8924,6 +8933,10 @@
             "results": {
               "type": "array",
               "items": {}
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 128
             }
           },
           "required": [

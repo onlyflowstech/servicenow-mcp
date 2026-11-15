@@ -756,9 +756,39 @@ in this section is needed to use this server.
 |------|-------------|
 | `sn_relationships` | CMDB CI graph traversal — upstream/downstream/both, configurable depth |
 | `sn_attach` | List attachments, return downloads as inline base64, and upload inline base64 content; never touches a host filesystem path |
-| `sn_syslog` | Query system logs with severity/source/time filters |
+| `sn_syslog` | Query system logs with severity/source/time filters, newest first. `tail: true` starts a tail (the newest entries, oldest first, plus a `cursor`); each later call with `after_cursor` returns only the entries after it, oldest first, plus a new `cursor` ([Tailing the system log](#tailing-the-system-log)) |
 | `sn_codesearch` | Search business rules, script includes, client scripts, etc., with a snippet around each match ([Code search](#code-search)). Part of the default read grant, so a plain read grant on a code table allows it |
 | `sn_discover` | Discover tables, scoped apps, store apps, plugins |
+
+#### Tailing the system log
+
+`sn_syslog` can follow the log without re-reading it. The first call sends
+`tail: true` and gets the newest `limit` entries (inside the `since` window),
+oldest first, and a `cursor`. Each later call sends that cursor as
+`after_cursor` and gets only the entries created after it, oldest first, and a
+new `cursor`; poll no faster than every few seconds.
+
+- **No skips, no repeats.** Many log rows share one `sys_created_on` second, so
+  the cursor holds the second and the row's `sys_id`, and a call returns the
+  rows after that pair. It is an opaque token: pass it back as given.
+- **`has_more`.** If more than `limit` entries are waiting, the call returns
+  `limit` of them with `has_more: true` and a cursor at the last one; call again
+  with it. A response cut to fit the byte budget does the same, and the cursor
+  always names the last entry actually returned. Tail pages carry no `total` and
+  no `next_offset`, and `offset` cannot be combined with a tail.
+- **Same filters on every call.** The cursor is bound to the `level`, `source`
+  and `message` it was issued for. A call that changes them is refused (so is a
+  malformed, oversized or altered cursor) with a fixed message that does not
+  repeat the cursor. `since` applies to the first call only. With nothing to
+  return, the call gives the same position back, so keep polling with it. If the
+  first call finds no entries in its window it returns no cursor; call it again.
+- **Reads go straight to the instance**, never through the metadata cache, and
+  use the same table and field policy as an ordinary `sn_syslog` read. A tail
+  also reads `sys_id` and `sys_created_on` to place the cursor, so a field policy
+  that withholds either refuses it.
+- **Limits.** Order is by creation second, then `sys_id`. A row the instance
+  stores late with a creation time at or before the cursor's second is not seen
+  by a tail that has already moved past it.
 
 ### Testing & Automation
 

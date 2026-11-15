@@ -22,6 +22,7 @@ import {
   type TruncationHintParts,
 } from "./truncation-hint.js";
 import { withResolvedProfileOutput } from "./tool-module.js";
+import { MAX_CURSOR_LENGTH, restateTailPageAfterFit } from "./syslog-cursor.js";
 
 export const DEFAULT_RESULT_RECORD_LIMIT = 1_000;
 export const DEFAULT_RESULT_BYTE_LIMIT = MAX_RESPONSE_BYTES_DEFAULT;
@@ -226,6 +227,11 @@ const queryResultSchema = z
   })
   .strict();
 
+/** sn_syslog's page, plus the cursor a tail returns. */
+const syslogResultSchema = queryResultSchema.extend({
+  cursor: z.string().max(MAX_CURSOR_LENGTH).optional(),
+});
+
 const createResultSchema = z
   .object({
     sys_id: canonicalSysIdSchema,
@@ -315,7 +321,7 @@ const productionDataSchemas = Object.freeze({
   sn_health: healthResultSchema,
   sn_attach: attachmentResultEnvelopeSchema,
   sn_relationships: relationshipResultSchema,
-  sn_syslog: queryResultSchema,
+  sn_syslog: syslogResultSchema,
   sn_codesearch: listResultSchema,
   sn_discover: listResultSchema,
   sn_atf: atfResultEnvelopeSchema,
@@ -923,6 +929,17 @@ const LOOK_AHEAD_TOOLS: ReadonlySet<string> = new Set([
   "sn_aggregate",
 ]);
 
+/**
+ * A tail read of the system log pages by cursor, not by offset: it has no
+ * offset to continue at, and its `has_more` and `cursor` are the tool's own.
+ */
+function isTailRead(
+  name: ProductionToolName,
+  args: Readonly<Record<string, unknown>>
+): boolean {
+  return name === "sn_syslog" && (args.tail === true || args.after_cursor !== undefined);
+}
+
 export function envelopeCompatibilityResult(
   name: ProductionToolName,
   args: Readonly<Record<string, unknown>>,
@@ -999,7 +1016,7 @@ export function envelopeCompatibilityResult(
       max_records: maximumRecords,
       max_bytes: byteLimit(name, args),
     },
-    pagination: collection
+    pagination: collection && !isTailRead(name, args)
       ? {
           mode: "offset",
           limit,
@@ -1310,6 +1327,9 @@ function finalizeSummaryResult(
       probeRecords.splice(count);
       probe.metadata.record_count = count;
       synchronizeRecordCount(probe.data, count);
+      if (tool === "sn_syslog" && probe.metadata.pagination.mode === "none" && count < originalRecordCount) {
+        restateTailPageAfterFit(probe.data, count);
+      }
       if (probe.metadata.pagination.mode === "offset") {
         probe.metadata.pagination.returned = count;
         if (count < originalRecordCount) {
