@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error says so. An empty list is rejected with its own message. A list is read
   this way only as the top-level `filter` and only by `sn_query`: `sn_batch`
   write filters stay one object, so a mutation never selects records through a
-  list. `tools/list` is unchanged.
+  list. The list is part of the published `tools/list` schema (#33, below).
 - **`structured_query.filter` shows a working example in `tools/list` (#19).**
   `sn_query`'s `filter` says a list is read as AND and shows one, and the
   `sn_query` description gains a one-line example with the OR group form.
@@ -35,13 +35,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{ total_ms, upstream_ms, watermark_ms }` in whole milliseconds, wall-clock:
   `upstream_ms` and `watermark_ms` are the time at least one request of that
   kind was in flight, so overlapping requests count once. Only the server sets
-  them (a value a tool supplies is discarded), and they are added only when
-  they fit the result's byte limit, so they never cost a record. Every tool's
+  them (a value a tool supplies is discarded), and they are not counted
+  against the result's byte limit, so they never cost a record and are never
+  dropped (#34, below). Every tool's
   `outputSchema` grows by 322 characters (7,728 in `tools/list`). Cache
   behaviour is unchanged.
 
 ### Fixed
 
+- **The list form of `structured_query.filter` is in the published `tools/list`
+  schema, and `tools/list` is smaller (#33).** `sn_query` read a list filter,
+  and its descriptions tell clients to send one, but the schema it published
+  had no array option, so a client that validates arguments against it (ajv)
+  rejected the documented example. The list is now an explicit branch of the
+  schema, 1 to 32 conditions. The filter union and the leaf-condition union
+  are published once per tool, under `definitions`, and referred to with
+  `$ref`, where each use used to be written out again; every `$ref` resolves
+  inside the same tool's `inputSchema`. `sn_batch` shares them and still
+  publishes no array option, and a list is still rejected there. Behaviour is
+  unchanged: the error messages (#27) and the nesting rule (a list of two or
+  more takes one group level) are as before. One difference stays between the
+  schema and the server: the schema cannot say that a list of two or more
+  takes a level, so it accepts a list that holds a 3-level group, which the
+  server rejects. `tools/list`: `sn_query` 16,574 to 10,063 characters,
+  `sn_batch` 14,818 to 8,223, the whole list 140,887 to 127,781 (the part a
+  model reads, without output schemas, 52,641 to 39,535). This delivers most of
+  the filter dedupe asked for in #9; stripping the bounds the server enforces
+  anyway, and sharing the scalar value union, are not done. Clients that do not
+  resolve `$ref` to `definitions` are not served by this form.
+- **Truncated responses keep `metadata.cache` and `metadata.timing` (#34).**
+  The two fields were added only when the finished response still fit
+  `max_response_bytes`, so a response fitted to within about 90 bytes of its
+  limit lost them, on exactly the calls where the timing helps most. They are
+  no longer counted against the limit: the fit and the truncation hint's numbers
+  (#28, #29) are unchanged, and a successful response always carries both. It
+  can exceed `max_response_bytes` by their size, under 100 bytes. The
+  `max_response_bytes` description of `sn_query`, `sn_get` and `sn_flow_view`
+  says so (about 61 characters each in `tools/list`).
 - **A rejected `structured_query.filter` names the mistake (#27).** A bad
   operator, an unknown or missing `type`, a bad group, a missing key, a value of
   the wrong kind or a group nested too deep used to get the same shape message,
