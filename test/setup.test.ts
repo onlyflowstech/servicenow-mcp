@@ -10,6 +10,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { PassThrough } from "node:stream";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -35,7 +37,9 @@ import { FLOW_VIEW_TABLES } from "../src/tools/flow-view-contracts.js";
 import { resolveToolTableAccess } from "../src/tool-table-access.js";
 import {
   classifyVerificationFailure,
+  createTtyPrompter,
   runSetupCli,
+  type AskOptions,
   type SetupCliDependencies,
   type WizardPrompter,
 } from "../src/setup.js";
@@ -2392,6 +2396,449 @@ describe("setup wizard", () => {
   });
 });
 
+describe("setup wizard authentication default", () => {
+  let home: string;
+  let manager: ProfileManager;
+
+  beforeEach(() => {
+    home = newHome("sn-mcp-wizard-auth-");
+    mkdirSync(join(home, ".servicenow-mcp"), { recursive: true, mode: 0o700 });
+    manager = new ProfileManager({ configFilePath: profileConfigPath(home) });
+  });
+
+  async function run(
+    script: readonly string[],
+    secrets: readonly string[],
+    overrides: Partial<SetupCliDependencies> = {}
+  ): Promise<{ prompter: ScriptedPrompter; out: string }> {
+    const prompter = scriptedPrompter(script, secrets);
+    const io = capture();
+    await runSetupCli({
+      home,
+      argv: [],
+      env: { HOME: home },
+      interactive: true,
+      prompter,
+      profileManager: manager,
+      keyProvider: FIXED_KEY,
+      verifyCredential: ACCEPTS,
+      resolveParentTable: async () => undefined,
+      commandExists: () => false,
+      writeStdout: (value) => io.out.push(value),
+      writeStderr: (value) => io.err.push(value),
+      ...overrides,
+    });
+    return { prompter, out: io.out.join("") };
+  }
+
+  /** The prompter, recording the options each question was asked with. */
+  function recording(script: readonly string[], secrets: readonly string[]): {
+    prompter: ScriptedPrompter;
+    asked: Map<string, AskOptions | undefined>;
+  } {
+    const inner = scriptedPrompter(script, secrets);
+    const asked = new Map<string, AskOptions | undefined>();
+    return {
+      asked,
+      prompter: {
+        ...inner,
+        ask: (question, options) => {
+          asked.set(question, options);
+          return inner.ask(question, options);
+        },
+      },
+    };
+  }
+
+  const JUST_INCIDENT = "Just incident";
+  const NONE = "None";
+  const savedConfig = () =>
+    JSON.parse(readFileSync(profileConfigPath(home), "utf8")) as {
+      profiles: Record<string, Record<string, unknown>>;
+    };
+
+  // Every answer after the instance is left empty, so each prompt resolves to
+  // its own default: this is what pressing Enter all the way through does.
+  const PRESS_ENTER = [
+    "dev",
+    "dev00001.service-now.com",
+    "",                             // Authentication
+    "",                             // OAuth grant type
+    "",                             // credential storage
+    "oauth-client-id",              // OAuth client id has no default
+    JUST_INCIDENT,
+    NONE,
+  ];
+
+  it("offers oauth as the default, first in the list, with Basic marked legacy", async () => {
+    const { prompter, asked } = recording(PRESS_ENTER, ["client-secret-value"]);
+    await run([], [], { prompter });
+
+    const options = asked.get("Authentication");
+    expect(options?.default).toBe("oauth");
+    expect(options?.choices?.[0]).toBe("oauth");
+    expect([...(options?.choices ?? [])].sort()).toEqual(["apikey", "basic", "oauth"]);
+    // Basic stays available, and is labelled so the operator can see why.
+    expect(options?.hints?.basic).toMatch(/legacy/u);
+    expect(options?.hints?.basic).toMatch(/not recommended/u);
+    expect(options?.hints?.oauth).toMatch(/recommended/u);
+  });
+
+  it("creates an OAuth client-credentials profile when every default is taken", async () => {
+    const verified: Array<{ authType?: string; grantType?: string }> = [];
+    const { out } = await run(PRESS_ENTER, ["client-secret-value"], {
+      verifyCredential: async (config) => {
+        verified.push({
+          ...(config.authType ? { authType: config.authType } : {}),
+          ...(config.grantType ? { grantType: config.grantType } : {}),
+        });
+        return { ok: true, detail: `${config.instance} accepted the credential.` };
+      },
+    });
+
+    expect(verified).toEqual([{ authType: "oauth", grantType: "client_credentials" }]);
+    const profile = new ProfileManager({
+      configFilePath: profileConfigPath(home),
+    }).getProfile("dev");
+    expect(profile.authType).toBe("oauth");
+    expect(profile.grantType).toBe("client_credentials");
+    expect(profile.clientId).toBe("oauth-client-id");
+    expect(profile.clientSecret).toMatchObject({ type: "encrypted" });
+    // Client credentials run as the application user: no username, no password.
+    expect(profile.username).toBeUndefined();
+    expect(profile.credential).toBeUndefined();
+    expect(out).toContain("Setup complete.");
+    expect(out).not.toContain("client-secret-value");
+    expect(readFileSync(profileConfigPath(home), "utf8")).not.toContain(
+      "client-secret-value"
+    );
+  });
+
+  it("renders the real menu with oauth first and Enter choosing it", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let shown = "";
+    output.on("data", (chunk: Buffer) => {
+      shown += chunk.toString();
+    });
+    const prompter = createTtyPrompter({
+      input: input as never,
+      output: output as never,
+    });
+    const pending = prompter.ask("Authentication", {
+      default: "oauth",
+      choices: ["oauth", "apikey", "basic"],
+      hints: { oauth: "client credentials, recommended", basic: "legacy, not recommended" },
+    });
+    // Enter, sent once the question is on screen.
+    input.write("\n");
+    const answer = await pending;
+    prompter.close();
+
+    expect(answer).toBe("oauth");
+    expect(shown).toContain("1) oauth (default) - client credentials, recommended");
+    expect(shown).toContain("3) basic - legacy, not recommended");
+    expect(shown).toContain("Choice [1]:");
+  });
+
+  it("still creates a Basic profile when basic is chosen, and says nothing about OAuth setup", async () => {
+    const { prompter } = await run(
+      [
+        "dev",
+        "dev00001.service-now.com",
+        "basic",
+        "encrypted",
+        "integration.user",
+        JUST_INCIDENT,
+        NONE,
+      ],
+      ["basic-password"]
+    );
+
+    const profile = new ProfileManager({
+      configFilePath: profileConfigPath(home),
+    }).getProfile("dev");
+    expect(profile.authType).toBe("basic");
+    expect(profile.username).toBe("integration.user");
+    expect(profile.credential).toMatchObject({ type: "encrypted" });
+    expect(profile.clientId).toBeUndefined();
+    expect(prompter.notes.join("\n")).not.toContain("Application Registry");
+  });
+
+  it("says briefly what OAuth needs, and where the README explains it", async () => {
+    const { prompter } = await run(PRESS_ENTER, ["client-secret-value"]);
+    const note = prompter.notes.find((text) => text.includes("Application Registry"));
+
+    expect(note).toBeDefined();
+    expect(note).toContain("client ID and client secret");
+    expect(note).toContain("client credentials grant");
+    expect(note).toContain("OAuth Application User");
+    expect(note).toContain("integration user");
+    expect(note).toContain("README");
+    expect(note).toContain("Authentication > OAuth 2.0");
+    // Short: a handful of lines, not a manual.
+    expect(note!.trim().split("\n").length).toBeLessThanOrEqual(8);
+  });
+
+  it("prints the OAuth note before the first OAuth question, not after", async () => {
+    const inner = scriptedPrompter(PRESS_ENTER, ["client-secret-value"]);
+    const events: string[] = [];
+    await run([], [], {
+      prompter: {
+        ...inner,
+        ask: (question, options) => {
+          events.push(`ask: ${question}`);
+          return inner.ask(question, options);
+        },
+        note: (text) => {
+          if (text.includes("Application Registry")) events.push("oauth-note");
+          inner.note(text);
+        },
+      },
+    });
+    expect(events.indexOf("oauth-note")).toBeGreaterThan(events.indexOf("ask: Authentication"));
+    expect(events.indexOf("oauth-note")).toBeLessThan(events.indexOf("ask: OAuth grant type"));
+  });
+
+  describe("a 401 on a Basic credential", () => {
+    const BASIC_SCRIPT = [
+      "dev",
+      "dev00001.service-now.com",
+      "basic",
+      "encrypted",
+      "integration.user",
+    ];
+    // After a switch the wizard asks the OAuth questions again.
+    const OAUTH_AFTER_SWITCH = [
+      "client_credentials",
+      "encrypted",
+      "oauth-client-id",
+      JUST_INCIDENT,
+      NONE,
+    ];
+    const rejected = (authType: string | undefined) =>
+      classifyVerificationFailure(
+        createToolError("authentication", "retry_after_correction"),
+        {
+          instance: "https://dev00001.service-now.com",
+          user: "u",
+          password: "p",
+          displayValue: "true",
+          relDepth: 1,
+          ...(authType ? { authType } : {}),
+        } as never
+      );
+
+    it("offers switching to OAuth next to retrying the same settings", async () => {
+      const { prompter, asked } = recording(
+        [...BASIC_SCRIPT, "stop"],
+        ["basic-password"]
+      );
+      await expect(
+        run([], [], {
+          prompter,
+          verifyCredential: async (config) => rejected(config.authType),
+        })
+      ).rejects.toThrow(/No profile was written/u);
+
+      const next = [...asked.entries()].find(([question]) => question.includes("What next?"));
+      expect(next?.[1]?.choices).toEqual(["retry", "oauth", "stop"]);
+      expect(next?.[1]?.default).toBe("retry");
+      expect(next?.[1]?.hints?.retry).toMatch(/same settings/u);
+      expect(next?.[1]?.hints?.oauth).toMatch(/OAuth/u);
+      // The Basic failure's own explanation is still shown first.
+      expect(prompter.notes.join("\n")).toContain("snc_basic_auth_api_access");
+      expect(() => manager.getProfile("dev")).toThrow(/not found/u);
+    });
+
+    it("switches to OAuth keeping the name and instance, and saves only OAuth", async () => {
+      const seen: Array<{ authType?: string; user: string; password: string }> = [];
+      const { prompter, out } = await run(
+        [...BASIC_SCRIPT, "oauth", ...OAUTH_AFTER_SWITCH],
+        ["basic-password", "oauth-client-secret"],
+        {
+          verifyCredential: async (config) => {
+            seen.push({
+              ...(config.authType ? { authType: config.authType } : {}),
+              user: config.user,
+              password: config.password,
+            });
+            return config.authType === "oauth"
+              ? { ok: true, detail: `${config.instance} accepted the credential.` }
+              : rejected(config.authType);
+          },
+        }
+      );
+
+      expect(seen.map((entry) => entry.authType)).toEqual(["basic", "oauth"]);
+      // Name and instance were asked once: the script had no second copy.
+      expect(prompter.remaining()).toBe(0);
+      expect(prompter.notes.join("\n")).toContain("Switching to OAuth");
+
+      const raw = readFileSync(profileConfigPath(home), "utf8");
+      const saved = savedConfig().profiles.dev;
+      expect(saved.authType).toBe("oauth");
+      expect(saved.instance).toBe("https://dev00001.service-now.com");
+      expect(saved.clientId).toBe("oauth-client-id");
+      expect(saved.clientSecret).toMatchObject({ type: "encrypted" });
+      // The discarded Basic credential is nowhere on disk or in the output.
+      expect(saved.username).toBeUndefined();
+      expect(saved.credential).toBeUndefined();
+      for (const secret of ["basic-password", "oauth-client-secret"]) {
+        expect(raw).not.toContain(secret);
+        expect(out).not.toContain(secret);
+        expect(prompter.notes.join("\n")).not.toContain(secret);
+      }
+      // The OAuth note is shown on the switch, as it is on a first choice.
+      expect(prompter.notes.join("\n")).toContain("Application Registry");
+    });
+
+    it("retries the same settings when asked to", async () => {
+      let calls = 0;
+      await run(
+        [...BASIC_SCRIPT, "retry", JUST_INCIDENT, NONE],
+        ["basic-password"],
+        {
+          verifyCredential: async (config) => {
+            calls += 1;
+            return calls === 1
+              ? rejected(config.authType)
+              : { ok: true, detail: `${config.instance} accepted the credential.` };
+          },
+        }
+      );
+      expect(calls).toBe(2);
+      expect(manager.getProfile("dev").authType).toBe("basic");
+    });
+
+    it("takes Enter as retry, the choice the old prompt's Enter made", async () => {
+      let calls = 0;
+      await run([...BASIC_SCRIPT, "", JUST_INCIDENT, NONE], ["basic-password"], {
+        verifyCredential: async (config) => {
+          calls += 1;
+          return calls === 1
+            ? rejected(config.authType)
+            : { ok: true, detail: "accepted" };
+        },
+      });
+      expect(calls).toBe(2);
+    });
+
+    it("writes nothing when the operator stops", async () => {
+      await expect(
+        run([...BASIC_SCRIPT, "stop"], ["basic-password"], {
+          verifyCredential: async (config) => rejected(config.authType),
+        })
+      ).rejects.toThrow(/No profile was written/u);
+      expect(existsSync(profileConfigPath(home))).toBe(false);
+    });
+
+    it("does not offer the switch for a failure that is not a 401", async () => {
+      // A hibernating instance: retrying is the right move, OAuth is not.
+      let calls = 0;
+      const { prompter } = await run(
+        [...BASIC_SCRIPT, "y", JUST_INCIDENT, NONE],
+        ["basic-password"],
+        {
+          verifyCredential: async () => {
+            calls += 1;
+            return calls === 1
+              ? classifyVerificationFailure(
+                  createInstanceHibernatingError("dev00001.service-now.com"),
+                  { instance: "https://dev00001.service-now.com", authType: "basic" } as never
+                )
+              : { ok: true, detail: "accepted" };
+          },
+        }
+      );
+      expect(calls).toBe(2);
+      expect(prompter.notes.join("\n")).not.toContain("Switching to OAuth");
+    });
+
+    it("does not offer the switch when OAuth itself is rejected", async () => {
+      const { prompter, asked } = recording(
+        [
+          "dev",
+          "dev00001.service-now.com",
+          "oauth",
+          "client_credentials",
+          "encrypted",
+          "oauth-client-id",
+          "n",
+        ],
+        ["oauth-client-secret"]
+      );
+      await expect(
+        run([], [], {
+          prompter,
+          verifyCredential: async (config) => rejected(config.authType),
+        })
+      ).rejects.toThrow(/No profile was written/u);
+      expect([...asked.keys()].some((question) => question.includes("What next?"))).toBe(
+        false
+      );
+    });
+  });
+
+  describe("existing profiles", () => {
+    const LEGACY = {
+      instance: "https://legacy.service-now.com",
+      username: "legacy.user",
+      credential: "env:SN_PASSWORD_LEGACY",
+    };
+    const EXPLICIT_BASIC = {
+      instance: "https://dev00001.service-now.com",
+      authType: "basic" as const,
+      username: "existing",
+      credential: "env:SN_PASSWORD_DEV",
+    };
+
+    it("are not touched, and a profile with no authType stays without one", async () => {
+      manager.addProfile("legacy", LEGACY);
+      manager.addProfile("dev", EXPLICIT_BASIC);
+      const before = savedConfig().profiles;
+      expect(before.legacy).not.toHaveProperty("authType");
+
+      await run(
+        [
+          "profile",
+          "staging",
+          "staging00001.service-now.com",
+          "",                      // Authentication: the new default
+          "",
+          "",
+          "staging-client-id",
+          JUST_INCIDENT,
+          NONE,
+        ],
+        ["staging-client-secret"]
+      );
+
+      const after = savedConfig().profiles;
+      expect(after.legacy).toEqual(before.legacy);
+      expect(after.dev).toEqual(before.dev);
+      expect(after.legacy).not.toHaveProperty("authType");
+      expect(after.staging.authType).toBe("oauth");
+    });
+
+    it("are not touched when a re-run only re-registers clients", async () => {
+      manager.addProfile("legacy", LEGACY);
+      const before = readFileSync(profileConfigPath(home), "utf8");
+      await run(["clients", "n"], []);
+      expect(readFileSync(profileConfigPath(home), "utf8")).toBe(before);
+    });
+
+    it("are still read as Basic when they carry no authType", () => {
+      manager.addProfile("legacy", LEGACY);
+      const reloaded = new ProfileManager({ configFilePath: profileConfigPath(home) });
+      expect(reloaded.getProfile("legacy").authType).toBeUndefined();
+      expect(
+        reloaded.listProfiles().find((entry) => entry.name === "legacy")?.authType
+      ).toBe("basic");
+    });
+  });
+});
+
 describe("setup wizard opt-out", () => {
   it("keeps the non-interactive path when stdin is not a terminal", async () => {
     const home = newHome("sn-mcp-wizard-tty-");
@@ -2474,7 +2921,19 @@ describe("credential verification diagnosis", () => {
     expect(result.detail).toContain("dev00001.service-now.com");
     expect(result.detail).toContain("401");
     expect(result.remedy).toMatch(/username and password/u);
+    expect(result.authenticationRejected).toBe(true);
     expect(JSON.stringify(result)).not.toContain("s3cr3t-zx9-value");
+  });
+
+  it("flags only a 401 as a rejected credential", () => {
+    expect(
+      diagnose(createToolError("not_found", "do_not_retry")).authenticationRejected
+    ).toBeUndefined();
+    expect(diagnose(createHtmlResponseError()).authenticationRejected).toBeUndefined();
+    expect(
+      diagnose(createToolError("authorization", "retry_after_correction"))
+        .authenticationRejected
+    ).toBeUndefined();
   });
 
   it.each([

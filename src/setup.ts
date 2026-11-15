@@ -122,6 +122,8 @@ export interface SetupCliDependencies {
 export interface AskOptions {
   readonly default?: string;
   readonly choices?: readonly string[];
+  /** A short note shown beside a choice in the menu. Display only. */
+  readonly hints?: Readonly<Record<string, string>>;
   /** Return a message to reject and re-prompt; return undefined to accept. */
   readonly validate?: (value: string) => string | undefined;
 }
@@ -149,6 +151,8 @@ export interface CredentialVerification {
   readonly remedy?: string;
   /** True when the instance authenticated us but denied the probe read. */
   readonly authenticatedButDenied?: boolean;
+  /** True when the instance answered 401: it rejected the credential itself. */
+  readonly authenticationRejected?: boolean;
 }
 
 /** Raised when the operator aborts; nothing has been written to the profile. */
@@ -433,78 +437,22 @@ async function runWizard(
 
     const name = await askProfileName(prompter, existing);
     const instance = await askInstance(prompter);
-    const authType = await askAuthType(prompter);
-    const grantType: GrantType =
-      authType === "oauth"
-        ? ((await prompter.ask("OAuth grant type", {
-            default: "client_credentials",
-            choices: ["client_credentials", "password"],
-          })) as GrantType)
-        : "client_credentials";
-
-    // Asked here, before any secret is in hand. A mistyped answer to a
-    // question adjacent to a credential prompt echoes the credential, so the
-    // last thing before the hidden prompts is deliberately not this question.
-    const mode = (await prompter.ask("How should the credential be stored?", {
-      default: "encrypted",
-      choices: ["encrypted", "reference"],
-    })) as CredentialSourceMode;
-    const provider =
-      mode === "reference"
-        ? await prompter.ask("Secret provider", { default: "env", choices: ["env"] })
-        : undefined;
-
-    const profile: Profile = { instance, authType };
-    if (authType === "basic" || grantType === "password") {
-      profile.username = await prompter.ask("ServiceNow username", {
-        validate: (value) =>
-          value.trim() === "" ? "A username is required for this auth mode." : undefined,
-      });
-    }
-    if (authType === "oauth") {
-      profile.grantType = grantType;
-      profile.clientId = await prompter.ask("OAuth client id (not a secret)", {
-        validate: (value) =>
-          value.trim() === "" ? "A client id is required for OAuth." : undefined,
-      });
-    }
-    if (authType === "apikey") {
-      profile.apiKeyHeader = await prompter.ask("API key header", {
-        default: "x-sn-apikey",
-      });
-    }
-
-    const fields = requiredSecretFields(authType, grantType);
-    validateCreateMetadata(profile, fields);
-
-    // 3. Capture the secrets. Never echoed, never in argv, never logged.
-    prompter.note(
-      mode === "reference"
-        ? "\nEnter the NAME of the environment variable holding each secret.\n" +
-            "Input is hidden."
-        : "\nEnter each secret now. Input is hidden — nothing you type from here\n" +
-            "is displayed."
-    );
-    const captured: CapturedProfileSecret[] = [];
-    for (const field of fields) {
-      captured.push(
-        Object.freeze({ field, mode, value: await prompter.secret(field) })
+    // 3-4. Authentication, the credential, and its verification. Collected in
+    //      one place so a Basic 401 can send the operator back to OAuth
+    //      without re-asking the profile name or the instance.
+    let forcedAuthType: AuthType | undefined;
+    let collected: CollectedCredential | undefined;
+    while (collected === undefined) {
+      collected = await collectVerifiedCredential(
+        prompter,
+        instance,
+        env,
+        dependencies,
+        forcedAuthType
       );
+      forcedAuthType = "oauth";
     }
-
-    // 4. Verify against the live instance before anything is persisted.
-    const config = wizardConfig(profile, captured, mode, env);
-    const verify = dependencies.verifyCredential ?? verifyCredentialAgainstInstance;
-    prompter.note("\nVerifying against the instance...");
-    let verification = await verify(config);
-    while (!verification.ok) {
-      prompter.note(`\n  FAILED  ${verification.detail}`);
-      if (verification.remedy) prompter.note(`  -> ${verification.remedy}`);
-      if (!(await prompter.confirm("\nRetry with the same settings?", true))) {
-        throw new WizardAbort();
-      }
-      verification = await verify(config);
-    }
+    const { profile, captured, mode, provider, config, verification } = collected;
     prompter.note(`  ok  ${verification.detail}`);
     if (verification.authenticatedButDenied) {
       prompter.note(
@@ -573,6 +521,123 @@ async function runWizard(
   } finally {
     prompter.close();
   }
+}
+
+/** One verified credential, still only in memory. */
+interface CollectedCredential {
+  readonly profile: Profile;
+  readonly captured: readonly CapturedProfileSecret[];
+  readonly mode: CredentialSourceMode;
+  readonly provider: string | undefined;
+  readonly config: ServiceNowConfig;
+  readonly verification: CredentialVerification;
+}
+
+/**
+ * Ask for the authentication type and its credential, then verify it against
+ * the instance. Returns `undefined` when the operator, after a 401 on a Basic
+ * credential, chose to switch to OAuth: the caller asks again with OAuth
+ * forced. Nothing is persisted here, and a discarded Basic credential is not
+ * kept anywhere.
+ */
+async function collectVerifiedCredential(
+  prompter: WizardPrompter,
+  instance: string,
+  env: NodeJS.ProcessEnv,
+  dependencies: SetupCliDependencies,
+  forcedAuthType: AuthType | undefined
+): Promise<CollectedCredential | undefined> {
+  const authType = forcedAuthType ?? (await askAuthType(prompter));
+  if (authType === "oauth") prompter.note(OAUTH_REQUIREMENTS_NOTE);
+  const grantType: GrantType =
+    authType === "oauth"
+      ? ((await prompter.ask("OAuth grant type", {
+          default: "client_credentials",
+          choices: ["client_credentials", "password"],
+        })) as GrantType)
+      : "client_credentials";
+
+  // Asked here, before any secret is in hand. A mistyped answer to a
+  // question adjacent to a credential prompt echoes the credential, so the
+  // last thing before the hidden prompts is deliberately not this question.
+  const mode = (await prompter.ask("How should the credential be stored?", {
+    default: "encrypted",
+    choices: ["encrypted", "reference"],
+  })) as CredentialSourceMode;
+  const provider =
+    mode === "reference"
+      ? await prompter.ask("Secret provider", { default: "env", choices: ["env"] })
+      : undefined;
+
+  const profile: Profile = { instance, authType };
+  if (authType === "basic" || grantType === "password") {
+    profile.username = await prompter.ask("ServiceNow username", {
+      validate: (value) =>
+        value.trim() === "" ? "A username is required for this auth mode." : undefined,
+    });
+  }
+  if (authType === "oauth") {
+    profile.grantType = grantType;
+    profile.clientId = await prompter.ask("OAuth client id (not a secret)", {
+      validate: (value) =>
+        value.trim() === "" ? "A client id is required for OAuth." : undefined,
+    });
+  }
+  if (authType === "apikey") {
+    profile.apiKeyHeader = await prompter.ask("API key header", {
+      default: "x-sn-apikey",
+    });
+  }
+
+  const fields = requiredSecretFields(authType, grantType);
+  validateCreateMetadata(profile, fields);
+
+  // Capture the secrets. Never echoed, never in argv, never logged.
+  prompter.note(
+    mode === "reference"
+      ? "\nEnter the NAME of the environment variable holding each secret.\n" +
+          "Input is hidden."
+      : "\nEnter each secret now. Input is hidden — nothing you type from here\n" +
+          "is displayed."
+  );
+  const captured: CapturedProfileSecret[] = [];
+  for (const field of fields) {
+    captured.push(
+      Object.freeze({ field, mode, value: await prompter.secret(field) })
+    );
+  }
+
+  // Verify against the live instance before anything is persisted.
+  const config = wizardConfig(profile, captured, mode, env);
+  const verify = dependencies.verifyCredential ?? verifyCredentialAgainstInstance;
+  prompter.note("\nVerifying against the instance...");
+  let verification = await verify(config);
+  while (!verification.ok) {
+    prompter.note(`\n  FAILED  ${verification.detail}`);
+    if (verification.remedy) prompter.note(`  -> ${verification.remedy}`);
+    if (authType === "basic" && verification.authenticationRejected === true) {
+      // A 401 on Basic often means the instance no longer accepts Basic for
+      // REST, which retrying cannot fix. Offer the way out next to the retry.
+      const next = await prompter.ask("\nWhat next?", {
+        default: "retry",
+        choices: ["retry", "oauth", "stop"],
+        hints: {
+          retry: "try the same settings again",
+          oauth: "discard this credential and set up OAuth client credentials",
+          stop: "cancel; nothing is saved",
+        },
+      });
+      if (next === "stop") throw new WizardAbort();
+      if (next === "oauth") {
+        prompter.note("\nSwitching to OAuth. The Basic credential is discarded.");
+        return undefined;
+      }
+    } else if (!(await prompter.confirm("\nRetry with the same settings?", true))) {
+      throw new WizardAbort();
+    }
+    verification = await verify(config);
+  }
+  return { profile, captured, mode, provider, config, verification };
 }
 
 /**
@@ -678,10 +743,33 @@ export function instanceProblem(value: string): string | undefined {
   );
 }
 
+/**
+ * OAuth client credentials is the default and listed first. Basic stays
+ * available for an instance that still accepts it, and is listed last and
+ * marked legacy: ServiceNow is retiring it for REST calls (KB3096078).
+ */
+const AUTH_TYPE_CHOICES: readonly AuthType[] = Object.freeze(["oauth", "apikey", "basic"]);
+
+const AUTH_TYPE_HINTS: Readonly<Record<string, string>> = Object.freeze({
+  oauth: "client credentials, recommended",
+  apikey: "inbound API key",
+  basic: "legacy, not recommended: ServiceNow is retiring it",
+});
+
+/** What OAuth client credentials need on the instance. Fixed text, no secret. */
+const OAUTH_REQUIREMENTS_NOTE =
+  "\nOAuth client credentials need these on the instance:\n" +
+  "  - an Application Registry entry (System OAuth > Application Registry)\n" +
+  "    with a client ID and client secret\n" +
+  "  - the client credentials grant enabled for it\n" +
+  "  - an OAuth Application User: the integration user this server acts as\n" +
+  "Steps: README, section Authentication > OAuth 2.0.\n";
+
 async function askAuthType(prompter: WizardPrompter): Promise<AuthType> {
   return (await prompter.ask("Authentication", {
-    default: "basic",
-    choices: ["basic", "oauth", "apikey"],
+    default: "oauth",
+    choices: AUTH_TYPE_CHOICES,
+    hints: AUTH_TYPE_HINTS,
   })) as AuthType;
 }
 
@@ -755,8 +843,8 @@ const BASIC_AUTH_401_REMEDY =
   "instance may be rejecting Basic Auth for REST API calls (KB3096078): " +
   "current instances require the role snc_basic_auth_api_access for REST " +
   "Basic auth, or a Web-Service-Access-Only account. ServiceNow is retiring " +
-  "Basic auth, so OAuth client credentials are recommended: re-run setup " +
-  "and choose oauth.";
+  "Basic auth, so OAuth client credentials are recommended: choose oauth " +
+  "below to switch this profile.";
 
 /** Map a probe failure onto the thing the operator must actually change. */
 export function classifyVerificationFailure(
@@ -799,6 +887,7 @@ export function classifyVerificationFailure(
   if (descriptor?.category === "authentication") {
     return Object.freeze({
       ok: false,
+      authenticationRejected: true,
       detail: `${host} rejected the credential (HTTP 401).`,
       remedy:
         config.authType === "oauth"
@@ -1244,7 +1333,8 @@ function renderQuestion(question: string, options: AskOptions): string {
   const lines = [`${question}:`];
   options.choices.forEach((choice, index) => {
     const marker = choice === options.default ? " (default)" : "";
-    lines.push(`  ${index + 1}) ${choice}${marker}`);
+    const hint = options.hints?.[choice];
+    lines.push(`  ${index + 1}) ${choice}${marker}${hint ? ` - ${hint}` : ""}`);
   });
   const defaultIndex = options.default ? options.choices.indexOf(options.default) + 1 : 0;
   lines.push(defaultIndex > 0 ? `Choice [${defaultIndex}]: ` : "Choice: ");

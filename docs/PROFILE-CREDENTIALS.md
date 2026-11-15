@@ -12,10 +12,15 @@ After installing the package, invoke the dedicated operator-only executable:
 servicenow-mcp-profile create \
   --name dev \
   --instance https://dev.service-now.com \
-  --auth-type basic \
-  --username integration.user \
+  --auth-type oauth \
+  --client-id <non-secret-oauth-client-id> \
   --source encrypted
 ```
+
+Always pass `--auth-type`. Left out, `create` still builds a Basic profile, as
+it always has, and prints a deprecation notice on standard error. ServiceNow is
+retiring Basic Auth for REST calls, so OAuth client credentials is the
+recommended type: [Authentication](../README.md#authentication).
 
 When working from a source checkout, build first and invoke the same artifact
 directly:
@@ -25,8 +30,8 @@ npm run build
 node dist/profile-admin.js create \
   --name dev \
   --instance https://dev.service-now.com \
-  --auth-type basic \
-  --username integration.user \
+  --auth-type oauth \
+  --client-id <non-secret-oauth-client-id> \
   --source encrypted
 ```
 

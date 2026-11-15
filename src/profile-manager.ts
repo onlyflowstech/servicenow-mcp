@@ -68,7 +68,7 @@ export interface Profile {
   vendor_code?: string;
   /** Human-readable description of this profile */
   description?: string;
-  /** Auth scheme: "basic" (default), "oauth", or "apikey" */
+  /** Auth scheme. A saved profile with none is read as "basic"; the setup wizard offers "oauth" by default. */
   authType?: AuthType;
   /** OAuth client id (authType "oauth") */
   clientId?: string;

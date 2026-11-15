@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The setup wizard defaults to OAuth client credentials.** The authentication
+  prompt now lists `oauth` first and offers it by default, then `apikey`, then
+  `basic`, which is marked legacy because ServiceNow is retiring Basic Auth for
+  REST calls. Choosing OAuth prints a short note on what the instance needs (an
+  Application Registry entry with a client ID and secret, the client credentials
+  grant, and an OAuth Application User) and where the README explains it. When a
+  Basic credential gets a 401, the wizard now asks what next: retry with the same
+  settings, switch to OAuth (keeping the profile name and instance, and
+  discarding the Basic credential), or stop. Nothing else changes for scripts:
+  `servicenow-mcp-profile create` without `--auth-type` still creates a Basic
+  profile, now with a deprecation notice on standard error (a future release may
+  require the flag), and `SN_AUTH_TYPE` still defaults to `basic`. Saved
+  profiles are never changed, and a saved profile with no `authType` is still
+  read as Basic. The README quick start, the profile and client setup guides and
+  their examples now show OAuth first.
+
 ## [2.3.0-dev.3] — 2026-11-15
 
 ### Added

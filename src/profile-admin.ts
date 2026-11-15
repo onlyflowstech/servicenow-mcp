@@ -50,7 +50,21 @@ export interface ProfileAdminDependencies {
   manager?: ProfileManager;
   keyProvider?: ProfileEncryptionKeyProvider;
   io?: ProfileAdminIO;
+  /** Where a deprecation notice goes. Defaults to standard error. */
+  notice?: (text: string) => void;
 }
+
+/**
+ * Printed when `create` is run without `--auth-type`. The command keeps
+ * creating a Basic profile, as it always has, so a script written before the
+ * setup wizard defaulted to OAuth keeps working. The notice goes to the
+ * notice sink (standard error by default), never into the command's output.
+ */
+export const AUTH_TYPE_OMITTED_NOTICE =
+  "[servicenow-mcp] Deprecated: no --auth-type given, so this profile is created " +
+  "as basic. ServiceNow is retiring Basic Auth for REST calls, and a future " +
+  "release may require --auth-type. Pass --auth-type oauth (recommended) or " +
+  "--auth-type basic to say which you mean.\n";
 
 interface ParsedArguments {
   command: Command;
@@ -73,6 +87,11 @@ export async function runProfileAdmin(
 
   switch (parsed.command) {
     case "create": {
+      if (!parsed.values.has("--auth-type")) {
+        (dependencies.notice ?? ((text) => void process.stderr.write(text)))(
+          AUTH_TYPE_OMITTED_NOTICE
+        );
+      }
       const authType = parseChoice<AuthType>(
         parsed.values.get("--auth-type") ?? "basic",
         ["basic", "oauth", "apikey"],

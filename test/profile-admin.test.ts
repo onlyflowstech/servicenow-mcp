@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  AUTH_TYPE_OMITTED_NOTICE,
   MAX_PROTECTED_INPUT_BYTES,
   MAX_PROTECTED_INPUT_VALUES,
   MAX_SENSITIVE_VALUE_CHARACTERS,
@@ -258,6 +259,102 @@ describe("create, inspect, rotate, and remove", () => {
     }
     expect(output.join("")).not.toContain(firstCiphertext);
     expect(output.join("")).not.toContain(secondCiphertext);
+  });
+});
+
+describe("create without --auth-type (scripted setup)", () => {
+  const BASE = ["create", "--name", "dev", "--instance", "https://dev.service-now.com"];
+
+  async function create(
+    args: readonly string[],
+    secrets: string[]
+  ): Promise<{ notices: string[]; output: string[] }> {
+    const manager = new ProfileManager({
+      configFilePath: configPath,
+      encryptionKeyProvider: keyProvider,
+    });
+    const notices: string[] = [];
+    const output: string[] = [];
+    await runProfileAdmin([...BASE, ...args], {
+      manager,
+      keyProvider,
+      io: scriptedIO(secrets, output),
+      notice: (text) => notices.push(text),
+    });
+    return { notices, output };
+  }
+
+  const savedProfile = () => JSON.parse(fs.readFileSync(configPath, "utf8")).profiles.dev;
+
+  it("keeps creating a Basic profile, so an existing script does not break", async () => {
+    const { output } = await create(
+      ["--username", "admin", "--source", "encrypted"],
+      ["script-password"]
+    );
+    expect(JSON.parse(output.join("")).auth_type).toBe("basic");
+    expect(savedProfile().username).toBe("admin");
+    expect(savedProfile().credential).toMatchObject({ type: "encrypted" });
+  });
+
+  it("says so on the notice channel, never in the command's own output", async () => {
+    const { notices, output } = await create(
+      ["--username", "admin", "--source", "encrypted"],
+      ["script-password"]
+    );
+    expect(notices).toEqual([AUTH_TYPE_OMITTED_NOTICE]);
+    expect(AUTH_TYPE_OMITTED_NOTICE).toMatch(/Deprecated/u);
+    expect(AUTH_TYPE_OMITTED_NOTICE).toContain("--auth-type oauth");
+    expect(AUTH_TYPE_OMITTED_NOTICE).toContain("--auth-type basic");
+    // The output stays one JSON document that a script can parse.
+    expect(() => JSON.parse(output.join(""))).not.toThrow();
+    expect(output.join("")).not.toContain("Deprecated");
+    expect(notices.join("")).not.toContain("script-password");
+  });
+
+  it.each([
+    ["basic", ["--username", "admin"], "credential"],
+    ["oauth", ["--client-id", "client-1"], "clientSecret"],
+  ])("an explicit --auth-type %s wins and prints no notice", async (authType, extra, field) => {
+    const { notices, output } = await create(
+      ["--auth-type", authType, ...extra, "--source", "encrypted"],
+      ["explicit-secret"]
+    );
+    expect(notices).toEqual([]);
+    expect(JSON.parse(output.join("")).auth_type).toBe(authType);
+    expect(savedProfile().authType).toBe(authType);
+    expect(savedProfile()[field]).toMatchObject({ type: "encrypted" });
+  });
+
+  it("creates an OAuth client-credentials profile with no username", async () => {
+    await create(
+      ["--auth-type", "oauth", "--client-id", "client-1", "--source", "encrypted"],
+      ["client-secret"]
+    );
+    expect(savedProfile().grantType).toBe("client_credentials");
+    expect(savedProfile().clientId).toBe("client-1");
+    expect(savedProfile().username).toBeUndefined();
+  });
+
+  it("writes the notice to standard error by default", async () => {
+    const manager = new ProfileManager({
+      configFilePath: configPath,
+      encryptionKeyProvider: keyProvider,
+    });
+    const written: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      await runProfileAdmin(
+        [...BASE, "--username", "admin", "--source", "encrypted"],
+        { manager, keyProvider, io: scriptedIO(["pw"], []) }
+      );
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(written).toEqual([AUTH_TYPE_OMITTED_NOTICE]);
   });
 });
 

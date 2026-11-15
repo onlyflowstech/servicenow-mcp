@@ -18,7 +18,7 @@ export interface ServiceNowConfig {
   password: string;
   displayValue: string;
   relDepth: number;
-  /** Auth scheme (default "basic"). */
+  /** Auth scheme. When absent it is read as "basic", for profiles saved before OAuth existed. */
   authType?: AuthType;
   /** OAuth client id (authType "oauth"). */
   clientId?: string;

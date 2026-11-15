@@ -27,7 +27,9 @@ servicenow-mcp-setup
 ```
 
 Run bare on a terminal, `servicenow-mcp-setup` is a guided wizard. It
-generates the local auth material, prompts for the instance and credential,
+generates the local auth material, prompts for the instance and credential
+(the authentication type defaults to OAuth client credentials, and Basic is
+offered last, marked legacy),
 verifies that credential against the instance with one bounded authenticated
 read, prompts for table access, writes the profile with its grant already
 attached, and registers any supported client whose CLI is installed.
@@ -325,8 +327,8 @@ At the protected prompt, enter the name of the supervisor-injected environment
 secret for this profile. The stored entry is a structured `secret_ref`; the
 referenced secret is resolved only when a call explicitly selects `dev`.
 
-The following creates a separate basic-auth staging profile with an encrypted
-credential. First inject `SN_PROFILE_ENCRYPTION_KEY` from the secret manager
+The following creates a separate OAuth staging profile with an encrypted
+client secret. First inject `SN_PROFILE_ENCRYPTION_KEY` from the secret manager
 into the CLI process. The key is exactly 32 random bytes encoded as base64 or
 base64url and remains separate from the profile file, MCP bearer, and
 ServiceNow credentials. Then run:
@@ -335,12 +337,12 @@ ServiceNow credentials. Then run:
 servicenow-mcp-profile create \
   --name staging \
   --instance https://staging.service-now.com \
-  --auth-type basic \
-  --username staging.integration \
+  --auth-type oauth \
+  --client-id staging-non-secret-client-id \
   --source encrypted
 ```
 
-Enter the staging credential only at the non-echoed prompt or bounded standard
+Enter the staging client secret only at the non-echoed prompt or bounded standard
 input. The resulting owner-only `~/.servicenow-mcp/config.json` contains the
 two non-secret instance definitions plus a structured secret reference for
 `dev` and a versioned encrypted envelope for `staging`. It contains neither

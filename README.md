@@ -65,8 +65,11 @@ and **Codex** automatically; **Claude Desktop**, **Cursor**, **VS Code** and
 2. **Set up a connection:** `servicenow-mcp-setup`. It asks for your instance
    and credential, checks them against the instance, asks which tables to
    allow, and registers Claude Code and Codex if their CLIs are installed.
-   Choose **OAuth** when the wizard asks for the authentication type; Basic
-   is the wizard's default but is [deprecated by ServiceNow](#basic-default-deprecated-by-servicenow).
+   The wizard's authentication type defaults to **OAuth client credentials**,
+   so you can press Enter at that prompt. You need an Application Registry
+   entry on the instance first: see [OAuth 2.0](#oauth-20-recommended). Basic
+   is still offered, marked legacy, because ServiceNow is
+   [retiring it for REST calls](#basic-legacy-deprecated-by-servicenow).
 3. **Open your client and ask.** There is no server to start; the client
    launches `servicenow-mcp` itself.
 
@@ -114,19 +117,31 @@ instance. Press Ctrl+C at any point to stop; nothing will be saved.
 Profile name [dev]: dev
 ServiceNow instance (for example dev12345.service-now.com): dev12345.service-now.com
 Authentication:
-  1) basic (default)
-  2) oauth
-  3) apikey
+  1) oauth (default) - client credentials, recommended
+  2) apikey - inbound API key
+  3) basic - legacy, not recommended: ServiceNow is retiring it
+Choice [1]: 1
+
+OAuth client credentials need these on the instance:
+  - an Application Registry entry (System OAuth > Application Registry)
+    with a client ID and client secret
+  - the client credentials grant enabled for it
+  - an OAuth Application User: the integration user this server acts as
+Steps: README, section Authentication > OAuth 2.0.
+
+OAuth grant type:
+  1) client_credentials (default)
+  2) password
 Choice [1]: 1
 How should the credential be stored?:
   1) encrypted (default)
   2) reference
 Choice [1]: 1
-ServiceNow username: integration.user
+OAuth client id (not a secret): <your-client-id>
 
 Enter each secret now. Input is hidden — nothing you type from here
 is displayed.
-credential:
+clientSecret:
 
 Verifying against the instance...
   ok  https://dev12345.service-now.com accepted the credential.
@@ -161,7 +176,7 @@ ok    node: v22.11.0
 ok    server command: servicenow-mcp resolves on PATH; clients spawn it over stdio
 ok    config directory: ~/.servicenow-mcp (0700)
 ok    profile dev: instance: https://dev12345.service-now.com
-ok    profile dev: credential: basic credential resolves from its encrypted source
+ok    profile dev: credential: oauth clientSecret resolves from its encrypted source
 ok    profile dev: table access: 1 read, 1 write, 1 target(s)
 
 All checks passed.
@@ -191,11 +206,22 @@ servicenow-mcp-setup doctor --profile dev
 global install, and `servicenow-mcp setup` is an alias for
 `servicenow-mcp-setup`.
 
+If you choose Basic and the instance answers 401, the wizard explains the
+Basic Auth restriction and asks what next: `retry` with the same settings,
+switch to `oauth` (it discards the Basic credential and asks the OAuth
+questions, keeping the profile name and instance), or `stop`. Nothing is
+saved until a credential verifies.
+
 ### Scripted setup
 
 Pass any flag, or run without a terminal, and the wizard steps aside for the
 original non-interactive behavior — so CI and provisioning scripts are
-unaffected. `--non-interactive` forces it explicitly:
+unaffected. `--non-interactive` forces it explicitly. Only the interactive
+wizard defaults to OAuth. `servicenow-mcp-profile create` has no default you
+should rely on: pass `--auth-type oauth` (recommended) or `--auth-type basic`.
+Left out, it still creates a Basic profile, as it always has, so existing
+scripts keep working, and it prints a deprecation notice on standard error. A
+future release may require the flag.
 
 ```bash
 servicenow-mcp-setup --non-interactive --clients none --json
@@ -334,7 +360,8 @@ MCP_OWNER_ID=local-owner \
 MCP_CLIENT_ID=local-client \
 SN_PROFILE_NAME=dev \
 SN_INSTANCE=https://yourinstance.service-now.com \
-SN_USER=your_user \
+SN_AUTH_TYPE=oauth \
+SN_CLIENT_ID=your-non-secret-client-id \
 SN_ALLOWED_READ_TABLES=incident,problem,change_request \
 SN_ALLOWED_WRITE_TABLES=incident,change_request \
 SN_TABLE_ACCESS_TARGETS='[{"table":"incident","kind":"canonical","tools":["sn_query","sn_get","sn_create","sn_update","sn_incident_add_comment","sn_incident_add_work_note","sn_delete","sn_batch"],"closureComplete":true,"relatedTables":["incident"]},{"table":"problem","kind":"canonical","tools":["sn_query","sn_get"],"closureComplete":true,"relatedTables":["problem"]},{"table":"change_request","kind":"canonical","tools":["sn_query","sn_get"],"closureComplete":true,"relatedTables":["change_request"]}]' \
@@ -379,8 +406,8 @@ without putting them in argv, and it writes the file with the right ownership
 and mode:
 
 ```bash
-servicenow-mcp-profile create --name dev  --instance https://mydev.service-now.com  --auth-type basic --username admin    --source reference --provider env
-servicenow-mcp-profile create --name prod --instance https://myprod.service-now.com --auth-type basic --username api.user --source reference --provider env
+servicenow-mcp-profile create --name dev  --instance https://mydev.service-now.com  --auth-type oauth --client-id <dev-client-id>  --source reference --provider env
+servicenow-mcp-profile create --name prod --instance https://myprod.service-now.com --auth-type oauth --client-id <prod-client-id> --source reference --provider env
 
 servicenow-mcp-setup grant --profile dev  --read incident,problem --write incident
 servicenow-mcp-setup grant --profile prod --read incident
@@ -395,8 +422,9 @@ The resulting `~/.servicenow-mcp/config.json` looks like this. Note
   "profiles": {
     "dev": {
       "instance": "https://mydev.service-now.com",
-      "username": "admin",
-      "credential": { "type": "secret_ref", "provider": "env", "reference": "SN_PASSWORD_DEV" },
+      "authType": "oauth",
+      "clientId": "your-dev-client-id",
+      "clientSecret": { "type": "secret_ref", "provider": "env", "reference": "SN_CLIENT_SECRET_DEV" },
       "description": "Development instance",
       "tableAccess": {
         "readTables": ["incident", "problem"],
@@ -428,7 +456,7 @@ The resulting `~/.servicenow-mcp/config.json` looks like this. Note
 ```
 
 Have the approved supervisor, orchestrator, keychain, or secret manager provide
-the values referenced by `SN_PASSWORD_DEV` and `SN_PASSWORD_PROD` in the
+the values referenced by `SN_CLIENT_SECRET_DEV` and `SN_CLIENT_SECRET_PROD` in the
 environment the server is spawned with, or in `~/.servicenow-mcp/server.env`,
 which the server falls back to. Do not type either value into a shell command,
 command argument, dotenv file, or command history.
@@ -492,8 +520,10 @@ administrative write; the MCP boundary never consults it.
 
 If no config file exists, canonical `SN_*` connection values are exposed only
 through an explicit `SN_PROFILE_NAME` mapping. For example, set
-`SN_PROFILE_NAME=dev` with `SN_INSTANCE`, `SN_USER`, and `SN_PASSWORD`, then
-call tools with `profile: "dev"`. Without `SN_PROFILE_NAME`, bare connection
+`SN_PROFILE_NAME=dev` with `SN_INSTANCE`, `SN_AUTH_TYPE=oauth`, `SN_CLIENT_ID`
+and `SN_CLIENT_SECRET`, then call tools with `profile: "dev"`. Without
+`SN_AUTH_TYPE` the environment profile is Basic (`SN_USER` and `SN_PASSWORD`),
+as it has always been; set `SN_AUTH_TYPE` explicitly. Without `SN_PROFILE_NAME`, bare connection
 variables create no profile and cannot route a request. Secret values remain
 runtime-only environment references and are never persisted as plaintext.
 
@@ -501,13 +531,19 @@ runtime-only environment references and are never persisted as plaintext.
 
 ## Authentication
 
-Three ServiceNow auth types are available per profile, selected with `authType` (default: `basic`). Profile configuration is managed out of band by the service operator. This is the only authentication involved: the transport is stdio, so there is no endpoint in front of the server to protect.
+Three ServiceNow auth types are available per profile, selected with `authType`. The setup wizard and every example here use OAuth client credentials. A saved profile that has no `authType` is read as Basic, because that is what such a profile has always meant; saved profiles are never rewritten. Profile configuration is managed out of band by the service operator. This is the only authentication involved: the transport is stdio, so there is no endpoint in front of the server to protect.
 
 > **Heads up:** ServiceNow's [inbound Basic Auth restriction program](https://support.servicenow.com/kb?id=kb_article_view&sysparm_article=KB3096078) is phasing out basic auth for API requests — instances can start hard-rejecting it at any time (exemptions: Web-Service-Access-Only accounts or the `snc_basic_auth_api_access` role). **OAuth is the recommended auth type.** The server prints a startup warning for basic-auth profiles.
 
 ### OAuth 2.0 (recommended)
 
-`client_credentials` grant (default) — create an OAuth API endpoint client in ServiceNow (**System OAuth → Application Registry**) and reference the secret via `env:` indirection:
+`client_credentials` grant (default). On the instance you need three things:
+
+1. An **Application Registry** entry, an OAuth API endpoint for external clients (**System OAuth → Application Registry**), which gives you a client ID and a client secret.
+2. The **client credentials grant enabled** for it: on current releases the system property `glide.oauth.inbound.client.credential.grant_type.enabled` must be `true`.
+3. An **OAuth Application User** set on that entry: the integration user the server acts as. Give it the least roles that do the job, not an administrator.
+
+Then create the profile with the wizard (`servicenow-mcp-setup`, press Enter at the authentication prompt) or `servicenow-mcp-profile create --auth-type oauth --client-id <client-id>`, or reference the secret via `env:` indirection:
 
 ```json
 {
@@ -553,7 +589,9 @@ For instances using Inbound Authentication Profiles with API keys. The header na
 }
 ```
 
-### Basic (default, deprecated by ServiceNow)
+### Basic (legacy, deprecated by ServiceNow)
+
+Basic is no longer the wizard's default. Use it only for an instance that still accepts it.
 
 ```json
 {
@@ -626,7 +664,8 @@ export SN_ALLOWED_WRITE_TABLES="incident,change_request"
 export SN_TABLE_ACCESS_TARGETS='[{"table":"incident","kind":"canonical","tools":["sn_query","sn_get","sn_create","sn_update","sn_incident_add_comment","sn_incident_add_work_note","sn_delete","sn_batch"],"closureComplete":true,"relatedTables":["incident"]},{"table":"problem","kind":"canonical","tools":["sn_query","sn_get"],"closureComplete":true,"relatedTables":["problem"]},{"table":"change_request","kind":"canonical","tools":["sn_query","sn_get"],"closureComplete":true,"relatedTables":["change_request"]}]'
 export SN_PROFILE_NAME="dev"
 export SN_INSTANCE="https://yourinstance.service-now.com"
-export SN_USER="your_username"
+export SN_AUTH_TYPE="oauth"
+export SN_CLIENT_ID="your-non-secret-oauth-client-id"
 npm run build
 npm start
 ```
@@ -1246,8 +1285,9 @@ startup configuration. File-backed profile example:
   "profiles": {
     "dev": {
       "instance": "https://dev.service-now.com",
-      "username": "integration.user",
-      "credential": "env:SN_PASSWORD",
+      "authType": "oauth",
+      "clientId": "your-oauth-client-id",
+      "clientSecret": "env:SN_CLIENT_SECRET",
       "tableAccess": {
         "readTables": ["incident", "sys_dictionary"],
         "writeTables": ["incident"],
@@ -1586,7 +1626,7 @@ smaller.
 | `SN_INSTANCE` | ✅* | — | Instance URL (e.g. `https://yourinstance.service-now.com`) |
 | `SN_USER` | ✅* | — | ServiceNow username (basic auth / OAuth password grant) |
 | `SN_PASSWORD` | ✅* | — | ServiceNow password (basic auth / OAuth password grant) |
-| `SN_AUTH_TYPE` | ❌ | `basic` | Auth scheme: `basic`, `oauth`, or `apikey` |
+| `SN_AUTH_TYPE` | ❌ | `basic` (legacy; set `oauth` explicitly) | Auth scheme: `basic`, `oauth`, or `apikey` |
 | `SN_CLIENT_ID` | ❌ | — | OAuth client id (`SN_AUTH_TYPE=oauth`) |
 | `SN_CLIENT_SECRET` | ❌ | — | OAuth client secret (`SN_AUTH_TYPE=oauth`) |
 | `SN_GRANT_TYPE` | ❌ | `client_credentials` | OAuth grant: `client_credentials` or `password` |
