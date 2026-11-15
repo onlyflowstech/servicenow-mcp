@@ -24,6 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error never contains the response body, the credential or the instance URL.
   OAuth and API-key profiles are unchanged. The README already said the error
   explained the restriction; now it does. The wizard still defaults to `basic`.
+- **`sn_query` refuses a `structured_query` filter or order on a field the
+  table does not have.** ServiceNow ignores a condition on a field it does not
+  know, so a misspelt field returned unrelated rows with no error. The call now
+  fails and says the field "was not found on the table, or is not readable by
+  this user" (a field hidden by an ACL looks the same as a missing one). No
+  extra request is made: the fields a filter or order uses are added to the
+  read's `sysparm_fields` and looked for in the rows that come back, then left
+  out of the result. A field counts as present when any returned row carries
+  it, an existing column with no value is still returned, and a read that
+  returns no rows is returned as before, since there is nothing to check. A raw
+  encoded `query` is not checked; it is only accepted through a policy rule
+  that already pins the query and its fields. The extra columns add bytes to
+  each fetched row, and a filter on a very large text field that is not in
+  `fields` can take a wide read past the 1 MiB upstream response limit: the
+  call then says so and asks for a lower `limit`.
 
 ## [2.3.0-dev.2] — 2026-11-15
 

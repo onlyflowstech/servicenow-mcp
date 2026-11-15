@@ -31,6 +31,7 @@ import {
   trustedToolErrorDescriptor,
 } from "../src/tool-error.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
+import { echoFields } from "./fixtures/echo-fields.js";
 
 const PROFILE = "journal-write";
 const CONFIG: ServiceNowConfig = {
@@ -110,10 +111,10 @@ async function createHarness(
   const records: ToolAuditRecord[] = [];
   const matched = options.matched ?? 2;
   const serviceNowClient = {
-    get: vi.fn(async () => ({
-      result: Array.from({ length: matched }, (_, index) => ({
-        sys_id: sysIdFor(index),
-      })),
+    get: vi.fn(async (_path: string, params?: unknown) => ({
+      result: Array.from({ length: matched }, (_, index) =>
+        echoFields({ sys_id: sysIdFor(index) }, params)
+      ),
     })),
     getWithMeta: vi.fn(async () => ({
       data: { result: [] },
@@ -878,9 +879,12 @@ describe("sn_batch response budgets with the real HTTP client", () => {
         stats[method] += 1;
         if (method === "GET") {
           return respond(200, {
-            result: Array.from({ length: options.records }, (_, index) => ({
-              sys_id: sysIdFor(index),
-            })),
+            result: Array.from({ length: options.records }, (_, index) =>
+              echoFields(
+                { sys_id: sysIdFor(index) },
+                { sysparm_fields: url.searchParams.get("sysparm_fields") }
+              )
+            ),
           });
         }
         if (method === "POST" && url.pathname === BATCH_PATH) {
@@ -1101,7 +1105,7 @@ describe("Security finding 2: journal writes are never re-sent after they may ha
     const second = sysIdFor(1);
     const fetchLog = scriptedFetch(({ method, nth }) => {
       if (method === "GET") {
-        return { status: 200, body: { result: [{ sys_id: SYS_ID }, { sys_id: second }] } };
+        return { status: 200, body: { result: [{ sys_id: SYS_ID, active: "true" }, { sys_id: second, active: "true" }] } };
       }
       if (method === "POST") return { status: 404, body: {} };
       return nth < 2 ? { status: 502 } : ok;
@@ -1627,10 +1631,10 @@ describe("Security finding 9: each record is changed once per run", () => {
     const second = sysIdFor(1);
     connected.serviceNowClient.get.mockResolvedValue({
       result: [
-        { sys_id: SYS_ID },
-        { sys_id: SYS_ID.toUpperCase() },
-        { sys_id: second },
-        { sys_id: SYS_ID },
+        { sys_id: SYS_ID, active: "true" },
+        { sys_id: SYS_ID.toUpperCase(), active: "true" },
+        { sys_id: second, active: "true" },
+        { sys_id: SYS_ID, active: "true" },
       ],
     });
     const result = await callTool(

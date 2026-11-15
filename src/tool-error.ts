@@ -35,7 +35,9 @@ export type ToolErrorReason =
   | "html_response"
   | "invalid_response"
   | "redirected"
-  | "basic_auth_restricted";
+  | "basic_auth_restricted"
+  | "unknown_filter_field"
+  | "filter_fields_too_large";
 
 export interface ToolErrorDescriptor {
   readonly category: ToolErrorCategory;
@@ -164,6 +166,50 @@ export function createBasicAuthRestrictedError(): Error {
     category: "authentication",
     reason: "basic_auth_restricted",
     message: `${CATEGORY_MESSAGES.authentication} ${BASIC_AUTH_401_HINT}`,
+    retry: "retry_after_correction",
+  });
+}
+
+/**
+ * A canonical field name: lowercase identifier, with dot-walked segments. It
+ * is the only shape a field name is echoed in, and it bounds the echo.
+ */
+export const CANONICAL_FIELD_PATTERN =
+  /^[a-z][a-z0-9_]{0,79}(?:\.[a-z][a-z0-9_]{0,79}){0,7}$/u;
+
+/**
+ * Issue the trusted error for a filter or order on a field the rows do not
+ * carry. The field name is echoed only when it is canonical, never anything
+ * else the caller typed.
+ */
+export function createUnknownFilterFieldError(field: string): Error {
+  const subject =
+    typeof field === "string" && CANONICAL_FIELD_PATTERN.test(field)
+      ? `The filter field "${field}"`
+      : "A filter or order field";
+  return issue({
+    category: "not_found",
+    reason: "unknown_filter_field",
+    message:
+      `${subject} was not found on the table, or is not readable by this ` +
+      "user. ServiceNow ignores a condition on a field it does not have, so " +
+      "the filter would match unrelated rows. Check the field name with " +
+      "sn_schema.",
+    retry: "retry_after_correction",
+  });
+}
+
+/**
+ * Issue the trusted error for a read that passed the response size bound only
+ * because the filter's own fields were asked for with it.
+ */
+export function createFilterFieldsTooLargeError(): Error {
+  return issue({
+    category: "upstream",
+    reason: "filter_fields_too_large",
+    message:
+      "The response was too large once the fields used by the filter were " +
+      "included. Lower limit and try again.",
     retry: "retry_after_correction",
   });
 }

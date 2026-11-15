@@ -15,6 +15,7 @@ import type { ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
+import { withQueryFields } from "./fixtures/echo-fields.js";
 
 const CONFIG: ServiceNowConfig = {
   instance: "https://structured-filter.service-now.com",
@@ -89,7 +90,12 @@ export async function harness(
   const getWithMeta = vi.fn(async (path: string, params?: Record<string, string>) =>
     options.upstream
       ? options.upstream(path, params)
-      : { data: { result: records }, status: 200, headers: new Headers() }
+      : {
+          // A table that has the filter's columns returns them on its rows.
+          data: { result: records.map((row) => withQueryFields(row, params)) },
+          status: 200,
+          headers: new Headers(),
+        }
   );
   const post = vi.fn(async () => ({ serviced_requests: [], unserviced_requests: [] }));
   const get = vi.fn(async () => ({ result: [] }));

@@ -23,7 +23,16 @@ import {
   StructuredQueryError,
   structuredQueryReadSchema,
 } from "../structured-query.js";
+import {
+  createFilterFieldsTooLargeError,
+  createUnknownFilterFieldError,
+} from "../tool-error.js";
 import { resolveToolTableAccess } from "../tool-table-access.js";
+import {
+  echoFilterFields,
+  firstMissingFilterField,
+  isFilterEchoTooLarge,
+} from "../unknown-filter-fields.js";
 import {
   ok,
   buildTableParams,
@@ -494,11 +503,19 @@ async function executeQuery(
       structuredPlan ? undefined : args.orderby,
       structuredPlan?.structuredQuery.order_by
     );
+    // The filter's and order's own fields ride along on this read, so the rows
+    // show whether the table has them (see unknown-filter-fields.ts). A raw
+    // query is pinned by policy and is not checked.
+    const selectedFields = rawPlan?.outputFields
+      ? rawPlan.outputFields.join(",")
+      : fieldSelectionToSysparmFields(effectiveFields);
+    const echo = echoFilterFields(
+      selectedFields,
+      structuredPlan?.referencedFields ?? []
+    );
     const params = buildTableParams({
       query: queryWithStableOrder,
-      fields: rawPlan?.outputFields
-        ? rawPlan.outputFields.join(",")
-        : fieldSelectionToSysparmFields(effectiveFields),
+      fields: echo.sysparmFields,
       // Fetch one bounded sentinel row: it is the only continuation signal.
       // The request sets sysparm_no_count, so ServiceNow skips the COUNT and
       // the X-Total-Count header reports the size of this response (limit +
@@ -514,8 +531,19 @@ async function executeQuery(
       params[FORCE_RECACHE_PARAM] = "true";
     }
 
-    const resp = await client.getWithMeta(`/api/now/table/${args.table}`, params);
+    let resp;
+    try {
+      resp = await client.getWithMeta(`/api/now/table/${args.table}`, params);
+    } catch (error) {
+      if (isFilterEchoTooLarge(error, echo)) throw createFilterFieldsTooLargeError();
+      throw error;
+    }
     const rawResults = Array.isArray(resp.data?.result) ? resp.data.result : [];
+    // Refuse before anything is built from rows ServiceNow chose by ignoring a
+    // condition. The columns added for the check never reach the result: the
+    // readable-field filter below keeps only the caller's own selection.
+    const missingField = firstMissingFilterField(rawResults, echo.probe);
+    if (missingField !== undefined) throw createUnknownFilterFieldError(missingField);
     const hasSentinel = rawResults.length > args.limit;
     const consumedRawResults = rawResults.slice(0, args.limit);
     const policyFiltered = filterReadableRecord(

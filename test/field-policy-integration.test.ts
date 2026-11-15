@@ -92,6 +92,8 @@ async function createHarness() {
           result: [
             {
               sys_id: "1".repeat(32),
+              // The batch filter's own field, as a real table returns it.
+              active: "true",
               password: "must-not-leave-the-server",
             },
           ],

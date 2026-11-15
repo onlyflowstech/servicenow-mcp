@@ -78,7 +78,8 @@ function createProfileManager(options: HarnessOptions = {}) {
   const configuredProfiles = options.configuredProfiles ?? ["secondary"];
   const fakeClient = {
     getWithMeta: vi.fn(async () => ({
-      data: { result: [{ sys_id: "abc123" }] },
+      // `active` is the column the nested filter tests; a table that has it returns it.
+      data: { result: [{ sys_id: "abc123", active: "true" }] },
       status: 200,
       headers: new Headers(),
     })),

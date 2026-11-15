@@ -29,6 +29,7 @@ import { ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
+import { echoFields } from "./fixtures/echo-fields.js";
 
 const TABLE = "sys_flow_context";
 const INSTANCE = "https://batch-cached-lookup.service-now.com";
@@ -73,7 +74,11 @@ function stubInstance() {
         );
       }
       wire.push({ method, kind: "lookup", params });
-      return json(200, { result: state.matching.map((sysId) => ({ sys_id: sysId })) }, watermarkHeaders);
+      return json(
+        200,
+        { result: state.matching.map((sysId) => echoFields({ sys_id: sysId }, params)) },
+        watermarkHeaders
+      );
     }
     if (method === "POST" && url.pathname === "/api/now/v1/batch") {
       const payload = JSON.parse(String(init?.body)) as {
@@ -251,7 +256,8 @@ describe("sn_batch target lookup on a cached metadata table", () => {
         ...second.lookups,
       ]) {
         expect(lookup.params).toEqual({
-          sysparm_fields: "sys_id",
+          // The filter's own field rides along so a mistyped one is caught.
+          sysparm_fields: "sys_id,state",
           sysparm_limit: "200",
           sysparm_query: "state=waiting",
         });
