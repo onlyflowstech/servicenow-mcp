@@ -149,13 +149,28 @@ export interface FlowPill { token: string; label: string | null }
 export interface FlowVariableDef { scope: "input" | "output" | "variable"; flow_index: number;
   name: string; label: string | null; type: string | null }
 
+/**
+ * The Mermaid diagram the text carries, derived from `nodes` and `edges`.
+ * `source` is absent, with a `note` saying why, when it did not fit the
+ * response budget; the graph itself is complete either way.
+ */
+export interface FlowDiagram { format: "mermaid"; source?: string; note?: string }
+/** One warning code with the sentence the text shows for it. */
+export interface FlowWarningDetail { code: FlowWarningCode; message: string }
+
 export interface FlowGraph {
   schema_version: 1;
   source: FlowSourceName;                       // always "table" in v1
+  /** The root flow's record: the target of the text's "Open the flow record" link. */
+  ref?: { table: "sys_hub_flow"; sys_id: string };
   flows: FlowHeader[]; trigger: FlowTrigger | null;
   nodes: FlowNode[]; edges: FlowEdge[]; pills: FlowPill[]; variables: FlowVariableDef[];
   options: { depth: number; include_inputs: boolean; max_nodes: number; format: "both" | "mermaid" | "outline" };
   limits_hit: FlowLimitHit[]; warnings: FlowWarningCode[];
+  /** `warnings`, each with its explanation, in the same order. */
+  warning_details?: FlowWarningDetail[];
+  /** Present when `options.format` asks for a diagram and one passed the grammar check. */
+  diagram?: FlowDiagram;
   counts: { steps_seen: number; nodes_returned: number; inputs_redacted: number;
             inputs_truncated: number; items_dropped: number };
 }
@@ -274,6 +289,27 @@ export const FLOW_WARNING_CODES = enumValues<FlowWarningCode>()([
   "subflow_too_large", "inputs_omitted_too_large", "flow_too_large", "input_values_incomplete",
   "subflow_timeout",
 ]);
+/** The sentence for each warning code, shown in the text and in `warning_details`. */
+export const FLOW_WARNING_TEXT: Readonly<Record<FlowWarningCode, string>> = Object.freeze({
+  subflow_cycle: "A subflow call cycle was found and not expanded again.",
+  subflow_not_found: "A called subflow could not be found.",
+  subflow_denied: "A called subflow was not expanded because policy denies it.",
+  orphan_steps: "Some steps had an unknown parent and are shown at the top level.",
+  unknown_logic_type: "Some flow logic types are not recognized and are drawn as plain steps.",
+  items_dropped_invalid: "Some items failed validation and were dropped.",
+  gzip_decode_failed: "Some compressed input values could not be decoded.",
+  label_cache_unavailable: "Data pill labels were unavailable; raw pill tokens are shown.",
+  flow_version_unknown: "The flow version could not be determined.",
+  subflow_too_large: "A called subflow was too large to read and was not expanded.",
+  inputs_omitted_too_large:
+    "Input values were left out of a flow too large to read with them; it was read as with include_inputs=false.",
+  flow_too_large: "The flow is too large to read, even without input values; only its record is shown.",
+  input_values_incomplete: "Some older (V1) steps store more values than were read; their inputs may be incomplete.",
+  subflow_timeout: "A called subflow was not expanded because reading it timed out; retrying may help.",
+});
+/** Why `diagram.source` is missing when the graph was cut to fit the response budget. */
+export const FLOW_DIAGRAM_OMITTED_NOTE =
+  "Diagram omitted to fit the response budget; nodes and edges in this result describe the same graph.";
 export const FLOW_VIEW_FORMATS = Object.freeze(["both", "mermaid", "outline"] as const);
 
 /**
@@ -730,6 +766,7 @@ export const flowGraphSchema = z
   .object({
     schema_version: z.literal(1),
     source: z.enum(FLOW_SOURCE_NAMES),
+    ref: z.object({ table: z.literal("sys_hub_flow"), sys_id: serviceNowSysIdSchema }).strict().optional(),
     flows: z.array(flowHeaderSchema).max(B.MAX_FLOWS),
     trigger: flowTriggerSchema.nullable(),
     nodes: z.array(flowNodeSchema).max(B.MAX_NODES),
@@ -746,6 +783,18 @@ export const flowGraphSchema = z
       .strict(),
     limits_hit: z.array(z.enum(FLOW_LIMIT_HITS)).max(FLOW_LIMIT_HITS.length),
     warnings: z.array(z.enum(FLOW_WARNING_CODES)).max(L.MAX_WARNINGS),
+    warning_details: z
+      .array(z.object({ code: z.enum(FLOW_WARNING_CODES), message: z.string().max(300) }).strict())
+      .max(L.MAX_WARNINGS)
+      .optional(),
+    diagram: z
+      .object({
+        format: z.literal("mermaid"),
+        source: z.string().max(L.MERMAID_MAX_CHARS).optional(),
+        note: z.string().max(300).optional(),
+      })
+      .strict()
+      .optional(),
     counts: z
       .object({
         steps_seen: nonNegativeInt(B.MAX_COUNT),

@@ -62,6 +62,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sys_id, an unknown status) now ends the call with an upstream error instead of
   an internal one.
 
+- **A client that reads only `structuredContent` no longer loses what the text
+  carried.** Some MCP clients give the model the structured result and drop the
+  text, and a few tools kept information only in the text. They now carry it as
+  typed fields as well, and the text is unchanged. `sn_flow_view` adds `diagram`
+  (the Mermaid source, when `format` asks for one), `ref` (the flow record as
+  table and sys_id) and `warning_details` (each warning code with its
+  explanation). `sn_atf_run` and `sn_atf_results` add `result_ref` (the suite
+  result record) and `advice` (how to read a failed step in full).
+  `sn_atf_author` adds `advice` after an insert whose outcome could not be
+  confirmed; the records it created were already listed with their table and
+  sys_id. Record links stay out of `structuredContent`: it names a record by
+  table and sys_id, and the instance address stays in the text, so no result
+  gains an address. The diagram counts toward `max_response_bytes` and is the first
+  thing given up: if the graph and the diagram do not fit together the diagram
+  keeps only a note, and its source is never cut short. The published output
+  schemas grow by about 1.6 KB in total (1.3%), and the model-visible part of
+  `tools/list` by 18 characters.
+
 ## [2.3.0-dev.4] — 2026-11-15
 
 ### Changed

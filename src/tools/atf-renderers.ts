@@ -2,7 +2,7 @@ import { registerEnvelopeTextRenderer } from "./result-envelope.js";
 import { headline, renderMarkdown, table, text, recordLink, formatDuration, untrustedBlock } from "./markdown.js";
 import type { z } from "zod";
 import type { atfComparisonSchema } from "./atf-contracts.js";
-import type { AtfExecutionResult } from "./atf-contracts.js";
+import { ATF_SUITE_RESULT_TABLE, type AtfExecutionResult } from "./atf-contracts.js";
 import type { AtfRunSummary } from "../atf-result-cache.js";
 let registered = false;
 function execution(data: AtfExecutionResult, origin = "") {
@@ -10,7 +10,7 @@ function execution(data: AtfExecutionResult, origin = "") {
   return renderMarkdown(
     headline(`Suite ${data.suite_name ?? data.suite_id ?? ""}: ${run?.status ?? data.outcome}`, { status: run?.status === "success" ? "pass" : data.outcome !== "completed" || run?.status === "success_with_warnings" ? "warn" : "fail" }),
     run ? text(`${run.counts.passed} passed, ${run.counts.failed} failed, ${run.counts.errors} errors, ${run.counts.skipped} skipped in ${formatDuration(run.durationMs)}`) : null,
-    data.result_id ? recordLink(origin, "sys_atf_test_suite_result", data.result_id, "Open suite result") : null,
+    data.result_id ? recordLink(origin, ATF_SUITE_RESULT_TABLE, data.result_id, "Open suite result") : null,
     data.progress_id ? text(`Progress ID: ${data.progress_id}`) : null,
     ...data.failures.flatMap(row => [
       text(`${row.test_name} — ${row.step}`, 1200),

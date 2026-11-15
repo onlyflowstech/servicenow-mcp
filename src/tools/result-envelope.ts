@@ -1,5 +1,5 @@
 import { atfExecutionResultSchema, atfResultsSchema, atfReadinessSchema } from "./atf-contracts.js";
-import { FLOW_VIEW_LIMITS, flowGraphSchema } from "./flow-view-contracts.js";
+import { FLOW_DIAGRAM_OMITTED_NOTE as DIAGRAM_OMITTED_NOTE, FLOW_VIEW_LIMITS, flowGraphSchema } from "./flow-view-contracts.js";
 /** Shared SNSDK-33 structured-result contracts and compatibility adapter. */
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -212,6 +212,7 @@ const atfAuthorResultSchema = z.object({
   rollback_failed: z.array(atfRecordIdSchema).max(1000),
   uncertain_insert: z.boolean(),
   message: z.string().max(1000).optional(),
+  advice: z.array(z.string().max(500)).max(5).optional(),
 }).strict();
 
 const queryResultSchema = z
@@ -1156,6 +1157,22 @@ function truncateLongestString(data: unknown): boolean {
   return true;
 }
 
+/**
+ * Give up a derived diagram before any text is cut. A diagram's source is a
+ * rendering of fields the result already carries, and cutting it mid-line
+ * leaves source that does not parse, so it goes whole, with a note.
+ */
+function dropDerivedDiagram(data: unknown): boolean {
+  if (typeof data !== "object" || data === null) return false;
+  const diagram = (data as { diagram?: unknown }).diagram;
+  if (typeof diagram !== "object" || diagram === null) return false;
+  const entry = diagram as { source?: unknown; note?: unknown };
+  if (typeof entry.source !== "string") return false;
+  delete entry.source;
+  entry.note = DIAGRAM_OMITTED_NOTE;
+  return true;
+}
+
 function deepFreeze(value: unknown): unknown {
   if (typeof value === "object" && value !== null) {
     for (const entry of Object.values(value)) deepFreeze(entry);
@@ -1482,7 +1499,10 @@ function finalizeSummaryResult(
     return resultBytes(restated) <= maximum ? restated : candidate;
   }
 
-  while (resultBytes(candidate) > maximum && truncateLongestString(envelope.data)) {
+  while (
+    resultBytes(candidate) > maximum &&
+    (dropDerivedDiagram(envelope.data) || truncateLongestString(envelope.data))
+  ) {
     applyByteTruncation(
       envelope,
       envelope.metadata.truncation.dropped_records ?? 0

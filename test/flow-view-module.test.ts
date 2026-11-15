@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import Ajv2020 from "ajv/dist/2020.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -21,6 +22,7 @@ import { createToolError } from "../src/tool-error.js";
 import {
   FLOW_TABLE_FIELDS,
   FLOW_VIEW_LIMITS,
+  FLOW_WARNING_TEXT,
   FLOW_VIEW_TABLES,
   flowGraphSchema,
   type FlowGraph,
@@ -35,6 +37,9 @@ import {
 } from "../src/tools/flow-view-module.js";
 import type { FlowFieldPlan } from "../src/tools/flow-view-policy.js";
 import { registerServiceNowToolModules, toolModules } from "../src/tools/index.js";
+import { isValidMermaidSource } from "../src/tools/markdown.js";
+import { renderFlowView } from "../src/tools/flow-view-renderers.js";
+import type { RenderableEnvelope } from "../src/tools/result-envelope.js";
 
 // Every response scope the module opens gets a number, so calls can be
 // attributed to the scope they ran in, and its signal, so the fake can refuse
@@ -451,6 +456,103 @@ describe("sn_flow_view end to end", () => {
     expect(text).toContain("Flow outline");
     expect(text).toContain("| Source | table API |");
     expectTableApiOnly(fake.calls);
+  });
+
+  describe("structuredContent carries what only the text carried", () => {
+    /** The structured result checked against the output schema the server publishes. */
+    async function viewPublished(args: Record<string, unknown>, ops: ServiceNowOperations) {
+      const { client } = await harness(ops);
+      const tool = (await client.listTools()).tools.find((candidate) => candidate.name === "sn_flow_view")!;
+      const result = (await client.callTool({
+        name: "sn_flow_view",
+        arguments: { profile: PROFILE, ...args },
+      })) as CallToolResult;
+      const validate = new Ajv2020({ strict: true, validateFormats: false }).compile(tool.outputSchema!);
+      expect(validate(result.structuredContent), JSON.stringify(validate.errors)).toBe(true);
+      return result;
+    }
+    const diagramIn = (text: string): string | undefined => /```mermaid\n([\s\S]*?)\n```/u.exec(text)?.[1];
+
+    it("has the Mermaid diagram, the flow record reference and the warning prose", async () => {
+      const result = await viewPublished({ flow: F1 }, fakeInstance([capture("tables-F1.json")]).ops);
+      const graph = graphOf(result);
+      const text = textOf(result);
+      expect(graph.diagram?.format).toBe("mermaid");
+      expect(isValidMermaidSource(graph.diagram?.source)).toBe(true);
+      // The text and the structured result carry the same source.
+      expect(diagramIn(text)).toBe(graph.diagram!.source);
+      expect(graph.ref).toEqual({ table: "sys_hub_flow", sys_id: F1 });
+      expect(text).toContain(`[Open the flow record](${INSTANCE}/sys_hub_flow.do?sys_id=${F1})`);
+      expect(graph.warning_details ?? []).toEqual(
+        graph.warnings.map((code) => ({ code, message: FLOW_WARNING_TEXT[code] }))
+      );
+      for (const detail of graph.warning_details ?? []) expect(text).toContain(detail.message);
+    });
+
+    it("never puts the instance address in structuredContent", async () => {
+      const result = await viewPublished({ flow: F1 }, fakeInstance([capture("tables-F1.json")]).ops);
+      expect(JSON.stringify(result.structuredContent)).not.toContain(new URL(INSTANCE).host);
+      expect(textOf(result)).toContain(new URL(INSTANCE).host);
+    });
+
+    it("explains each warning in warning_details, in the order of the codes", async () => {
+      const root = sid(0xc0);
+      const big = synthetic({ [root]: Array.from({ length: 400 }, () => sid(0xcf)) }, 3_000);
+      const result = await viewPublished(
+        { flow: root },
+        fakeInstance([big.capture], { scopeBudgetBytes: 1_048_576 }).ops
+      );
+      const graph = graphOf(result);
+      expect(graph.warnings).toContain("flow_too_large");
+      expect(graph.warning_details).toEqual(
+        graph.warnings.map((code) => ({ code, message: FLOW_WARNING_TEXT[code] }))
+      );
+      expect(textOf(result)).toContain(FLOW_WARNING_TEXT.flow_too_large);
+    });
+
+    it("leaves the text exactly as it was without the added fields", async () => {
+      for (const format of ["both", "mermaid", "outline"]) {
+        const result = await viewPublished({ flow: F1, format }, fakeInstance([capture("tables-F1.json")]).ops);
+        const envelope = result.structuredContent as unknown as RenderableEnvelope & { data: Record<string, unknown> };
+        const before: Record<string, unknown> = { ...envelope.data };
+        for (const field of ["ref", "warning_details", "diagram"]) delete before[field];
+        const text = renderFlowView(
+          { ...envelope, data: before },
+          { summary: "unused", instanceOrigin: INSTANCE }
+        );
+        expect(textOf(result), format).toBe(text);
+      }
+    });
+
+    it("carries a diagram only when the format asks for one", async () => {
+      const ops = () => fakeInstance([capture("tables-F6b.json")]).ops;
+      expect(graphOf(await view(ops(), { flow: F6B, format: "both" })).diagram?.source).toBeDefined();
+      expect(graphOf(await view(ops(), { flow: F6B, format: "mermaid" })).diagram?.source).toBeDefined();
+      expect(graphOf(await view(ops(), { flow: F6B, format: "outline" })).diagram).toBeUndefined();
+    });
+
+    it.each([10_000, 25_000, 100_000])(
+      "keeps a diagram that is there parseable and equal to the text's, and the whole result in %i bytes",
+      async (limit) => {
+        const result = await viewPublished(
+          { flow: F6C, max_response_bytes: limit },
+          fakeInstance([capture("tables-F6c.json")]).ops
+        );
+        const graph = graphOf(result);
+        const size = Buffer.byteLength(
+          JSON.stringify({ content: result.content, structuredContent: result.structuredContent }),
+          "utf8"
+        );
+        expect(size).toBeLessThanOrEqual(limit);
+        if (graph.diagram?.source !== undefined) {
+          expect(isValidMermaidSource(graph.diagram.source)).toBe(true);
+          const shown = diagramIn(textOf(result));
+          if (shown !== undefined) expect(shown).toBe(graph.diagram.source);
+        } else {
+          expect(graph.diagram?.note).toContain("omitted");
+        }
+      }
+    );
   });
 
   it("draws Try / Catch with an error edge into the Catch node", async () => {

@@ -5,6 +5,7 @@ import { serviceNowSysIdSchema as id } from "../servicenow-identifiers.js";
 import { ok } from "../utils.js";
 import { defineServiceNowToolModule, withRequiredProfile } from "./tool-module.js";
 import { envelopeCompatibilityResult, productionToolOutputSchemas } from "./result-envelope.js";
+import { withAtfExecutionExtras, type AtfExecutionResult } from "./atf-contracts.js";
 import { guardAtfUpstream, RESULT_TABLES, prepareAtfReads, progress, getAtfExecution, compareAtfRuns, readAtfRows, value, atfStepLabel } from "./atf-shared.js";
 
 const schema = withRequiredProfile(z.object({
@@ -43,7 +44,8 @@ export const atfResultsToolModule = defineServiceNowToolModule({
     return { args: prepareAtfReads(args, RESULT_TABLES), requests: RESULT_TABLES.map(table => ({ operation: "read" as const, table })) };
   },
   handler: (args, services) => guardAtfUpstream(async () => {
-    const finish = (data: Record<string, unknown>) => envelopeCompatibilityResult("sn_atf_results", args, ok({ action: args.action, ...data }));
+    const finish = (data: Record<string, unknown>) => envelopeCompatibilityResult("sn_atf_results", args, ok({ action: args.action, ...data,
+      ...(data.execution === undefined ? {} : { execution: withAtfExecutionExtras(data.execution as AtfExecutionResult) }) }));
     if (args.action === "step") {
       const rows = await readAtfRows(services, args, "sys_atf_test_result_step", `sys_id=${id.parse(args.step_result_id)}^type=step_result`, 1);
       if (rows.length !== 1 || value(rows[0].sys_id) !== args.step_result_id) throw createToolError("not_found", "retry_after_correction");

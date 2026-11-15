@@ -27,6 +27,8 @@ import {
   FLOW_VIEW_LIMITS,
   FLOW_VIEW_TABLES,
   FLOW_WARNING_CODES,
+  FLOW_WARNING_TEXT,
+  FLOW_DIAGRAM_OMITTED_NOTE,
   REDACTION_REASONS,
   type FlowEdge,
   type FlowEdgeKind,
@@ -47,6 +49,7 @@ import {
   type NormalizedStep,
   type RedactionReason,
 } from "./flow-view-contracts.js";
+import { buildFlowMermaid } from "./flow-view-mermaid.js";
 
 const L = FLOW_VIEW_LIMITS;
 const B = FLOW_GRAPH_SCHEMA_BOUNDS;
@@ -984,6 +987,22 @@ export function fitFlowGraphToBudget(graph: FlowGraph, targetBytes: number): num
   return FLOW_GRAPH_BUDGET_STEPS.NODES_HALVED_REPEATEDLY;
 }
 
+/**
+ * Put the Mermaid diagram into the graph once the graph is final, so it shows
+ * the nodes that survived the budget. The diagram is derived from `nodes` and
+ * `edges`, so it is the first thing given up: when the graph and the diagram
+ * together do not fit `targetBytes`, only a note is kept. The inputs and
+ * nodes the budget ladder works to keep are never traded for it.
+ */
+export function attachFlowDiagram(graph: FlowGraph, targetBytes: number): void {
+  delete graph.diagram;
+  const built = buildFlowMermaid(graph);
+  if (built === undefined) return;
+  graph.diagram = { format: "mermaid", source: built.diagram.source };
+  if (byteLength(graph) <= targetBytes) return;
+  graph.diagram = { format: "mermaid", note: FLOW_DIAGRAM_OMITTED_NOTE };
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -1080,6 +1099,13 @@ export function buildFlowGraph(input: FlowGraphBuildInput): FlowGraph {
   }
   graph.limits_hit = sortedLimits([...builder.limits, ...graph.limits_hit]);
   graph.warnings = sortedWarnings(builder.warnings);
+  if (graph.warnings.length > 0) {
+    graph.warning_details = graph.warnings.map((code) => ({ code, message: FLOW_WARNING_TEXT[code] }));
+  }
+  const rootHeader = graph.flows[0];
+  if (rootHeader !== undefined && SYS_ID.test(rootHeader.sys_id)) {
+    graph.ref = { table: "sys_hub_flow", sys_id: rootHeader.sys_id };
+  }
   // Flow headers keep a call site only while that node survives.
   const ids = new Set(graph.nodes.map((node) => node.id));
   for (const flow of graph.flows) {
@@ -1087,7 +1113,9 @@ export function buildFlowGraph(input: FlowGraphBuildInput): FlowGraph {
   }
   recount(graph);
 
-  fitFlowGraphToBudget(graph, Math.floor(options.max_response_bytes * L.STRUCTURED_SHARE));
+  const target = Math.floor(options.max_response_bytes * L.STRUCTURED_SHARE);
+  fitFlowGraphToBudget(graph, target);
+  if (options.format !== "outline") attachFlowDiagram(graph, target);
   return graph;
 }
 

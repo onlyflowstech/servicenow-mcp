@@ -24,9 +24,15 @@ reads only through the Table API. Every call requires an explicit `profile`.
   `true`, `false`, `loop_body`, `loop_back`, `parallel`, `error`, `subflow`),
   data pills, flow variables, the limits that were hit and fixed-vocabulary
   warnings. Node ids are generated (`n0` is the trigger), never instance
-  data.
-- **The text** holds a headline, a summary table, a Mermaid `flowchart TD`
-  diagram and a numbered outline in an untrusted-content block.
+  data. It also holds what the text shows beyond the graph, so a client that
+  reads only `structuredContent` loses nothing: `diagram` (the Mermaid source,
+  when `format` asks for a diagram), `ref` (the flow record as table and
+  sys_id, never as a link, so the instance address stays out of
+  `structuredContent`) and `warning_details` (each warning code with its
+  explanation).
+- **The text** holds a headline, a link to the flow record, a summary table, a
+  Mermaid `flowchart TD` diagram and a numbered outline in an untrusted-content
+  block.
 
 Branches are drawn the way Flow Designer stores them. The `false` edge of an If
 or Else If enters the next Else If or the Else node, which then leads into its
@@ -196,13 +202,16 @@ then values dropped, then descriptions, annotations and conditions cut to 200
 characters, then steps halved behind a "more" node, then pills and variables
 dropped. The text gets the rest: diagram and full outline, then a shortened
 outline, then the outline alone, then the summary table. Every reduction is
-reported in `limits_hit`.
+reported in `limits_hit`. The `diagram` is drawn from the nodes that are left
+and is the first thing given up: when the graph and the diagram do not fit
+together, `diagram` keeps only a `note` saying it was left out (its source is
+never cut short), and `nodes` and `edges` describe the same graph.
 
 ## How clients show it
 
 | Client | What to expect |
 | --- | --- |
-| Clients that read `structuredContent` | The full graph, for their own rendering. |
+| Clients that read `structuredContent` | The full graph, with the diagram source, for their own rendering. |
 | Chat clients that render Markdown with Mermaid support | The diagram drawn, plus the outline. Whether a `mermaid` block is drawn depends on the client and its version. |
 | Terminal clients (Claude Code, Codex CLI) | The Mermaid source and the outline as text. `format: "outline"` saves space; paste the diagram into any Mermaid viewer to draw it. |
 

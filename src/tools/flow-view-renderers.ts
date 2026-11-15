@@ -18,6 +18,7 @@ import {
   FLOW_SOURCE_NAMES,
   FLOW_VIEW_LIMITS,
   FLOW_WARNING_CODES,
+  FLOW_WARNING_TEXT as WARNING_TEXT,
   REDACTION_REASONS as CONTRACT_REDACTION_REASONS,
   type FlowGraph,
   type FlowWarningCode,
@@ -26,6 +27,7 @@ import { buildFlowMermaid } from "./flow-view-mermaid.js";
 import {
   bulletList,
   headline,
+  issueMermaidDiagram,
   mermaidBlock,
   recordLink,
   renderMarkdown,
@@ -76,24 +78,6 @@ const REDACTION_REASONS: ReadonlySet<string> = new Set(CONTRACT_REDACTION_REASON
 const SOURCES: ReadonlySet<string> = new Set(FLOW_SOURCE_NAMES);
 const LIMITS: ReadonlySet<string> = new Set(FLOW_LIMIT_HITS);
 const NOT_EXPANDED = new Set(["depth", "cycle", "limit", "denied", "not_found", "too_large", "timeout"]);
-const WARNING_TEXT: Readonly<Record<FlowWarningCode, string>> = Object.freeze({
-  subflow_cycle: "A subflow call cycle was found and not expanded again.",
-  subflow_not_found: "A called subflow could not be found.",
-  subflow_denied: "A called subflow was not expanded because policy denies it.",
-  orphan_steps: "Some steps had an unknown parent and are shown at the top level.",
-  unknown_logic_type: "Some flow logic types are not recognized and are drawn as plain steps.",
-  items_dropped_invalid: "Some items failed validation and were dropped.",
-  gzip_decode_failed: "Some compressed input values could not be decoded.",
-  label_cache_unavailable: "Data pill labels were unavailable; raw pill tokens are shown.",
-  flow_version_unknown: "The flow version could not be determined.",
-  subflow_too_large: "A called subflow was too large to read and was not expanded.",
-  inputs_omitted_too_large:
-    "Input values were left out of a flow too large to read with them; it was read as with include_inputs=false.",
-  flow_too_large: "The flow is too large to read, even without input values; only its record is shown.",
-  input_values_incomplete: "Some older (V1) steps store more values than were read; their inputs may be incomplete.",
-  subflow_timeout: "A called subflow was not expanded because reading it timed out; retrying may help.",
-});
-
 const KNOWN_WARNINGS: ReadonlySet<string> = new Set(FLOW_WARNING_CODES);
 
 type Format = "both" | "mermaid" | "outline";
@@ -486,8 +470,13 @@ export function buildFlowViewTextParts(
   header.push(summaryTable(root));
   let mermaid: MarkdownFragment | undefined;
   if (format !== "outline") {
-    const built = buildFlowMermaid(root);
-    if (built) mermaid = mermaidBlock(built.diagram);
+    // The graph carries the diagram it was built with; use it when it is
+    // there and still parses, and build it only when the budget left it out.
+    const carried = record(root.diagram)?.source;
+    const diagram =
+      (typeof carried === "string" ? issueMermaidDiagram(carried) : undefined) ??
+      buildFlowMermaid(root)?.diagram;
+    if (diagram) mermaid = mermaidBlock(diagram);
   }
   const warnings = warningList(root);
   return Object.freeze({

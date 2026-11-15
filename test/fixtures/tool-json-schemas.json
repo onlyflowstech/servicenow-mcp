@@ -795,6 +795,14 @@
             "message": {
               "type": "string",
               "maxLength": 1000
+            },
+            "advice": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 500
+              }
             }
           },
           "required": [
@@ -1477,6 +1485,32 @@
                 "suite_name": {
                   "type": "string",
                   "maxLength": 100
+                },
+                "result_ref": {
+                  "type": "object",
+                  "properties": {
+                    "table": {
+                      "type": "string",
+                      "const": "sys_atf_test_suite_result"
+                    },
+                    "sys_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{32}$"
+                    }
+                  },
+                  "required": [
+                    "table",
+                    "sys_id"
+                  ],
+                  "additionalProperties": false
+                },
+                "advice": {
+                  "maxItems": 5,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
                 },
                 "run": {
                   "type": "object",
@@ -2232,6 +2266,32 @@
             "suite_name": {
               "type": "string",
               "maxLength": 100
+            },
+            "result_ref": {
+              "type": "object",
+              "properties": {
+                "table": {
+                  "type": "string",
+                  "const": "sys_atf_test_suite_result"
+                },
+                "sys_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              },
+              "required": [
+                "table",
+                "sys_id"
+              ],
+              "additionalProperties": false
+            },
+            "advice": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 500
+              }
             },
             "run": {
               "type": "object",
@@ -4805,6 +4865,24 @@
                 "table"
               ]
             },
+            "ref": {
+              "type": "object",
+              "properties": {
+                "table": {
+                  "type": "string",
+                  "const": "sys_hub_flow"
+                },
+                "sys_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              },
+              "required": [
+                "table",
+                "sys_id"
+              ],
+              "additionalProperties": false
+            },
             "flows": {
               "maxItems": 9,
               "type": "array",
@@ -5814,6 +5892,64 @@
                   "subflow_timeout"
                 ]
               }
+            },
+            "warning_details": {
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "subflow_cycle",
+                      "subflow_not_found",
+                      "subflow_denied",
+                      "orphan_steps",
+                      "unknown_logic_type",
+                      "items_dropped_invalid",
+                      "gzip_decode_failed",
+                      "label_cache_unavailable",
+                      "flow_version_unknown",
+                      "subflow_too_large",
+                      "inputs_omitted_too_large",
+                      "flow_too_large",
+                      "input_values_incomplete",
+                      "subflow_timeout"
+                    ]
+                  },
+                  "message": {
+                    "type": "string",
+                    "maxLength": 300
+                  }
+                },
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "diagram": {
+              "type": "object",
+              "properties": {
+                "format": {
+                  "type": "string",
+                  "const": "mermaid"
+                },
+                "source": {
+                  "type": "string",
+                  "maxLength": 20000
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "format"
+              ],
+              "additionalProperties": false
             },
             "counts": {
               "type": "object",

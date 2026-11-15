@@ -7,7 +7,7 @@ import { ok } from "../utils.js";
 import { defineServiceNowToolModule, withRequiredProfile } from "./tool-module.js";
 import { envelopeCompatibilityResult, productionToolOutputSchemas } from "./result-envelope.js";
 import { RESULT_TABLES, prepareAtfReads, resolveSuite, progress, getAtfExecution } from "./atf-shared.js";
-import type { AtfExecutionResult } from "./atf-contracts.js";
+import { withAtfExecutionExtras, type AtfExecutionResult } from "./atf-contracts.js";
 import { registerAtfRenderers } from "./atf-renderers.js";
 
 const schema = withRequiredProfile(z.object({
@@ -49,7 +49,7 @@ export const atfRunToolModule = defineServiceNowToolModule({
       }));
       output = { ...output, outcome: "running", progress_id: submitted.progress_id, result_id: submitted.result_id };
       if (!submitted.progress_id && !submitted.result_id) throw new Error("No result locator returned");
-      if (!args.wait) return envelopeCompatibilityResult("sn_atf_run", args, ok(output));
+      if (!args.wait) return envelopeCompatibilityResult("sn_atf_run", args, ok(withAtfExecutionExtras(output)));
       const deadline = new AbortController();
       const timeoutTimer = setTimeout(() => deadline.abort(new Error("ATF wait timed out")), Number(args.timeout) * 1000);
       const signal = AbortSignal.any([deadline.signal, services.context.signal]);
@@ -75,6 +75,6 @@ export const atfRunToolModule = defineServiceNowToolModule({
       const category = trustedToolErrorDescriptor(error)?.category;
       output.warnings.push(category === "authorization" ? "CI/CD access denied. Check the CI/CD role and sn_atf_readiness before retrying." : "Submission or response could not be verified. The suite may have started; inspect the instance before retrying.");
     }
-    return envelopeCompatibilityResult("sn_atf_run", args, ok(output));
+    return envelopeCompatibilityResult("sn_atf_run", args, ok(withAtfExecutionExtras(output)));
   },
 });

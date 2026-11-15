@@ -1,3 +1,4 @@
+import { ATF_UNCERTAIN_INSERT_ADVICE } from "./atf-contracts.js";
 import { prepareAtfReads, readAtfRows, value } from "./atf-shared.js";
 import { stepRequestSchema, prepareSteps, authorSteps, stepTypes, STEP_READ_TABLES, MAX_ATF_AUTHOR_STEPS } from "./atf-step-catalog.js";
 import { boundedArray } from "../bounded-input.js";
@@ -69,6 +70,11 @@ export function resolveAtfAuthorAccess(candidate: unknown, policy?: ResolvedEffe
   };
 }
 
+/** What the text says after an unconfirmed insert, as a field; created records already carry table and sys_id. */
+function withUncertainAdvice<T extends { uncertain_insert: boolean }>(data: T): T & { advice?: string[] } {
+  return data.uncertain_insert ? { ...data, advice: [ATF_UNCERTAIN_INSERT_ADVICE] } : data;
+}
+
 registerEnvelopeTextRenderer("sn_atf_author", (envelope, context) => {
   if ((envelope.data as { action: string }).action === "list_step_types") return renderMarkdown(headline("ATF step catalog"), table(["Type", "Name"], ((envelope.data as { step_types: {type: string; name: string}[] }).step_types).map(step => [step.type, step.name])));
   const data = envelope.data as { outcome: "created" | "failed"; results: { table: string; sys_id: string }[]; rolled_back: string[]; rollback_failed: string[]; uncertain_insert: boolean; message?: string };
@@ -77,7 +83,7 @@ registerEnvelopeTextRenderer("sn_atf_author", (envelope, context) => {
     text(`Rolled back: ${data.rolled_back.join(", ") || "none"}.`, 4000),
     text(data.message),
     text(`Rollback failed for: ${data.rollback_failed.join(", ") || "none"}.`, 4000),
-    data.uncertain_insert ? text("The last insert may have succeeded without a usable response; inspect the instance before retrying.") : null,
+    data.uncertain_insert ? text(ATF_UNCERTAIN_INSERT_ADVICE) : null,
   );
   return renderMarkdown(headline("ATF records created", { status: "pass" }),
     table(["Table", "Record"], data.results.map(row => [row.table,
@@ -102,7 +108,7 @@ export const atfAuthorToolModule = defineServiceNowToolModule({
   resolveAccess: (args, policy) => resolveAtfAuthorAccess(args, policy),
   handler: async (args, services) => {
     if (args.action === "list_step_types") return envelopeCompatibilityResult("sn_atf_author", args, ok({ action: args.action, outcome: "catalog", results: [], rolled_back: [], rollback_failed: [], uncertain_insert: false, step_types: args.step_types }));
-    if (args.action === "add_steps") return envelopeCompatibilityResult("sn_atf_author", args, ok({ action: args.action, ...await authorSteps(args, services) }));
+    if (args.action === "add_steps") return envelopeCompatibilityResult("sn_atf_author", args, ok(withUncertainAdvice({ action: args.action, ...await authorSteps(args, services) })));
     const writes = (args as unknown as { writes: Write[] }).writes;
     const created: { table: string; sys_id: string }[] = [];
     let uncertain = false;
@@ -140,11 +146,11 @@ export const atfAuthorToolModule = defineServiceNowToolModule({
       // A failed authoring attempt is a structured domain outcome so the
       // coordinator preserves the rollback report instead of sanitizing it
       // as an untrusted handler error.
-      return envelopeCompatibilityResult("sn_atf_author", args, ok({
+      return envelopeCompatibilityResult("sn_atf_author", args, ok(withUncertainAdvice({
         action: args.action, outcome: "failed", results: [], rolled_back: rolledBack,
         rollback_failed: remaining, uncertain_insert: uncertain,
         ...(verifyingMemberships ? { message: "Could not verify suite and test references. No memberships were created." } : {}),
-      }));
+      })));
     }
   },
 });

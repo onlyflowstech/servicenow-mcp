@@ -115,17 +115,17 @@ describe("tools/list size ledger (#19)", () => {
       {
         "sn_aggregate": 3795,
         "sn_atf": 4320,
-        "sn_atf_author": 5647,
+        "sn_atf_author": 5728,
         "sn_atf_readiness": 3560,
-        "sn_atf_results": 13403,
-        "sn_atf_run": 8182,
+        "sn_atf_results": 13705,
+        "sn_atf_run": 8484,
         "sn_attach": 4690,
         "sn_batch": 8328,
         "sn_codesearch": 3784,
         "sn_create": 3626,
         "sn_delete": 3292,
         "sn_discover": 3473,
-        "sn_flow_view": 14924,
+        "sn_flow_view": 15886,
         "sn_get": 4745,
         "sn_health": 3127,
         "sn_incident_add_comment": 3280,
@@ -137,7 +137,7 @@ describe("tools/list size ledger (#19)", () => {
         "sn_schema": 3586,
         "sn_syslog": 4582,
         "sn_update": 3661,
-        "total": 128706,
+        "total": 130353,
       }
     `);
   });
@@ -156,8 +156,8 @@ describe("tools/list size ledger (#19)", () => {
     const outputSchemas = tools.reduce((sum, tool) => sum + size(tool.outputSchema ?? {}), 0);
     expect({ modelVisible, outputSchemas }).toMatchInlineSnapshot(`
       {
-        "modelVisible": 40437,
-        "outputSchemas": 83707,
+        "modelVisible": 40455,
+        "outputSchemas": 85336,
       }
     `);
   });
