@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cursor at the last entry returned. Tail reads never use the metadata cache,
   carry no total count and no `next_offset`, and follow the same table and field
   policy as any `sn_syslog` read; a call without `tail` or `after_cursor` is
-  unchanged. The two new inputs and the `cursor` output add about 340 characters
+  unchanged. A cursor older than the longest `since` window (one year) is refused,
+  so a tail cannot reach further back than a plain read. The two new inputs and the `cursor` output add about 340 characters
   to the `sn_syslog` entry in `tools/list`.
 
 ### Changed

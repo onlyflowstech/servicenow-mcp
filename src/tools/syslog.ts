@@ -46,6 +46,9 @@ const SYSLOG_LEVEL_VALUES: Record<string, string> = {
   error: "2",
 };
 
+/** The longest `since`, in minutes; a cursor may not reach further back either. */
+const MAX_SINCE_MINUTES = 525_600;
+
 const INVALID_CURSOR_MESSAGE = "after_cursor is not a valid cursor";
 
 const LEVEL_ENUM = ["error", "warning", "info", "debug", "-1", "0", "1", "2"] as const;
@@ -72,7 +75,7 @@ export const schema = z
     message: z.string().optional().describe("Filter message contains text (LIKE match)"),
     limit: z.number().int().min(1).max(1000).optional().default(25).describe("Max records (default 25, max 1000)"),
     offset: z.number().int().min(0).max(10000).optional().describe("Pagination offset (max 10000)"),
-    since: z.number().int().min(1).max(525600).optional().default(60).describe("Show logs from last N minutes (default 60, max 525600)"),
+    since: z.number().int().min(1).max(MAX_SINCE_MINUTES).optional().default(60).describe("Show logs from last N minutes (default 60, max 525600)"),
     fields: z.string().optional().describe("Fields to return (default: sys_id,level,source,message,sys_created_on)"),
     tail: z.boolean().optional().describe("Start a tail: newest entries plus a cursor"),
     after_cursor: z
@@ -125,6 +128,15 @@ async function tailRead(
     throw createInvalidCursorError();
   }
   if (args.offset !== undefined) throw createInvalidCursorError("offset");
+  // A follow-up ignores `since`, but a cursor may not reach back further than
+  // the longest window a plain read allows, so a made-up old cursor cannot walk
+  // the whole log.
+  if (
+    after !== undefined &&
+    Date.parse(`${after.timestamp.replace(" ", "T")}Z`) < Date.now() - MAX_SINCE_MINUTES * 60_000
+  ) {
+    throw createInvalidCursorError("window");
+  }
 
   const parts: string[] = [];
   if (level !== undefined) parts.push(`level=${level}`);

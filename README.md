@@ -779,9 +779,11 @@ new `cursor`; poll no faster than every few seconds.
 - **Same filters on every call.** The cursor is bound to the `level`, `source`
   and `message` it was issued for. A call that changes them is refused (so is a
   malformed, oversized or altered cursor) with a fixed message that does not
-  repeat the cursor. `since` applies to the first call only. With nothing to
-  return, the call gives the same position back, so keep polling with it. If the
-  first call finds no entries in its window it returns no cursor; call it again.
+  repeat the cursor. `since` applies to the first call only, but a cursor older
+  than the longest `since` (525,600 minutes, one year) is refused with a fixed
+  message: start a new tail. With nothing to return, the call gives the same
+  position back, so keep polling with it. If the first call finds no entries in
+  its window it returns no cursor; call it again.
 - **Reads go straight to the instance**, never through the metadata cache, and
   use the same table and field policy as an ordinary `sn_syslog` read. A tail
   also reads `sys_id` and `sys_created_on` to place the cursor, so a field policy

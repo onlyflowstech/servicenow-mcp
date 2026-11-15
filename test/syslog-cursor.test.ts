@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ServiceNowClient } from "../src/client.js";
 import type { ServiceNowConfig } from "../src/config.js";
@@ -11,7 +11,16 @@ import {
 } from "../src/tools/syslog-cursor.js";
 import { callError, closeHarnesses, harness, type Harness } from "./structured-filter-harness.js";
 
-afterEach(closeHarnesses);
+// The fixtures are dated 2026-11-15; only the clock is pinned (timers stay real),
+// so the one-year window is checked against a known "now".
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-11-15T12:30:00Z"));
+});
+afterEach(async () => {
+  vi.useRealTimers();
+  await closeHarnesses();
+});
 
 /**
  * A synthetic syslog. `upstream` answers a Table API read the way the
@@ -373,6 +382,40 @@ describe("sn_syslog tail: strict cursor handling", () => {
     expect((result as Error).message).toContain("after_cursor cannot be used");
     expect((result as Error).message).not.toContain("secret-looking-text");
     expect((result as Error).message).not.toContain(hostile);
+    expect(log.reads).toHaveLength(0);
+  });
+
+  it("refuses a cursor older than the longest read window, and serves one inside it", async () => {
+    const log = simulation([row(1, 0)]);
+    const filter = hashTailFilters({});
+    const at = (timestamp: string) => encodeTailCursor({ timestamp, sysId: id(0), filter });
+    // "Now" is 2026-11-15 12:30:00 UTC, so the window opens 2025-11-15 12:30:00.
+    for (const timestamp of ["1970-01-01 00:00:00", "2025-11-15 12:29:59"]) {
+      const cursor = at(timestamp);
+      const error = await direct(log, { after_cursor: cursor }).catch((caught: unknown) => caught as Error);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain("Start a new tail with tail=true");
+      expect((error as Error).message).not.toContain(cursor);
+      expect((error as Error).message).not.toContain(timestamp);
+    }
+    expect(log.reads).toHaveLength(0);
+    for (const timestamp of ["2025-11-15 12:30:00", "2026-01-01 00:00:00", "2026-11-15 12:00:00"]) {
+      const page = await direct(log, { after_cursor: at(timestamp) });
+      expect(page.cursor).toBeDefined();
+    }
+    expect(log.reads).toHaveLength(3);
+  });
+
+  it("refuses an old cursor through the server with the same fixed text", async () => {
+    const log = simulation([row(1, 0)]);
+    const connected = await harness([], { tableAccess: {
+      readTables: ["syslog"],
+      targets: [{ table: "syslog", kind: "canonical", tools: ["sn_syslog"], closureComplete: true, relatedTables: ["syslog"] }],
+    }, upstream: log.upstream });
+    const cursor = encodeTailCursor({ timestamp: "1970-01-01 00:00:00", sysId: id(0), filter: hashTailFilters({}) });
+    const message = await callError(connected, "sn_syslog", { after_cursor: cursor });
+    expect(message).toContain("Start a new tail with tail=true");
+    expect(message).not.toContain(cursor);
     expect(log.reads).toHaveLength(0);
   });
 

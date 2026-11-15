@@ -228,18 +228,21 @@ export function createFilterFieldsTooLargeError(): Error {
 
 /**
  * Issue the trusted error for a tail request that cannot be served: a cursor
- * that is malformed, oversized or issued for different filters, or an offset
- * sent with a tail. The text is fixed, so a rejected cursor is never echoed,
+ * that is malformed, oversized or issued for different filters, an offset
+ * sent with a tail, or a cursor older than the longest read window. The text is fixed, so a rejected cursor is never echoed,
  * and for a cursor it does not say which of the three it was.
  */
-export function createInvalidCursorError(problem: "cursor" | "offset" = "cursor"): Error {
+export function createInvalidCursorError(problem: "cursor" | "offset" | "window" = "cursor"): Error {
   return issue({
     category: "conflict",
     reason: "invalid_cursor",
     message:
       problem === "offset"
         ? "offset cannot be used with tail or after_cursor; a tail pages by cursor."
-        : "The after_cursor cannot be used. It is malformed, or it was issued " +
+        : problem === "window"
+          ? "The after_cursor is older than the longest window a read allows. " +
+            "Start a new tail with tail=true."
+          : "The after_cursor cannot be used. It is malformed, or it was issued " +
           "for a different level, source or message filter. Repeat the original " +
           "filters with the cursor from the last call, or start a new tail with " +
           "tail=true.",
