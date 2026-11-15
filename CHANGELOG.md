@@ -10,15 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`sn_query` reads `structured_query.filter` given as a list as an implicit
-  AND (#17).** `filter: [c1, c2]` means `{type: "group", operator: "and",
+  AND.** `filter: [c1, c2]` means `{type: "group", operator: "and",
   conditions: [c1, c2]}`, and a one-element list means that element. The
   existing limit of 3 nested group levels is unchanged: a list of two or more
   takes one level, so a list that holds a 3-level group is rejected, and the
   error says so. An empty list is rejected with its own message. A list is read
   this way only as the top-level `filter` and only by `sn_query`: `sn_batch`
   write filters stay one object, so a mutation never selects records through a
-  list. The list is part of the published `tools/list` schema (#33, below).
-- **`structured_query.filter` shows a working example in `tools/list` (#19).**
+  list. The list is part of the published `tools/list` schema (see the schema entry below).
+- **`structured_query.filter` shows a working example in `tools/list`.**
   `sn_query`'s `filter` says a list is read as AND and shows one, and the
   `sn_query` description gains a one-line example with the OR group form.
   `sn_batch`'s `filter` has its own text: one condition or group, and a list is
@@ -27,8 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   such as `name` would match every row of a table without that column, since
   ServiceNow drops a condition on a field the table lacks. Costs 605 characters
   in `tools/list` (`sn_query` +459, `sn_batch` +146).
-- **Responses say whether the metadata cache was used and where the time went
-  (#21).** `structuredContent.metadata` gains two optional fields. `cache` is
+- **Responses say whether the metadata cache was used and where the time went.** `structuredContent.metadata` gains two optional fields. `cache` is
   `hit`, `miss`, `bypass` (a `force_recache` refresh) or `mixed` (several
   cacheable reads with different outcomes, such as an `sn_codesearch` with no
   `table`), and is absent when the call read no cacheable table. `timing` is
@@ -37,14 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kind was in flight, so overlapping requests count once. Only the server sets
   them (a value a tool supplies is discarded), and they are not counted
   against the result's byte limit, so they never cost a record and are never
-  dropped (#34, below). Every tool's
+  dropped (see the entry on truncated responses below). Every tool's
   `outputSchema` grows by 322 characters (7,728 in `tools/list`). Cache
   behaviour is unchanged.
 
 ### Fixed
 
 - **`sn_query` no longer fails with an internal error at the smallest byte
-  budgets (#39, a regression from the labelled hint, #37).** A truncated read
+  budgets (a regression from the labelled hint).** A truncated read
   at `max_response_bytes` 1000 with a wide row (eight fields including a long
   `description`, limit 50) returned `The operation failed unexpectedly` every
   time: the envelope's metadata leaves room for little beside the counts at
@@ -55,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `recovery` set, a hint that parses and equals `dropped_records`). The hint
   never names a value above the effective maximum.
 - **A truncation hint says which `max_response_bytes` is for the next row and
-  which for the whole page (#37).** The hint's budget was measured for the
+  which for the whole page.** The hint's budget was measured for the
   next row only, but a bare `max_response_bytes=1500` read as a value for the
   page: live, a 50-row read at 1000 bytes said 1500 and following it returned
   one row. The hint now reads `... or max_response_bytes=1500 (fits the next
@@ -71,7 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   costs 68 characters in `tools/list` (`sn_schema` 3518 to 3586, total 128190
   to 128258).
 - **The list form of `structured_query.filter` is in the published `tools/list`
-  schema, and `tools/list` is smaller (#33).** `sn_query` read a list filter,
+  schema, and `tools/list` is smaller.** `sn_query` read a list filter,
   and its descriptions tell clients to send one, but the schema it published
   had no array option, so a client that validates arguments against it (ajv)
   rejected the documented example. The list is now an explicit branch of the
@@ -82,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `StructuredQueryFilter` and `StructuredQueryCondition`, so clients that merge
   `definitions` across tools or servers do not collide. `sn_batch` shares them
   and still publishes no array option, and a list is still rejected there.
-  Behaviour is unchanged: the error messages (#27, including the specific one
+  Behaviour is unchanged: the error messages (including the specific one
   for a bad field name, a control character or an over-long value inside a
   list element, which now names the caller's own position, `filter[1].field`,
   and not a position inside the wrapper group) and the nesting rule (a list of
@@ -92,22 +91,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server rejects. `tools/list`: `sn_query` 16,574 to 10,183 characters,
   `sn_batch` 14,818 to 8,328, the whole list 140,887 to 128,006 (the part a
   model reads, without output schemas, 52,641 to 39,760). This delivers most of
-  the filter dedupe asked for in #9; stripping the bounds the server enforces
+  the filter dedupe that was asked for; stripping the bounds the server enforces
   anyway, and sharing the scalar value union, are not done. Clients that do not
   resolve `$ref` to `definitions` are not served by this form, and a client that
   dereferences `$ref` before it validates or shows the schema sees `sn_query` at
   about 22.8k characters (the list option written out), against about 13.7k
   before this change.
-- **Truncated responses keep `metadata.cache` and `metadata.timing` (#34).**
+- **Truncated responses keep `metadata.cache` and `metadata.timing`.**
   The two fields were added only when the finished response still fit
   `max_response_bytes`, so a response fitted to within about 90 bytes of its
   limit lost them, on exactly the calls where the timing helps most. They are
   no longer counted against the limit: the fit and the truncation hint's numbers
-  (#28, #29) are unchanged, and a successful response always carries both. It
+  (see the entries on `has_more` and on the hint's values) are unchanged, and a successful response always carries both. It
   can exceed `max_response_bytes` by their size, under 100 bytes. The
   `max_response_bytes` description of `sn_query`, `sn_get` and `sn_flow_view`
   says so (about 61 characters each in `tools/list`).
-- **A rejected `structured_query.filter` names the mistake (#27).** A bad
+- **A rejected `structured_query.filter` names the mistake.** A bad
   operator, an unknown or missing `type`, a bad group, a missing key, a value of
   the wrong kind or a group nested too deep used to get the same shape message,
   even when the condition sat inside a group. The message now says the first
@@ -121,7 +120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   condition type is quoted only when it is one of the known type names. The
   shape message remains for anything the walk cannot name. `tools/list` is
   byte-identical.
-- **The `sn_query` truncation hint gives values to use (#29).** The
+- **The `sn_query` truncation hint gives values to use.** The
   `max_response_bytes` description promised exact follow-up arguments, but the
   hint said "a lower limit" and "a higher max_response_bytes" with no numbers,
   and a caller who chose their own `fields` got no field advice. The hint now
@@ -138,7 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dropped_records` and the hint stays within 600 characters. The
   `max_response_bytes` description now names what the hint carries (5
   characters shorter; `tools/list` `sn_query` 16,579 to 16,574).
-- **`sn_query` no longer stops paging after page 2 (#1).** The tool sends
+- **`sn_query` no longer stops paging after page 2.** The tool sends
   `sysparm_no_count`, so ServiceNow's `X-Total-Count` header holds the size of
   the response (the page plus the one sentinel row), not the table. The handler
   trusted it: `total` echoed the rows fetched, and `has_more` turned false from
@@ -150,7 +149,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call `sn_aggregate` with `COUNT` when the table size matters. If ServiceNow
   ACLs strip rows from a page, `has_more` can read false early; cross-check
   with `sn_aggregate` `COUNT`.
-- **A read grant now allows code search (#2).** `servicenow-mcp-setup grant
+- **A read grant now allows code search.** `servicenow-mcp-setup grant
   --read <table>` binds `sn_codesearch` along with `sn_query`, `sn_get`,
   `sn_aggregate` and `sn_schema`, so `--read sys_script_include` is enough to
   search script includes; before, every code search on such a profile was
@@ -163,7 +162,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --profile <name> --read <code table>` again to add the default tools, or add
   just this one with `--tools sn_codesearch`. Neither removes a tool.
 - **A truncation hint on `sn_query` no longer disagrees with `dropped_records`,
-  and suggests fields the table has (#20).** A read cut to fit
+  and suggests fields the table has.** A read cut to fit
   `max_response_bytes` is trimmed in two steps, and the second could drop more
   rows than the hint's "Dropped n/m" said. The hint is now restated from the
   final result, so its count, its empty-result advice and its continuation
@@ -174,7 +173,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   display field the profile's field policy names, else `sys_id` alone. A call
   that passed its own `fields` is told to lower `limit` or raise
   `max_response_bytes` instead of being given a field list.
-- **A rejected `structured_query.filter` now says what is accepted (#18).**
+- **A rejected `structured_query.filter` now says what is accepted.**
   Every mistake used to read "Invalid input at structured_query.filter". The
   message now says the filter is one condition or group object, gives a working
   example, shows how to combine conditions with a group, and states the limit
@@ -183,7 +182,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **A repeated read of a small cached-table response is one request, not a
-  watermark and a read (#36).** A cache hit costs one watermark round trip, so
+  watermark and a read.** A cache hit costs one watermark round trip, so
   for a small response a hit cost about what a plain read did and a miss cost
   two requests. A read of a cacheable table whose response is under 32 KiB is
   no longer kept: the selector is remembered as small, per credential scope,
@@ -197,7 +196,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   size, not a time: `sys_dictionary` there has a watermark of about 0.5 s, and
   even a 66 KB read was faster uncached. `metadataCache.smallReadBytes` sets
   the threshold per profile (0 keeps every response).
-- **`has_more` and `next_offset` count rows dropped for size (#28). Contract
+- **`has_more` and `next_offset` count rows dropped for size. Contract
   change for truncated pages.** A page cut to fit `max_response_bytes` kept
   `has_more` and `next_offset` for the rows beyond the page, so a client that
   followed `next_offset` skipped every dropped row, and a cut last page said
@@ -221,10 +220,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sn_discover`, `sn_attach` (list) and `sn_atf` continue at `offset + rows
   returned`; any other cut collection (for example `sn_aggregate`) reports
   `has_more: true` with no `next_offset`. This also stops a byte drop made only
-  by the envelope (#23) from skipping the dropped row when `next_offset` is
+  by the envelope from skipping the dropped row when `next_offset` is
   followed, and the tool's "More records available. Call sn_query again with
   offset=N." hint is restated at `next_offset` (or says no row fit), so it never
-  contradicts it; #23's `truncated`/`dropped_records` flags in `data` are not
+  contradicts it; the envelope's `truncated`/`dropped_records` flags in `data` are not
   added here. See the README, "Paging when a response is cut to size".
 - **Code tables are in the default metadata cache.** `sys_script`,
   `sys_script_include`, `sys_ui_script`, `sys_script_client` and
@@ -459,9 +458,7 @@ parentheses are the pull requests that made each change.
   `io.github.onlyflowstech/servicenow-mcp`, and the package ships the
   `server.json` manifest for the official MCP Registry. (#14)
 - The README leads with what the server controls and what it does not, lists
-  the tools by area, and documents per-profile field policy. `AGENTS.md`
-  describes how contributors' AI agents work in this repository. (#11, #13,
-  #14)
+  the tools by area, and documents per-profile field policy. (#11, #13, #14)
 - From the 2.2.0 dev builds: the ATF tools `sn_atf_author`, `sn_atf_run`,
   `sn_atf_results` and `sn_atf_readiness`, with `setup grant --atf`;
   Windows support in `servicenow-mcp-setup`; and the npm `dev` channel for
