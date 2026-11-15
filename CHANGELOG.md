@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A default read of a code table no longer returns the script.** `sn_query`
+  and `sn_get` on `sys_script`, `sys_script_include`, `sys_ui_script`,
+  `sys_script_client` and `sys_ws_operation` return, with no `fields`,
+  identifiers and metadata instead of the script body: for `sys_script_include`
+  that is `sys_id`, `name`, `api_name`, `active` and `sys_updated_on` (the other
+  tables add what identifies a row, such as `collection` and `when` for a
+  business rule). A default read of 87 script includes used to keep 9 rows
+  before the response budget cut it; it now returns all 87. **This changes the
+  default output:** a caller that relied on the body appearing by default must
+  name it, for example `fields: "sys_id,name,script"`. `fields=all` and
+  `response_format: "detailed"` still include it, and a profile that states its
+  own `defaults` for one of these tables keeps them.
+
 ### Fixed
 
 - **A response that passes the byte cap is reported as too large, with the

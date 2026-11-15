@@ -68,6 +68,8 @@ export interface HarnessOptions {
   readonly encodedQueryAccess?: { readonly rules: readonly Record<string, unknown>[] };
   /** Also grant sn_codesearch (and reads) on the five code tables. */
   readonly codeTables?: boolean;
+  /** The profile's field policy entries, as `fieldPolicy: { fieldPolicy }` on the effective policy. */
+  readonly fieldPolicy?: Record<string, unknown>;
 }
 
 const CODE_TABLES = [
@@ -170,6 +172,9 @@ export async function harness(
         ...(options.encodedQueryAccess === undefined
           ? {}
           : { encodedQueryAccess: options.encodedQueryAccess as never }),
+        ...(options.fieldPolicy === undefined
+          ? {}
+          : { fieldPolicy: { fieldPolicy: options.fieldPolicy } as never }),
       }),
     },
     auditSink: { write: () => {}, writePreContext: () => {} },

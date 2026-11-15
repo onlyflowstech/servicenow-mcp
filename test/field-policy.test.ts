@@ -1672,7 +1672,9 @@ describe('a named custom table follows the profile "*" entry key by key', () => 
     // ITSM and system-table defaults are unchanged by this rule.
     withFieldPolicy({ "*": { readable: wide } }, () => {
       expect(resolveReadableFields("incident")).toEqual(["sys_id"]);
-      expect(resolveReadableFields("sys_script")).toEqual(["sys_id", "name", "script"]);
+      expect(resolveReadableFields("sys_script")).toEqual([
+        "sys_id", "name", "collection", "when", "active", "sys_updated_on",
+      ]);
     });
   });
 

@@ -56,6 +56,7 @@ async function rawRead(
         profile: "p",
         table: "sys_script_include",
         query: "nameSTARTSWITHInclude",
+        fields: "sys_id,name,script",
         ...extra,
       },
     });

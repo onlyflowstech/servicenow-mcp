@@ -301,9 +301,20 @@ describe("truncation hint text", () => {
   });
 });
 
+/**
+ * A table whose default fields hold a large one. The code tables' own defaults
+ * leave their script out, so a test of "defaults without the large ones" names
+ * the script among them through the profile's field policy.
+ */
+const SCRIPT_IN_DEFAULTS = { sys_script_include: { defaults: ["sys_id", "name", "script"] } };
+
 describe("the field suggestion in a truncation hint", () => {
   it("uses the table's default fields without its large ones", async () => {
-    const hint = await directHint({ table: "sys_script_include", limit: 22 }, scriptRows(22, 450));
+    const hint = await directHint(
+      { table: "sys_script_include", limit: 22 },
+      scriptRows(22, 450),
+      SCRIPT_IN_DEFAULTS
+    );
     expect(hint).toContain('fields="sys_id,name"');
     expect(hint).not.toContain("script");
     expect(hint).not.toContain("number");
@@ -337,9 +348,17 @@ describe("the field suggestion in a truncation hint", () => {
   it("offers the table's default fields to a caller who asked for all of them", async () => {
     const hint = await directHint(
       { table: "sys_script_include", fields: "all", limit: 22 },
-      scriptRows(22, 450)
+      scriptRows(22, 450),
+      SCRIPT_IN_DEFAULTS
     );
     expect(hint).toContain('fields="sys_id,name"');
+    // With the built-in defaults, which hold no script, the suggestion is the
+    // first three of them.
+    const builtIn = await directHint(
+      { table: "sys_script_include", fields: "all", limit: 22 },
+      scriptRows(22, 450)
+    );
+    expect(builtIn).toContain('fields="sys_id,name,api_name"');
   });
 
   it("never offers a field the caller could not read, or a malformed one", async () => {
@@ -439,6 +458,7 @@ async function truncated(rowBytes: number) {
     arguments: {
       profile: "p",
       table: "sys_script_include",
+      fields: "sys_id,name,script",
       limit: 22,
       max_response_bytes: SERVER_BUDGET,
     },
@@ -530,7 +550,7 @@ describe("the truncation hint agrees with dropped_records after the envelope fit
   });
 
   it("points a detailed read through the real server back at the concise default", async () => {
-    const connected = await harness(scriptRows(23, 150));
+    const connected = await harness(scriptRows(23, 150), { fieldPolicy: SCRIPT_IN_DEFAULTS });
     const result = await connected.client.callTool({
       name: "sn_query",
       arguments: {
@@ -581,7 +601,7 @@ async function readTruncated(
 ): Promise<Truncated> {
   const result = await connected.client.callTool({
     name: "sn_query",
-    arguments: { profile: "p", table: "sys_script_include", ...args },
+    arguments: { profile: "p", table: "sys_script_include", fields: "sys_id,name,script", ...args },
   });
   expect(result.isError).toBeUndefined();
   return result.structuredContent as unknown as Truncated;

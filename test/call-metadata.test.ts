@@ -76,6 +76,7 @@ async function metadataOf(connected: Connected, name: string, args: Record<strin
 
 const queryScripts = (extra: Record<string, unknown> = {}) => ({
   table: "sys_script_include",
+  fields: "sys_id,name,script",
   limit: 22,
   ...extra,
 });
@@ -279,7 +280,7 @@ describe("the byte limit", () => {
     for (const budget of budgets) {
       const result = await connected.client.callTool({
         name: "sn_query",
-        arguments: { profile: "p", table: "sys_script_include", limit: 22, max_response_bytes: budget },
+        arguments: { profile: "p", table: "sys_script_include", fields: "sys_id,name,script", limit: 22, max_response_bytes: budget },
       });
       expect(result.isError, `budget ${budget}`).toBeUndefined();
       const content = result.structuredContent as {
@@ -326,7 +327,7 @@ describe("the byte limit", () => {
     const call = (maxBytes: number) =>
       connected.client.callTool({
         name: "sn_query",
-        arguments: { profile: "p", table: "sys_script_include", limit: 22, max_response_bytes: maxBytes },
+        arguments: { profile: "p", table: "sys_script_include", fields: "sys_id,name,script", limit: 22, max_response_bytes: maxBytes },
       });
     const minimum = await call(1_000);
     const content = minimum.structuredContent as {

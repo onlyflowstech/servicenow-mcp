@@ -79,7 +79,9 @@ async function read(
 ): Promise<Page> {
   const result = await connected.client.callTool({
     name: "sn_query",
-    arguments: { profile: "p", table: "sys_script_include", ...args },
+    // The rows carry a script body so their size is controlled; a code
+    // table's default fields leave the body out, so ask for it.
+    arguments: { profile: "p", table: "sys_script_include", fields: "sys_id,name,script", ...args },
   });
   expect(result.isError).toBeUndefined();
   return result.structuredContent as unknown as Page;

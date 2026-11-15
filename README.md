@@ -1323,6 +1323,19 @@ client-side code, and the user and group tables (`sys_user`,
 `sys_user_group`, `sys_user_grmember`). Name a system table to narrow it, and
 grant it in `tableAccess` only deliberately.
 
+**Code tables list without their scripts.** A read of `sys_script`,
+`sys_script_include`, `sys_ui_script`, `sys_script_client` or `sys_ws_operation`
+that names no `fields` returns identifiers and metadata, not the script body, so
+a page of them is not cut short by a few large bodies. For `sys_script_include`
+that is `sys_id`, `name`, `api_name`, `active` and `sys_updated_on`; the others
+keep `sys_id`, `name`, `active`, `sys_updated_on` and what identifies them
+(`collection` and `when` for a business rule, `table` and `type` for a client
+script, `http_method` and `relative_path` for a scripted REST operation, `global`
+for a UI script). The body is one named field away, and `fields=all` and
+`response_format: "detailed"` still include it:
+`sn_query {table: "sys_script_include", fields: "sys_id,name,script"}`. A profile
+that states its own `defaults` for one of these tables keeps them.
+
 **Read-only profiles.** A `"*"` entry with `writable: []` does not make a
 profile read-only, because it never reaches the system tables. To make a
 profile read-only, grant no writes: `tableAccess.writeTables: []`, or

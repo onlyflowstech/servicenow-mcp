@@ -564,28 +564,32 @@ const POLICY_DEFINITIONS = {
     ],
     writable: [],
   },
+  // The code tables list by identity and metadata, never by script body. A body
+  // runs to kilobytes, so a default read that carried it filled the response
+  // budget after a handful of rows. `script` stays readable: name it in
+  // `fields` (or ask for `fields: "all"`) to read it.
   sys_script: {
-    defaults: ["sys_id", "name", "script"],
+    defaults: ["sys_id", "name", "collection", "when", "active", "sys_updated_on"],
     readable: ["sys_id", "name", "script", "active", "collection", "filter", "when", "order", "sys_updated_on"],
     writable: [],
   },
   sys_script_include: {
-    defaults: ["sys_id", "name", "script"],
+    defaults: ["sys_id", "name", "api_name", "active", "sys_updated_on"],
     readable: ["sys_id", "name", "script", "active", "api_name", "client_callable", "access", "sys_updated_on"],
     writable: [],
   },
   sys_ui_script: {
-    defaults: ["sys_id", "name", "script"],
+    defaults: ["sys_id", "name", "global", "active", "sys_updated_on"],
     readable: ["sys_id", "name", "script", "active", "global", "sys_updated_on"],
     writable: [],
   },
   sys_script_client: {
-    defaults: ["sys_id", "name", "script"],
+    defaults: ["sys_id", "name", "table", "type", "active", "sys_updated_on"],
     readable: ["sys_id", "name", "script", "active", "table", "type", "condition", "sys_updated_on"],
     writable: [],
   },
   sys_ws_operation: {
-    defaults: ["sys_id", "name", "operation_script"],
+    defaults: ["sys_id", "name", "http_method", "relative_path", "active", "sys_updated_on"],
     readable: ["sys_id", "name", "operation_script", "active", "http_method", "relative_path", "sys_updated_on"],
     writable: [],
   },
