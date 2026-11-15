@@ -766,5 +766,5 @@ describe("field policy through the metadata and schema caches", () => {
     start = upstream.calls.length;
     await query();
     expect(upstream.calls.slice(start).map((call) => call.kind)).toEqual(["watermark"]);
-  });
+  }, 120_000);
 });

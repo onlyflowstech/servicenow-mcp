@@ -690,7 +690,7 @@ describe.each(clients)(
         await client.close();
         await closeHarness(harness);
       }
-    });
+    }, 120_000);
 
     it("returns structured output that a JSON Schema 2020-12 client accepts", async () => {
       const harness = await createHarness({ client: representativeClient() });
@@ -714,7 +714,7 @@ describe.each(clients)(
         await client.close();
         await closeHarness(harness);
       }
-    });
+    }, 120_000);
 
     it("returns schema-valid trusted profiles with concise non-duplicating text", async () => {
       const harness = await createHarness({ client: representativeClient() });

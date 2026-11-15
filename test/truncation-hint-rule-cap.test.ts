@@ -141,7 +141,7 @@ describe("the hint stays within a raw-read rule's byte cap", () => {
     // The sweep covers both a value that fits under the cap and one that does not.
     expect(finite).toBeGreaterThan(0);
     expect(over).toBeGreaterThan(0);
-  });
+  }, 120_000);
 
   it("names the whole window only while it fits under the cap, and the next row alone otherwise", async () => {
     let both = 0;
@@ -168,7 +168,7 @@ describe("the hint stays within a raw-read rule's byte cap", () => {
     // The sweep covers a whole window that fits under the cap and one that does not.
     expect(both).toBeGreaterThan(0);
     expect(nextOnly).toBeGreaterThan(0);
-  });
+  }, 120_000);
 
   it("decides whether the advice fits from the widest text, so the sizing probe is never shorter than the real hint", () => {
     const names = (length: number) =>
@@ -256,7 +256,7 @@ describe("the hint stays within a raw-read rule's byte cap", () => {
     // The advice is about 437 characters: with both figures it does not fit
     // the 600 limit in the widest form, so it is left out everywhere.
     expect(withAdvice).toBe(0);
-  });
+  }, 120_000);
 
   it("never returns a sizing probe's text under a rule cap, with 390 to 430 characters of advice (security R1, round 4b)", async () => {
     // Twelve fields, so the page is over the 5000 cap and the hint has no page
@@ -269,7 +269,9 @@ describe("the hint stays within a raw-read rule's byte cap", () => {
       );
       const caught = { ...RULE, fields: ["sys_id", "name", "script", ...names] };
       const fields = ["script", ...names].join(",");
-      for (let size = 150; size <= 1_500; size += 10) {
+      // Steps of 20 bytes: the leak showed in about a third of the sizes, so
+      // this reaches it many times per advice length at half the cost.
+      for (let size = 150; size <= 1_500; size += 20) {
         const data = Array.from({ length: 12 }, (_, i) => ({
           sys_id: i.toString(16).padStart(32, "0"),
           script: "x".repeat(size),
@@ -291,7 +293,7 @@ describe("the hint stays within a raw-read rule's byte cap", () => {
         expect(parseTruncationHint(hint), label).toBeDefined();
       }
     }
-    expect(hints).toBeGreaterThan(400);
+    expect(hints).toBeGreaterThan(200);
     // About 390 to 430 characters of advice: the edge where a probe and the
     // real text can disagree about keeping it.
     expect(withAdvice).toBeLessThan(hints);

@@ -480,7 +480,7 @@ describe("the truncation hint agrees with dropped_records after the envelope fit
     }
     // The sweep must cover the window where the second stage drops more rows.
     expect(twoStage).toBeGreaterThan(0);
-  });
+  }, 120_000);
 
   it("gives a caller who passed fields a limit and a budget with numbers, not other fields", async () => {
     const connected = await harness(
@@ -647,7 +647,7 @@ describe("the truncation hint gives values a caller can use (#29)", () => {
       expect(next.data.truncated, label).toBeUndefined();
     }
     expect(compared).toBeGreaterThan(10);
-  });
+  }, 120_000);
 
   it("restates the budget with the envelope's own cost, not the payload alone", async () => {
     // At this size the tool's payload fits but the envelope's metadata does

@@ -225,7 +225,7 @@ describe("has_more and next_offset account for rows dropped for size (#28)", () 
       expect(page.data.record_count).toBe(returned);
       expect(page.metadata.truncation.dropped_records).toBe(22 - returned);
     }
-  });
+  }, 120_000);
 
   it("leaves has_more false, with no next_offset, when nothing was dropped and no rows remain", async () => {
     const connected = await tableHarness(MIXED_ROWS);

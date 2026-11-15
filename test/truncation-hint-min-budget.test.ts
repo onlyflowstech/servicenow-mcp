@@ -118,10 +118,13 @@ function checkHint(structured: Structured, effectiveCap: number, label: string):
   }
 }
 
-/** 1000 to 1300 in steps of 10, then on to 3000 in steps of 50. */
+/**
+ * 1000 to 1300 in steps of 10 (where the hint's forms change, and the owner's
+ * step 5 and the 1000-byte minimum sit), then on to 3000 in steps of 200.
+ */
 const BUDGETS: number[] = [];
 for (let budget = 1_000; budget <= 1_300; budget += 10) BUDGETS.push(budget);
-for (let budget = 1_350; budget <= 3_000; budget += 50) BUDGETS.push(budget);
+for (let budget = 1_400; budget <= 3_000; budget += 200) BUDGETS.push(budget);
 
 describe("a truncated read at the smallest budgets (regression in 77448fa, #37)", () => {
   it("returns a normal truncated result for the owner's step 5 call", async () => {

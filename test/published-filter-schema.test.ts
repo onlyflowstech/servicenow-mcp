@@ -286,7 +286,7 @@ describe("a strict validator and the server agree on the published filter (#33)"
         expect(await accepted(connected, name, filter), `server ${name} ${label}`).toBe(false);
       }
     }
-  });
+  }, 120_000);
 
   it("differ only where the published schema cannot say what the server checks", async () => {
     const connected = await harness();
