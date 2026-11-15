@@ -170,6 +170,62 @@ describe("the hint stays within a raw-read rule's byte cap", () => {
     expect(nextOnly).toBeGreaterThan(0);
   });
 
+  it("decides whether the advice fits from the widest text, so the sizing probe is never shorter than the real hint", () => {
+    const names = (length: number) =>
+      Array.from({ length: 11 }, (_, i) => `u_${String(i).padStart(2, "0")}_${"f".repeat(60)}`.slice(0, length));
+    for (let nameLength = 30; nameLength <= 46; nameLength += 1) {
+      const advice = `fields="${names(nameLength).join(",")}"`;
+      const base = { dropped: 20, total: 22, offset: 0, advice, capBytes: CAP };
+      const widest = renderTruncationHint({
+        ...base,
+        neededBytes: Number.POSITIVE_INFINITY,
+        allBytes: Number.POSITIVE_INFINITY,
+      });
+      for (const real of [
+        { neededBytes: 4_900, allBytes: 5_000 },
+        { neededBytes: 1_000, allBytes: 1_100 },
+        { neededBytes: 4_900 },
+        { neededBytes: Number.POSITIVE_INFINITY },
+      ]) {
+        const hint = renderTruncationHint({ ...base, ...real });
+        const label = `advice ${advice.length}: ${hint.length} against widest ${widest.length}`;
+        expect(widest.length, label).toBeGreaterThanOrEqual(hint.length);
+        expect(hint.length, label).toBeLessThanOrEqual(600);
+        // The same choice for both: the advice is in both or in neither.
+        expect(hint.includes("fields="), label).toBe(widest.includes("fields="));
+      }
+    }
+  });
+
+  it("never names a value above the cap, or says exceeds beside a fits-all figure, with about 440 characters of advice (security R1)", async () => {
+    const names = Array.from({ length: 11 }, (_, i) => `u_${String(i).padStart(2, "0")}_${"f".repeat(60)}`.slice(0, 38));
+    const rule = { ...RULE, fields: ["sys_id", "name", "script", ...names] };
+    const fields = ["script", ...names].join(",");
+    let hints = 0;
+    let withAdvice = 0;
+    for (let size = 150; size <= 1_500; size += 10) {
+      const data = Array.from({ length: 12 }, (_, i) => ({
+        sys_id: i.toString(16).padStart(32, "0"),
+        script: "x".repeat(size),
+        ...Object.fromEntries(names.map((name) => [name, "v"])),
+      }));
+      const { first } = await rawRead(data, { fields, limit: 12, max_response_bytes: CAP }, rule);
+      if (first.isError) continue;
+      const hint = (first.structuredContent as { data: { hint?: string } }).data.hint;
+      if (typeof hint !== "string") continue;
+      hints += 1;
+      if (hint.includes('fields="')) withAdvice += 1;
+      const label = `size ${size}: ${hint.replace(/fields="[^"]*"/u, 'fields="..."')}`;
+      expect(Math.max(0, ...named(hint)), label).toBeLessThanOrEqual(CAP);
+      expect(hint.includes("exceeds the maximum") && hint.includes("fits all"), label).toBe(false);
+      expect(parseTruncationHint(hint), label).toBeDefined();
+    }
+    expect(hints).toBeGreaterThan(20);
+    // The advice is about 437 characters: with both figures it does not fit
+    // the 600 limit in the widest form, so it is left out everywhere.
+    expect(withAdvice).toBe(0);
+  });
+
   it("is still offered up to the schema maximum when no rule caps the call", async () => {
     const wide = { ...RULE, maxResponseBytes: 100_000 };
     const { first } = await rawRead(rows(12, 2_400), { limit: 12, max_response_bytes: CAP }, wide);

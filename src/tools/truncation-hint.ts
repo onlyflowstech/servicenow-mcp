@@ -139,12 +139,22 @@ function renderHint(parts: TruncationHintParts, withAdvice: boolean): string {
 /**
  * Render the hint. When no row is left, the row itself exceeds the budget, so
  * a lower limit cannot help and the single-record read is offered instead.
- * Field advice that would push the hint past its length limit is left out, so
- * the hint always parses back.
+ * Field advice that would push the hint past its length limit, in its widest
+ * form, is left out, so the hint always parses back and a longer real text
+ * never replaces a shorter one that was used to size the rows.
  */
 export function renderTruncationHint(parts: TruncationHintParts): string {
-  const full = renderHint(parts, true);
-  return full.length <= HINT_MAX_LENGTH ? full : renderHint(parts, false);
+  // Whether the advice fits is decided once, from the widest rendering of
+  // these parts (the "exceeds the maximum" clause and a 7-digit page figure,
+  // which no real figures are longer than). A fit sizes rows with that widest
+  // text and then swaps in the real one, so the two must make the same choice:
+  // if the widest dropped the advice and the real text kept it, the real text
+  // could be hundreds of characters longer than the one the rows were sized for.
+  const widest = renderHint(
+    { ...parts, neededBytes: Number.POSITIVE_INFINITY, allBytes: Number.POSITIVE_INFINITY },
+    true
+  );
+  return renderHint(parts, widest.length <= HINT_MAX_LENGTH);
 }
 
 const DROPPED_CLAUSE = /^Dropped (\d+)\/(\d+)$/u;
