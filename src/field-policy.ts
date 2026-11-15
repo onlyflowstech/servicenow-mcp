@@ -593,6 +593,13 @@ const POLICY_DEFINITIONS = {
     readable: ["sys_id", "name", "operation_script", "active", "http_method", "relative_path", "sys_updated_on"],
     writable: [],
   },
+  // ES modules: the script is `content`, and a module is named by its `path`
+  // (the table has no `name` column of its own).
+  sys_module: {
+    defaults: ["sys_id", "path", "sys_updated_on"],
+    readable: ["sys_id", "path", "content", "sys_updated_on"],
+    writable: [],
+  },
   sys_db_object: {
     defaults: ["sys_id", "name", "label", "super_class", "sys_scope", "is_extendable"],
     readable: ["sys_id", "name", "label", "super_class", "sys_scope", "is_extendable"],
@@ -764,6 +771,7 @@ const SYSTEM_TABLES: ReadonlySet<string> = new Set([
   "sys_ui_script",
   "sys_script_client",
   "sys_ws_operation",
+  "sys_module",
   "sys_db_object",
   "sys_app",
   "sys_store_app",

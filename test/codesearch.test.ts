@@ -247,7 +247,7 @@ describe("a search with no table over a partial grant", () => {
     ]);
     expect(data.warnings).toEqual([
       "Not searched, because this profile does not allow sn_codesearch to read them: " +
-        "sys_script, sys_script_client, sys_ws_operation. To include one, run " +
+        "sys_script, sys_script_client, sys_ws_operation, sys_module. To include one, run " +
         "servicenow-mcp-setup grant --profile <profile> --read <table> --tools sn_codesearch.",
     ]);
   });
@@ -263,11 +263,20 @@ describe("a search with no table over a partial grant", () => {
     connected.get.mockImplementation(fiveTables().get as never);
     const four = await search(connected, { search_term: "needle" });
     expect(four.data.warnings).toEqual([
-      "Not searched, because this profile does not allow sn_codesearch to read it: sys_ws_operation. " +
+      "Not searched, because this profile does not allow sn_codesearch to read them: " +
+        "sys_ws_operation, sys_module. To include one, run servicenow-mcp-setup grant " +
+        "--profile <profile> --read <table> --tools sn_codesearch.",
+    ]);
+
+    const five = { ...all, sys_ws_operation: ["sn_codesearch"] };
+    const almost = await harness([], { tableAccess: grants(five) });
+    almost.get.mockImplementation(fiveTables().get as never);
+    expect((await search(almost, { search_term: "needle" })).data.warnings).toEqual([
+      "Not searched, because this profile does not allow sn_codesearch to read it: sys_module. " +
         "To include it, run servicenow-mcp-setup grant --profile <profile> --read <table> --tools sn_codesearch.",
     ]);
 
-    const full = await harness([], { tableAccess: grants({ ...all, sys_ws_operation: ["sn_codesearch"] }) });
+    const full = await harness([], { tableAccess: grants({ ...five, sys_module: ["sn_codesearch"] }) });
     full.get.mockImplementation(fiveTables().get as never);
     expect((await search(full, { search_term: "needle" })).data.warnings).toBeUndefined();
   });
@@ -277,7 +286,7 @@ describe("a search with no table over a partial grant", () => {
     const fake = fiveTables();
     connected.get.mockImplementation(fake.get as never);
     const { data } = await search(connected, { search_term: "needle" });
-    expect(new Set(fake.reads.map((read) => read.table)).size).toBe(5);
+    expect(new Set(fake.reads.map((read) => read.table)).size).toBe(6);
     expect(data.warnings).toBeUndefined();
   });
 
@@ -289,7 +298,9 @@ describe("a search with no table over a partial grant", () => {
     expect(message).toContain(
       "this profile does not allow sn_codesearch to read any of the tables it searches"
     );
-    expect(message).toContain("(sys_script_include, sys_script, sys_ui_script, sys_script_client, sys_ws_operation)");
+    expect(message).toContain(
+      "(sys_script_include, sys_script, sys_ui_script, sys_script_client, sys_ws_operation, sys_module)"
+    );
     expect(message).toContain("--read <table> --tools sn_codesearch");
     expect(message).not.toContain("incident");
     expect(connected.get).not.toHaveBeenCalled();
@@ -324,6 +335,7 @@ describe("a search with no table over a partial grant", () => {
         sys_ui_script: { readable: ["sys_id"] },
         sys_script_client: { readable: ["sys_id"] },
         sys_ws_operation: { readable: ["sys_id"] },
+        sys_module: { readable: ["sys_id"] },
       },
     });
     const message = await callError(connected, "sn_codesearch", { search_term: "needle" });
@@ -359,5 +371,97 @@ describe("a search with no table over a partial grant", () => {
       "sys_ws_operation",
     ]);
     expect(again.data.results).toEqual(first.data.results);
+  });
+});
+
+describe("ES modules", () => {
+  const module = {
+    sys_id: "e".repeat(32),
+    path: "x_app/lib/fleet.js",
+    content: `${"// pad\n".repeat(30)}import { needle } from './needle';\n`,
+  };
+
+  it("searches content by the module's path", async () => {
+    const connected = await harness([], { codeTables: true });
+    connected.get.mockResolvedValue({ result: [module] });
+    const { data } = await search(connected, { search_term: "needle", table: "sys_module" });
+    const [read] = reads(connected);
+    expect(read!.path).toBe("/api/now/table/sys_module");
+    expect(read!.params.sysparm_query).toBe("contentLIKEneedle^ORDERBYsys_id");
+    // The table has no name column: the path names the row.
+    expect(read!.params.sysparm_fields).toBe("sys_id,path,content");
+    expect(data.results[0]).toMatchObject({
+      table: "sys_module",
+      table_label: "sys_module",
+      sys_id: module.sys_id,
+      name: "x_app/lib/fleet.js",
+      line: 31,
+    });
+    expect(String(data.results[0]!.snippet)).toContain("import { needle }");
+  });
+
+  it("searches the path itself when asked, without repeating it in the projection", async () => {
+    const connected = await harness([], { codeTables: true });
+    connected.get.mockResolvedValue({ result: [module] });
+    const { data } = await search(connected, { search_term: "fleet", table: "sys_module", field: "path" });
+    const [read] = reads(connected);
+    expect(read!.params.sysparm_query).toBe("pathLIKEfleet^ORDERBYsys_id");
+    expect(read!.params.sysparm_fields).toBe("sys_id,path");
+    expect(data.results[0]).toMatchObject({ name: "x_app/lib/fleet.js", snippet: "x_app/lib/fleet.js" });
+  });
+
+  it("takes its turn in a search across tables, labelled as ES modules, and is last in a round", async () => {
+    const connected = await harness([], { codeTables: true });
+    const order = ["sys_script_include", "sys_script", "sys_ui_script", "sys_script_client", "sys_ws_operation", "sys_module"];
+    const fake = fakeInstance(
+      Object.fromEntries(
+        order.map((table, salt) => [
+          table,
+          [
+            {
+              sys_id: sysId(1, salt),
+              name: `${table}-n`,
+              path: `${table}-p`,
+              script: scriptWith("needle", 100),
+              operation_script: scriptWith("needle", 100),
+              content: scriptWith("needle", 100),
+            },
+          ],
+        ])
+      )
+    );
+    connected.get.mockImplementation(fake.get as never);
+    const { data } = await search(connected, { search_term: "needle" });
+    expect(data.results.map((row) => row.table)).toEqual(order);
+    expect(data.results.at(-1)).toMatchObject({ table_label: "ES Modules", name: "sys_module-p" });
+    // The ES module is read with its own searched field and label field.
+    const moduleRead = fake.finds().find((read) => read.table === "sys_module")!;
+    expect(moduleRead.params).toMatchObject({
+      sysparm_query: "contentLIKEneedle^ORDERBYsys_id",
+      sysparm_fields: "sys_id,path",
+    });
+  });
+
+  it("is refused for a profile that does not hold it, by name", async () => {
+    const connected = await harness([], {
+      tableAccess: grants({ sys_script_include: ["sn_codesearch"] }),
+    });
+    const message = await callError(connected, "sn_codesearch", { search_term: "x", table: "sys_module" });
+    expect(message).toContain('no read grant on "sys_module" that allows sn_codesearch');
+    expect(message).toContain("--read sys_module --tools sn_codesearch");
+    expect(connected.get).not.toHaveBeenCalled();
+  });
+
+  it("is read through the field policy: content must be readable, and a path-only profile may search the path", async () => {
+    const connected = await harness([], {
+      tableAccess: { readTables: ["*"] },
+      fieldPolicy: { sys_module: { readable: ["sys_id", "path"] } },
+    });
+    connected.get.mockResolvedValue({ result: [module] });
+    const denied = await callError(connected, "sn_codesearch", { search_term: "x", table: "sys_module" });
+    expect(denied).toContain('field "content"');
+    expect(denied).toContain("fieldPolicy.sys_module.readable");
+    const { data } = await search(connected, { search_term: "fleet", table: "sys_module", field: "path" });
+    expect(data.results).toHaveLength(1);
   });
 });

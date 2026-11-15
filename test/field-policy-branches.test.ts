@@ -89,6 +89,7 @@ describe("SNSDK-30 fixed-table response branches", () => {
         sys_id: "2".repeat(32),
         name: "Safe rule",
         snippet: "gs.info('safe')",
+        line: 1,
       },
     ]);
     expect(JSON.stringify(responseData(result))).not.toMatch(

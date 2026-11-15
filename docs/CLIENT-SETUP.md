@@ -217,7 +217,7 @@ granted implicitly and must be named with `--tools`.
 
 `sn_codesearch` is checked against each code table it searches
 (`sys_script`, `sys_script_include`, `sys_ui_script`, `sys_script_client`,
-`sys_ws_operation`), so a plain `--read sys_script_include` is enough to search
+`sys_ws_operation`, `sys_module`), so a plain `--read sys_script_include` is enough to search
 script includes. A search with no `table` searches the code tables the profile
 may read and names the others in a warning; it fails only when it may read none
 of them. It does nothing on other tables. A profile saved before this default keeps its stored tool list:

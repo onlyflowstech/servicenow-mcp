@@ -474,7 +474,7 @@ describe("complete registered-tool table plans", () => {
       { operation: "read", table: "change_request" },
       { operation: "read", table: "problem" },
     ]);
-    expect(resolveToolTableAccess("sn_codesearch", {}).requests).toHaveLength(5);
+    expect(resolveToolTableAccess("sn_codesearch", {}).requests).toHaveLength(6);
     expect(resolveToolTableAccess("sn_atf", { action: "run" }).requests).toEqual([]);
     expect(resolveToolTableAccess("sn_atf", { action: "run-suite" }).requests).toEqual([]);
     expect(
@@ -664,6 +664,7 @@ describe("the code search plan under a partial grant", () => {
       "read:sys_ui_script",
       "read:sys_script_client",
       "read:sys_ws_operation",
+      "read:sys_module",
     ]);
   });
 

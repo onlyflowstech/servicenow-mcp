@@ -869,6 +869,40 @@ describe("setup grant", () => {
         help: expect.stringContaining("sn_codesearch"),
       });
     });
+
+    it("lets a plain read grant on sys_module run a code search on ES modules, and on nothing else", async () => {
+      await grant(["--read", "sys_module"]);
+
+      expect(toolsOn("sys_module")).toEqual(READ_DEFAULTS);
+      const modules = resolveToolTableAccess("sn_codesearch", { search_term: "x", table: "sys_module" });
+      expect(() =>
+        authorizeTableAccessPlan(persistedPolicy(), modules.requests, "sn_codesearch")
+      ).not.toThrow();
+      const scripts = resolveToolTableAccess("sn_codesearch", { search_term: "x", table: "sys_script" });
+      expect(() =>
+        authorizeTableAccessPlan(persistedPolicy(), scripts.requests, "sn_codesearch")
+      ).toThrow(/denied by policy/u);
+      expectDenied("write", "sys_module", ["sn_create", "sn_update", "sn_codesearch"]);
+    });
+
+    it("searches the code tables the profile holds when it holds only some, and none when it holds none", async () => {
+      await grant(["--read", "sys_script_include,sys_module"]);
+      const plan = resolveToolTableAccess(
+        "sn_codesearch",
+        { search_term: "x" },
+        undefined,
+        persistedPolicy()
+      );
+      expect(plan.requests.map((request) => request.table)).toEqual(["sys_script_include", "sys_module"]);
+      expect(() =>
+        authorizeTableAccessPlan(persistedPolicy(), plan.requests, "sn_codesearch")
+      ).not.toThrow();
+
+      await grant(["--replace", "--read", "incident"]);
+      expect(() =>
+        resolveToolTableAccess("sn_codesearch", { search_term: "x" }, undefined, persistedPolicy())
+      ).toThrow(TablePolicyError);
+    });
   });
 
   // The merged allowlists also hold the profile's earlier grants and the
@@ -3194,7 +3228,7 @@ describe("security review fixes in setup", () => {
     }
   });
 
-  it.each(["sys_script", "sysauto_script", "sys_properties", "sys_user"])(
+  it.each(["sys_script", "sys_module", "sysauto_script", "sys_properties", "sys_user"])(
     "warns on a write grant on %s, and names the real profile, not a placeholder",
     async (table) => {
       manager.addProfile("dev", {

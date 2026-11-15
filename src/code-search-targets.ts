@@ -28,6 +28,7 @@ export const CODE_SEARCH_TARGETS: readonly CodeSearchTarget[] = Object.freeze([
   target("sys_ui_script", "UI Scripts", "script"),
   target("sys_script_client", "Client Scripts", "script"),
   target("sys_ws_operation", "Scripted REST", "operation_script"),
+  target("sys_module", "ES Modules", "content", "path"),
 ]);
 
 function target(

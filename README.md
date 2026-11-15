@@ -847,7 +847,8 @@ limit is always 1 MiB and no environment variable changes it.
 
 `sn_codesearch {search_term, table?, field?, limit?, offset?}` finds records
 whose script contains the text, in the business rules, script includes, UI
-scripts, client scripts and scripted REST operations of the instance. Each row
+scripts, client scripts, scripted REST operations and ES modules of the
+instance. Each row
 is `{table, table_label, sys_id, name, snippet, line}`: `snippet` is about 200
 characters of the script centred on the first match (`...` marks a cut) and
 `line` is the line that match is on. The comparison is the instance's
@@ -863,9 +864,16 @@ snippet is the head of the script and the row has no `line`.
   left out when the table policy does not bind `sn_codesearch` to it or the field
   policy does not let the profile read its script field. The call fails only when
   none can be read, and the error says why.
+- **ES modules** are `sys_module`: the script is its `content` column and a row
+  is named by its `path`, because the table has no `name`. It is a system table
+  like the other code tables, so a profile holds it by name
+  (`servicenow-mcp-setup grant --profile dev --read sys_module`, or a read
+  wildcard), it is cached by default like them, and `fields=all` reads `content`.
+  A default `sn_query` of it lists `sys_id`, `path` and `sys_updated_on`.
 - **A page is shared among the tables.** A search of several tables takes turns:
   each table's first match (script includes first, then business rules, UI
-  scripts, client scripts, scripted REST operations), then each table's second,
+  scripts, client scripts, scripted REST operations, ES modules), then each
+  table's second,
   and so on, each table in `sys_id` order. No table crowds the others off page
   1, and the order depends only on the data, so `offset` and `next_offset` page
   through it exactly. A table with few matches leaves its share to the others.
@@ -887,9 +895,9 @@ snippet is the head of the script and the row has no `line`.
 Stable ServiceNow metadata reads are cached per instance and credential identity
 for 24 hours by default. The default cached table patterns are
 `sys_glide_object`, `sys_dictionary`, `sys_db_object`, `sys_app`, `sys_plugins`,
-`sys_metadata*`, `sys_flow*`, and the five code tables `sn_codesearch`
+`sys_metadata*`, `sys_flow*`, and the six code tables `sn_codesearch`
 searches: `sys_script`, `sys_script_include`, `sys_ui_script`,
-`sys_script_client`, and `sys_ws_operation`. A repeated code search or
+`sys_script_client`, `sys_ws_operation`, and `sys_module`. A repeated code search or
 `sn_query` page on those tables is served from the cache while the table's
 watermark is unchanged. Set `metadataCache.ttlMs` and
 `metadataCache.tables` on a file-backed profile, or `SN_METADATA_CACHE_TTL_MS`
@@ -947,7 +955,7 @@ reads were served: `hit` (all from the cache), `miss` (from ServiceNow: nothing
 cached yet, the watermark moved, the entry expired, the table could not be
 cached just then, or the response is small and not kept), `bypass` (a `force_recache: true` refresh), or `mixed` (the
 call made several cacheable reads with different outcomes, such as an
-`sn_codesearch` with no `table` over the five code tables). It is absent when
+`sn_codesearch` with no `table` over the code tables). It is absent when
 the call read no cache-eligible table. `timing` is `{ total_ms, upstream_ms,
 watermark_ms }` in whole milliseconds, measured wall-clock: `total_ms` is the
 whole tool call; `upstream_ms` is the time during which at least one request to
@@ -1148,7 +1156,7 @@ servicenow-mcp-setup grant --profile dev --flows   # sn_flow_view's 15 tables, b
 A read grant without `--tools` binds `sn_query`, `sn_get`, `sn_aggregate`,
 `sn_schema` and `sn_codesearch` to each table it names. `sn_codesearch` is
 authorized per code table it searches (`sys_script`, `sys_script_include`,
-`sys_ui_script`, `sys_script_client`, `sys_ws_operation`), so
+`sys_ui_script`, `sys_script_client`, `sys_ws_operation`, `sys_module`), so
 `servicenow-mcp-setup grant --profile dev --read sys_script_include` lets that
 profile search script includes. A search with no `table` searches the code tables
 the profile may read and names the others in a warning; it fails only when the
@@ -1341,8 +1349,8 @@ The same policy in the list form:
   `cmdb_ci_computer`, `kb_knowledge`.
 - **Every table without a built-in entry:** `u_*` and `x_*` tables, and
   platform tables such as `change_task` and `sys_properties`.
-- **The 23 system tables:** `sys_script`, `sys_script_include`,
-  `sys_script_client`, `sys_ui_script`, `sys_ws_operation`, `sys_user`,
+- **The 24 system tables:** `sys_script`, `sys_script_include`,
+  `sys_script_client`, `sys_ui_script`, `sys_ws_operation`, `sys_module`, `sys_user`,
   `sys_user_group`, `sys_user_grmember`, `sys_db_object`, `sys_app`,
   `sys_store_app`, `v_plugin`, `sys_atf_test`, `sys_atf_test_suite`,
   `sys_atf_test_suite_test`, `sys_atf_test_result`, `sys_atf_step`,
@@ -1359,7 +1367,7 @@ projections, trimmed to the effective `readable` set.
 A `"*"` entry never reaches a system table, named or not: each key comes from
 the table's own entry, or else covers every field. The system tables include
 the script tables (`sys_script`, `sys_script_include`, `sys_script_client`,
-`sys_ui_script`, `sys_ws_operation`), whose records hold server- or
+`sys_ui_script`, `sys_ws_operation`, `sys_module`), whose records hold server- or
 client-side code, and the user and group tables (`sys_user`,
 `sys_user_group`, `sys_user_grmember`). Name a system table to narrow it, and
 grant it in `tableAccess` only deliberately.

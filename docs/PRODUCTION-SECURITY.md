@@ -287,7 +287,7 @@ SN_ALLOWED_READ_TABLES=incident,problem,change_request
 SN_ALLOWED_WRITE_TABLES=incident,change_request
 SN_TABLE_ACCESS_TARGETS=<runtime-config:reviewed-target-catalog>
 SN_METADATA_CACHE_TTL_MS=86400000
-SN_METADATA_CACHE_TABLES=sys_glide_object,sys_dictionary,sys_db_object,sys_app,sys_plugins,sys_metadata*,sys_flow*,sys_script,sys_script_include,sys_ui_script,sys_script_client,sys_ws_operation
+SN_METADATA_CACHE_TABLES=sys_glide_object,sys_dictionary,sys_db_object,sys_app,sys_plugins,sys_metadata*,sys_flow*,sys_script,sys_script_include,sys_ui_script,sys_script_client,sys_ws_operation,sys_module
 ```
 
 Metadata caching works in every auth mode, including the client_credentials
@@ -326,11 +326,15 @@ ACLs on the cached rows are not evaluated on the hit. Do not add it, and review 
 table you do add against the same two questions: are its rows ACL-restricted
 per user, and would a stale or cross-identity answer be a disclosure?
 
-The five code tables in the default list (`sys_script`, `sys_script_include`,
-`sys_ui_script`, `sys_script_client`, `sys_ws_operation`) hold script bodies,
-and scripts can contain hard-coded credentials. A cached entry keeps the whole
-response of a read, so it holds the full `script` or `operation_script` of
-every row read, not the 200-character snippet `sn_codesearch` shows. Entries
+The six code tables in the default list (`sys_script`, `sys_script_include`,
+`sys_ui_script`, `sys_script_client`, `sys_ws_operation`, `sys_module`) hold
+script bodies, and scripts can contain hard-coded credentials. A cached entry
+keeps the whole response of a read, so it holds the full `script`,
+`operation_script` or `content` of every row read, not the 200-character snippet
+`sn_codesearch` shows. `sys_variable_value`, which holds ATF step inputs among
+every other table's variable values, is not in the default list: an ATF step
+script search reads it straight through, and an operator who adds it to the list
+caches those values for the TTL, so add it only after the same review. Entries
 live only in process memory, partitioned by instance and credential identity,
 and are never written to disk or to logs. They are kept for up to the cache TTL
 (24 hours by default), within 32 MiB per credential and 128 MiB overall. They

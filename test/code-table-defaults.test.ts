@@ -32,6 +32,12 @@ describe("the code tables' default fields", () => {
     expect(isAllFieldSelection(resolveReadableFields(table, { responseFormat: "detailed" }))).toBe(true);
   });
 
+  it("list ES modules by path, with the content one named field away", () => {
+    expect(resolveReadableFields("sys_module")).toEqual(["sys_id", "path", "sys_updated_on"]);
+    expect(resolveReadableFields("sys_module", { fields: "content" })).toEqual(["content"]);
+    expect(isAllFieldSelection(resolveReadableFields("sys_module", { fields: "all" }))).toBe(true);
+  });
+
   it("lists script includes by name, API name and state", () => {
     expect(resolveReadableFields("sys_script_include")).toEqual([
       "sys_id",

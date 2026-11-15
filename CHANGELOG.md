@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`sn_codesearch` searches ES modules.** `table: "sys_module"` searches the
+  `content` column and names each row by its `path` (the table has no `name`);
+  with no `table` it takes its turn after the other code tables, labelled "ES
+  Modules" (a search that names the table labels rows with the table name, as for
+  the others). `sys_module` follows the same rules as the other code tables: it
+  is a built-in **system table** (24 now), so a profile's `"*"` field entry never
+  reaches it and it is granted by name, a plain `--read sys_module` binds
+  `sn_codesearch` to it with the other default read tools, `content` goes through
+  the field policy and the sensitive-name rules, it is in the default metadata
+  cache list, and a write grant on it is flagged as code execution.
+
 ### Changed
 
 - **A default read of a code table no longer returns the script.** `sn_query`

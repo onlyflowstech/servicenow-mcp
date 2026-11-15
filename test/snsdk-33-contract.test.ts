@@ -744,9 +744,11 @@ describe("SNSDK-33 bounded collection inputs", () => {
       result?.structuredContent
     );
 
+    // The tables take turns (script includes, business rules, UI scripts, ...),
+    // so offset 2 is the third table's first row, not the third of a table sort.
     expect(structured.data.results.map((entry) => (entry as { table: string }).table)).toEqual([
-      "sys_script_include",
       "sys_ui_script",
+      "sys_script_client",
     ]);
     expect(structured.metadata.pagination).toMatchObject({
       offset: 2,
@@ -754,7 +756,7 @@ describe("SNSDK-33 bounded collection inputs", () => {
       has_more: true,
       next_offset: 4,
     });
-    expect(get).toHaveBeenCalledTimes(5);
+    expect(get).toHaveBeenCalledTimes(6);
     for (const call of get.mock.calls) {
       expect(call[1]).toMatchObject({ sysparm_limit: "5", sysparm_offset: "0" });
     }

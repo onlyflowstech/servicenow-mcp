@@ -80,6 +80,7 @@ const CODE_TABLES = [
   "sys_ui_script",
   "sys_script_client",
   "sys_ws_operation",
+  "sys_module",
 ] as const;
 
 export async function harness(

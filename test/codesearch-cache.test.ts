@@ -14,7 +14,14 @@ import { fakeInstance, scriptWith, sysId } from "./code-search-fake.js";
  */
 
 const CONFIG = { instance: "https://codesearch-cache.service-now.com" } as unknown as ServiceNowConfig;
-const TABLES = ["sys_script_include", "sys_script", "sys_ui_script", "sys_script_client", "sys_ws_operation"];
+const TABLES = [
+  "sys_script_include",
+  "sys_script",
+  "sys_ui_script",
+  "sys_script_client",
+  "sys_ws_operation",
+  "sys_module",
+];
 let counter = 0;
 
 function world(bodySize: number, rowsPerTable = 8) {
@@ -76,7 +83,7 @@ describe("a code search through the cache", () => {
     const cold = await search();
     // Rows (five tables) and scripts (the tables the page reached), once each.
     const coldReads = fake.reads.length;
-    expect(fake.finds()).toHaveLength(5);
+    expect(fake.finds()).toHaveLength(6);
     expect(fake.bodies().length).toBeGreaterThan(0);
     // The watermark is read once per table per call, not once per read.
     expect(watermarks.slice().sort()).toEqual([...TABLES].sort());

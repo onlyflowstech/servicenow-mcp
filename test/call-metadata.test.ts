@@ -17,7 +17,7 @@ let instanceCounter = 0;
 interface Scripted {
   /** Per table: the newest row and total count that the watermark read returns. */
   readonly tables: Map<string, { newest: typeof NEWEST; count: number }>;
-  readonly reads: Array<{ table: string; kind: "watermark" | "rows" }>;
+  readonly reads: Array<{ table: string; kind: "watermark" | "rows" | "scripts" }>;
   readonly upstream: NonNullable<Parameters<typeof harness>[1]>["upstream"];
 }
 
@@ -43,7 +43,10 @@ function scripted(delayMs = 0): Scripted {
           }),
         };
       }
-      reads.push({ table, kind: "rows" });
+      reads.push({
+        table,
+        kind: (params?.sysparm_query ?? "").startsWith("sys_idIN") ? "scripts" : "rows",
+      });
       return {
         data: { result: [{ sys_id: "b".repeat(32), name: `${table} fixture`, script: "needle" }] },
         status: 200,
@@ -99,22 +102,22 @@ describe("metadata.cache", () => {
     expect((await metadataOf(connected, "sn_query", queryScripts())).cache).toBe("miss");
   });
 
-  it("is mixed for a no-table sn_codesearch whose five reads differ, then hit when all hit", async () => {
-    const { connected } = await cachedServer();
-    // Warm two of the five code tables.
-    for (const table of ["sys_script", "sys_ui_script"]) {
-      expect((await metadataOf(connected, "sn_codesearch", { search_term: "needle", table })).cache).toBe("miss");
-    }
+  it("is mixed for a no-table sn_codesearch whose reads differ, then hit when all hit", async () => {
+    const { connected, double } = await cachedServer();
+    expect((await metadataOf(connected, "sn_codesearch", { search_term: "needle" })).cache).toBe("miss");
+    // One table changes, so its reads miss while the other tables' still hit.
+    double.tables.get("sys_script")!.count += 1;
     const mixed = await metadataOf(connected, "sn_codesearch", { search_term: "needle" });
     expect(mixed.cache).toBe("mixed");
-    // Every table is warm now, so all five reads hit and the call says so.
+    // Every table is warm again, so all reads hit and the call says so.
     expect((await metadataOf(connected, "sn_codesearch", { search_term: "needle" })).cache).toBe("hit");
   });
 
-  it("is miss when all five reads miss", async () => {
+  it("is miss when every read misses: the rows, then the scripts of the rows it returns", async () => {
     const { connected, double } = await cachedServer();
     expect((await metadataOf(connected, "sn_codesearch", { search_term: "needle" })).cache).toBe("miss");
-    expect(double.reads.filter((read) => read.kind === "rows")).toHaveLength(5);
+    expect(double.reads.filter((read) => read.kind === "rows")).toHaveLength(6);
+    expect(double.reads.filter((read) => read.kind === "scripts")).toHaveLength(6);
   });
 
   it("is absent when the call made no cacheable read, and timing is still there", async () => {

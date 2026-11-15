@@ -179,6 +179,7 @@ export const serviceNowToolModules = Object.freeze([
   existingToolModule(codesearch, {
     permissions: ["read"],
     tables: dynamicTable("Caller-selected approved code table or the fixed code-table set.", [
+      "sys_module",
       "sys_script",
       "sys_script_client",
       "sys_script_include",

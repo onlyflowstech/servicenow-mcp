@@ -12,7 +12,7 @@ import {
 } from "../src/tools/codesearch.js";
 
 /**
- * A no-table sn_codesearch reads five code tables. The reads run together,
+ * A no-table sn_codesearch reads six code tables. The reads run together,
  * through the real client so its per-origin limiter applies, over a fetch
  * double that tracks how many requests are in flight.
  */
@@ -23,6 +23,7 @@ const TABLES = [
   "sys_ui_script",
   "sys_script_client",
   "sys_ws_operation",
+  "sys_module",
 ] as const;
 
 let counter = 0;
@@ -100,13 +101,13 @@ afterEach(() => {
 });
 
 describe("sn_codesearch per-table reads", () => {
-  it("reads the five tables together, within the client's concurrency limit, cold then warm", async () => {
+  it("reads the six tables together, within the client's concurrency limit, cold then warm", async () => {
     const { call, watermarks, searches, peak } = harness();
 
     const cold = parseText(await call());
     expect(watermarks.slice().sort()).toEqual([...TABLES].sort());
     expect(searches.slice().sort()).toEqual([...TABLES].sort());
-    expect(cold).toHaveLength(5);
+    expect(cold).toHaveLength(6);
     // More than one in flight (it is not serial), never above the limit.
     expect(peak()).toBeGreaterThan(1);
     expect(peak()).toBeLessThanOrEqual(DEFAULT_MAX_CONCURRENT_REQUESTS);
@@ -121,7 +122,7 @@ describe("sn_codesearch per-table reads", () => {
 
   it("returns results in the fixed table order, script includes first, whichever read finishes first", async () => {
     const { call } = harness({
-      delays: { sys_script: 60, sys_script_include: 45, sys_ui_script: 30, sys_script_client: 15, sys_ws_operation: 1 },
+      delays: { sys_script: 60, sys_script_include: 45, sys_ui_script: 30, sys_script_client: 15, sys_ws_operation: 1, sys_module: 1 },
     });
     const results = parseText(await call()) as Array<{ table: string }>;
     expect(results.map((row) => row.table)).toEqual([
@@ -130,6 +131,7 @@ describe("sn_codesearch per-table reads", () => {
       "sys_ui_script",
       "sys_script_client",
       "sys_ws_operation",
+      "sys_module",
     ]);
   });
 
@@ -147,6 +149,7 @@ describe("sn_codesearch per-table reads", () => {
       "sys_ws_operation",
     ]);
     expect(parsed.results.map((row: { table: string }) => row.table).sort()).toEqual([
+      "sys_module",
       "sys_script",
       "sys_script_client",
       "sys_ui_script",

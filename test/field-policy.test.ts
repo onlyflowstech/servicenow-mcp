@@ -599,6 +599,7 @@ describe("SNSDK-30 dispatcher preparation", () => {
     ["sys_ui_script", "script"],
     ["sys_script_client", "script"],
     ["sys_ws_operation", "operation_script"],
+    ["sys_module", "content"],
   ] as const)(
     "denies a code search on %s when its %s field is not readable, as sn_query does",
     (table, scriptField) => {
@@ -1210,6 +1211,7 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
     "sys_ui_script",
     "sys_script_client",
     "sys_ws_operation",
+    "sys_module",
     "sys_user",
     "sys_user_group",
     "sys_user_grmember",
@@ -1251,8 +1253,8 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
     ])
   );
 
-  it("splits the 34 built-in tables into 11 ITSM and 23 system tables", () => {
-    expect(new Set([...ITSM_TABLES, ...SYSTEM_TABLES]).size).toBe(34);
+  it("splits the 35 built-in tables into 11 ITSM and 24 system tables", () => {
+    expect(new Set([...ITSM_TABLES, ...SYSTEM_TABLES]).size).toBe(35);
     for (const [table, resolved] of builtIn) {
       expect(resolved.all, table).toEqual(["*"]);
     }

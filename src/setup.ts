@@ -280,10 +280,13 @@ const MINIMUM_NODE_MAJOR = 20;
  * Tools bound to a table by a read grant when `--tools` is not given.
  *
  * `sn_codesearch` is authorized per code table it searches (sys_script,
- * sys_script_include, sys_ui_script, sys_script_client, sys_ws_operation), so
- * binding it here is what lets a plain read grant on one of those tables run a
- * code search on it. On any other table it is inert: a search names only code
- * tables, so the binding grants nothing there.
+ * sys_script_include, sys_ui_script, sys_script_client, sys_ws_operation and
+ * sys_module), so binding it here is what lets a plain read grant on one of
+ * those tables run a code search on it. ATF step scripts are searched through
+ * three tables (sys_variable_value, sys_atf_step and sys_atf_test), and a plain
+ * read grant on all three allows that search the same way. On any other table
+ * it is inert: a search names only those tables, so the binding grants nothing
+ * there.
  */
 const DEFAULT_READ_TOOLS: readonly string[] = Object.freeze([
   "sn_query",

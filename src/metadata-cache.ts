@@ -70,8 +70,8 @@ export const DEFAULT_METADATA_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
  *   original metadata set; not every table in it has a reader in this
  *   server today.
  * - sys_script, sys_script_include, sys_ui_script, sys_script_client,
- *   sys_ws_operation: the five code tables sn_codesearch searches, which
- *   sn_query also reads. Each row carries a full script body, so a repeated
+ *   sys_ws_operation, sys_module: the code tables sn_codesearch searches (the
+ *   last holds ES modules), which sn_query also reads. Each row carries a full script body, so a repeated
  *   search or page is among the heaviest reads this server makes. Editing a
  *   script moves sys_updated_on, which the watermark sees, so a cached search
  *   never outlives a save. They are not covered by sys_metadata*: patterns
@@ -106,6 +106,7 @@ export const DEFAULT_METADATA_CACHE_TABLES = Object.freeze([
   "sys_ui_script",
   "sys_script_client",
   "sys_ws_operation",
+  "sys_module",
 ]);
 
 export interface MetadataCacheConfigInput {

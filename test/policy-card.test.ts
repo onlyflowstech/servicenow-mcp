@@ -258,8 +258,8 @@ describe("policy card matches the enforced policy", () => {
     expect(byTable.get("sys_user")!.class).toBe("system");
     expect(byTable.get("sys_user")!.readable).toBe("*");
     expect(byTable.get("sys_user")!.writable).toBe("*");
-    expect(renderPolicyCard(result)).toContain("never the 23 system tables");
-    expect(BUILT_IN_TABLE_CLASSES.system).toHaveLength(23);
+    expect(renderPolicyCard(result)).toContain("never the 24 system tables");
+    expect(BUILT_IN_TABLE_CLASSES.system).toHaveLength(24);
   });
 
   it("reports class and domain fields only where the profile lists them", () => {
@@ -949,7 +949,7 @@ describe("a wildcard profile states what the system tables keep", () => {
       other.system_tables.fully_writable.length + other.system_tables.write_narrowed.length
     ).toBe(BUILT_IN_TABLE_CLASSES.system.length);
     const text = renderPolicyCard(result);
-    expect(text).toContain("does not apply to the 23 system tables");
+    expect(text).toContain("does not apply to the 24 system tables");
     expect(text).toContain("stay fully writable (every field)");
   });
 

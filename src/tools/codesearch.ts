@@ -63,6 +63,8 @@ interface Selected {
   readonly target: CodeSearchTarget;
   /** The field searched, and the one a snippet is cut from. */
   readonly field: string;
+  /** Named by the caller; its rows carry the table name as their label, as they always have. */
+  readonly named: boolean;
 }
 
 /** One matching row, found before its script is read. */
@@ -176,9 +178,16 @@ function selectTargets(args: z.infer<typeof schema>): {
   if (args.table !== undefined) {
     const target = codeSearchTarget(normalizeTableName(args.table));
     if (target === undefined) throw new TypeError("table is not searchable");
-    return { selection: [{ target, field: args.field || target.defaultField }], skipped: [] };
+    return {
+      selection: [{ target, field: args.field || target.defaultField, named: true }],
+      skipped: [],
+    };
   }
-  const all = CODE_SEARCH_TARGETS.map((target) => ({ target, field: target.defaultField }));
+  const all = CODE_SEARCH_TARGETS.map((target) => ({
+    target,
+    field: target.defaultField,
+    named: false,
+  }));
   const authorized = all.filter(
     (entry) => preparedReadableFields(args, entry.target.table) !== undefined
   );
@@ -389,7 +398,7 @@ function toRow(match: Match, term: string): Record<string, unknown> {
   const { target } = match.selected;
   const row: Record<string, unknown> = {
     table: target.table,
-    table_label: target.label,
+    table_label: match.selected.named ? target.table : target.label,
     sys_id: match.sysId,
     name: match.name,
   };

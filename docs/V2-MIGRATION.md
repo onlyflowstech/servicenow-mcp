@@ -764,7 +764,7 @@ then the `"*"` entry, then every field, on:
   `cmdb_ci_computer`, `kb_knowledge`;
 - every table without a built-in entry, named in the policy or not.
 
-The other 23 built-in tables are system tables, listed in the
+The other 24 built-in tables are system tables, listed in the
 [field policy reference](../README.md#field-policy). A `"*"` entry never
 reaches them, named or not.
 

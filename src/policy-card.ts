@@ -355,7 +355,7 @@ export function renderPolicyCard(card: PolicyCard): string {
     "",
     "Fields: all* = every field except sensitive-name fields (password, token, secret,",
     "  key, ...), which are never readable or writable.",
-    'A "*" field-policy entry covers ITSM and custom tables, never the 23 system tables;',
+    `A "*" field-policy entry covers ITSM and custom tables, never the ${BUILT_IN_TABLE_CLASSES.system.length} system tables;`,
     "  a system table is narrowed only by naming it.",
     `Explicit-listing fields (${card.explicit_write_fields.join(", ")}): writable only where`,
     "  a profile lists them by name; a writable wildcard never covers them. A listed one is",

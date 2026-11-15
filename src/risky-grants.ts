@@ -32,6 +32,7 @@ export const RISKY_WRITE_TABLES: readonly string[] = Object.freeze([
   "sys_ui_script",
   "sys_script_client",
   "sys_ws_operation",
+  "sys_module",
   "sys_processor",
   // Configuration, identity and authentication.
   "sys_properties",
