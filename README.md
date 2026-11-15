@@ -855,8 +855,14 @@ case-insensitive `LIKE`; if the text holds no literal match for the term, the
 snippet is the head of the script and the row has no `line`.
 
 - **One table or all.** With `table`, one table is searched (and `field` can
-  name another field of it, such as `name`). With none, all five code tables
-  are searched.
+  name another field of it, such as `name`). With none, every code table the
+  profile may read is searched, and the tables left out are named in a warning
+  (`Not searched, because this profile does not allow sn_codesearch to read
+  them: sys_script, sys_ws_operation. To include one, run servicenow-mcp-setup
+  grant --profile <profile> --read <table> --tools sn_codesearch.`). A table is
+  left out when the table policy does not bind `sn_codesearch` to it or the field
+  policy does not let the profile read its script field. The call fails only when
+  none can be read, and the error says why.
 - **A page is shared among the tables.** A search of several tables takes turns:
   each table's first match (script includes first, then business rules, UI
   scripts, client scripts, scripted REST operations), then each table's second,
@@ -1144,14 +1150,16 @@ A read grant without `--tools` binds `sn_query`, `sn_get`, `sn_aggregate`,
 authorized per code table it searches (`sys_script`, `sys_script_include`,
 `sys_ui_script`, `sys_script_client`, `sys_ws_operation`), so
 `servicenow-mcp-setup grant --profile dev --read sys_script_include` lets that
-profile search script includes; a search with no `table` needs a read grant on
-all five. On any other table the binding is inert. **A profile written before
+profile search script includes. A search with no `table` searches the code tables
+the profile may read and names the others in a warning; it fails only when the
+profile may read none of them. On any other table the binding is inert. **A profile written before
 `sn_codesearch` was a default keeps the tool list it was saved with** and is not
 rewritten: re-run the same `grant --read <code table>` to add it, or pass
 `--tools sn_codesearch` to add only that tool. Neither removes a tool. The
 profile's field policy still decides the script field: `sn_codesearch` is
 denied on a code table whose script field is not readable, exactly as `sn_query`
-is for that field.
+is for that field (in a search with no `table` that table is left out and named
+in the warning instead).
 
 A call the table policy refuses says which table and which tool were refused, and
 whether the table is missing from the profile or only the tool is, and it gives

@@ -81,7 +81,8 @@ function existingToolModule<TSchema extends AnyZodObject>(
       resolveToolTableAccess(
         tool.definition.name,
         args,
-        policy.encodedQueryAccess
+        policy.encodedQueryAccess,
+        policy.tableAccess
     ),
     handler: async (args, services) =>
       envelopeCompatibilityResult(

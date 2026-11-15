@@ -13,7 +13,7 @@ import type { ServiceNowConfig } from "../src/config.js";
 import type { ExecutionContextDependencies } from "../src/execution-context.js";
 import type { ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
-import { createTableAccessPolicy } from "../src/table-policy.js";
+import { createTableAccessPolicy, type TableAccessPolicyInput } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
 import { withQueryFields } from "./fixtures/echo-fields.js";
 
@@ -68,6 +68,8 @@ export interface HarnessOptions {
   readonly encodedQueryAccess?: { readonly rules: readonly Record<string, unknown>[] };
   /** Also grant sn_codesearch (and reads) on the five code tables. */
   readonly codeTables?: boolean;
+  /** Replaces the table policy (the default grants incident, a few others and, with `codeTables`, the code tables). */
+  readonly tableAccess?: TableAccessPolicyInput;
   /** The profile's field policy entries, as `fieldPolicy: { fieldPolicy }` on the effective policy. */
   readonly fieldPolicy?: Record<string, unknown>;
 }
@@ -122,7 +124,7 @@ export async function harness(
     getConfig: vi.fn(() => config),
     getClient: vi.fn(() => serviceNowClient),
   } as unknown as ProfileManager;
-  const tableAccess = createTableAccessPolicy({
+  const tableAccess = createTableAccessPolicy(options.tableAccess ?? {
     readTables: [
       "incident",
       "sys_script_include",

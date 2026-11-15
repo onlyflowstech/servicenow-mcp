@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A code search with no `table` searches the code tables the profile may read.**
+  It needed a read grant on all five (and `sn_codesearch` bound to each), so a
+  profile that held only `sys_script_include` was denied outright while the same
+  call with `table: "sys_script_include"` worked. It now decides each table on
+  its own, by the table policy and by the field policy of its script field,
+  searches the ones it may read, and adds a warning that names the others and
+  the `grant` command that includes one. It fails only when none can be read: the
+  error names the tool and the grant, or, when the tables are granted but their
+  script field is not readable, the field and the key to change. The dispatcher
+  still authorizes the narrowed plan, so this never widens access.
 - **A large code search returns results instead of failing.** `sn_codesearch`
   read the full script of `limit + 1` rows from every table it searched, so
   above about 100 rows (150, 200 and 300 failed every time on an instance of

@@ -88,9 +88,10 @@ export async function handler(
 ) {
   const signal = context?.signal;
   const term = escapeQueryValue(args.search_term);
-  const selection = selectTargets(args);
+  const { selection, skipped } = selectTargets(args);
   const single = selection.length === 1;
   const warnings: string[] = [];
+  if (skipped.length > 0) warnings.push(skippedWarning(skipped));
 
   // A search of one table reads exactly the page asked for (the instance
   // applies the offset). A search of several takes turns through the tables,
@@ -161,15 +162,46 @@ export async function handler(
   );
 }
 
-/** The tables this call searches: all, or the one named. */
-function selectTargets(args: z.infer<typeof schema>): Selected[] {
+/**
+ * The tables this call searches: the one named, or every code table the
+ * profile may read. The dispatcher's access plan marks only the tables it
+ * authorized, with the fields it approved, so a table without that mark was
+ * refused by the table policy or the field policy and is skipped. A call that
+ * did not come through the dispatcher carries no marks and searches all of them.
+ */
+function selectTargets(args: z.infer<typeof schema>): {
+  readonly selection: Selected[];
+  readonly skipped: string[];
+} {
   if (args.table !== undefined) {
     const target = codeSearchTarget(normalizeTableName(args.table));
     if (target === undefined) throw new TypeError("table is not searchable");
-    return [{ target, field: args.field || target.defaultField }];
+    return { selection: [{ target, field: args.field || target.defaultField }], skipped: [] };
   }
   const all = CODE_SEARCH_TARGETS.map((target) => ({ target, field: target.defaultField }));
-  return all;
+  const authorized = all.filter(
+    (entry) => preparedReadableFields(args, entry.target.table) !== undefined
+  );
+  if (authorized.length === 0) return { selection: all, skipped: [] };
+  return {
+    selection: authorized,
+    skipped: all
+      .filter((entry) => !authorized.includes(entry))
+      .map((entry) => entry.target.table),
+  };
+}
+
+/**
+ * Name the tables a search left out. Fixed table names and one fixed command:
+ * nothing of the profile's rules, and nothing the caller sent.
+ */
+function skippedWarning(tables: readonly string[]): string {
+  return (
+    `Not searched, because this profile does not allow sn_codesearch to read ` +
+    `${tables.length === 1 ? "it" : "them"}: ${tables.join(", ")}. ` +
+    `To include ${tables.length === 1 ? "it" : "one"}, run servicenow-mcp-setup grant ` +
+    `--profile <profile> --read <table> --tools sn_codesearch.`
+  );
 }
 
 /**

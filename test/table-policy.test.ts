@@ -644,3 +644,59 @@ describe("denial detail", () => {
     expect(text).toContain("--read <table> --tools sn_codesearch");
   });
 });
+
+describe("the code search plan under a partial grant", () => {
+  const policy = createTableAccessPolicy({
+    readTables: ["sys_script_include", "sys_ui_script", "sys_script"],
+    targets: [
+      { table: "sys_script_include", kind: "canonical", tools: ["sn_codesearch"], closureComplete: true, relatedTables: ["sys_script_include"] },
+      { table: "sys_ui_script", kind: "canonical", tools: ["sn_codesearch", "sn_query"], closureComplete: true, relatedTables: ["sys_ui_script"] },
+      { table: "sys_script", kind: "canonical", tools: ["sn_query"], closureComplete: true, relatedTables: ["sys_script"] },
+    ],
+  });
+  const reads = (access: ReturnType<typeof resolveToolTableAccess>) =>
+    access.requests.map(({ operation, table }) => `${operation}:${table}`);
+
+  it("asks for every code table when no policy is given, as before", () => {
+    expect(reads(resolveToolTableAccess("sn_codesearch", { search_term: "x" }))).toEqual([
+      "read:sys_script_include",
+      "read:sys_script",
+      "read:sys_ui_script",
+      "read:sys_script_client",
+      "read:sys_ws_operation",
+    ]);
+  });
+
+  it("asks only for the tables the profile holds for the tool, which the dispatcher then authorizes", () => {
+    const access = resolveToolTableAccess("sn_codesearch", { search_term: "x" }, undefined, policy);
+    expect(reads(access)).toEqual(["read:sys_script_include", "read:sys_ui_script"]);
+    expect(() => authorizeTableAccessPlan(policy, access.requests, "sn_codesearch")).not.toThrow();
+  });
+
+  it("fails, saying none of the tables is allowed, when the profile holds none for the tool", () => {
+    const none = createTableAccessPolicy({
+      readTables: ["sys_script"],
+      targets: [
+        { table: "sys_script", kind: "canonical", tools: ["sn_query"], closureComplete: true, relatedTables: ["sys_script"] },
+      ],
+    });
+    try {
+      resolveToolTableAccess("sn_codesearch", { search_term: "x" }, undefined, none);
+      throw new Error("expected a denial");
+    } catch (error) {
+      expect((error as TablePolicyError).detail).toMatchObject({
+        reason: "none_granted",
+        operation: "read",
+        tool: "sn_codesearch",
+      });
+    }
+  });
+
+  it("decides a named table by the table policy as before", () => {
+    expect(() =>
+      resolveToolTableAccess("sn_codesearch", { search_term: "x", table: "sys_script" }, undefined, policy)
+    ).not.toThrow();
+    const denied = resolveToolTableAccess("sn_codesearch", { search_term: "x", table: "sys_script" }, undefined, policy);
+    expect(() => authorizeTableAccessPlan(policy, denied.requests, "sn_codesearch")).toThrow(TablePolicyError);
+  });
+});

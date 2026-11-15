@@ -186,3 +186,178 @@ describe("paging through the server", () => {
     expect(page.metadata.pagination).toMatchObject({ order_by: ["sys_id"] });
   });
 });
+
+/** A profile that holds some code tables, each bound to the tools given. */
+function grants(tools: Record<string, readonly string[]>) {
+  return {
+    readTables: Object.keys(tools),
+    targets: Object.entries(tools).map(([table, bound]) => ({
+      table,
+      kind: "canonical" as const,
+      tools: [...bound],
+      closureComplete: true as const,
+      relatedTables: [table],
+    })),
+  };
+}
+
+function fiveTables() {
+  const tables = ["sys_script_include", "sys_script", "sys_ui_script", "sys_script_client", "sys_ws_operation"];
+  return fakeInstance(
+    Object.fromEntries(
+      tables.map((table, salt) => [
+        table,
+        Array.from({ length: 4 }, (_, index) => ({
+          sys_id: sysId(index, salt),
+          name: `${table}-${index}`,
+          script: scriptWith("needle", 120),
+          operation_script: scriptWith("needle", 120),
+        })),
+      ])
+    )
+  );
+}
+
+describe("a search with no table over a partial grant", () => {
+  it("searches the tables the profile holds for sn_codesearch and names the ones it left out", async () => {
+    const connected = await harness([], {
+      tableAccess: grants({
+        sys_script_include: ["sn_codesearch"],
+        sys_ui_script: ["sn_query", "sn_codesearch"],
+        sys_script: ["sn_query"],
+      }),
+    });
+    const fake = fiveTables();
+    connected.get.mockImplementation(fake.get as never);
+    const { data } = await search(connected, { search_term: "needle", limit: 20 });
+
+    // Only the two tables it may read were asked; sys_script is bound to sn_query only.
+    expect(new Set(fake.reads.map((read) => read.table))).toEqual(
+      new Set(["sys_script_include", "sys_ui_script"])
+    );
+    expect(data.results.map((row) => row.table)).toEqual([
+      "sys_script_include",
+      "sys_ui_script",
+      "sys_script_include",
+      "sys_ui_script",
+      "sys_script_include",
+      "sys_ui_script",
+      "sys_script_include",
+      "sys_ui_script",
+    ]);
+    expect(data.warnings).toEqual([
+      "Not searched, because this profile does not allow sn_codesearch to read them: " +
+        "sys_script, sys_script_client, sys_ws_operation. To include one, run " +
+        "servicenow-mcp-setup grant --profile <profile> --read <table> --tools sn_codesearch.",
+    ]);
+  });
+
+  it("says it in the singular for one table, and adds no warning when all are held", async () => {
+    const all = {
+      sys_script_include: ["sn_codesearch"],
+      sys_script: ["sn_codesearch"],
+      sys_ui_script: ["sn_codesearch"],
+      sys_script_client: ["sn_codesearch"],
+    };
+    const connected = await harness([], { tableAccess: grants(all) });
+    connected.get.mockImplementation(fiveTables().get as never);
+    const four = await search(connected, { search_term: "needle" });
+    expect(four.data.warnings).toEqual([
+      "Not searched, because this profile does not allow sn_codesearch to read it: sys_ws_operation. " +
+        "To include it, run servicenow-mcp-setup grant --profile <profile> --read <table> --tools sn_codesearch.",
+    ]);
+
+    const full = await harness([], { tableAccess: grants({ ...all, sys_ws_operation: ["sn_codesearch"] }) });
+    full.get.mockImplementation(fiveTables().get as never);
+    expect((await search(full, { search_term: "needle" })).data.warnings).toBeUndefined();
+  });
+
+  it("searches everything under a read wildcard, with no warning", async () => {
+    const connected = await harness([], { tableAccess: { readTables: ["*"] } });
+    const fake = fiveTables();
+    connected.get.mockImplementation(fake.get as never);
+    const { data } = await search(connected, { search_term: "needle" });
+    expect(new Set(fake.reads.map((read) => read.table)).size).toBe(5);
+    expect(data.warnings).toBeUndefined();
+  });
+
+  it("fails, naming the tool and the grant, when the profile holds none of the tables", async () => {
+    const connected = await harness([], {
+      tableAccess: grants({ incident: ["sn_query"], sys_script: ["sn_query"] }),
+    });
+    const message = await callError(connected, "sn_codesearch", { search_term: "needle" });
+    expect(message).toContain(
+      "this profile does not allow sn_codesearch to read any of the tables it searches"
+    );
+    expect(message).toContain("(sys_script_include, sys_script, sys_ui_script, sys_script_client, sys_ws_operation)");
+    expect(message).toContain("--read <table> --tools sn_codesearch");
+    expect(message).not.toContain("incident");
+    expect(connected.get).not.toHaveBeenCalled();
+  });
+
+  it("leaves out a table whose script field the field policy does not let it read, and says so", async () => {
+    const connected = await harness([], {
+      tableAccess: { readTables: ["*"] },
+      fieldPolicy: { sys_script: { readable: ["sys_id", "name"] } },
+    });
+    const fake = fiveTables();
+    connected.get.mockImplementation(fake.get as never);
+    const { data } = await search(connected, { search_term: "needle" });
+    expect(fake.reads.map((read) => read.table)).not.toContain("sys_script");
+    expect(data.warnings?.[0]).toContain("to read it: sys_script.");
+
+    // Named on its own, the same table is refused with the field and the key to change.
+    const message = await callError(connected, "sn_codesearch", {
+      search_term: "needle",
+      table: "sys_script",
+    });
+    expect(message).toContain('field "script"');
+    expect(message).toContain("fieldPolicy.sys_script.readable");
+  });
+
+  it("fails with the field denial when every table is held but none may be read", async () => {
+    const connected = await harness([], {
+      tableAccess: { readTables: ["*"] },
+      fieldPolicy: {
+        sys_script: { readable: ["sys_id"] },
+        sys_script_include: { readable: ["sys_id"] },
+        sys_ui_script: { readable: ["sys_id"] },
+        sys_script_client: { readable: ["sys_id"] },
+        sys_ws_operation: { readable: ["sys_id"] },
+      },
+    });
+    const message = await callError(connected, "sn_codesearch", { search_term: "needle" });
+    expect(message).toContain("is not readable on");
+    expect(message).not.toContain("none of the tables");
+    expect(connected.get).not.toHaveBeenCalled();
+  });
+
+  it("still names the table and the tool when a named table is refused", async () => {
+    const connected = await harness([], {
+      tableAccess: grants({ sys_script_include: ["sn_codesearch"], sys_script: ["sn_query"] }),
+    });
+    const unbound = await callError(connected, "sn_codesearch", { search_term: "x", table: "sys_script" });
+    expect(unbound).toContain('"sys_script" is granted to this profile, but not for sn_codesearch');
+    const absent = await callError(connected, "sn_codesearch", { search_term: "x", table: "sys_ui_script" });
+    expect(absent).toContain('no read grant on "sys_ui_script" that allows sn_codesearch');
+    const unsupported = await callError(connected, "sn_codesearch", { search_term: "x", table: "incident" });
+    expect(unsupported).toContain('sn_codesearch does not support table "incident"');
+    expect(connected.get).not.toHaveBeenCalled();
+  });
+
+  it("keeps the interleaved order stable over the tables it may read", async () => {
+    const connected = await harness([], {
+      tableAccess: grants({ sys_ws_operation: ["sn_codesearch"], sys_script: ["sn_codesearch"] }),
+    });
+    connected.get.mockImplementation(fiveTables().get as never);
+    const first = await search(connected, { search_term: "needle", limit: 4 });
+    const again = await search(connected, { search_term: "needle", limit: 4 });
+    expect(first.data.results.map((row) => row.table)).toEqual([
+      "sys_script",
+      "sys_ws_operation",
+      "sys_script",
+      "sys_ws_operation",
+    ]);
+    expect(again.data.results).toEqual(first.data.results);
+  });
+});

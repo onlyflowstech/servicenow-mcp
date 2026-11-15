@@ -11,7 +11,10 @@
 
 import {
   TablePolicyError,
+  authorizeTableAccess,
+  isTablePolicyError,
   normalizeTableName,
+  type TableAccessPolicy,
   type TableAccessRequest,
 } from "./table-policy.js";
 import {
@@ -59,6 +62,8 @@ export interface ToolTableAccessResolution {
   readonly requests: readonly TableAccessRequest[];
 }
 
+const CODE_SEARCH_TOOL = "sn_codesearch";
+
 const HEALTH_TABLES = Object.freeze({
   version: ["sys_properties"],
   nodes: ["sys_cluster_state"],
@@ -73,7 +78,14 @@ const DENY_ALL_ENCODED_QUERIES = createEncodedQueryAccessPolicy();
 export function resolveToolTableAccess(
   tool: string,
   candidateArgs: unknown,
-  encodedQueryAccess: EncodedQueryAccessPolicy = DENY_ALL_ENCODED_QUERIES
+  encodedQueryAccess: EncodedQueryAccessPolicy = DENY_ALL_ENCODED_QUERIES,
+  /**
+   * The profile's table policy, for a tool that reads a fixed set of tables and
+   * can do its work on the part of the set the profile may read. The dispatcher
+   * still authorizes whatever plan this returns, so passing it narrows a plan
+   * and never widens one.
+   */
+  tableAccess?: TableAccessPolicy
 ): ToolTableAccessResolution {
   try {
     const args = snapshotPlainDataArguments(candidateArgs);
@@ -203,7 +215,7 @@ export function resolveToolTableAccess(
           [read("syslog")]
         );
       case "sn_codesearch":
-        return codeSearchResolution(args);
+        return codeSearchResolution(args, tableAccess);
       case "sn_discover":
         return discoveryResolution(args);
       case "sn_atf":
@@ -283,12 +295,20 @@ function attachmentResolution(
 }
 
 function codeSearchResolution(
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  tableAccess: TableAccessPolicy | undefined
 ): ToolTableAccessResolution {
   if (args.table !== undefined) {
     const table = requiredTable(args.table);
     const target = codeSearchTarget(table);
-    if (target === undefined) throw new TablePolicyError();
+    if (target === undefined) {
+      throw new TablePolicyError({
+        reason: "unsupported_table",
+        operation: "read",
+        table,
+        tool: CODE_SEARCH_TOOL,
+      });
+    }
     const selected = resolveReadableFields(table, {
       fields: args.field ?? target.defaultField,
     });
@@ -310,15 +330,43 @@ function codeSearchResolution(
   if (args.field !== undefined) {
     throw new FieldPolicyError("invalid_field_selection");
   }
+
+  // A search of every code table works on the ones this profile may read. Each
+  // is decided on its own, by the table policy and then by the field policy
+  // that governs the script field, and a table that is refused is left out of
+  // the plan (the handler names it in a warning) instead of failing the call.
+  // Only when nothing is left does the call fail, and then with the reason.
   let prepared = args;
+  const granted: string[] = [];
+  let fieldDenial: unknown;
   for (const target of CODE_SEARCH_TARGETS) {
-    prepared = prepareAdditionalReadFieldArguments(
-      prepared,
-      target.table,
-      searchProjection(target.nameField, target.defaultField).join(",")
-    );
+    try {
+      if (tableAccess !== undefined) {
+        authorizeTableAccess(tableAccess, read(target.table), CODE_SEARCH_TOOL);
+      }
+      prepared = prepareAdditionalReadFieldArguments(
+        prepared,
+        target.table,
+        searchProjection(target.nameField, target.defaultField).join(",")
+      );
+      granted.push(target.table);
+    } catch (error) {
+      // Without a policy to consult, a refusal is the whole call's, as before.
+      if (tableAccess === undefined) throw error;
+      if (isFieldPolicyError(error)) fieldDenial ??= error;
+      else if (!isTablePolicyError(error)) throw error;
+    }
   }
-  return resolution(prepared, CODE_SEARCH_TARGETS.map((target) => read(target.table)));
+  if (granted.length === 0) {
+    if (fieldDenial !== undefined) throw fieldDenial;
+    throw new TablePolicyError({
+      reason: "none_granted",
+      operation: "read",
+      tool: CODE_SEARCH_TOOL,
+      tables: CODE_SEARCH_TARGETS.map((target) => target.table),
+    });
+  }
+  return resolution(prepared, granted.map(read));
 }
 
 function discoveryResolution(
