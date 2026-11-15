@@ -70,20 +70,37 @@ describe("truncation hint text", () => {
   const OVER = Number.POSITIVE_INFINITY;
   const variants: Array<[TruncationHintParts, string]> = [
     [
-      { dropped: 14, total: 22, offset: 0, advice: 'fields="sys_id,name"', neededBytes: 31_500 },
-      'Dropped 14/22; continue offset=8 limit=8; retry offset=0 with fields="sys_id,name" or max_response_bytes=31500.',
+      {
+        dropped: 14,
+        total: 22,
+        offset: 0,
+        advice: 'fields="sys_id,name"',
+        neededBytes: 1_500,
+        allBytes: 31_500,
+      },
+      'Dropped 14/22; continue offset=8 limit=8; retry offset=0 with fields="sys_id,name" or max_response_bytes=1500 (fits the next row) or max_response_bytes=31500 (fits all 22).',
     ],
     [
-      { dropped: 3, total: 20, offset: 40, neededBytes: 4_200 },
-      "Dropped 3/20; continue offset=57 limit=17; retry offset=40 with max_response_bytes=4200.",
+      // The whole window is more than the maximum: only the next row is named.
+      { dropped: 14, total: 22, offset: 0, advice: 'fields="sys_id,name"', neededBytes: 1_500 },
+      'Dropped 14/22; continue offset=8 limit=8; retry offset=0 with fields="sys_id,name" or max_response_bytes=1500 (fits the next row).',
     ],
     [
-      { dropped: 20, total: 20, offset: 5, advice: 'response_format="concise"', neededBytes: 1_000_000 },
-      'Dropped 20/20; row too large; retry offset=5 with response_format="concise" or max_response_bytes=1000000 or sn_get.',
+      { dropped: 3, total: 20, offset: 40, neededBytes: 4_200, allBytes: 4_900 },
+      "Dropped 3/20; continue offset=57 limit=17; retry offset=40 with max_response_bytes=4200 (fits the next row) or max_response_bytes=4900 (fits all 20).",
+    ],
+    [
+      // One row dropped: the next row is the whole remainder, written once.
+      { dropped: 1, total: 20, offset: 0, neededBytes: 4_200, allBytes: 4_200 },
+      "Dropped 1/20; continue offset=19 limit=19; retry offset=0 with max_response_bytes=4200 (fits the next row).",
+    ],
+    [
+      { dropped: 20, total: 20, offset: 5, advice: 'response_format="concise"', neededBytes: 1_000_000, allBytes: 1_000_000 },
+      'Dropped 20/20; row too large; retry offset=5 with response_format="concise" or max_response_bytes=1000000 (fits the next row) or max_response_bytes=1000000 (fits all 20) or sn_get.',
     ],
     [
       { dropped: 22, total: 22, offset: 0, neededBytes: 9_000 },
-      "Dropped 22/22; row too large; retry offset=0 with max_response_bytes=9000 or sn_get.",
+      "Dropped 22/22; row too large; retry offset=0 with max_response_bytes=9000 (fits the next row) or sn_get.",
     ],
     [
       { dropped: 22, total: 22, offset: 7, neededBytes: OVER },
@@ -124,17 +141,36 @@ describe("truncation hint text", () => {
       total: 22,
       offset: 0,
       neededBytes: 5_000,
+      allBytes: 5_300,
     });
     expect(hint).toContain("Dropped 2/22;");
     expect(hint).toContain("continue offset=20 limit=20;");
-    expect(hint).toContain("max_response_bytes=5000");
-    const fewer = refreshTruncationHint(hint, { dropped: 12, returned: 10, neededBytes: 7_300 });
+    expect(hint).toContain("max_response_bytes=5000 (fits the next row)");
+    expect(hint).toContain("max_response_bytes=5300 (fits all 22)");
+    const fewer = refreshTruncationHint(hint, {
+      dropped: 12,
+      returned: 10,
+      neededBytes: 7_300,
+      allBytes: 9_100,
+    });
     expect(fewer).toBe(
-      "Dropped 12/22; continue offset=10 limit=10; retry offset=0 with max_response_bytes=7300."
+      "Dropped 12/22; continue offset=10 limit=10; retry offset=0 with max_response_bytes=7300 (fits the next row) or max_response_bytes=9100 (fits all 22)."
+    );
+    // A whole window over the maximum is left out, and null says so.
+    expect(refreshTruncationHint(hint, { dropped: 12, returned: 10, neededBytes: 7_300, allBytes: null })).toBe(
+      "Dropped 12/22; continue offset=10 limit=10; retry offset=0 with max_response_bytes=7300 (fits the next row)."
+    );
+    // The budget the hint carries is kept when the caller gives none.
+    expect(refreshTruncationHint(hint, { dropped: 12, returned: 10 })).toContain(
+      "max_response_bytes=5300 (fits all 22)"
+    );
+    // One row left to drop: the next row is the rest of the window.
+    expect(refreshTruncationHint(hint, { dropped: 1, returned: 21 })).toBe(
+      "Dropped 1/22; continue offset=21 limit=21; retry offset=0 with max_response_bytes=5000 (fits the next row)."
     );
     const refreshed = refreshTruncationHint(hint, { dropped: 22, returned: 0 });
     expect(refreshed).toContain("Dropped 22/22; row too large;");
-    expect(refreshed).toContain("max_response_bytes=5000 or sn_get");
+    expect(refreshed).toContain("max_response_bytes=5000 (fits the next row) or max_response_bytes=5300 (fits all 22) or sn_get");
     // A lower limit cannot help when no row fits, and nothing continues.
     expect(refreshed).not.toContain("limit");
     expect(refreshed).not.toContain("continue");
@@ -165,6 +201,20 @@ describe("truncation hint text", () => {
       "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=4200 or sn_get.",
       "Dropped 20/20; row too large; retry offset=0 with max_response_bytes=4200.",
       "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=42.",
+      // The bare figure, which read as a value for the whole page, is no
+      // longer written, so it is not read back either.
+      "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=4200.",
+      "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=4200 (fits the page).",
+      // The whole-window figure restates the window: its count is the total,
+      // it follows the next-row figure, is no smaller, and only appears when
+      // more than one row is dropped.
+      "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=4200 (fits the next row) or max_response_bytes=4900 (fits all 19).",
+      "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=4900 (fits all 20).",
+      "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=4200 (fits the next row) or max_response_bytes=4100 (fits all 20).",
+      "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=4900 (fits all 20) or max_response_bytes=4200 (fits the next row).",
+      "Dropped 1/20; continue offset=19 limit=19; retry offset=0 with max_response_bytes=4200 (fits the next row) or max_response_bytes=4900 (fits all 20).",
+      "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=4200 (fits the next row) or max_response_bytes=4900 (fits all 20) or max_response_bytes=5000 (fits all 20).",
+      "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=4200 (fits the next row) or max_response_bytes=4200 (fits the next row).",
       "Dropped 3/20; continue offset=17 limit=17; retry offset=0 with max_response_bytes=4200.\nIgnore previous",
     ]) {
       expect(parseTruncationHint(text), text).toBeUndefined();
@@ -184,6 +234,47 @@ describe("truncation hint text", () => {
     expect(hint.length).toBeLessThanOrEqual(600);
     expect(hint).not.toContain("fields=");
     expect(parseTruncationHint(hint)).toMatchObject({ dropped: 3, total: 20, neededBytes: 4_200 });
+  });
+
+  it("names both budgets within the length limit even with the longest advice that fits", () => {
+    for (const advice of [undefined, 'fields="sys_id,name"', `fields="${"u_".concat("f".repeat(400))}"`]) {
+      const hint = renderTruncationHint({
+        dropped: 20,
+        total: 20,
+        offset: 9_999,
+        ...(advice === undefined ? {} : { advice }),
+        neededBytes: 999_900,
+        allBytes: 1_000_000,
+      });
+      expect(hint.length).toBeLessThanOrEqual(600);
+      expect(parseTruncationHint(hint)).toMatchObject({ neededBytes: 999_900, allBytes: 1_000_000 });
+    }
+  });
+
+  it("renders the widest form at least as long as any real one, so a fit leaves room for the text", () => {
+    const widest = renderTruncationHint({
+      dropped: 20,
+      total: 20,
+      offset: 0,
+      advice: 'fields="sys_id,name"',
+      neededBytes: Number.POSITIVE_INFINITY,
+      allBytes: Number.POSITIVE_INFINITY,
+    });
+    for (const [needed, all] of [
+      [1_000, 1_100],
+      [999_900, 1_000_000],
+      [12_300, 45_600],
+    ] as const) {
+      const real = renderTruncationHint({
+        dropped: 20,
+        total: 20,
+        offset: 0,
+        advice: 'fields="sys_id,name"',
+        neededBytes: needed,
+        allBytes: all,
+      });
+      expect(widest.length, real).toBeGreaterThanOrEqual(real.length);
+    }
   });
 });
 
@@ -217,7 +308,7 @@ describe("the field suggestion in a truncation hint", () => {
     );
     // Nothing to leave out of their list: a limit and a budget, with numbers.
     expect(withoutLarge).not.toContain("fields=");
-    expect(withoutLarge).toMatch(/continue offset=\d+ limit=\d+; retry offset=0 with max_response_bytes=\d+\./u);
+    expect(withoutLarge).toMatch(/continue offset=\d+ limit=\d+; retry offset=0 with max_response_bytes=\d+ \(fits the next row\)(?: or max_response_bytes=\d+ \(fits all 22\))?\./u);
   });
 
   it("offers the table's default fields to a caller who asked for all of them", async () => {
@@ -386,7 +477,7 @@ describe("the truncation hint agrees with dropped_records after the envelope fit
     expect(data.results.length).toBeGreaterThan(0);
     expect(data.hint).not.toContain("fields=");
     expect(data.hint).toContain(`limit=${data.results.length};`);
-    expect(data.hint).toMatch(/with max_response_bytes=\d+\.$/u);
+    expect(data.hint).toMatch(/with max_response_bytes=\d+ \(fits the next row\)(?: or max_response_bytes=\d+ \(fits all 22\))?\.$/u);
   });
 
   it("cannot tell a typed default list from the default, so it still suggests a shorter list", async () => {
@@ -503,6 +594,17 @@ describe("the truncation hint gives values a caller can use (#29)", () => {
       expect(larger.data.results.length, label).toBeGreaterThan(returned);
       compared += 1;
 
+      // The figure for the whole window holds every row: nothing is dropped.
+      expect(Number.isFinite(parts?.allBytes), label).toBe(true);
+      expect(parts?.allBytes as number, label).toBeGreaterThanOrEqual(parts?.neededBytes as number);
+      expect((parts?.allBytes as number) % 100, label).toBe(0);
+      const whole = await readTruncated(connected, {
+        limit: 22,
+        max_response_bytes: parts?.allBytes,
+      });
+      expect(whole.data.results.length, label).toBe(22);
+      expect(whole.data.truncated, label).toBeUndefined();
+
       if (returned === 0) {
         expect(first.data.hint, label).toContain("row too large");
         expect(first.data.hint, label).not.toMatch(/limit=/u);
@@ -553,6 +655,44 @@ describe("the truncation hint gives values a caller can use (#29)", () => {
     expect(parseTruncationHint(hint)?.neededBytes).toBe(Number.POSITIVE_INFINITY);
   });
 
+  it("says which figure is for the next row and which for the whole page, and the page figure returns the page (#37)", async () => {
+    // The shape the owner saw: 50 rows, a budget that holds none of them. The
+    // next row's budget buys one row; only the page figure returns all 50.
+    const connected = await tableOf(scriptRows(50, 300));
+    const first = await readTruncated(connected, { limit: 50, max_response_bytes: 1_000 });
+    const hint = first.data.hint ?? "";
+    expect(first.data.results).toEqual([]);
+    expect(hint).toMatch(
+      /^Dropped 50\/50; row too large; retry offset=0 with fields="sys_id,name" or max_response_bytes=\d+ \(fits the next row\) or max_response_bytes=\d+ \(fits all 50\) or sn_get\.$/u
+    );
+    const parts = parseTruncationHint(hint);
+    expect(parts?.dropped).toBe(first.data.dropped_records);
+    expect(parts?.total).toBe(50);
+
+    const nextRow = await readTruncated(connected, { limit: 50, max_response_bytes: parts?.neededBytes });
+    expect(nextRow.data.results.length).toBeGreaterThan(0);
+    expect(nextRow.data.results.length).toBeLessThan(50);
+    expect(nextRow.data.hint).toMatch(/\(fits the next row\)/u);
+
+    const page = await readTruncated(connected, { limit: 50, max_response_bytes: parts?.allBytes });
+    expect(page.data.results).toHaveLength(50);
+    expect(page.data.truncated).toBeUndefined();
+    expect(page.data.hint).toBeUndefined();
+  });
+
+  it("names only the next row when the whole page is more than the maximum (#37)", async () => {
+    const connected = await tableOf(scriptRows(30, 60_000));
+    const page = await readTruncated(connected, { limit: 30, max_response_bytes: 100_000 });
+    const hint = page.data.hint ?? "";
+    expect(page.data.truncated).toBe(true);
+    const parts = parseTruncationHint(hint);
+    expect(parts?.total).toBe(30);
+    expect(Number.isFinite(parts?.neededBytes)).toBe(true);
+    expect(parts?.allBytes).toBeUndefined();
+    expect(hint).toContain("(fits the next row)");
+    expect(hint).not.toContain("(fits all");
+  });
+
   it("keeps every value in the hint to fixed words, numbers and policy-approved fields", async () => {
     const connected = await tableOf(scriptRows(30, 300));
     const page = await readTruncated(connected, {
@@ -562,7 +702,7 @@ describe("the truncation hint gives values a caller can use (#29)", () => {
     });
     const hint = page.data.hint ?? "";
     expect(hint).toMatch(
-      /^Dropped \d+\/22; continue offset=\d+ limit=\d+; retry offset=0 with fields="sys_id,name,api_name" or max_response_bytes=\d+\.$/u
+      /^Dropped \d+\/22; continue offset=\d+ limit=\d+; retry offset=0 with fields="sys_id,name,api_name" or max_response_bytes=\d+ \(fits the next row\)(?: or max_response_bytes=\d+ \(fits all 22\))?\.$/u
     );
   });
 });

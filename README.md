@@ -986,19 +986,24 @@ skipped the dropped rows, and a cut last page reported `has_more: false` with
 **The `sn_query` hint gives values you can use.** For example
 
 ```text
-Dropped 14/22; continue offset=8 limit=8; retry offset=0 with fields="sys_id,name" or max_response_bytes=31500.
+Dropped 14/22; continue offset=8 limit=8; retry offset=0 with fields="sys_id,name" or max_response_bytes=1500 (fits the next row) or max_response_bytes=31500 (fits all 22).
 ```
 
 - `continue offset=8 limit=8` is `next_offset` and the number of rows that fit:
   page on with that `limit` and nothing is dropped again.
 - `retry offset=0 with ...` re-reads the whole page in one response, with fewer
-  fields or a larger budget. `max_response_bytes=31500` is measured from the
-  response itself (the rows plus the envelope's own metadata), rounded up, and
-  is enough to hold at least the next row. When even that would be more than
-  the 1,000,000-byte maximum (or the `maxResponseBytes` of the raw-read rule
-  that approved a raw `query`, when that is lower), the hint says the next row
-  exceeds that maximum, names it, and offers only fields and `sn_get`. It never
-  names a budget the policy would deny.
+  fields or a larger budget. The two budgets are different numbers, and each
+  says what it buys. `max_response_bytes=1500 (fits the next row)` holds one
+  more row than this response did, so a retry with it returns about one more
+  row; `max_response_bytes=31500 (fits all 22)` holds every row of the page.
+  Both are measured from the response itself (the rows plus the envelope's own
+  metadata) and rounded up. The page figure is left out when it would be more
+  than the 1,000,000-byte maximum (or the `maxResponseBytes` of the raw-read
+  rule that approved a raw `query`, when that is lower) and when only one row
+  was dropped, since the next row is then the rest of the page. When even the
+  next row would be more than that maximum, the hint says the next row exceeds
+  it, names it, and offers only fields and `sn_get`. It never names a budget
+  the policy would deny.
 - `fields=...` appears when it helps: the table's short default list for a
   read of the defaults or of `all`, or your own list without its large fields
   (for example `script`) when you chose one. It only ever names fields your

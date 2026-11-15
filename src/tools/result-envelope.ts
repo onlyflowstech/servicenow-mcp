@@ -765,7 +765,8 @@ function synchronizePagingFields(
   truncation: MutableMetadata["truncation"],
   depth = 0,
   neededBytes?: number,
-  capBytes?: number
+  capBytes?: number,
+  allBytes?: number | null
 ): void {
   if (
     pagination.mode !== "offset" ||
@@ -821,6 +822,7 @@ function synchronizePagingFields(
             dropped: truncation.dropped_records,
             returned: pagination.returned,
             ...(neededBytes === undefined ? {} : { neededBytes }),
+            ...(allBytes === undefined ? {} : { allBytes }),
             ...(capBytes === undefined ? {} : { capBytes }),
           });
         }
@@ -838,7 +840,8 @@ function synchronizePagingFields(
       truncation,
       depth + 1,
       neededBytes,
-      capBytes
+      capBytes,
+      allBytes
     );
   }
 }
@@ -1183,6 +1186,23 @@ export function finalizeEnvelopeResult(
 }
 
 /**
+ * The `max_response_bytes` to name for the whole window: what the tool
+ * measured for all its rows, plus what the envelope adds around them. Null
+ * when the tool named none (the window exceeded the maximum on its own) or
+ * when the sum exceeds the maximum, so the hint leaves it out.
+ */
+function wholeWindowBytes(
+  toolHint: TruncationHintParts,
+  envelopeBytes: number,
+  current: number,
+  cap: number
+): number | null {
+  if (toolHint.allBytes === undefined) return null;
+  const needed = neededResponseBytes(toolHint.allBytes + envelopeBytes, current, cap);
+  return Number.isFinite(needed) ? needed : null;
+}
+
+/**
  * The tools whose `offset` argument is a row offset into the collection they
  * return, so that `offset + rows returned` is the first row not returned. For
  * these a fit that drops rows for size can offer that offset as
@@ -1234,7 +1254,8 @@ function finalizeSummaryResult(
       restated.metadata.truncation,
       0,
       neededResponseBytes(toolHint.neededBytes + overhead, maximum, byteCap),
-      byteCap
+      byteCap,
+      wholeWindowBytes(toolHint, overhead, maximum, byteCap)
     );
     const restatedCandidate = candidateResult(result, restated);
     // The larger number can add a digit; if that tips the result over its
@@ -1250,7 +1271,11 @@ function finalizeSummaryResult(
     // While fitting, a hint carries the widest form of its byte budget (the
     // "exceeds the maximum" clause), which is never shorter than a number, so
     // a result that fits that way still fits with the real number.
-    const envelopeForCount = (count: number, neededBytes?: number): MutableEnvelope => {
+    const envelopeForCount = (
+      count: number,
+      neededBytes?: number,
+      allBytes?: number | null
+    ): MutableEnvelope => {
       const probe = JSON.parse(JSON.stringify(sourceEnvelope)) as MutableEnvelope;
       const probeRecords = collectionArray(probe.data);
       if (!probeRecords) throw new TypeError("collection envelope lost its records");
@@ -1280,7 +1305,8 @@ function finalizeSummaryResult(
         probe.metadata.truncation,
         0,
         neededBytes,
-        byteCap
+        byteCap,
+        allBytes
       );
       return probe;
     };
@@ -1290,7 +1316,7 @@ function finalizeSummaryResult(
     let best = -1;
     while (low <= high) {
       const midpoint = Math.floor((low + high) / 2);
-      const probe = candidateResult(result, envelopeForCount(midpoint, widest));
+      const probe = candidateResult(result, envelopeForCount(midpoint, widest, widest));
       if (resultBytes(probe) <= maximum) {
         best = midpoint;
         low = midpoint + 1;
@@ -1304,15 +1330,23 @@ function finalizeSummaryResult(
     // while next_offset (when present) remains the separately authoritative
     // post-window resume point.
     const kept = Math.max(best, 0);
-    envelope = envelopeForCount(kept, widest);
+    envelope = envelopeForCount(kept, widest, widest);
     candidate = candidateResult(result, envelope);
     if (resultBytes(candidate) > maximum) return undefined;
     if (toolHint === undefined || kept >= originalRecordCount) return candidate;
     // The budget that would hold one more row is measured here, with the
     // envelope's own cost in it, not guessed.
-    const withNextRow = candidateResult(result, envelopeForCount(kept + 1, widest));
+    const withNextRow = candidateResult(result, envelopeForCount(kept + 1, widest, widest));
     const needed = neededResponseBytes(resultBytes(withNextRow), maximum, byteCap);
-    const restated = candidateResult(result, envelopeForCount(kept, needed));
+    // The rows the tool already dropped are not here to measure, so the whole
+    // window is its payload size, which the tool measured, plus what this
+    // envelope adds around the rows. The envelope of a whole page carries no
+    // truncation fields, so this is never too small.
+    const overhead = resultBytes(candidate) - Buffer.byteLength(JSON.stringify(envelope.data), "utf8");
+    const restated = candidateResult(
+      result,
+      envelopeForCount(kept, needed, wholeWindowBytes(toolHint, overhead, maximum, byteCap))
+    );
     return resultBytes(restated) <= maximum ? restated : candidate;
   }
 

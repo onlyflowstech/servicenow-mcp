@@ -143,6 +143,33 @@ describe("the hint stays within a raw-read rule's byte cap", () => {
     expect(over).toBeGreaterThan(0);
   });
 
+  it("names the whole window only while it fits under the cap, and the next row alone otherwise", async () => {
+    let both = 0;
+    let nextOnly = 0;
+    for (let size = 300; size <= 2_600; size += 100) {
+      const { call, first } = await rawRead(rows(12, size), { limit: 12, max_response_bytes: 3_000 });
+      const { hint } = hintOf(first);
+      const parts = parseTruncationHint(hint);
+      const label = `size ${size}: ${hint}`;
+      if (!Number.isFinite(parts?.neededBytes)) continue;
+      if (parts?.dropped === 1) continue; // one figure, whichever name it has
+      if (parts?.allBytes === undefined) {
+        nextOnly += 1;
+        expect(hint, label).toContain("(fits the next row)");
+        expect(hint, label).not.toContain("(fits all");
+        continue;
+      }
+      both += 1;
+      expect(parts.allBytes, label).toBeLessThanOrEqual(CAP);
+      // The policy accepts it, and it holds every row of the window.
+      const whole = hintOf(await call({ limit: 12, max_response_bytes: parts.allBytes }));
+      expect(whole.count, label).toBe(12);
+    }
+    // The sweep covers a whole window that fits under the cap and one that does not.
+    expect(both).toBeGreaterThan(0);
+    expect(nextOnly).toBeGreaterThan(0);
+  });
+
   it("is still offered up to the schema maximum when no rule caps the call", async () => {
     const wide = { ...RULE, maxResponseBytes: 100_000 };
     const { first } = await rawRead(rows(12, 2_400), { limit: 12, max_response_bytes: CAP }, wide);

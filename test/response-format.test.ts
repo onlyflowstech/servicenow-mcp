@@ -214,7 +214,7 @@ describe("sn_query max_response_bytes truncation", () => {
     // large one (description), and the limit that fit, and a budget.
     expect(payload.hint).toContain('fields="sys_id"');
     expect(payload.hint).not.toContain("description");
-    expect(payload.hint).toMatch(/max_response_bytes=\d+\.$/u);
+    expect(payload.hint).toMatch(/max_response_bytes=\d+ \(fits (?:the next row|all \d+)\)\.$/u);
     expect(payload.next_offset).toBe(5 + kept);
     expect(payload.has_more).toBe(true);
   });

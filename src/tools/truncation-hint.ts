@@ -15,7 +15,13 @@
  * by an anchored pattern, so only text this module wrote is ever rewritten:
  *
  *     Dropped 14/22; continue offset=8 limit=8; retry offset=0 with
- *     fields="sys_id,name" or max_response_bytes=31500.
+ *     fields="sys_id,name" or max_response_bytes=1500 (fits the next row) or
+ *     max_response_bytes=31500 (fits all 22).
+ *
+ * The two budgets are different numbers and the text says which is which:
+ * the first holds one more row than this response did (each retry with it
+ * buys a row), the second the whole window. The second is left out when it is
+ * the first (one row dropped) or when it is more than the maximum.
  *
  * @module truncation-hint
  */
@@ -73,6 +79,15 @@ export interface TruncationHintParts {
    */
   readonly neededBytes: number;
   /**
+   * The `max_response_bytes` that would hold every row of the window
+   * (`total`), when that is no more than the maximum budget; absent when it
+   * is more. When one row was dropped the next row is the whole remainder, so
+   * this is `neededBytes` and is written once. Infinity stands for the widest
+   * rendering, which a fit uses to leave room for the real text and which is
+   * never parsed back.
+   */
+  readonly allBytes?: number;
+  /**
    * The largest `max_response_bytes` the caller may use, named when the next
    * row exceeds it. Defaults to the schema maximum; a raw-read rule can set a
    * smaller one. Only read back from a hint's "exceeds the maximum" clause.
@@ -86,6 +101,10 @@ function returnedRows(parts: TruncationHintParts): number {
 }
 
 const EMPTY_CLAUSE = "row too large";
+const NEXT_ROW_NOTE = " (fits the next row)";
+function allRowsNote(total: number): string {
+  return ` (fits all ${total})`;
+}
 const SN_GET_OPTION = "sn_get";
 function overMaximumClause(cap: number): string {
   return `the next row exceeds the maximum max_response_bytes (${cap})`;
@@ -95,9 +114,15 @@ function renderHint(parts: TruncationHintParts, withAdvice: boolean): string {
   const returned = returnedRows(parts);
   const empty = returned <= 0;
   const over = !Number.isFinite(parts.neededBytes);
+  // With one row dropped the next row is the whole remainder: one figure.
+  const allBytes = parts.dropped > 1 ? parts.allBytes : undefined;
   const options = [
     withAdvice ? parts.advice : undefined,
-    over ? undefined : `max_response_bytes=${parts.neededBytes}`,
+    over ? undefined : `max_response_bytes=${parts.neededBytes}${NEXT_ROW_NOTE}`,
+    allBytes === undefined
+      ? undefined
+      // Infinity is the widest form, used while fitting (see finalizeSummaryResult).
+      : `max_response_bytes=${Number.isFinite(allBytes) ? allBytes : MAX_RESPONSE_BYTES_MAX}${allRowsNote(parts.total)}`,
     // When no row fits, a narrower page cannot help; the single-record read can.
     empty ? SN_GET_OPTION : undefined,
   ].filter((option): option is string => option !== undefined);
@@ -127,7 +152,8 @@ const CONTINUE_CLAUSE = /^continue offset=(\d+) limit=(\d+)$/u;
 const RETRY_CLAUSE = /^retry offset=(\d+) with (.+)$/u;
 const ADVICE_OPTION =
   /^(?:fields="[a-z][a-z0-9_]*(?:,[a-z][a-z0-9_]*)*"|response_format="concise")$/u;
-const BYTES_OPTION = /^max_response_bytes=([1-9]\d{3,6})$/u;
+const NEXT_ROW_OPTION = /^max_response_bytes=([1-9]\d{3,6}) \(fits the next row\)$/u;
+const ALL_ROWS_OPTION = /^max_response_bytes=([1-9]\d{3,6}) \(fits all ([1-9]\d{0,15})\)$/u;
 const OVER_MAXIMUM = /^the next row exceeds the maximum max_response_bytes \(([1-9]\d{3,6})\)$/u;
 
 /** A byte value the schema could accept: 1000 to 1,000,000. */
@@ -163,6 +189,7 @@ export function parseTruncationHint(hint: string): TruncationHintParts | undefin
     offset = Number(next[1]) - returned;
   }
   let neededBytes: number | undefined;
+  let allBytes: number | undefined;
   let capBytes: number | undefined;
   const over = OVER_MAXIMUM.exec(clauses[index] ?? "");
   if (over !== null) {
@@ -180,11 +207,28 @@ export function parseTruncationHint(hint: string): TruncationHintParts | undefin
     if (offset !== undefined && offset !== retryOffset) return undefined;
     offset = retryOffset;
     for (const option of (retry[2] ?? "").split(" or ")) {
-      const bytes = BYTES_OPTION.exec(option);
-      if (bytes !== null) {
-        const value = budgetValue(bytes[1]);
+      const next = NEXT_ROW_OPTION.exec(option);
+      const all = next === null ? ALL_ROWS_OPTION.exec(option) : null;
+      if (next !== null) {
+        const value = budgetValue(next[1]);
         if (neededBytes !== undefined || value === undefined) return undefined;
         neededBytes = value;
+      } else if (all !== null) {
+        const value = budgetValue(all[1]);
+        // The count restates the window; the figure must follow the next-row
+        // one, be no smaller, and exist only when more than one row is left.
+        if (
+          allBytes !== undefined ||
+          value === undefined ||
+          Number(all[2]) !== total ||
+          droppedCount < 2 ||
+          neededBytes === undefined ||
+          !Number.isFinite(neededBytes) ||
+          value < neededBytes
+        ) {
+          return undefined;
+        }
+        allBytes = value;
       } else if (ADVICE_OPTION.test(option) && advice === undefined) {
         advice = option;
       } else if (option === SN_GET_OPTION && !sawSnGet) {
@@ -204,12 +248,15 @@ export function parseTruncationHint(hint: string): TruncationHintParts | undefin
   ) {
     return undefined;
   }
+  // One row dropped: the next row is the whole remainder, written once.
+  if (droppedCount === 1 && Number.isFinite(neededBytes)) allBytes = neededBytes;
   return {
     dropped: droppedCount,
     total,
     offset,
     ...(advice === undefined ? {} : { advice }),
     neededBytes,
+    ...(allBytes === undefined ? {} : { allBytes }),
     ...(capBytes === undefined ? {} : { capBytes }),
   };
 }
@@ -226,6 +273,11 @@ export function refreshTruncationHint(
     readonly dropped: number;
     readonly returned: number;
     readonly neededBytes?: number;
+    /**
+     * The budget for the whole window: a number to name it, null when it is
+     * more than the maximum (so it is left out), absent to keep the hint's own.
+     */
+    readonly allBytes?: number | null;
     /** The cap to name if the next row exceeds it; else the one the hint named. */
     readonly capBytes?: number;
   }
@@ -238,6 +290,9 @@ export function refreshTruncationHint(
     offset: parts.offset,
     ...(parts.advice === undefined ? {} : { advice: parts.advice }),
     neededBytes: final.neededBytes ?? parts.neededBytes,
+    ...(final.allBytes === null || (final.allBytes ?? parts.allBytes) === undefined
+      ? {}
+      : { allBytes: (final.allBytes ?? parts.allBytes) as number }),
     ...(final.capBytes ?? parts.capBytes) === undefined
       ? {}
       : { capBytes: (final.capBytes ?? parts.capBytes) as number },

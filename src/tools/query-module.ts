@@ -349,7 +349,11 @@ function enforceByteBudget(
   // the widest value is the size of the response that would hold `keep` rows.
   // This stage measures the payload alone; the shared envelope restates the
   // number with its own cost added (see refreshTruncationHint).
-  const build = (keep: number, neededBytes: number): Record<string, unknown> => {
+  const build = (
+    keep: number,
+    neededBytes: number,
+    allBytes?: number
+  ): Record<string, unknown> => {
     const dropped = fetched - keep;
     const out: Record<string, unknown> = { record_count: keep };
     // Rows were dropped, so rows exist that this response does not hold:
@@ -374,6 +378,7 @@ function enforceByteBudget(
       offset,
       ...(shrinkAdvice === undefined ? {} : { advice: shrinkAdvice }),
       neededBytes,
+      ...(allBytes === undefined ? {} : { allBytes }),
       capBytes: byteCap,
     });
     out.results = results.slice(0, keep);
@@ -384,7 +389,7 @@ function enforceByteBudget(
   // Estimate the largest prefix that fits via per-record sizes, then walk
   // down until the exact serialization is within budget (the hint's digits
   // shift the envelope size slightly as `keep` changes).
-  const envelope = serializedBytes(build(0, WIDEST));
+  const envelope = serializedBytes(build(0, WIDEST, WIDEST));
   let keep = 0;
   let used = envelope;
   for (let i = 0; i < fetched; i++) {
@@ -393,20 +398,25 @@ function enforceByteBudget(
     keep = i + 1;
   }
   keep = Math.min(keep, fetched - 1); // over budget => at least one record goes
-  let out = build(keep, WIDEST);
+  let out = build(keep, WIDEST, WIDEST);
   while (keep > 0 && serializedBytes(out) > maxBytes) {
     keep -= 1;
-    out = build(keep, WIDEST);
+    out = build(keep, WIDEST, WIDEST);
   }
   // The budget that would hold one more row. The widest hint is what was
   // measured, so the number is never too small once the real, shorter hint
   // replaces it.
-  const needed = neededResponseBytes(
-    serializedBytes(build(keep + 1, WIDEST)),
-    maxBytes,
-    byteCap
-  );
-  return build(keep, needed);
+  const withNextRow = serializedBytes(build(keep + 1, WIDEST, WIDEST));
+  const needed = neededResponseBytes(withNextRow, maxBytes, byteCap);
+  // The budget for the whole window: the response with the next row plus the
+  // rows after it. It stops adding once it passes the largest budget there
+  // is, so a window far over the maximum costs no more than the maximum.
+  let withAllRows = withNextRow;
+  for (let i = keep + 1; i < fetched && withAllRows <= byteCap; i++) {
+    withAllRows += serializedBytes(results[i]) + 1;
+  }
+  const whole = neededResponseBytes(withAllRows, maxBytes, byteCap);
+  return build(keep, needed, Number.isFinite(whole) ? whole : undefined);
 }
 
 export async function handler(
