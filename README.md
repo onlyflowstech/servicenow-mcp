@@ -847,8 +847,8 @@ limit is always 1 MiB and no environment variable changes it.
 
 `sn_codesearch {search_term, table?, field?, limit?, offset?}` finds records
 whose script contains the text, in the business rules, script includes, UI
-scripts, client scripts, scripted REST operations and ES modules of the
-instance. Each row
+scripts, client scripts, scripted REST operations, ES modules and ATF step
+scripts of the instance. Each row
 is `{table, table_label, sys_id, name, snippet, line}`: `snippet` is about 200
 characters of the script centred on the first match (`...` marks a cut) and
 `line` is the line that match is on. The comparison is the instance's
@@ -870,6 +870,24 @@ snippet is the head of the script and the row has no `line`.
   (`servicenow-mcp-setup grant --profile dev --read sys_module`, or a read
   wildcard), it is cached by default like them, and `fields=all` reads `content`.
   A default `sn_query` of it lists `sys_id`, `path` and `sys_updated_on`.
+- **ATF step scripts** are searched with `table: "sys_atf_step"`. A step's script
+  is not a column of the step but the value of its script input, a row of
+  `sys_variable_value`. The search reads only the rows whose `document` is
+  `sys_atf_step` and whose `variable` ends with `script`, a condition fixed in
+  the server: no argument can widen it to another table's variables, and `field`
+  is refused. Each result is the step (`sys_id` is the step's), named
+  `<test name> > step <order>` where `order` is the step's own order value, and
+  the steps and then their tests are read by id to say so. Three tables are read,
+  so the profile needs read on `sys_variable_value`, `sys_atf_step` and
+  `sys_atf_test`, each bound to `sn_codesearch`:
+  `servicenow-mcp-setup grant --profile dev --read sys_variable_value,sys_atf_step,sys_atf_test`
+  (or `--tools sn_codesearch` to bind only this tool: `sys_variable_value` also
+  holds other tables' variable values, which that grant does not let this tool
+  search). `grant --atf` binds those tables to `sn_atf_author` only, so a profile
+  that has it adds this grant on top. A search with no `table` includes ATF
+  step scripts when all three are held and names `sys_atf_step` in the warning
+  when they are not. These tables are not in the default cache list: the reads go
+  straight to the instance.
 - **A page is shared among the tables.** A search of several tables takes turns:
   each table's first match (script includes first, then business rules, UI
   scripts, client scripts, scripted REST operations, ES modules), then each

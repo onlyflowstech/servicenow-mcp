@@ -3740,11 +3740,11 @@
           "description": "Text to search for in script fields"
         },
         "table": {
-          "description": "Search a specific table only (default: searches all code tables). Options: sys_script, sys_script_include, sys_ui_script, sys_script_client, sys_ws_operation",
+          "description": "Search one table only (default: all code tables you may read). Options: sys_script, sys_script_include, sys_ui_script, sys_script_client, sys_ws_operation, sys_module, sys_atf_step",
           "type": "string"
         },
         "field": {
-          "description": "Specific field to search (default: script)",
+          "description": "Specific field to search (default: the table's script field)",
           "type": "string"
         },
         "limit": {
@@ -3756,7 +3756,7 @@
         },
         "offset": {
           "default": 0,
-          "description": "Deterministic combined-result offset (default 0)",
+          "description": "Offset into the combined results (default 0)",
           "type": "integer",
           "minimum": 0,
           "maximum": 10000

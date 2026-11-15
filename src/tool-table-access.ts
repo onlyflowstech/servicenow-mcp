@@ -53,8 +53,10 @@ import {
 import { flowViewFieldSelection } from "./tools/flow-view-policy.js";
 import {
   CODE_SEARCH_TARGETS,
+  codeSearchReads,
   codeSearchTarget,
   searchProjection,
+  type CodeSearchTarget,
 } from "./code-search-targets.js";
 
 export interface ToolTableAccessResolution {
@@ -309,22 +311,28 @@ function codeSearchResolution(
         tool: CODE_SEARCH_TOOL,
       });
     }
-    const selected = resolveReadableFields(table, {
-      fields: args.field ?? target.defaultField,
-    });
-    // Exactly one searched field: a list would silently search only its first.
-    if (selected.length !== 1) throw new FieldPolicyError("invalid_field_selection");
-    const field = selected[0]!;
-    const fields = resolveReadableFields(table, {
-      fields: searchProjection(target.nameField, field).join(","),
-    });
+    let field = target.defaultField;
+    if (target.fixedField) {
+      // The searched field of this target is part of its definition.
+      if (args.field !== undefined) throw new FieldPolicyError("invalid_field_selection");
+    } else {
+      const selected = resolveReadableFields(table, {
+        fields: args.field ?? target.defaultField,
+      });
+      // Exactly one searched field: a list would silently search only its first.
+      if (selected.length !== 1) throw new FieldPolicyError("invalid_field_selection");
+      field = selected[0]!;
+    }
+    // Every table the search reads is prepared, so the handler reads each with
+    // the fields the policy approved for this call and no others.
+    const prepared = codeSearchPlan(
+      withFieldPolicyArgumentValues(args, { table, field }),
+      target,
+      field
+    );
     return resolution(
-      prepareAdditionalReadFieldArguments(
-        withFieldPolicyArgumentValues(args, { table, field }),
-        table,
-        fields.join(",")
-      ),
-      [read(table)]
+      prepared,
+      codeSearchReads(target).map((name) => read(name))
     );
   }
   if (args.field !== undefined) {
@@ -335,6 +343,7 @@ function codeSearchResolution(
   // is decided on its own, by the table policy and then by the field policy
   // that governs the script field, and a table that is refused is left out of
   // the plan (the handler names it in a warning) instead of failing the call.
+  // A target that reads several tables is in only when every one of them passes.
   // Only when nothing is left does the call fail, and then with the reason.
   let prepared = args;
   const granted: string[] = [];
@@ -342,14 +351,12 @@ function codeSearchResolution(
   for (const target of CODE_SEARCH_TARGETS) {
     try {
       if (tableAccess !== undefined) {
-        authorizeTableAccess(tableAccess, read(target.table), CODE_SEARCH_TOOL);
+        for (const name of codeSearchReads(target)) {
+          authorizeTableAccess(tableAccess, read(name), CODE_SEARCH_TOOL);
+        }
       }
-      prepared = prepareAdditionalReadFieldArguments(
-        prepared,
-        target.table,
-        searchProjection(target.nameField, target.defaultField).join(",")
-      );
-      granted.push(target.table);
+      prepared = codeSearchPlan(prepared, target, target.defaultField);
+      granted.push(...codeSearchReads(target));
     } catch (error) {
       // Without a policy to consult, a refusal is the whole call's, as before.
       if (tableAccess === undefined) throw error;
@@ -366,7 +373,34 @@ function codeSearchResolution(
       tables: CODE_SEARCH_TARGETS.map((target) => target.table),
     });
   }
-  return resolution(prepared, granted.map(read));
+  return resolution(prepared, granted.map((name) => read(name)));
+}
+
+/**
+ * Prepare the fields a search of one target may read from each table it reads:
+ * the identifier, name and searched field of the searched table, and what its
+ * lookups read. All are checked, so a field the policy refuses fails the target.
+ */
+function codeSearchPlan(
+  args: Record<string, unknown>,
+  target: CodeSearchTarget,
+  field: string
+): Record<string, unknown> {
+  let prepared = prepareAdditionalReadFieldArguments(
+    args,
+    target.queryTable,
+    resolveReadableFields(target.queryTable, {
+      fields: searchProjection(target.nameField, field).join(","),
+    }).join(",")
+  );
+  for (const lookup of target.lookups) {
+    prepared = prepareAdditionalReadFieldArguments(
+      prepared,
+      lookup.table,
+      resolveReadableFields(lookup.table, { fields: lookup.fields.join(",") }).join(",")
+    );
+  }
+  return prepared;
 }
 
 function discoveryResolution(

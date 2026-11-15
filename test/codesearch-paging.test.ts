@@ -242,15 +242,15 @@ describe("a search across tables", () => {
     const counts = Object.fromEntries(order.map((table) => [table, 60]));
     const fake = fakeInstance(fiveTables(counts));
     const { rows: found } = await run(fake, { limit: 10, offset: 30 });
-    expect(fake.finds()).toHaveLength(6);
+    expect(fake.finds()).toHaveLength(7);
     for (const read of fake.finds()) {
-      const module = read.table === "sys_module";
-      expect(read.params).toMatchObject({
-        sysparm_offset: "0",
-        sysparm_limit: "41",
-        sysparm_fields: module ? "sys_id,path" : "sys_id,name",
-      });
-      expect(read.params.sysparm_query).toMatch(/^(script|operation_script|content)LIKEneedle\^ORDERBYsys_id$/u);
+      expect(read.params).toMatchObject({ sysparm_offset: "0", sysparm_limit: "41" });
+      expect(read.params.sysparm_fields).toBe(
+        { sys_module: "sys_id,path", sys_variable_value: "sys_id,document_key" }[read.table] ?? "sys_id,name"
+      );
+      expect(read.params.sysparm_query).toMatch(
+        /^((document=sys_atf_step\^variableENDSWITHscript\^value)|script|operation_script|content)LIKEneedle\^ORDERBYsys_id$/u
+      );
     }
     // Scripts for the ten rows of the page only.
     const ids = fake.bodies().flatMap((read) => read.params.sysparm_query!.split("IN")[1]!.split(","));
@@ -279,7 +279,10 @@ describe("a search across tables", () => {
     expect(new Set(some.rows.map((row) => row.table))).toEqual(new Set(order.filter((t) => t !== "sys_script")));
 
     const all = Object.fromEntries(
-      [...order, "sys_module"].map((table) => [table, new ServiceNowResponseTooLargeError("x")])
+      [...order, "sys_module", "sys_variable_value"].map((table) => [
+        table,
+        new ServiceNowResponseTooLargeError("x"),
+      ])
     );
     await expect(run(fakeInstance(fiveTables(counts), { fail: all }))).rejects.toSatisfy(
       (error: unknown) => error instanceof Error && error.message.includes("Error category: too_large.")

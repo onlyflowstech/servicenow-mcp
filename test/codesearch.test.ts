@@ -247,7 +247,7 @@ describe("a search with no table over a partial grant", () => {
     ]);
     expect(data.warnings).toEqual([
       "Not searched, because this profile does not allow sn_codesearch to read them: " +
-        "sys_script, sys_script_client, sys_ws_operation, sys_module. To include one, run " +
+        "sys_script, sys_script_client, sys_ws_operation, sys_module, sys_atf_step (needs read on sys_variable_value, sys_atf_step, sys_atf_test). To include one, run " +
         "servicenow-mcp-setup grant --profile <profile> --read <table> --tools sn_codesearch.",
     ]);
   });
@@ -264,7 +264,7 @@ describe("a search with no table over a partial grant", () => {
     const four = await search(connected, { search_term: "needle" });
     expect(four.data.warnings).toEqual([
       "Not searched, because this profile does not allow sn_codesearch to read them: " +
-        "sys_ws_operation, sys_module. To include one, run servicenow-mcp-setup grant " +
+        "sys_ws_operation, sys_module, sys_atf_step (needs read on sys_variable_value, sys_atf_step, sys_atf_test). To include one, run servicenow-mcp-setup grant " +
         "--profile <profile> --read <table> --tools sn_codesearch.",
     ]);
 
@@ -272,11 +272,29 @@ describe("a search with no table over a partial grant", () => {
     const almost = await harness([], { tableAccess: grants(five) });
     almost.get.mockImplementation(fiveTables().get as never);
     expect((await search(almost, { search_term: "needle" })).data.warnings).toEqual([
-      "Not searched, because this profile does not allow sn_codesearch to read it: sys_module. " +
-        "To include it, run servicenow-mcp-setup grant --profile <profile> --read <table> --tools sn_codesearch.",
+      "Not searched, because this profile does not allow sn_codesearch to read them: " +
+        "sys_module, sys_atf_step (needs read on sys_variable_value, sys_atf_step, sys_atf_test). To include one, run servicenow-mcp-setup grant " +
+        "--profile <profile> --read <table> --tools sn_codesearch.",
     ]);
 
-    const full = await harness([], { tableAccess: grants({ ...five, sys_module: ["sn_codesearch"] }) });
+    const six = { ...five, sys_module: ["sn_codesearch"] };
+    const nearly = await harness([], { tableAccess: grants(six) });
+    nearly.get.mockImplementation(fiveTables().get as never);
+    expect((await search(nearly, { search_term: "needle" })).data.warnings).toEqual([
+      "Not searched, because this profile does not allow sn_codesearch to read it: " +
+        "sys_atf_step (needs read on sys_variable_value, sys_atf_step, sys_atf_test). To include it, run servicenow-mcp-setup grant " +
+        "--profile <profile> --read <table> --tools sn_codesearch.",
+    ]);
+
+    // The ATF step scripts need all three of their tables bound to the tool.
+    const full = await harness([], {
+      tableAccess: grants({
+        ...six,
+        sys_variable_value: ["sn_codesearch"],
+        sys_atf_step: ["sn_codesearch"],
+        sys_atf_test: ["sn_codesearch"],
+      }),
+    });
     full.get.mockImplementation(fiveTables().get as never);
     expect((await search(full, { search_term: "needle" })).data.warnings).toBeUndefined();
   });
@@ -286,7 +304,7 @@ describe("a search with no table over a partial grant", () => {
     const fake = fiveTables();
     connected.get.mockImplementation(fake.get as never);
     const { data } = await search(connected, { search_term: "needle" });
-    expect(new Set(fake.reads.map((read) => read.table)).size).toBe(6);
+    expect(new Set(fake.reads.map((read) => read.table)).size).toBe(7);
     expect(data.warnings).toBeUndefined();
   });
 
@@ -299,7 +317,7 @@ describe("a search with no table over a partial grant", () => {
       "this profile does not allow sn_codesearch to read any of the tables it searches"
     );
     expect(message).toContain(
-      "(sys_script_include, sys_script, sys_ui_script, sys_script_client, sys_ws_operation, sys_module)"
+      "(sys_script_include, sys_script, sys_ui_script, sys_script_client, sys_ws_operation, sys_module, sys_atf_step)"
     );
     expect(message).toContain("--read <table> --tools sn_codesearch");
     expect(message).not.toContain("incident");
@@ -336,6 +354,7 @@ describe("a search with no table over a partial grant", () => {
         sys_script_client: { readable: ["sys_id"] },
         sys_ws_operation: { readable: ["sys_id"] },
         sys_module: { readable: ["sys_id"] },
+        sys_variable_value: { readable: ["sys_id"] },
       },
     });
     const message = await callError(connected, "sn_codesearch", { search_term: "needle" });
@@ -463,5 +482,212 @@ describe("ES modules", () => {
     expect(denied).toContain("fieldPolicy.sys_module.readable");
     const { data } = await search(connected, { search_term: "fleet", table: "sys_module", field: "path" });
     expect(data.results).toHaveLength(1);
+  });
+});
+
+describe("ATF step scripts", () => {
+  const STEP_1 = "a1".repeat(16);
+  const STEP_2 = "a2".repeat(16);
+  const STEP_3 = "a3".repeat(16);
+  const TEST_1 = "b1".repeat(16);
+  const TEST_2 = "b2".repeat(16);
+  const atfGrants = (extra: Record<string, readonly string[]> = {}) =>
+    grants({
+      sys_variable_value: ["sn_codesearch"],
+      sys_atf_step: ["sn_codesearch"],
+      sys_atf_test: ["sn_codesearch"],
+      ...extra,
+    });
+
+  function atfInstance() {
+    // `document_key` and `test` come back as { link, value } unless the read
+    // asks for the value alone, as they do on an instance.
+    return fakeInstance(
+      {
+      sys_variable_value: [
+        // Two script inputs of ATF steps that hold the term.
+        { sys_id: sysId(1), document: "sys_atf_step", document_key: STEP_1, variable: "script", value: "var a = 1;\ngs.info('needle');" },
+        { sys_id: sysId(2), document: "sys_atf_step", document_key: STEP_3, variable: "script", value: "needle first" },
+        // An ATF step's other input that holds it too: not a script.
+        { sys_id: sysId(3), document: "sys_atf_step", document_key: STEP_2, variable: "description", value: "a needle in a description" },
+        // Another owner's script variable: not an ATF step.
+        { sys_id: sysId(4), document: "sc_cat_item", document_key: "c".repeat(32), variable: "script", value: "needle in a catalog script" },
+        // An ATF step script that does not hold it.
+        { sys_id: sysId(5), document: "sys_atf_step", document_key: STEP_2, variable: "script", value: "no match here" },
+      ],
+      sys_atf_step: [
+        { sys_id: STEP_1, test: TEST_1, order: "100" },
+        { sys_id: STEP_2, test: TEST_1, order: "200" },
+        { sys_id: STEP_3, test: TEST_2, order: "300" },
+      ],
+      sys_atf_test: [
+        { sys_id: TEST_1, name: "Login flow" },
+        { sys_id: TEST_2, name: "Approve change" },
+      ],
+      },
+      { referenceFields: ["document_key", "test"] }
+    );
+  }
+
+  it("searches only the script inputs of ATF steps, with the query fixed on the server", async () => {
+    const connected = await harness([], { tableAccess: atfGrants() });
+    const fake = atfInstance();
+    connected.get.mockImplementation(fake.get as never);
+    const { data } = await search(connected, { search_term: "needle", table: "sys_atf_step" });
+
+    const [find] = fake.finds();
+    expect(find!.table).toBe("sys_variable_value");
+    expect(find!.params.sysparm_query).toBe(
+      "document=sys_atf_step^variableENDSWITHscript^valueLIKEneedle^ORDERBYsys_id"
+    );
+    // The rows are the two script inputs: not the description, not the catalog item's script.
+    expect(data.results.map((row) => row.sys_id)).toEqual([STEP_1, STEP_3]);
+    expect(data.results[0]).toMatchObject({
+      table: "sys_atf_step",
+      table_label: "sys_atf_step",
+      name: "Login flow > step 100",
+      line: 2,
+    });
+    expect(String(data.results[0]!.snippet)).toContain("gs.info('needle')");
+    expect(data.results[1]).toMatchObject({ name: "Approve change > step 300", line: 1 });
+  });
+
+  it("reads the steps and then their tests, once each, for the rows of the page only", async () => {
+    const connected = await harness([], { tableAccess: atfGrants() });
+    const fake = atfInstance();
+    connected.get.mockImplementation(fake.get as never);
+    await search(connected, { search_term: "needle", table: "sys_atf_step" });
+    expect(fake.reads.map((read) => read.table)).toEqual(["sys_variable_value", "sys_atf_step", "sys_atf_test"]);
+    const [, steps, tests] = fake.reads;
+    expect(steps!.params).toMatchObject({
+      sysparm_query: `sys_idIN${STEP_1},${STEP_3}`,
+      sysparm_fields: "sys_id,test,order",
+      sysparm_exclude_reference_link: "true",
+    });
+    expect(tests!.params).toMatchObject({
+      sysparm_query: `sys_idIN${TEST_1},${TEST_2}`,
+      sysparm_fields: "sys_id,name",
+    });
+  });
+
+  it("cannot be widened by the search term, the field, or a table argument", async () => {
+    const connected = await harness([], { tableAccess: atfGrants() });
+    const fake = atfInstance();
+    connected.get.mockImplementation(fake.get as never);
+    await search(connected, { search_term: "x^document=sc_cat_item^NQvariable=password", table: "sys_atf_step" });
+    expect(fake.finds()[0]!.params.sysparm_query).toBe(
+      "document=sys_atf_step^variableENDSWITHscript^valueLIKExdocument=sc_cat_itemNQvariable=password^ORDERBYsys_id"
+    );
+
+    for (const field of ["value", "variable", "document"]) {
+      const message = await callError(connected, "sn_codesearch", {
+        search_term: "needle",
+        table: "sys_atf_step",
+        field,
+      });
+      expect(message).toContain("denied by policy");
+    }
+    // The value table itself is not a search target: only its ATF step rows are.
+    const direct = await callError(connected, "sn_codesearch", { search_term: "needle", table: "sys_variable_value" });
+    expect(direct).toContain('sn_codesearch does not support table "sys_variable_value"');
+  });
+
+  it("reads the scripts in batches when the page is large", async () => {
+    const connected = await harness([], { tableAccess: atfGrants() });
+    const fake = atfInstance();
+    connected.get.mockImplementation(fake.get as never);
+    await search(connected, { search_term: "needle", table: "sys_atf_step", limit: 60 });
+    expect(fake.finds()[0]!.params).toMatchObject({ sysparm_fields: "sys_id,document_key", sysparm_limit: "61" });
+    const [bodies] = fake.bodies();
+    expect(bodies).toMatchObject({ table: "sys_variable_value" });
+    expect(bodies!.params.sysparm_fields).toBe("sys_id,value");
+  });
+
+  it("needs a grant on all three tables, and says which one is missing", async () => {
+    const connected = await harness([], {
+      tableAccess: grants({ sys_variable_value: ["sn_codesearch"], sys_atf_step: ["sn_codesearch"] }),
+    });
+    const message = await callError(connected, "sn_codesearch", { search_term: "needle", table: "sys_atf_step" });
+    expect(message).toContain('no read grant on "sys_atf_test" that allows sn_codesearch');
+    expect(message).toContain("--read sys_atf_test --tools sn_codesearch");
+    expect(connected.get).not.toHaveBeenCalled();
+
+    const unbound = await harness([], {
+      tableAccess: grants({
+        sys_variable_value: ["sn_query"],
+        sys_atf_step: ["sn_codesearch"],
+        sys_atf_test: ["sn_codesearch"],
+      }),
+    });
+    const second = await callError(unbound, "sn_codesearch", { search_term: "needle", table: "sys_atf_step" });
+    expect(second).toContain('"sys_variable_value" is granted to this profile, but not for sn_codesearch');
+  });
+
+  it("is searched in a search with no table once all three are held, after ES modules", async () => {
+    const connected = await harness([], { tableAccess: { readTables: ["*"] } });
+    const fake = atfInstance();
+    connected.get.mockImplementation(fake.get as never);
+    const { data } = await search(connected, { search_term: "needle" });
+    expect(data.results.map((row) => row.table)).toEqual(["sys_atf_step", "sys_atf_step"]);
+    expect(data.results[0]).toMatchObject({ table_label: "ATF Step Scripts", name: "Login flow > step 100" });
+    expect(data.warnings).toBeUndefined();
+  });
+
+  it("goes through the field policy of each table it reads", async () => {
+    const value = await harness([], {
+      tableAccess: atfGrants(),
+      fieldPolicy: { sys_variable_value: { readable: ["sys_id", "document_key"] } },
+    });
+    expect(await callError(value, "sn_codesearch", { search_term: "x", table: "sys_atf_step" })).toContain(
+      'field "value"'
+    );
+    const names = await harness([], {
+      tableAccess: atfGrants(),
+      fieldPolicy: { sys_atf_test: { readable: ["sys_id"] } },
+    });
+    expect(await callError(names, "sn_codesearch", { search_term: "x", table: "sys_atf_step" })).toContain(
+      "fieldPolicy.sys_atf_test.readable"
+    );
+    expect(value.get).not.toHaveBeenCalled();
+    expect(names.get).not.toHaveBeenCalled();
+  });
+
+  it("leaves a step it cannot name as 'unnamed' with a warning, and ignores a malformed step id", async () => {
+    const connected = await harness([], { tableAccess: atfGrants() });
+    const fake = fakeInstance(
+      {
+        sys_variable_value: [
+          { sys_id: sysId(1), document: "sys_atf_step", document_key: STEP_1, variable: "script", value: "needle" },
+          { sys_id: sysId(2), document: "sys_atf_step", document_key: "not-a-sys-id^x", variable: "script", value: "needle" },
+        ],
+        sys_atf_step: [{ sys_id: STEP_1, test: TEST_1, order: "100" }],
+        sys_atf_test: [{ sys_id: TEST_1, name: "Login flow" }],
+      },
+      { fail: { sys_atf_test: new Error("RAW_DETAIL") } }
+    );
+    connected.get.mockImplementation(fake.get as never);
+    const { data } = await search(connected, { search_term: "needle", table: "sys_atf_step" });
+    expect(data.results.map((row) => row.name)).toEqual(["step 100", "unnamed"]);
+    expect(data.warnings).toHaveLength(1);
+    expect(data.warnings![0]).toContain("sys_atf_test: names unavailable for some results.");
+    expect(data.warnings![0]).not.toContain("RAW_DETAIL");
+    // The malformed id never reaches a query.
+    expect(JSON.stringify(fake.reads.map((read) => read.params))).not.toContain("not-a-sys-id");
+  });
+
+  it("names two matches of one step with one read of the step", async () => {
+    const connected = await harness([], { tableAccess: atfGrants() });
+    const fake = fakeInstance({
+      sys_variable_value: [
+        { sys_id: sysId(1), document: "sys_atf_step", document_key: STEP_1, variable: "script", value: "needle one" },
+        { sys_id: sysId(2), document: "sys_atf_step", document_key: STEP_1, variable: "setup script", value: "needle two" },
+      ],
+      sys_atf_step: [{ sys_id: STEP_1, test: TEST_1, order: "100" }],
+      sys_atf_test: [{ sys_id: TEST_1, name: "Login flow" }],
+    });
+    connected.get.mockImplementation(fake.get as never);
+    const { data } = await search(connected, { search_term: "needle", table: "sys_atf_step" });
+    expect(data.results.map((row) => row.name)).toEqual(["Login flow > step 100", "Login flow > step 100"]);
+    expect(fake.reads.filter((read) => read.table === "sys_atf_step")).toHaveLength(1);
   });
 });

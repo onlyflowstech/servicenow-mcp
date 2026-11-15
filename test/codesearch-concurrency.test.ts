@@ -47,6 +47,14 @@ function harness(options: { denied?: readonly string[]; delays?: Partial<Record<
     vi.fn(async (input: string | URL | Request) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
       const table = /\/api\/now\/table\/([a-z_]+)/u.exec(url.pathname)![1];
+      // ATF step scripts live in sys_variable_value, which is not cached and
+      // has no row here; this suite is about the code tables themselves.
+      if (table === "sys_variable_value") {
+        return new Response(JSON.stringify({ result: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json", "X-Total-Count": "0" },
+        });
+      }
       const watermark = url.searchParams.get("sysparm_query") === "ORDERBYDESCsys_updated_on";
       (watermark ? watermarks : searches).push(table);
       inFlight += 1;

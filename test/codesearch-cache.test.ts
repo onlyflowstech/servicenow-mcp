@@ -74,16 +74,19 @@ function world(bodySize: number, rowsPerTable = 8) {
     );
     return JSON.parse((result.content[0] as { text: string }).text) as unknown;
   };
-  return { fake, watermarks, search };
+  /** Reads of the cached code tables; the ATF value table is read straight through. */
+  const codeReads = () => fake.reads.filter((read) => read.table !== "sys_variable_value");
+  return { fake, watermarks, search, codeReads };
 }
 
 describe("a code search through the cache", () => {
   it("serves a repeated search from cache, rows and scripts both, for one watermark read per table", async () => {
-    const { fake, watermarks, search } = world(1_500);
+    const { fake, watermarks, search, codeReads } = world(1_500);
     const cold = await search();
-    // Rows (five tables) and scripts (the tables the page reached), once each.
-    const coldReads = fake.reads.length;
-    expect(fake.finds()).toHaveLength(6);
+    // Rows (six tables, and the uncached ATF value table) and scripts (the
+    // tables the page reached), once each.
+    const coldReads = codeReads().length;
+    expect(fake.finds()).toHaveLength(7);
     expect(fake.bodies().length).toBeGreaterThan(0);
     // The watermark is read once per table per call, not once per read.
     expect(watermarks.slice().sort()).toEqual([...TABLES].sort());
@@ -91,19 +94,19 @@ describe("a code search through the cache", () => {
     watermarks.length = 0;
     const warm = await search();
     expect(warm).toEqual(cold);
-    expect(fake.reads).toHaveLength(coldReads);
+    expect(codeReads()).toHaveLength(coldReads);
     expect(watermarks.slice().sort()).toEqual([...TABLES].sort());
   });
 
   it("keeps each credential identity's cached search to itself", async () => {
-    const { fake, search } = world(1_500);
+    const { search, codeReads } = world(1_500);
     await search("identity-a");
-    const afterFirst = fake.reads.length;
+    const afterFirst = codeReads().length;
     await search("identity-b");
     // The second identity reads from the instance: nothing of the first is shared.
-    expect(fake.reads.length).toBe(afterFirst * 2);
+    expect(codeReads().length).toBe(afterFirst * 2);
     await search("identity-a");
-    expect(fake.reads.length).toBe(afterFirst * 2);
+    expect(codeReads().length).toBe(afterFirst * 2);
   });
 
   it("leaves a small response to the one-request memo, with no watermark on the next call", async () => {

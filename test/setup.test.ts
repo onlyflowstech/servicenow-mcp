@@ -885,6 +885,34 @@ describe("setup grant", () => {
       expectDenied("write", "sys_module", ["sn_create", "sn_update", "sn_codesearch"]);
     });
 
+    it("lets a plain read grant on the three ATF tables run an ATF step script search, and --atf alone does not", async () => {
+      const atfSearch = { search_term: "x", table: "sys_atf_step" };
+      await grant(["--atf"]);
+      // The ATF bundle binds those tables to sn_atf_author only.
+      const authoring = resolveToolTableAccess("sn_codesearch", atfSearch);
+      expect(() =>
+        authorizeTableAccessPlan(persistedPolicy(), authoring.requests, "sn_codesearch")
+      ).toThrow(/denied by policy/u);
+
+      await grant(["--read", "sys_variable_value,sys_atf_step,sys_atf_test"]);
+      for (const table of ["sys_variable_value", "sys_atf_step", "sys_atf_test"]) {
+        expect(toolsOn(table)).toContain("sn_codesearch");
+      }
+      const plan = resolveToolTableAccess("sn_codesearch", atfSearch, undefined, persistedPolicy());
+      expect(plan.requests.map((request) => request.table)).toEqual([
+        "sys_variable_value",
+        "sys_atf_step",
+        "sys_atf_test",
+      ]);
+      expect(() =>
+        authorizeTableAccessPlan(persistedPolicy(), plan.requests, "sn_codesearch")
+      ).not.toThrow();
+      // The grant lets the tool search ATF steps and nothing else of those tables.
+      expect(() =>
+        resolveToolTableAccess("sn_codesearch", { search_term: "x", table: "sys_variable_value" })
+      ).toThrow(TablePolicyError);
+    });
+
     it("searches the code tables the profile holds when it holds only some, and none when it holds none", async () => {
       await grant(["--read", "sys_script_include,sys_module"]);
       const plan = resolveToolTableAccess(

@@ -227,6 +227,15 @@ applies: a code table whose script field is not readable denies `sn_codesearch`
 as it denies `sn_query` for that field (a search with no `table` leaves that
 table out and names it in the warning).
 
+Searching ATF step scripts (`sn_codesearch` with `table: "sys_atf_step"`) reads
+three tables, so it needs read on `sys_variable_value`, `sys_atf_step` and
+`sys_atf_test`, each bound to `sn_codesearch`:
+`servicenow-mcp-setup grant --profile <name> --read sys_variable_value,sys_atf_step,sys_atf_test`.
+`--atf` binds those tables to `sn_atf_author` only, so it is added on top. The
+search is limited in the server to the script inputs of ATF steps; the grant on
+`sys_variable_value` does not let `sn_codesearch` search any other table's
+variables.
+
 A grant decides which tools reach a table; the profile's field policy still
 decides which fields they may write. The journal tools follow it like
 `sn_update` does: if the incident's effective `writable` list, from

@@ -159,16 +159,21 @@ describe("sn_codesearch through the cache", () => {
     expect(watermarkReads).toEqual(["sys_script_include", "sys_script_include"]);
   });
 
-  it("serves a repeated search across all five code tables from cache", async () => {
+  it("serves a repeated search across all the code tables from cache", async () => {
     const { call, fullReads, watermarkReads } = upstream();
     const args = codesearchSchema.parse({ search_term: "needle" });
 
+    // The six code tables, and sys_variable_value for ATF step scripts. The
+    // last is not in the default cache list, so it is read straight through.
+    const searched = [...CODE_TABLES, "sys_variable_value"];
     await codesearchHandler(args, call(), config, undefined as never);
-    expect(fullReads.map((read) => read.table).sort()).toEqual([...CODE_TABLES].sort());
+    expect(fullReads.map((read) => read.table).sort()).toEqual([...searched].sort());
 
     await codesearchHandler(args, call(), config, undefined as never);
-    // No further search request: only the five watermark reads per call.
-    expect(fullReads).toHaveLength(CODE_TABLES.length);
+    // The code tables send no further search request, only a watermark read each
+    // per call; the uncached table is read again.
+    expect(fullReads).toHaveLength(searched.length + 1);
+    expect(fullReads.at(-1)!.table).toBe("sys_variable_value");
     expect(watermarkReads).toHaveLength(CODE_TABLES.length * 2);
   });
 
@@ -185,7 +190,10 @@ describe("sn_codesearch through the cache", () => {
 
     const result = parseText(await codesearchHandler(args, call(), config, undefined as never));
 
-    expect(fullReads.map((read) => read.table)).toEqual(["sys_script_include"]);
+    // Only the edited table is read again among the cached ones.
+    expect(fullReads.map((read) => read.table).filter((table) => table !== "sys_variable_value")).toEqual([
+      "sys_script_include",
+    ]);
     expect(
       result.find((row: { table: string }) => row.table === "sys_script_include").sys_id
     ).toBe("sys_script_include-edited");

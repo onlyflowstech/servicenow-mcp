@@ -20,6 +20,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the field policy and the sensitive-name rules, it is in the default metadata
   cache list, and a write grant on it is flagged as code execution.
 
+- **`sn_codesearch` searches ATF step scripts.** `table: "sys_atf_step"` finds
+  the script inputs of ATF steps: rows of `sys_variable_value` whose `document`
+  is `sys_atf_step` and whose `variable` ends with `script`, a condition fixed in
+  the server that no argument can widen (a `field` is refused, and the search
+  term cannot add a clause). Each result is the step, named `<test> > step
+  <order>`; the steps and then their tests are read by id to name them. The
+  profile needs read on `sys_variable_value`, `sys_atf_step` and `sys_atf_test`,
+  each bound to `sn_codesearch`; a denial names the missing table, and in a
+  search with no `table` the target is left out, and named, unless all three are
+  held. `grant --atf` binds those tables to `sn_atf_author` only, so add `grant
+  --read sys_variable_value,sys_atf_step,sys_atf_test --tools sn_codesearch` for
+  this search. The tables are not in the default metadata cache list.
+- **`tools/list` grows by 129 characters.** The `sn_codesearch` entry goes from
+  3,655 to 3,784 characters (model-visible total 40,012 to 40,141), for the new
+  description and parameter text. The published `inputSchema` shape is
+  unchanged.
+
 ### Changed
 
 - **A default read of a code table no longer returns the script.** `sn_query`

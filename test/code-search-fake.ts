@@ -40,6 +40,11 @@ export function fakeInstance(
     readonly delayMs?: Record<string, number>;
     /** Make every read of scripts by id fail with this error. */
     readonly failBodies?: unknown;
+    /**
+     * Fields the instance returns as `{ link, value }` unless the read sends
+     * sysparm_exclude_reference_link=true, as it does for a reference field.
+     */
+    readonly referenceFields?: readonly string[];
   } = {}
 ) {
   const reads: FakeRead[] = [];
@@ -65,10 +70,18 @@ export function fakeInstance(
       const offset = Number(params.sysparm_offset ?? 0);
       const limit = Number(params.sysparm_limit ?? rows.length);
       const fields = (params.sysparm_fields ?? "").split(",").filter(Boolean);
+      const links = params.sysparm_exclude_reference_link !== "true";
+      const shaped = (field: string, value: string): unknown =>
+        links && options.referenceFields?.includes(field)
+          ? { link: `https://fake.service-now.com/api/now/table/x/${value}`, value }
+          : value;
       const result = rows.slice(offset, offset + limit).map((row) =>
-        fields.length === 0
-          ? { ...row }
-          : Object.fromEntries(fields.filter((field) => field in row).map((field) => [field, row[field]!]))
+        Object.fromEntries(
+          (fields.length === 0 ? Object.keys(row) : fields.filter((field) => field in row)).map((field) => [
+            field,
+            shaped(field, row[field]!),
+          ])
+        )
       );
       read.bytes = Buffer.byteLength(JSON.stringify({ result }), "utf8");
       if (read.bytes > cap) {
@@ -101,9 +114,13 @@ function select(rows: readonly FakeRow[], query: string): FakeRow[] {
       continue;
     }
     const like = /^([a-z_]+)LIKE(.*)$/su.exec(clause);
+    const endsWith = /^([a-z_]+)ENDSWITH(.*)$/su.exec(clause);
     const inList = /^([a-z_]+)IN(.*)$/su.exec(clause);
     const equals = /^([a-z_]+)=(.*)$/su.exec(clause);
-    if (like) {
+    if (endsWith) {
+      const [, field, value] = endsWith;
+      out = out.filter((row) => (row[field!] ?? "").toLowerCase().endsWith(value!.toLowerCase()));
+    } else if (like) {
       const [, field, value] = like;
       out = out.filter((row) => (row[field!] ?? "").toLowerCase().includes(value!.toLowerCase()));
     } else if (inList) {

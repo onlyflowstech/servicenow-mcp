@@ -121,7 +121,7 @@ describe("tools/list size ledger (#19)", () => {
         "sn_atf_run": 8192,
         "sn_attach": 4690,
         "sn_batch": 8328,
-        "sn_codesearch": 3655,
+        "sn_codesearch": 3784,
         "sn_create": 3626,
         "sn_delete": 3292,
         "sn_discover": 3473,
@@ -137,7 +137,7 @@ describe("tools/list size ledger (#19)", () => {
         "sn_schema": 3586,
         "sn_syslog": 4243,
         "sn_update": 3661,
-        "total": 128258,
+        "total": 128387,
       }
     `);
   });
@@ -156,7 +156,7 @@ describe("tools/list size ledger (#19)", () => {
     const outputSchemas = tools.reduce((sum, tool) => sum + size(tool.outputSchema ?? {}), 0);
     expect({ modelVisible, outputSchemas }).toMatchInlineSnapshot(`
       {
-        "modelVisible": 40012,
+        "modelVisible": 40141,
         "outputSchemas": 83684,
       }
     `);

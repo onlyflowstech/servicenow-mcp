@@ -756,7 +756,7 @@ describe("SNSDK-33 bounded collection inputs", () => {
       has_more: true,
       next_offset: 4,
     });
-    expect(get).toHaveBeenCalledTimes(6);
+    expect(get).toHaveBeenCalledTimes(7);
     for (const call of get.mock.calls) {
       expect(call[1]).toMatchObject({ sysparm_limit: "5", sysparm_offset: "0" });
     }

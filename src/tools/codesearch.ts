@@ -16,6 +16,7 @@ import { ok, escapeQueryValue, formatError, withWarnings } from "../utils.js";
 import { createCommonToolError } from "../tool-error.js";
 import {
   CODE_SEARCH_TARGETS,
+  codeSearchReads,
   codeSearchTarget,
   searchProjection,
   type CodeSearchTarget,
@@ -26,7 +27,7 @@ import { normalizeTableName } from "../table-policy.js";
 export const definition = {
   name: "sn_codesearch",
   description:
-    "Search across ServiceNow code artifacts — business rules, script includes, UI scripts, client scripts, and scripted REST operations. Returns matching records with code snippets.",
+    "Search across ServiceNow code artifacts — business rules, script includes, UI scripts, client scripts, scripted REST operations, ES modules and ATF step scripts. Returns matches with a snippet around the first hit; with no table, tables take turns so each is on page 1.",
   annotations: {
     title: "Search code artifacts",
     readOnlyHint: true,
@@ -38,10 +39,10 @@ export const definition = {
 
 export const schema = z.object({
   search_term: z.string().describe("Text to search for in script fields"),
-  table: z.string().optional().describe("Search a specific table only (default: searches all code tables). Options: sys_script, sys_script_include, sys_ui_script, sys_script_client, sys_ws_operation"),
-  field: z.string().optional().describe("Specific field to search (default: script)"),
+  table: z.string().optional().describe("Search one table only (default: all code tables you may read). Options: sys_script, sys_script_include, sys_ui_script, sys_script_client, sys_ws_operation, sys_module, sys_atf_step"),
+  field: z.string().optional().describe("Specific field to search (default: the table's script field)"),
   limit: z.number().int().min(1).max(1000).optional().default(20).describe("Max total results (default 20, max 1000)"),
-  offset: z.number().int().min(0).max(10000).optional().default(0).describe("Deterministic combined-result offset (default 0)"),
+  offset: z.number().int().min(0).max(10000).optional().default(0).describe("Offset into the combined results (default 0)"),
 });
 
 /**
@@ -52,12 +53,13 @@ export const schema = z.object({
  * a window of them from every table was what passed the response cap.
  */
 const INLINE_MAX_ROWS = 50;
-/** Scripts read in one request. A batch that is still too large is halved. */
-const BODY_BATCH_ROWS = 50;
-/** Body requests in flight; the client's per-origin limiter is 4 as well. */
-const BODY_CONCURRENCY = 4;
+/** Records read in one request by id. A batch that is still too large is halved. */
+const BATCH_ROWS = 50;
+/** Requests by id in flight; the client's per-origin limiter is 4 as well. */
+const BATCH_CONCURRENCY = 4;
 const SYS_ID = /^[0-9a-f]{32}$/u;
 const TOO_LARGE_NOTE = "script too large to preview";
+const UNNAMED = "unnamed";
 
 interface Selected {
   readonly target: CodeSearchTarget;
@@ -72,9 +74,12 @@ interface Match {
   readonly selected: Selected;
   /** Position among this table's matches, in sys_id order. */
   readonly rank: number;
+  /** The row's id in the table that was searched. */
   readonly sysId: string;
-  readonly name: string;
-  /** The fields the policy lets this call read from the table. */
+  /** The record the row is about, which is `sysId` unless a lookup finds it. */
+  readonly recordId: string;
+  name: string;
+  /** The fields the policy lets this call read from the searched table. */
   readonly readable: FieldSelection;
   /** The searched value, once read: `undefined` until then. */
   body?: string;
@@ -154,7 +159,13 @@ export async function handler(
     ? (found[0] ?? [])
     : interleave(found).slice(args.offset, args.offset + args.limit + 1);
 
-  await readBodies(client, signal, page.slice(0, args.limit), warnings);
+  // The row that only says "there is more" is cut from the page, so neither its
+  // script nor its name is read.
+  const returned = page.slice(0, args.limit);
+  await Promise.all([
+    readBodies(client, signal, returned, warnings),
+    nameAtfSteps(client, signal, args, returned, warnings),
+  ]);
 
   return ok(
     withWarnings(
@@ -173,13 +184,19 @@ export async function handler(
  */
 function selectTargets(args: z.infer<typeof schema>): {
   readonly selection: Selected[];
-  readonly skipped: string[];
+  readonly skipped: CodeSearchTarget[];
 } {
   if (args.table !== undefined) {
     const target = codeSearchTarget(normalizeTableName(args.table));
     if (target === undefined) throw new TypeError("table is not searchable");
     return {
-      selection: [{ target, field: args.field || target.defaultField, named: true }],
+      selection: [
+        {
+          target,
+          field: target.fixedField ? target.defaultField : args.field || target.defaultField,
+          named: true,
+        },
+      ],
       skipped: [],
     };
   }
@@ -188,27 +205,32 @@ function selectTargets(args: z.infer<typeof schema>): {
     field: target.defaultField,
     named: false,
   }));
-  const authorized = all.filter(
-    (entry) => preparedReadableFields(args, entry.target.table) !== undefined
+  const authorized = all.filter((entry) =>
+    codeSearchReads(entry.target).every(
+      (table) => preparedReadableFields(args, table) !== undefined
+    )
   );
   if (authorized.length === 0) return { selection: all, skipped: [] };
   return {
     selection: authorized,
-    skipped: all
-      .filter((entry) => !authorized.includes(entry))
-      .map((entry) => entry.target.table),
+    skipped: all.filter((entry) => !authorized.includes(entry)).map((entry) => entry.target),
   };
 }
 
 /**
  * Name the tables a search left out. Fixed table names and one fixed command:
- * nothing of the profile's rules, and nothing the caller sent.
+ * nothing of the profile's rules, and nothing the caller sent. A target that
+ * reads several tables says which, since a grant on its own table is not enough.
  */
-function skippedWarning(tables: readonly string[]): string {
+function skippedWarning(targets: readonly CodeSearchTarget[]): string {
+  const names = targets.map((target) => {
+    const reads = codeSearchReads(target);
+    return reads.length > 1 ? `${target.table} (needs read on ${reads.join(", ")})` : target.table;
+  });
   return (
     `Not searched, because this profile does not allow sn_codesearch to read ` +
-    `${tables.length === 1 ? "it" : "them"}: ${tables.join(", ")}. ` +
-    `To include ${tables.length === 1 ? "it" : "one"}, run servicenow-mcp-setup grant ` +
+    `${names.length === 1 ? "it" : "them"}: ${names.join(", ")}. ` +
+    `To include ${names.length === 1 ? "it" : "one"}, run servicenow-mcp-setup grant ` +
     `--profile <profile> --read <table> --tools sn_codesearch.`
   );
 }
@@ -257,19 +279,23 @@ async function findMatches(
   const wanted = inline
     ? searchProjection(target.nameField, field)
     : searchProjection(target.nameField, target.nameField);
-  const fallback = resolveReadableFields(target.table, {
+  const fallback = resolveReadableFields(target.queryTable, {
     fields: searchProjection(target.nameField, field).join(","),
   });
-  const readableFields = preparedReadableFields(args, target.table) ?? fallback;
-  const resp = await client.get(`/api/now/table/${target.table}`, {
+  const readableFields = preparedReadableFields(args, target.queryTable) ?? fallback;
+  const likeField = `${escapeQueryValue(field)}LIKE${term}`;
+  const resp = await client.get(`/api/now/table/${target.queryTable}`, {
     // `sysparm_orderby` is not a Table API parameter; ordering is part of the
     // encoded query. Without it the window is not a stable prefix of the
     // table, and an offset can skip or repeat a record.
-    sysparm_query: `${escapeQueryValue(field)}LIKE${term}^ORDERBYsys_id`,
+    sysparm_query: `${target.fixedQuery === undefined ? "" : `${target.fixedQuery}^`}${likeField}^ORDERBYsys_id`,
     sysparm_fields: wanted.join(","),
     sysparm_limit: String(limit),
     sysparm_offset: String(offset),
     sysparm_no_count: "true",
+    // A reference or document field (an ATF value's `document_key`) arrives as
+    // `{ link, value }` unless asked for as its value alone.
+    sysparm_exclude_reference_link: "true",
   });
 
   const filtered = filterReadableRecord(rowsOf(resp), readableFields);
@@ -279,11 +305,15 @@ async function findMatches(
     const record = candidate as Record<string, unknown>;
     // The name column is also what was searched when the caller searches it.
     const searched = inline || field === target.nameField || field === "sys_id";
+    const sysId = String(record.sys_id ?? "");
+    // A target named by a lookup keeps the record it is about in its name field.
+    const named = target.lookups.length === 0;
     matches.push({
       selected,
       rank: matches.length,
-      sysId: String(record.sys_id ?? ""),
-      name: String(record[target.nameField] || "unnamed"),
+      sysId,
+      recordId: named ? sysId : (referenceId(record[target.nameField]) ?? ""),
+      name: named ? String(record[target.nameField] || UNNAMED) : UNNAMED,
       readable: readableFields,
       ...(searched && record[field] !== undefined ? { body: String(record[field]) } : {}),
     });
@@ -317,7 +347,6 @@ async function readBodies(
   page: readonly Match[],
   warnings: string[]
 ): Promise<void> {
-  const batches: Array<{ readonly selected: Selected; readonly matches: Match[] }> = [];
   const byTable = new Map<string, Match[]>();
   for (const match of page) {
     if (match.body !== undefined || !SYS_ID.test(match.sysId)) continue;
@@ -325,29 +354,13 @@ async function readBodies(
     if (group === undefined) byTable.set(match.selected.target.table, [match]);
     else group.push(match);
   }
-  for (const group of byTable.values()) {
-    for (let at = 0; at < group.length; at += BODY_BATCH_ROWS) {
-      batches.push({ selected: group[0]!.selected, matches: group.slice(at, at + BODY_BATCH_ROWS) });
+  const jobs: Array<{ readonly table: string; readonly run: () => Promise<void> }> = [];
+  for (const [table, group] of byTable) {
+    for (const batch of chunks(group, BATCH_ROWS)) {
+      jobs.push({ table, run: () => readBatch(client, signal, batch[0]!.selected, batch) });
     }
   }
-
-  const failed = new Map<string, unknown>();
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    while (next < batches.length) {
-      const batch = batches[next]!;
-      next += 1;
-      try {
-        await readBatch(client, signal, batch.selected, batch.matches);
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        if (!failed.has(batch.selected.target.table)) {
-          failed.set(batch.selected.target.table, error);
-        }
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(BODY_CONCURRENCY, batches.length) }, worker));
+  const failed = await runJobs(signal, jobs);
   for (const [table, error] of failed) {
     warnings.push(`${table}: snippets unavailable for some results. ${formatError(error)}`);
   }
@@ -362,11 +375,12 @@ async function readBatch(
   const { target, field } = selected;
   try {
     const resp = await inFreshBudget(signal, () =>
-      client.get(`/api/now/table/${target.table}`, {
+      client.get(`/api/now/table/${target.queryTable}`, {
         sysparm_query: `sys_idIN${matches.map((match) => match.sysId).join(",")}`,
         sysparm_fields: searchProjection("sys_id", field).join(","),
         sysparm_limit: String(matches.length),
         sysparm_no_count: "true",
+        sysparm_exclude_reference_link: "true",
       })
     );
     const filtered = filterReadableRecord(rowsOf(resp), matches[0]!.readable);
@@ -394,12 +408,119 @@ async function readBatch(
   }
 }
 
+/**
+ * Say which test and step each ATF match belongs to. The match is a value that
+ * belongs to a step (its `document_key`); the steps are read by id for their
+ * test and order, then the tests for their names. Both are tables the access
+ * plan already authorized, read with the fields it approved. A step or test that
+ * cannot be read leaves the row with the name "unnamed" and says why.
+ */
+async function nameAtfSteps(
+  client: ServiceNowOperations,
+  signal: AbortSignal | undefined,
+  args: z.infer<typeof schema>,
+  page: readonly Match[],
+  warnings: string[]
+): Promise<void> {
+  const matches = page.filter(
+    (match) => match.selected.target.lookups.length > 0 && SYS_ID.test(match.recordId)
+  );
+  if (matches.length === 0) return;
+  const [stepLookup, testLookup] = matches[0]!.selected.target.lookups;
+
+  const steps = new Map<string, { test: string | undefined; order: string | undefined }>();
+  const stepIds = [...new Set(matches.map((match) => match.recordId))];
+  const stepFailures = await runJobs(
+    signal,
+    chunks(stepIds, BATCH_ROWS).map((ids) => ({
+      table: stepLookup!.table,
+      run: async () => {
+        for (const record of await readByIds(client, signal, args, stepLookup!, ids)) {
+          if (typeof record.sys_id === "string") {
+            steps.set(record.sys_id, {
+              test: referenceId(record.test),
+              order: scalar(record.order),
+            });
+          }
+        }
+      },
+    }))
+  );
+
+  const tests = new Map<string, string>();
+  const testIds = [
+    ...new Set([...steps.values()].flatMap((step) => (step.test === undefined ? [] : [step.test]))),
+  ];
+  const testFailures = await runJobs(
+    signal,
+    chunks(testIds, BATCH_ROWS).map((ids) => ({
+      table: testLookup!.table,
+      run: async () => {
+        for (const record of await readByIds(client, signal, args, testLookup!, ids)) {
+          if (typeof record.sys_id === "string" && typeof record.name === "string" && record.name) {
+            tests.set(record.sys_id, record.name);
+          }
+        }
+      },
+    }))
+  );
+
+  for (const match of matches) {
+    const step = steps.get(match.recordId);
+    if (step === undefined) continue;
+    const test = step.test === undefined ? undefined : tests.get(step.test);
+    const position = step.order === undefined ? "step" : `step ${step.order}`;
+    match.name = test === undefined ? position : `${test} > ${position}`;
+  }
+  for (const [table, error] of [...stepFailures, ...testFailures]) {
+    warnings.push(`${table}: names unavailable for some results. ${formatError(error)}`);
+  }
+}
+
+/** The records of a lookup table with these ids, with only the fields the access plan approved. */
+async function readByIds(
+  client: ServiceNowOperations,
+  signal: AbortSignal | undefined,
+  args: z.infer<typeof schema>,
+  lookup: { readonly table: string; readonly fields: readonly string[] },
+  ids: readonly string[]
+): Promise<Record<string, unknown>[]> {
+  const readable =
+    preparedReadableFields(args, lookup.table) ??
+    resolveReadableFields(lookup.table, { fields: lookup.fields.join(",") });
+  const resp = await inFreshBudget(signal, () =>
+    client.get(`/api/now/table/${lookup.table}`, {
+      sysparm_query: `sys_idIN${ids.join(",")}`,
+      sysparm_fields: lookup.fields.join(","),
+      sysparm_limit: String(ids.length),
+      sysparm_no_count: "true",
+      sysparm_exclude_reference_link: "true",
+    })
+  );
+  const filtered = filterReadableRecord(rowsOf(resp), readable);
+  return (Array.isArray(filtered) ? filtered : []).filter(
+    (candidate): candidate is Record<string, unknown> =>
+      typeof candidate === "object" && candidate !== null && !Array.isArray(candidate)
+  );
+}
+
+/** A reference's id, whether the instance sent it bare or as `{ value }`. */
+function referenceId(value: unknown): string | undefined {
+  const candidate =
+    typeof value === "object" && value !== null ? (value as { value?: unknown }).value : value;
+  return typeof candidate === "string" && SYS_ID.test(candidate) ? candidate : undefined;
+}
+
+function scalar(value: unknown): string | undefined {
+  return typeof value === "string" || typeof value === "number" ? String(value) : undefined;
+}
+
 function toRow(match: Match, term: string): Record<string, unknown> {
   const { target } = match.selected;
   const row: Record<string, unknown> = {
     table: target.table,
     table_label: match.selected.named ? target.table : target.label,
-    sys_id: match.sysId,
+    sys_id: match.recordId,
     name: match.name,
   };
   if (match.body) {
@@ -417,6 +538,39 @@ function rowsOf(response: unknown): unknown {
   if (typeof response !== "object" || response === null) return [];
   const result = (response as { result?: unknown }).result;
   return result || [];
+}
+
+function chunks<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let at = 0; at < items.length; at += size) out.push(items.slice(at, at + size));
+  return out;
+}
+
+/**
+ * Run jobs with a few in flight, in the order given. A job that fails does not
+ * stop the others; the first failure of each table is returned. A cancelled
+ * call rethrows, since nothing after it should run.
+ */
+async function runJobs(
+  signal: AbortSignal | undefined,
+  jobs: ReadonlyArray<{ readonly table: string; readonly run: () => Promise<void> }>
+): Promise<Map<string, unknown>> {
+  const failed = new Map<string, unknown>();
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < jobs.length) {
+      const job = jobs[next]!;
+      next += 1;
+      try {
+        await job.run();
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        if (!failed.has(job.table)) failed.set(job.table, error);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(BATCH_CONCURRENCY, jobs.length) }, worker));
+  return failed;
 }
 
 /**
