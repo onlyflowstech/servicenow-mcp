@@ -10,10 +10,6 @@ const boundaryPath = resolve(
   "docs/ENTERPRISE-RELEASE-BOUNDARY.md"
 );
 const boundary = readFileSync(boundaryPath, "utf8");
-const roadmap = readFileSync(
-  resolve(repositoryRoot, "docs/MODERNIZATION-ROADMAP.md"),
-  "utf8"
-);
 const packageJson = JSON.parse(
   readFileSync(resolve(repositoryRoot, "package.json"), "utf8")
 ) as {
@@ -32,12 +28,9 @@ function sourceText(directory: string): string {
 }
 
 describe("SNSDK-43 enterprise release boundary", () => {
-  it("ships the boundary and links it from the approved modernization scope", () => {
+  it("ships the boundary document in the package", () => {
     expect(packageJson.files).toContain(
       "docs/ENTERPRISE-RELEASE-BOUNDARY.md"
-    );
-    expect(roadmap).toContain(
-      "[V2 and future enterprise release boundary](ENTERPRISE-RELEASE-BOUNDARY.md)"
     );
   });
 

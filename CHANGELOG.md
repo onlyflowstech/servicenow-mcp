@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- Planning documents that were not part of the published package are no longer
+  in the repository.
+
 ## [2.3.0-dev.2] — 2026-11-15
 
 ### Added
