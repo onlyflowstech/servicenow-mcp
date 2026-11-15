@@ -1343,7 +1343,14 @@ startup configuration. File-backed profile example:
 `run`/`run-suite` return migration guidance; use `sn_atf_run` with an explicit
 `atf.execute` profile grant. Typed ATF steps use the authenticated native form
 to save and verify inputs and output references without ACL changes or an
-installed application. See [ATF workflow](docs/ATF-WORKFLOW.md).
+installed application. A `record_query` or `record_validation` step reads its
+table on the server, so `sn_atf_author` needs a read grant on that table (a
+named-only table must be named), checks the fields in its conditions against the
+field policy (plain fields only, no dot-walks), and refuses
+`enforce_security: false`; leave it out and it stays `true`. The server's table
+grants do not govern steps that run through the UI as the impersonated user, nor
+suites authored in the instance, and `atf.execute` stays opt-in. See
+[ATF workflow](docs/ATF-WORKFLOW.md).
 
 #### Field policy
 
@@ -1499,6 +1506,18 @@ for by name: `oldvalue` and `newvalue` for `sys_audit`; `value` for
 `sys_email`. `sn_attach` is unchanged: it uses the Attachment API, under the
 grants for `sys_attachment` and the record's table, and never reads
 `sys_attachment_doc`.
+
+**Database views and extension tables are not covered by the name list.** The
+six tables are matched by table name. A database view built over one of them (a
+`sys_db_view` that joins any of the six) has a different name, so a `"*"` grant
+reaches the view and, through it, the columns of the joined table. The same holds
+for a custom table that extends one of the six. Do not grant such a view or table
+unless you mean to expose those rows, and on a profile with a `"*"` grant ask
+your instance administrator to review database views first; a profile with an
+explicit table list never reaches a view it does not name. To have the loader
+check it, declare the view as a `view` target with every table it reads in
+`relatedTables`: the profile then fails to load unless it also names each of
+those tables (for a named-only table, by name).
 
 **Code tables list without their scripts.** A read of `sys_script`,
 `sys_script_include`, `sys_ui_script`, `sys_script_client` or `sys_ws_operation`

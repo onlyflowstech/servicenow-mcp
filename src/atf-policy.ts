@@ -55,7 +55,10 @@ export function createAtfExecutionPolicy(
   });
 }
 
-export type AtfPolicyFailureReason = "execution_not_enabled" | "script_steps_not_enabled";
+export type AtfPolicyFailureReason =
+  | "execution_not_enabled"
+  | "script_steps_not_enabled"
+  | "acl_enforcement_required";
 
 const ISSUED_ATF_POLICY_ERRORS = new WeakSet<object>();
 
@@ -88,6 +91,7 @@ export function atfPolicyDenialMessage(
   tool?: string
 ): string {
   if (_error.reason === "script_steps_not_enabled") return "ATF script-step authoring denied by policy. Set atf.allowScriptSteps=true on this profile to permit code-executing steps.";
+  if (_error.reason === "acl_enforcement_required") return "ATF step denied by policy: record_query and record_validation steps always enforce ACLs. Leave enforce_security out, or set it to true.";
   const subject =
     typeof tool === "string" && tool.trim() !== "" ? tool.trim() : "This tool";
   return (

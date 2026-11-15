@@ -10,6 +10,8 @@ function example(type: keyof typeof definitions):Record<string,unknown> {
   if(input.internal_type==="integer" && values[input.element]!==undefined)values[input.element]=Number(values[input.element]);
   if(input.mandatory&&input.internal_type==="document_id"&&values[input.element]===undefined)values[input.element]=id;
  }
+ // The two record steps always enforce ACLs: the S0 example's `0` is refused.
+ if(type==="record_query"||type==="record_validation")values.enforce_security=true;
  return values;
 }
 const prepare=(type:string,inputs:Record<string,unknown>)=>prepareSteps({test_sys_id:id,steps:[{type,inputs}]},true);
@@ -21,7 +23,12 @@ describe("ATF catalog variation boundaries",()=>{
     expect(prepare(type,{...base,[input.element]:choice}).args.preparedSteps[0].inputs[input.element]).toBe(choice);
    });
    if("choices"in input) it(`${type}.${input.element} rejects unknown choices`,()=>{expect(()=>prepare(type,{...base,[input.element]:"not-a-choice"})).toThrow();});
-   if(input.internal_type==="boolean") it.each([true,false])(`${type}.${input.element} accepts boolean %s`,value=>{expect(prepare(type,{...base,[input.element]:value}).args.preparedSteps[0].inputs[input.element]).toBe(String(value));});
+   if(input.internal_type==="boolean"&&["record_query","record_validation"].includes(type)&&input.element==="enforce_security"){
+    it(`${type}.enforce_security accepts boolean true and refuses false`,()=>{
+     expect(prepare(type,{...base,enforce_security:true}).args.preparedSteps[0].inputs.enforce_security).toBe("true");
+     expect(()=>prepare(type,{...base,enforce_security:false})).toThrow("ATF operation denied by policy");
+    });
+   } else if(input.internal_type==="boolean") it.each([true,false])(`${type}.${input.element} accepts boolean %s`,value=>{expect(prepare(type,{...base,[input.element]:value}).args.preparedSteps[0].inputs[input.element]).toBe(String(value));});
   }
  }
  it.each(["headers","query_params"])("preserves nonempty %s maps and rejects malformed encodings",field=>{

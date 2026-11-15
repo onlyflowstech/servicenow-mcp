@@ -492,6 +492,31 @@ flow read creates a Workflow Studio history record. Approve it on these terms:
 [docs/FLOW-VIEW.md](FLOW-VIEW.md) lists every table, required field and
 field-policy switch.
 
+## Tables a `"*"` grant does not cover
+
+`sys_audit`, `sys_journal_field`, `sys_history_line`, `sys_audit_delete`,
+`sys_attachment_doc` and `sys_email` hold old and new field values, comments and
+work notes, deleted records, attachment content and email bodies. A `"*"` entry
+in `readTables` or `writeTables` never covers them: approve one only when the
+profile names it, bound to the tools that need it.
+
+- A database view built over one of them, or a custom table that extends one, has
+  a different table name, so a `"*"` grant reaches it. Do not grant such a view or
+  table unless those rows are meant to be exposed, and review database views on
+  the instance before approving a `"*"` profile. A profile with an explicit table
+  list never reaches a view it does not name.
+- Declare a view as a `view` target with every table it reads in
+  `relatedTables`. The profile then fails to load unless it also names each of
+  those tables, for a named-only table by name.
+- A `"*"` field-policy entry narrows these six once the profile names them, as it
+  does the ITSM tables; a value column is left out of a default read.
+- ATF `record_query` and `record_validation` steps read their table on the
+  server, so authoring one needs a read grant on that table, checks the fields of
+  its conditions against the field policy, and refuses `enforce_security: false`.
+  The server's table grants do not govern steps that run through the UI as the
+  impersonated user, nor suites authored in the instance. `atf.execute` stays
+  opt-in.
+
 ## Denied exposure patterns
 
 Do not approve a deployment that has any of these properties:

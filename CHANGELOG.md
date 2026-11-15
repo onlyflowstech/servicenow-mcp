@@ -28,6 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **ATF `record_query` and `record_validation` steps are checked when `sn_atf_author`
+  adds them.** Each step reads the table it names on the server, so
+  `add_steps` now needs a read grant on that table for the profile and tool,
+  with the same refusal as any table read (a named-only table such as `sys_audit`
+  must be named). The fields in the step's conditions are checked against the
+  table's field policy: a field the profile may not read, a dot-walk (`a.b`), a
+  condition that is only a pasted step output, or a term the check does not
+  recognise is refused, and `enforce_security: false` is refused with a fixed
+  message (leave it out, or pass `true`; it stays `true` by default). A refused
+  step refuses the whole call, before any write. Steps that run through the UI as
+  the impersonated user, and suites authored in the instance, are not governed
+  by the server's table grants, and `atf.execute` stays opt-in. The README and
+  `docs/PRODUCTION-SECURITY.md` now also say that a database view or extension
+  table over one of the six named-only tables is not covered by the name list.
 - **`sys_audit` and `sys_journal_field` are no longer covered by a `"*"` table
   grant; name them to read them.** A profile whose `readTables` (or
   `writeTables`) holds `"*"` used to reach both tables like any other. Their rows
