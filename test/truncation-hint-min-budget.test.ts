@@ -118,6 +118,11 @@ function checkHint(structured: Structured, effectiveCap: number, label: string):
   }
 }
 
+/** 1000 to 1300 in steps of 10, then on to 3000 in steps of 50. */
+const BUDGETS: number[] = [];
+for (let budget = 1_000; budget <= 1_300; budget += 10) BUDGETS.push(budget);
+for (let budget = 1_350; budget <= 3_000; budget += 50) BUDGETS.push(budget);
+
 describe("a truncated read at the smallest budgets (regression in 77448fa, #37)", () => {
   it("returns a normal truncated result for the owner's step 5 call", async () => {
     const connected = await harness(rowsFor(OWNER_FIELDS, 22));
@@ -161,7 +166,7 @@ describe("a truncated read at the smallest budgets (regression in 77448fa, #37)"
     expect((retry.structuredContent as unknown as Structured).data.results.length).toBeGreaterThan(0);
   });
 
-  it("never throws or returns an internal error, from 1000 to 1300 bytes, with and without a rule cap", async () => {
+  it("never throws or returns an internal error, from 1000 to 3000 bytes, with and without a rule cap", async () => {
     let calls = 0;
     let truncatedCalls = 0;
     let emptyCalls = 0;
@@ -173,14 +178,14 @@ describe("a truncated read at the smallest budgets (regression in 77448fa, #37)"
             rowsFor(fields, Math.min(limit, 22)),
             capped ? { encodedQueryAccess: { rules: [rule(fields)] } } : {}
           );
-          for (let budget = 1_000; budget <= 1_300; budget += 10) {
+          for (const budget of BUDGETS) {
             const label = `${capped ? "capped" : "uncapped"} fields ${fieldCount} limit ${limit} budget ${budget}`;
             const result = await connected.client.callTool({
               name: "sn_query",
               arguments: {
                 profile: "p",
                 table: "sys_script_include",
-                ...(capped ? { query: "nameSTARTSWITHfleet" } : {}),
+                ...(capped ? { query: "nameSTARTSWITHalpha" } : {}),
                 fields: fields.join(","),
                 limit,
                 max_response_bytes: budget,
@@ -192,15 +197,42 @@ describe("a truncated read at the smallest budgets (regression in 77448fa, #37)"
             if (structured.data.truncated === true) {
               truncatedCalls += 1;
               if (structured.data.record_count === 0) emptyCalls += 1;
+              // The rows here are a few hundred bytes, so the next row always
+              // fits under both caps: the hint never says it cannot, and always
+              // names the budget for it (never a sizing probe's text).
+              const hint = structured.data.hint ?? "";
+              expect(hint, `${label}: ${hint}`).not.toContain("exceeds the maximum");
+              expect(hint, `${label}: ${hint}`).toContain("(fits the next row)");
+              // Spot-check that the figure holds a row, where the rows are
+              // returned most tightly.
+              if (budget % 50 === 0) {
+                const named = parseTruncationHint(hint)?.neededBytes as number;
+                const again = await connected.client.callTool({
+                  name: "sn_query",
+                  arguments: {
+                    profile: "p",
+                    table: "sys_script_include",
+                    ...(capped ? { query: "nameSTARTSWITHalpha" } : {}),
+                    fields: fields.join(","),
+                    limit,
+                    max_response_bytes: named,
+                  },
+                });
+                const retried = again.structuredContent as unknown as Structured;
+                expect(again.isError, `${label}: retry ${named}`).toBeUndefined();
+                expect(retried.data.record_count, `${label}: retry ${named}`).toBeGreaterThan(
+                  structured.data.record_count
+                );
+              }
             }
             checkHint(structured, capped ? CAP : SCHEMA_MAX, label);
           }
         }
       }
     }
-    expect(calls).toBe(2 * 12 * 4 * 31);
+    expect(calls).toBe(2 * 12 * 4 * BUDGETS.length);
     // The sweep reaches the case that failed, and the ones around it.
     expect(truncatedCalls).toBeGreaterThan(500);
     expect(emptyCalls).toBeGreaterThan(100);
-  });
+  }, 120_000);
 });

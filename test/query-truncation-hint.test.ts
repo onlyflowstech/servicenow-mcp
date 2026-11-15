@@ -278,7 +278,11 @@ describe("truncation hint text", () => {
       advice: 'fields="sys_id,name"',
       neededBytes: Number.POSITIVE_INFINITY,
       allBytes: Number.POSITIVE_INFINITY,
+      widest: true,
     });
+    // The widest text names both the over-the-maximum clause and a next-row figure.
+    expect(widest).toContain("the next row exceeds the maximum");
+    expect(widest).toContain("max_response_bytes=1000000 (fits the next row)");
     for (const [needed, all] of [
       [1_000, 1_100],
       [999_900, 1_000_000],

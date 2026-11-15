@@ -173,28 +173,49 @@ describe("the hint stays within a raw-read rule's byte cap", () => {
   it("decides whether the advice fits from the widest text, so the sizing probe is never shorter than the real hint", () => {
     const names = (length: number) =>
       Array.from({ length: 11 }, (_, i) => `u_${String(i).padStart(2, "0")}_${"f".repeat(60)}`.slice(0, length));
-    for (let nameLength = 30; nameLength <= 46; nameLength += 1) {
-      const advice = `fields="${names(nameLength).join(",")}"`;
-      const base = { dropped: 20, total: 22, offset: 0, advice, capBytes: CAP };
-      const widest = renderTruncationHint({
-        ...base,
-        neededBytes: Number.POSITIVE_INFINITY,
-        allBytes: Number.POSITIVE_INFINITY,
-      });
-      for (const real of [
-        { neededBytes: 4_900, allBytes: 5_000 },
-        { neededBytes: 1_000, allBytes: 1_100 },
-        { neededBytes: 4_900 },
-        { neededBytes: Number.POSITIVE_INFINITY },
-      ]) {
-        const hint = renderTruncationHint({ ...base, ...real });
-        const label = `advice ${advice.length}: ${hint.length} against widest ${widest.length}`;
-        expect(widest.length, label).toBeGreaterThanOrEqual(hint.length);
-        expect(hint.length, label).toBeLessThanOrEqual(600);
-        // The same choice for both: the advice is in both or in neither.
-        expect(hint.includes("fields="), label).toBe(widest.includes("fields="));
+    const adviceOf = (nameLength: number | undefined) =>
+      nameLength === undefined ? undefined : `fields="${names(nameLength).join(",")}"`;
+    let compared = 0;
+    for (const nameLength of [undefined, 3, 30, 33, 36, 38, 40, 42, 44, 46]) {
+      const advice = adviceOf(nameLength);
+      // The windows a hint can describe: rows returned, one row dropped, none returned.
+      for (const [dropped, total] of [[20, 22], [1, 22], [22, 22], [1, 1], [5, 5], [999, 1_000]] as const) {
+        // The forms a fit uses, and a real over-the-maximum hint.
+        for (const real of [
+          { neededBytes: 4_900, allBytes: 5_000 },
+          { neededBytes: 1_000, allBytes: 1_100 },
+          { neededBytes: 999_900, allBytes: 1_000_000 },
+          { neededBytes: 4_900 },
+          { neededBytes: Number.POSITIVE_INFINITY },
+        ]) {
+          for (const withoutAdvice of [false, true]) {
+            const base = {
+              dropped,
+              total,
+              offset: 9_999,
+              ...(advice === undefined || withoutAdvice ? {} : { advice }),
+              capBytes: CAP,
+              ...real,
+            };
+            const hint = renderTruncationHint(base);
+            // What the fit renders as this form's probe: the same parts, widest.
+            const widest = renderTruncationHint({
+              ...base,
+              widest: true,
+              neededBytes: Number.POSITIVE_INFINITY,
+              ...("allBytes" in real ? { allBytes: Number.POSITIVE_INFINITY } : {}),
+            });
+            const label = `advice ${advice?.length} ${dropped}/${total} ${JSON.stringify(real)} withoutAdvice ${withoutAdvice}: ${hint.length} against widest ${widest.length}`;
+            expect(widest.length, label).toBeGreaterThanOrEqual(hint.length);
+            expect(hint.length, label).toBeLessThanOrEqual(600);
+            // The same choice for both: the advice is in both or in neither.
+            expect(hint.includes("fields="), label).toBe(widest.includes("fields="));
+            compared += 1;
+          }
+        }
       }
     }
+    expect(compared).toBeGreaterThan(500);
   });
 
   it("never names a value above the cap, or says exceeds beside a fits-all figure, with about 440 characters of advice (security R1)", async () => {

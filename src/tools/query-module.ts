@@ -379,6 +379,8 @@ function enforceByteBudget(
       ...(shrinkAdvice === undefined ? {} : { advice: shrinkAdvice }),
       neededBytes,
       ...(allBytes === undefined ? {} : { allBytes }),
+      // Both figures widest: the text rows are sized with, never shorter than the real one.
+      ...(allBytes === Number.POSITIVE_INFINITY ? { widest: true } : {}),
       capBytes: byteCap,
     });
     out.results = results.slice(0, keep);

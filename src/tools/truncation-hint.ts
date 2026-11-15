@@ -88,6 +88,14 @@ export interface TruncationHintParts {
    */
   readonly allBytes?: number;
   /**
+   * Render the longest text these parts could ever take, for a fit to size
+   * rows with: the "exceeds the maximum" clause and a 7-digit next-row figure
+   * together (no real hint has both), and the 7-digit page figure when
+   * `allBytes` is Infinity. Never written to a caller as it is, and never
+   * parsed back.
+   */
+  readonly widest?: boolean;
+  /**
    * The largest `max_response_bytes` the caller may use, named when the next
    * row exceeds it. Defaults to the schema maximum; a raw-read rule can set a
    * smaller one. Only read back from a hint's "exceeds the maximum" clause.
@@ -113,12 +121,18 @@ function overMaximumClause(cap: number): string {
 function renderHint(parts: TruncationHintParts, withAdvice: boolean): string {
   const returned = returnedRows(parts);
   const empty = returned <= 0;
-  const over = !Number.isFinite(parts.neededBytes);
+  const over = !Number.isFinite(parts.neededBytes) || parts.widest === true;
   // With one row dropped the next row is the whole remainder: one figure.
+  const nextRow =
+    parts.widest === true
+      ? `max_response_bytes=${MAX_RESPONSE_BYTES_MAX}${NEXT_ROW_NOTE}`
+      : Number.isFinite(parts.neededBytes)
+        ? `max_response_bytes=${parts.neededBytes}${NEXT_ROW_NOTE}`
+        : undefined;
   const allBytes = parts.dropped > 1 ? parts.allBytes : undefined;
   const options = [
     withAdvice ? parts.advice : undefined,
-    over ? undefined : `max_response_bytes=${parts.neededBytes}${NEXT_ROW_NOTE}`,
+    nextRow,
     allBytes === undefined
       ? undefined
       // Infinity is the widest form, used while fitting (see finalizeSummaryResult).
@@ -145,13 +159,19 @@ function renderHint(parts: TruncationHintParts, withAdvice: boolean): string {
  */
 export function renderTruncationHint(parts: TruncationHintParts): string {
   // Whether the advice fits is decided once, from the widest rendering of
-  // these parts (the "exceeds the maximum" clause and a 7-digit page figure,
-  // which no real figures are longer than). A fit sizes rows with that widest
+  // these parts (the "exceeds the maximum" clause with a 7-digit next-row
+  // figure, and a 7-digit page figure when these parts have one: no real
+  // figures make a longer text). A fit sizes rows with that widest
   // text and then swaps in the real one, so the two must make the same choice:
   // if the widest dropped the advice and the real text kept it, the real text
   // could be hundreds of characters longer than the one the rows were sized for.
   const widest = renderHint(
-    { ...parts, neededBytes: Number.POSITIVE_INFINITY, allBytes: Number.POSITIVE_INFINITY },
+    {
+      ...parts,
+      widest: true,
+      neededBytes: Number.POSITIVE_INFINITY,
+      ...(parts.allBytes === undefined ? {} : { allBytes: Number.POSITIVE_INFINITY }),
+    },
     true
   );
   return renderHint(parts, widest.length <= HINT_MAX_LENGTH);
@@ -290,6 +310,8 @@ export function refreshTruncationHint(
     readonly allBytes?: number | null;
     /** Leave the field advice out, as a fit does when the result is too tight to carry it. */
     readonly withoutAdvice?: boolean;
+    /** Render the widest text instead (see {@link TruncationHintParts.widest}). */
+    readonly widest?: boolean;
     /** The cap to name if the next row exceeds it; else the one the hint named. */
     readonly capBytes?: number;
   }
@@ -302,6 +324,7 @@ export function refreshTruncationHint(
     offset: parts.offset,
     ...(parts.advice === undefined || final.withoutAdvice === true ? {} : { advice: parts.advice }),
     neededBytes: final.neededBytes ?? parts.neededBytes,
+    ...(final.widest === true ? { widest: true } : {}),
     ...(final.allBytes === null || (final.allBytes ?? parts.allBytes) === undefined
       ? {}
       : { allBytes: (final.allBytes ?? parts.allBytes) as number }),
