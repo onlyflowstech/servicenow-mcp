@@ -6,7 +6,7 @@ import {
   OAuthProvider,
   createAuthProvider,
 } from "../src/auth.js";
-import { ServiceNowClient } from "../src/client.js";
+import { BASIC_AUTH_401_HINT, ServiceNowClient } from "../src/client.js";
 import type { ServiceNowConfig } from "../src/config.js";
 import {
   trustedToolErrorDescriptor,
@@ -527,36 +527,95 @@ describe("client + OAuth integration", () => {
       message: expect.not.stringContaining("KB3096078"),
     });
   });
-});
 
-describe("basic-auth 401 safety", () => {
-  it("returns the fixed authentication contract without upstream text", async () => {
+  it("does not append the basic-auth 401 hint for api key profiles", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => jsonResponse({ error: { message: "User Not Authenticated" } }, 401))
     );
-
     const client = new ServiceNowClient({
       instance: INSTANCE,
-      user: "admin",
-      password: "placeholder-password",
+      authType: "apikey",
+      apiKey: "fake-key",
       displayValue: "true",
       relDepth: 3,
     });
+    await expect(client.get("/x")).rejects.toMatchObject({
+      message: expect.not.stringContaining("snc_basic_auth_api_access"),
+    });
+  });
+});
 
-    let thrown: unknown;
+describe("basic-auth 401 safety", () => {
+  const PASSWORD = "placeholder-password";
+
+  async function basicAuth401(responseBody: unknown): Promise<unknown> {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(responseBody, 401)));
+    const client = new ServiceNowClient({
+      instance: INSTANCE,
+      user: "admin",
+      password: PASSWORD,
+      displayValue: "true",
+      relDepth: 3,
+    });
     try {
       await client.get("/api/now/table/incident");
     } catch (error) {
-      thrown = error;
+      return error;
     }
+    throw new Error("expected the request to fail");
+  }
+
+  it("returns the fixed authentication contract plus the fixed hint, without upstream text", async () => {
+    const thrown = await basicAuth401({
+      error: { message: "User Not Authenticated", detail: "upstream-detail-xyz" },
+    });
     expect(trustedToolErrorDescriptor(thrown)).toMatchObject({
       category: "authentication",
+      reason: "basic_auth_restricted",
       retry: "retry_after_correction",
     });
     const message = (thrown as Error).message;
+    expect(message).toBe(
+      `ServiceNow authentication could not be completed. ${BASIC_AUTH_401_HINT} ` +
+        "Error category: authentication. Retry after correcting the request or configuration."
+    );
+    expect(message).toContain("snc_basic_auth_api_access");
+    expect(message).toContain("KB3096078");
+    expect(message).toContain("OAuth");
     expect(message).not.toContain("User Not Authenticated");
-    expect(message).not.toContain("KB3096078");
+    expect(message).not.toContain("upstream-detail-xyz");
+    expect(message).not.toContain(PASSWORD);
+    expect(message).not.toContain(INSTANCE);
+  });
+
+  it("keeps the hint for a basic-auth profile with an explicit authType", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({}, 401)));
+    const client = new ServiceNowClient({
+      instance: INSTANCE,
+      authType: "basic",
+      user: "admin",
+      password: PASSWORD,
+      displayValue: "true",
+      relDepth: 3,
+    });
+    await expect(client.get("/x")).rejects.toMatchObject({
+      message: expect.stringContaining("snc_basic_auth_api_access"),
+    });
+  });
+
+  it("leaves a basic-auth 403 as a plain authorization error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({}, 403)));
+    const client = new ServiceNowClient({
+      instance: INSTANCE,
+      user: "admin",
+      password: PASSWORD,
+      displayValue: "true",
+      relDepth: 3,
+    });
+    const thrown = await client.get("/x").catch((error: unknown) => error);
+    expect(trustedToolErrorDescriptor(thrown)).toMatchObject({ category: "authorization" });
+    expect((thrown as Error).message).not.toContain("snc_basic_auth_api_access");
   });
 });
 

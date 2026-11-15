@@ -29,6 +29,8 @@ import {
   boundedRetryAfterSeconds,
   createInvalidResponseError,
   createRedirectedError,
+  createBasicAuthRestrictedError,
+  BASIC_AUTH_401_HINT,
   createToolError,
   type ToolErrorCategory,
   type ToolErrorRetry,
@@ -100,12 +102,8 @@ export const DEFAULT_MAX_JSON_RESPONSE_BYTES =
   MAX_CUMULATIVE_UPSTREAM_JSON_BYTES;
 export const MAX_ERROR_RESPONSE_BYTES = 64 * 1024;
 
-/** Guidance appended to 401 errors on basic-auth profiles. */
-export const BASIC_AUTH_401_HINT =
-  "ServiceNow may be enforcing Basic Auth restrictions on this instance " +
-  "(see KB3096078). Exemptions: Web-Service-Access-Only account or " +
-  "snc_basic_auth_api_access role. Recommended: switch this profile to " +
-  "OAuth (authType: 'oauth').";
+/** Guidance carried by 401 errors on basic-auth profiles (fixed text). */
+export { BASIC_AUTH_401_HINT };
 
 const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_BASE_RETRY_DELAY_MS = 500;
@@ -558,6 +556,9 @@ export class ServiceNowClient {
     headers: Headers
   ): ServiceNowError {
     const classification = classifyHttpFailure(status, method);
+    if (status === 401 && this.#auth.kind === "basic") {
+      return createBasicAuthRestrictedError();
+    }
     const retryAfterSeconds =
       classification.retry === "retry_later"
         ? boundedRetryAfterSeconds(

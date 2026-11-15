@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  BASIC_AUTH_401_HINT,
   MAX_TOOL_ERROR_RETRY_AFTER_SECONDS,
+  createBasicAuthRestrictedError,
   boundedRetryAfterSeconds,
   createCommonToolError,
   createToolError,
@@ -176,5 +178,35 @@ describe("trusted tool-error contract", () => {
       message: "The operation failed unexpectedly.",
       retry: "do_not_retry",
     });
+  });
+});
+
+describe("basic-auth restriction error", () => {
+  it("is an authentication error carrying only the fixed hint", () => {
+    const error = createBasicAuthRestrictedError();
+    expect(trustedToolErrorDescriptor(error)).toMatchObject({
+      category: "authentication",
+      reason: "basic_auth_restricted",
+      retry: "retry_after_correction",
+    });
+    expect(formatToolError(error)).toBe(
+      `ServiceNow authentication could not be completed. ${BASIC_AUTH_401_HINT} ` +
+        "Error category: authentication. Retry after correcting the request or configuration."
+    );
+    expect(BASIC_AUTH_401_HINT).toContain("snc_basic_auth_api_access");
+  });
+
+  it("survives aggregation only when every failure is the same error", () => {
+    const same = createCommonToolError([
+      createBasicAuthRestrictedError(),
+      createBasicAuthRestrictedError(),
+    ]);
+    expect(trustedToolErrorDescriptor(same)?.reason).toBe("basic_auth_restricted");
+
+    const mixed = createCommonToolError([
+      createBasicAuthRestrictedError(),
+      createToolError("authentication", "retry_after_correction"),
+    ]);
+    expect(trustedToolErrorDescriptor(mixed)?.reason).toBeUndefined();
   });
 });

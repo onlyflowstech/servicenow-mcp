@@ -34,7 +34,8 @@ export type ToolErrorReason =
   | "instance_hibernating"
   | "html_response"
   | "invalid_response"
-  | "redirected";
+  | "redirected"
+  | "basic_auth_restricted";
 
 export interface ToolErrorDescriptor {
   readonly category: ToolErrorCategory;
@@ -78,6 +79,18 @@ const HTML_RESPONSE_MESSAGE =
   "The instance returned an HTML page instead of an API response. It may be " +
   "asleep, behind single sign-on, or under maintenance. Check that the " +
   "instance URL is reachable in a browser.";
+
+/**
+ * Fixed guidance for a 401 on a basic-auth profile. It is module-owned text:
+ * no credential, host or response byte is ever part of it.
+ */
+export const BASIC_AUTH_401_HINT =
+  "If the username and password are correct, this instance may be rejecting " +
+  "Basic Auth for REST API calls (see KB3096078). Current instances require " +
+  "the role snc_basic_auth_api_access for REST Basic auth; a " +
+  "Web-Service-Access-Only account is also exempt. ServiceNow is retiring " +
+  "Basic auth, so OAuth client credentials are recommended: switch this " +
+  "profile to OAuth (authType: 'oauth').";
 
 const HOST_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(?::\d{1,5})?$/u;
 
@@ -137,6 +150,20 @@ export function createRedirectedError(): Error {
     message:
       "The instance redirected the request to another location. Check that " +
       "the profile's instance URL is the instance's canonical URL.",
+    retry: "retry_after_correction",
+  });
+}
+
+/**
+ * Issue the trusted authentication error for a 401 on a basic-auth profile.
+ * The text is the fixed category message plus {@link BASIC_AUTH_401_HINT};
+ * the response body and the credential are never read into it.
+ */
+export function createBasicAuthRestrictedError(): Error {
+  return issue({
+    category: "authentication",
+    reason: "basic_auth_restricted",
+    message: `${CATEGORY_MESSAGES.authentication} ${BASIC_AUTH_401_HINT}`,
     retry: "retry_after_correction",
   });
 }

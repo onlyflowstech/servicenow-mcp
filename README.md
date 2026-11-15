@@ -563,7 +563,7 @@ For instances using Inbound Authentication Profiles with API keys. The header na
 }
 ```
 
-On a 401, the error explains the Basic Auth restriction program (KB3096078) and how to move to OAuth.
+On a 401 for a basic-auth profile, the error explains the Basic Auth restriction program (KB3096078): the role `snc_basic_auth_api_access` or a Web-Service-Access-Only account is needed, and OAuth is the recommended way to move off Basic Auth. The setup wizard gives the same explanation when it verifies the credential.
 
 ### Timeouts & retries
 

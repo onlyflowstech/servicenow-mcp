@@ -29,6 +29,7 @@ import {
   createHtmlResponseError,
   createInstanceHibernatingError,
   createToolError,
+  createBasicAuthRestrictedError,
 } from "../src/tool-error.js";
 import { FLOW_VIEW_TABLES } from "../src/tools/flow-view-contracts.js";
 import { resolveToolTableAccess } from "../src/tool-table-access.js";
@@ -2414,11 +2415,38 @@ describe("credential verification diagnosis", () => {
     expect(JSON.stringify(result)).not.toContain("s3cr3t-zx9-value");
   });
 
+  it.each([
+    ["no authType (the default)", {}],
+    ["authType basic", { authType: "basic" }],
+  ])("explains the Basic Auth restriction on a 401 with %s", (_label, overrides) => {
+    const result = diagnose(
+      createToolError("authentication", "retry_after_correction"),
+      overrides
+    );
+    expect(result.ok).toBe(false);
+    expect(result.detail).toBe("dev00001.service-now.com rejected the credential (HTTP 401).");
+    expect(result.remedy).toMatch(/check the username and password/iu);
+    expect(result.remedy).toContain("snc_basic_auth_api_access");
+    expect(result.remedy).toContain("REST Basic auth");
+    expect(result.remedy).toContain("KB3096078");
+    expect(result.remedy).toMatch(/OAuth client credentials are recommended/u);
+    expect(JSON.stringify(result)).not.toContain("s3cr3t-zx9-value");
+  });
+
+  it("gives the same Basic Auth guidance for the runtime restriction error", () => {
+    const result = diagnose(createBasicAuthRestrictedError());
+    expect(result.remedy).toContain("snc_basic_auth_api_access");
+  });
+
   it("tailors the 401 remedy to OAuth", () => {
     const result = diagnose(createToolError("authentication", "retry_after_correction"), {
       authType: "oauth",
     });
-    expect(result.remedy).toMatch(/OAuth client id and secret/u);
+    expect(result.remedy).toBe(
+      "Check the OAuth client id and secret, and that the client is active on the instance."
+    );
+    expect(result.remedy).not.toContain("snc_basic_auth_api_access");
+    expect(result.remedy).not.toContain("KB3096078");
   });
 
   it("treats an ACL denial as a successful authentication", () => {

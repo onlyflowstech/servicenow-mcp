@@ -12,6 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Planning documents that were not part of the published package are no longer
   in the repository.
 
+### Fixed
+
+- **A 401 on a basic-auth profile now explains the Basic Auth restriction.**
+  Current ServiceNow instances reject REST Basic auth unless the user has the
+  role `snc_basic_auth_api_access` (or is a web-service-access-only account),
+  and the rejection is a bare 401. The setup wizard's credential check now says
+  so after "check the username and password", and recommends OAuth client
+  credentials, because ServiceNow is retiring Basic auth. A tool call that gets
+  a 401 on a basic-auth profile returns the same guidance as fixed text: the
+  error never contains the response body, the credential or the instance URL.
+  OAuth and API-key profiles are unchanged. The README already said the error
+  explained the restriction; now it does. The wizard still defaults to `basic`.
+
 ## [2.3.0-dev.2] — 2026-11-15
 
 ### Added

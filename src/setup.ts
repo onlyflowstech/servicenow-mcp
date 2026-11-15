@@ -745,6 +745,16 @@ async function verifyCredentialAgainstInstance(
   }
 }
 
+/** Wizard remedy for a 401 on a basic-auth profile. Fixed text only. */
+const BASIC_AUTH_401_REMEDY =
+  "Check the username and password. A ServiceNow account locked out or " +
+  "requiring a password reset also returns 401. If they are correct, this " +
+  "instance may be rejecting Basic Auth for REST API calls (KB3096078): " +
+  "current instances require the role snc_basic_auth_api_access for REST " +
+  "Basic auth, or a Web-Service-Access-Only account. ServiceNow is retiring " +
+  "Basic auth, so OAuth client credentials are recommended: re-run setup " +
+  "and choose oauth.";
+
 /** Map a probe failure onto the thing the operator must actually change. */
 export function classifyVerificationFailure(
   error: unknown,
@@ -790,7 +800,9 @@ export function classifyVerificationFailure(
       remedy:
         config.authType === "oauth"
           ? "Check the OAuth client id and secret, and that the client is active on the instance."
-          : "Check the username and password. A ServiceNow account locked out or requiring a password reset also returns 401.",
+          : config.authType === undefined || config.authType === "basic"
+            ? BASIC_AUTH_401_REMEDY
+            : "Check the username and password. A ServiceNow account locked out or requiring a password reset also returns 401.",
     });
   }
   if (descriptor?.category === "authorization") {
