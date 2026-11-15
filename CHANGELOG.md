@@ -76,6 +76,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `limit` 49 or less still reads the scripts with the rows, in one request.
   Reads also send `sysparm_no_count`, so the instance skips a row count it never
   used. If the rows alone pass the cap, the error is the too-large message.
+- **The script reads of one code search are bounded.** Scripts for the rows of a
+  page are read by id in batches of 50, and a call spends at most 12 such
+  requests and 8 MiB on them, however large the scripts are (a batch that passes
+  the response cap is retried smaller, and what it learns sizes the later
+  batches). Scripts are read only for the rows the response can hold, in page
+  order. When the budget is spent the remaining rows keep their place with an
+  empty snippet, and a warning says how many and to lower `limit`; the call does
+  not fail. A search across all code tables makes more requests than before but
+  transfers less data.
 - **A code search with no `table` no longer fills page 1 with one table.**
   Results were sorted by table name, so the first table (business rules)
   filled the page whenever it had `limit` or more matches and script includes

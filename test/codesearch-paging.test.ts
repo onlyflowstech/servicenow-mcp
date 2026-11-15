@@ -47,6 +47,14 @@ function rows(table: string, count: number, bodySize: (index: number) => number,
   }));
 }
 
+/** Reads of scripts by id, and what they pulled (an answer over the cap counts at the cap). */
+function byIdRequests(fake: ReturnType<typeof fakeInstance>): number {
+  return fake.bodies().length;
+}
+function byIdBytes(fake: ReturnType<typeof fakeInstance>): number {
+  return fake.bodies().reduce((sum, read) => sum + (read.tooLarge ? RESPONSE_CAP_BYTES : read.bytes), 0);
+}
+
 describe("the fake instance", () => {
   it("refuses the read the full-body search used to make at limit 300", async () => {
     const size = (index: number) => (index % 100 === 0 ? 56_000 : index % 10 === 0 ? 16_000 : 1_700);
@@ -123,8 +131,11 @@ describe("a page too big to read its scripts with the rows", () => {
     for (const limit of [150, 300]) {
       const fake = fakeInstance(instance);
       const { rows: found, warnings } = await run(fake, { table: "sys_script_include", limit });
-      expect(found.slice(0, limit).filter((row) => row.snippet.includes(TERM))).toHaveLength(limit);
+      // The response holds about 280 rows of this size; scripts are read for those.
+      const held = Math.min(limit, 270);
+      expect(found.slice(0, held).filter((row) => row.snippet.includes(TERM))).toHaveLength(held);
       expect(warnings).toEqual([]);
+      expect(byIdRequests(fake), `limit ${limit}`).toBeLessThanOrEqual(12);
       expect(fake.reads.some((read) => read.tooLarge), `limit ${limit}`).toBe(false);
       // What the old read asked for in one response, which cannot pass the cap.
       const oldBytes = instance.sys_script_include
@@ -134,18 +145,19 @@ describe("a page too big to read its scripts with the rows", () => {
     }
   });
 
-  it("halves a batch that passes the cap, and marks a script too large to read alone", async () => {
-    const data = rows("si", 60, () => 3_000);
+  it("narrows a batch that passes the cap, and marks a script too large to read alone", async () => {
+    const data = rows("si", 12, () => 3_000);
     data[7] = { ...data[7]!, script: scriptWith(TERM, 1_300_000) };
     const fake = fakeInstance({ sys_script_include: data });
-    const { rows: found } = await run(fake, { table: "sys_script_include", limit: 60 });
+    const { rows: found, warnings } = await run(fake, { table: "sys_script_include", limit: 12 });
     expect(fake.reads.some((read) => read.tooLarge)).toBe(true);
     const marked = found.filter((row) => row.note !== undefined);
     expect(marked.map((row) => row.name)).toEqual(["si-0007"]);
     expect(marked[0]).toMatchObject({ snippet: "", note: "script too large to preview" });
-    const others = found.slice(0, 60).filter((row) => row.name !== "si-0007");
+    const others = found.slice(0, 12).filter((row) => row.name !== "si-0007");
     expect(others.every((row) => row.snippet.includes(TERM))).toBe(true);
-    expect(others).toHaveLength(59);
+    expect(others).toHaveLength(11);
+    expect(warnings).toEqual([]);
   });
 
   it("keeps the rows and says so when a script read fails for another reason", async () => {
@@ -265,8 +277,9 @@ describe("a search across tables", () => {
     const fake = fakeInstance(data);
     const { rows: found, warnings } = await run(fake, { limit: 300 });
     expect(warnings).toEqual([]);
-    expect(found.slice(0, 300).every((row) => row.snippet.includes(TERM))).toBe(true);
+    expect(found.slice(0, 270).every((row) => row.snippet.includes(TERM))).toBe(true);
     expect(fake.reads.some((read) => read.tooLarge)).toBe(false);
+    expect(byIdRequests(fake)).toBeLessThanOrEqual(12);
   });
 
   it("reports a table that fails and returns the rest, and fails when all fail", async () => {
@@ -287,5 +300,80 @@ describe("a search across tables", () => {
     await expect(run(fakeInstance(fiveTables(counts), { fail: all }))).rejects.toSatisfy(
       (error: unknown) => error instanceof Error && error.message.includes("Error category: too_large.")
     );
+  });
+});
+
+describe("the script reads by id are bounded for the whole call", () => {
+  const MIB = 1024 * 1024;
+
+  it.each([
+    ["40 KB scripts, limit 60", 40_000, 60],
+    ["40 KB scripts, limit 150", 40_000, 150],
+    ["40 KB scripts, limit 300", 40_000, 300],
+    ["200 KB scripts, limit 50", 200_000, 50],
+    ["200 KB scripts, limit 1000", 200_000, 1000],
+  ])("stays within 12 requests and 8 MiB with %s, and still returns every row", async (_label, size, limit) => {
+    const fake = fakeInstance({ sys_script_include: rows("si", 1_200, () => size) });
+    const { rows: found } = await run(fake, { table: "sys_script_include", limit });
+    expect(byIdRequests(fake)).toBeLessThanOrEqual(12);
+    expect(byIdBytes(fake)).toBeLessThanOrEqual(8 * MIB);
+    // The call never fails and keeps the order: every row is there, a prefix has snippets.
+    expect(found).toHaveLength(limit + 1);
+    const withSnippet = found.map((row) => row.snippet !== "");
+    const firstEmpty = withSnippet.indexOf(false);
+    expect(withSnippet.slice(0, firstEmpty === -1 ? 0 : firstEmpty).every(Boolean)).toBe(true);
+  });
+
+  it("says how many rows have no snippet, and what to do, when the budget is spent", async () => {
+    const fake = fakeInstance({ sys_script_include: rows("si", 400, () => 40_000) });
+    const { rows: found, warnings } = await run(fake, { table: "sys_script_include", limit: 300 });
+    const empty = found.slice(0, 300).filter((row) => row.snippet === "").length;
+    expect(empty).toBeGreaterThan(0);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/^Script bodies were not read for \d+ results: the read budget for one search \(12 requests, 8 MiB\) was reached/u);
+    expect(warnings[0]).toContain("Lower limit to read them.");
+    // The count covers the rows the response holds, not the ones it would drop.
+    const reported = Number(/for (\d+) result/u.exec(warnings[0]!)![1]);
+    expect(reported).toBeLessThanOrEqual(empty);
+    expect(reported).toBeGreaterThan(0);
+  });
+
+  it("learns from the first too-large batch instead of starting every batch at 50", async () => {
+    const fake = fakeInstance({ sys_script_include: rows("si", 400, () => 40_000) });
+    await run(fake, { table: "sys_script_include", limit: 150 });
+    const sizes = fake.bodies().map((read) => read.params.sysparm_query!.split("IN")[1]!.split(",").length);
+    // The first batch is read alone at 50 and fails; no later batch is that big.
+    expect(sizes[0]).toBe(50);
+    expect(fake.bodies()[0]!.tooLarge).toBe(true);
+    expect(Math.max(...sizes.slice(1))).toBeLessThan(50);
+    expect(fake.bodies().filter((read) => read.tooLarge).length).toBeLessThanOrEqual(2);
+  });
+
+  it("reads scripts only for the rows the response can hold", async () => {
+    const fake = fakeInstance({ sys_script_include: rows("si", 1_200, () => 1_000) });
+    await run(fake, { table: "sys_script_include", limit: 1000 });
+    const ids = fake.bodies().flatMap((read) => read.params.sysparm_query!.split("IN")[1]!.split(","));
+    // About 280 rows fit in 100,000 bytes; the other 700 are not read.
+    expect(ids.length).toBeGreaterThan(200);
+    expect(ids.length).toBeLessThan(320);
+  });
+
+  it("does not touch a small page: one request at limit 20 and at 49, no read by id", async () => {
+    for (const limit of [20, 49]) {
+      const fake = fakeInstance({ sys_script_include: rows("si", 100, () => 5_500) });
+      const { rows: found } = await run(fake, { table: "sys_script_include", limit });
+      expect(fake.reads, `limit ${limit}`).toHaveLength(1);
+      expect(found.slice(0, limit).every((row) => row.snippet.includes(TERM))).toBe(true);
+    }
+  });
+
+  it("keeps the page order and the rows the same however the budget is spent", async () => {
+    const make = () => fakeInstance({ sys_script_include: rows("si", 400, () => 40_000) });
+    const whole = await run(make(), { table: "sys_script_include", limit: 200 });
+    const paged: Row[] = [];
+    for (let offset = 0; offset < 200; offset += 40) {
+      paged.push(...(await run(make(), { table: "sys_script_include", limit: 40, offset })).rows.slice(0, 40));
+    }
+    expect(paged.map((row) => row.sys_id)).toEqual(whole.rows.slice(0, 200).map((row) => row.sys_id));
   });
 });

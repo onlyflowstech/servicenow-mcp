@@ -900,9 +900,12 @@ snippet is the head of the script and the row has no `line`.
   with `limit` 49 or less reads the scripts with the rows, in one request (and
   falls back to the two steps below if that page passes the cap). A larger page, or a search of several tables, first finds the rows without
   their scripts and then reads the scripts of the rows it returns, 50 at a time,
-  halving a batch that is still too large. A script too large to read even on
-  its own gives its row an empty `snippet` and `note: "script too large to
-  preview"`; read it with `sn_get`. If the rows alone pass the response cap, the
+  narrowing a batch that is still too large. One search spends at most 12 such
+  requests and 8 MiB, and only for the rows one response can hold (about 280);
+  when that is spent, the remaining rows keep an empty `snippet` and a warning
+  says how many (lower `limit`). A script too large to read even on its own gives
+  its row an empty `snippet` and `note: "script too large to preview"`; read it
+  with `sn_get`. If the rows alone pass the response cap, the
   error says the response was too large and to lower `limit` or `offset`.
 - **The scripts are still field-policy readable fields.** The search reads the
   identifier, the name and the searched field of each table, each subject to the

@@ -12,7 +12,7 @@ import {
   resolveReadableFields,
   type FieldSelection,
 } from "../field-policy.js";
-import { ok, escapeQueryValue, formatError, withWarnings } from "../utils.js";
+import { ok, escapeQueryValue, formatError, withWarnings, MAX_RESPONSE_BYTES_DEFAULT } from "../utils.js";
 import { createCommonToolError } from "../tool-error.js";
 import {
   CODE_SEARCH_TARGETS,
@@ -57,6 +57,20 @@ const INLINE_MAX_ROWS = 50;
 const BATCH_ROWS = 50;
 /** Requests by id in flight; the client's per-origin limiter is 4 as well. */
 const BATCH_CONCURRENCY = 4;
+/**
+ * What one search may spend on reading scripts by id, whatever the scripts'
+ * sizes: requests (a retry after a too-large answer counts), and bytes pulled,
+ * with an answer that passed the cap counted at the cap.
+ */
+/** A first batch of more rows than this is read alone before the others start. */
+const PROBE_ROWS = 4;
+const BODY_MAX_REQUESTS = 12;
+const BODY_MAX_BYTES = 8 * 1024 * 1024;
+/** The client's cap on one response, which a failed attempt may have pulled in full. */
+const RESPONSE_CAP_BYTES = 1024 * 1024;
+/** A snippet's length (the window plus its two markers), and room for an ATF row's longer name. */
+const SNIPPET_ROOM = 206;
+const ATF_NAME_ROOM = 40;
 const SYS_ID = /^[0-9a-f]{32}$/u;
 const TOO_LARGE_NOTE = "script too large to preview";
 const UNNAMED = "unnamed";
@@ -85,6 +99,8 @@ interface Match {
   body?: string;
   /** Set when the script alone passed the response cap. */
   tooLarge?: boolean;
+  /** The most rows a batch holding this one may have, once a batch with it passed the cap. */
+  ceiling?: number;
 }
 
 export async function handler(
@@ -159,9 +175,10 @@ export async function handler(
     ? (found[0] ?? [])
     : interleave(found).slice(args.offset, args.offset + args.limit + 1);
 
-  // The row that only says "there is more" is cut from the page, so neither its
-  // script nor its name is read.
-  const returned = page.slice(0, args.limit);
+  // The row that only says "there is more" is cut from the page, and so are the
+  // rows past what one response holds, so neither their scripts nor their names
+  // are read.
+  const returned = rowsTheResponseCanHold(page.slice(0, args.limit));
   await Promise.all([
     readBodies(client, signal, returned, warnings),
     nameAtfSteps(client, signal, args, returned, warnings),
@@ -335,10 +352,20 @@ function interleave(perTable: readonly (readonly Match[])[]): Match[] {
 }
 
 /**
- * Read the script of each row that has none yet, a table at a time in batches
- * of ids, each batch in its own response scope. A batch that passes the cap is
- * halved until it fits, and a single script that does not is marked, so one
- * large script costs its own snippet and not the page. Any other failure
+ * Read the script of each row that has none yet, in batches of ids, each batch
+ * in its own response scope, within a budget for the whole call.
+ *
+ * Each batch has its own 1 MiB scope, so nothing else bounds the work: with
+ * large scripts every batch can pass the cap and be retried smaller. The budget
+ * does (BODY_MAX_REQUESTS requests, BODY_MAX_BYTES pulled, a failed attempt
+ * counted at the response cap, in-flight requests reserved at it). When it is
+ * spent the remaining rows keep an empty snippet and one warning says how many.
+ *
+ * A first batch of more than a few rows is read alone, and what it learns is kept: a batch that
+ * passes the cap makes the next ones half its size (a clean, small answer lets
+ * the size grow again), instead of every batch starting at 50 and failing. A
+ * batch of one that passes the cap marks its row. Rows are read in page order,
+ * so a spent budget leaves the later rows without a snippet. Any other failure
  * leaves those rows without a snippet and says why.
  */
 async function readBodies(
@@ -347,65 +374,150 @@ async function readBodies(
   page: readonly Match[],
   warnings: string[]
 ): Promise<void> {
-  const byTable = new Map<string, Match[]>();
-  for (const match of page) {
-    if (match.body !== undefined || !SYS_ID.test(match.sysId)) continue;
-    const group = byTable.get(match.selected.target.table);
-    if (group === undefined) byTable.set(match.selected.target.table, [match]);
-    else group.push(match);
-  }
-  const jobs: Array<{ readonly table: string; readonly run: () => Promise<void> }> = [];
-  for (const [table, group] of byTable) {
-    for (const batch of chunks(group, BATCH_ROWS)) {
-      jobs.push({ table, run: () => readBatch(client, signal, batch[0]!.selected, batch) });
+  const queue = page.filter((match) => match.body === undefined && SYS_ID.test(match.sysId));
+  if (queue.length === 0) return;
+  const state = { requests: 0, bytes: 0, size: BATCH_ROWS };
+  const failed = new Map<string, unknown>();
+  const spent = (): boolean =>
+    state.requests >= BODY_MAX_REQUESTS || state.bytes + RESPONSE_CAP_BYTES > BODY_MAX_BYTES;
+
+  const readOne = async (): Promise<boolean> => {
+    if (queue.length === 0 || spent()) return false;
+    const batch = takeBatch(queue, state.size);
+    state.requests += 1;
+    state.bytes += RESPONSE_CAP_BYTES;
+    try {
+      const pulled = await readBatch(client, signal, batch);
+      state.bytes += pulled - RESPONSE_CAP_BYTES;
+      if (pulled < RESPONSE_CAP_BYTES / 4) state.size = Math.min(BATCH_ROWS, state.size * 2);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      if (isServiceNowResponseTooLarge(error)) {
+        // The attempt may have pulled up to the cap: keep it counted.
+        if (batch.length === 1) batch[0]!.tooLarge = true;
+        else {
+          const half = Math.max(1, Math.ceil(batch.length / 2));
+          state.size = Math.max(1, Math.min(state.size, half));
+          // These rows are read again in halves, and never regrouped into a
+          // batch as large as the one that failed: a later success must not
+          // bring one large script back into a big batch.
+          for (const match of batch) match.ceiling = Math.min(match.ceiling ?? half, half);
+          queue.unshift(...batch);
+        }
+      } else {
+        state.bytes -= RESPONSE_CAP_BYTES;
+        const table = batch[0]!.selected.target.table;
+        if (!failed.has(table)) failed.set(table, error);
+      }
     }
+    return true;
+  };
+  const worker = async (): Promise<void> => {
+    while (await readOne()) {
+      // keep going until the queue or the budget is spent
+    }
+  };
+
+  // A batch of a few rows cannot pass the cap (the largest script seen is about
+  // a quarter of it), so only a larger first batch is read alone to learn from.
+  const firstTable = queue[0]!.selected.target.table;
+  if (queue.filter((match) => match.selected.target.table === firstTable).length > PROBE_ROWS) {
+    await readOne();
   }
-  const failed = await runJobs(signal, jobs);
+  await Promise.all(Array.from({ length: BATCH_CONCURRENCY }, worker));
+
   for (const [table, error] of failed) {
     warnings.push(`${table}: snippets unavailable for some results. ${formatError(error)}`);
   }
+  const unread = queue.filter((match) => match.body === undefined && !match.tooLarge).length;
+  if (unread > 0 && failed.size === 0) {
+    warnings.push(
+      `Script bodies were not read for ${unread} result${unread === 1 ? "" : "s"}: the read ` +
+        `budget for one search (${BODY_MAX_REQUESTS} requests, ${BODY_MAX_BYTES / (1024 * 1024)} MiB) was reached, ` +
+        `so their snippets are empty. Lower limit to read them.`
+    );
+  }
 }
 
+/**
+ * The next batch: up to `size` rows of the table of the first queued row, in
+ * order, and no more than any row in it can take (see `ceiling`).
+ */
+function takeBatch(queue: Match[], size: number): Match[] {
+  const table = queue[0]!.selected.target.table;
+  const batch: Match[] = [];
+  let room = size;
+  for (let at = 0; at < queue.length && batch.length < room; ) {
+    const candidate = queue[at]!;
+    if (candidate.selected.target.table !== table) {
+      at += 1;
+      continue;
+    }
+    const next = Math.min(room, candidate.ceiling ?? room);
+    if (batch.length + 1 > next) break;
+    room = next;
+    batch.push(...queue.splice(at, 1));
+  }
+  return batch;
+}
+
+/** Read one batch of scripts by id and return about how many bytes it pulled. */
 async function readBatch(
   client: ServiceNowOperations,
   signal: AbortSignal | undefined,
-  selected: Selected,
   matches: readonly Match[]
-): Promise<void> {
-  const { target, field } = selected;
-  try {
-    const resp = await inFreshBudget(signal, () =>
-      client.get(`/api/now/table/${target.queryTable}`, {
-        sysparm_query: `sys_idIN${matches.map((match) => match.sysId).join(",")}`,
-        sysparm_fields: searchProjection("sys_id", field).join(","),
-        sysparm_limit: String(matches.length),
-        sysparm_no_count: "true",
-        sysparm_exclude_reference_link: "true",
-      })
-    );
-    const filtered = filterReadableRecord(rowsOf(resp), matches[0]!.readable);
-    const bodies = new Map<string, string>();
-    for (const candidate of Array.isArray(filtered) ? filtered : []) {
-      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) continue;
-      const record = candidate as Record<string, unknown>;
-      if (typeof record.sys_id === "string" && record[field] !== undefined) {
-        bodies.set(record.sys_id, String(record[field]));
-      }
+): Promise<number> {
+  const { target, field } = matches[0]!.selected;
+  const resp = await inFreshBudget(signal, () =>
+    client.get(`/api/now/table/${target.queryTable}`, {
+      sysparm_query: `sys_idIN${matches.map((match) => match.sysId).join(",")}`,
+      sysparm_fields: searchProjection("sys_id", field).join(","),
+      sysparm_limit: String(matches.length),
+      sysparm_no_count: "true",
+      sysparm_exclude_reference_link: "true",
+    })
+  );
+  const filtered = filterReadableRecord(rowsOf(resp), matches[0]!.readable);
+  const bodies = new Map<string, string>();
+  let pulled = 0;
+  for (const candidate of Array.isArray(filtered) ? filtered : []) {
+    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) continue;
+    const record = candidate as Record<string, unknown>;
+    if (typeof record.sys_id === "string" && record[field] !== undefined) {
+      const body = String(record[field]);
+      bodies.set(record.sys_id, body);
+      pulled += body.length + 64;
     }
-    for (const match of matches) {
-      const body = bodies.get(match.sysId);
-      if (body !== undefined) match.body = body;
-    }
-  } catch (error) {
-    if (signal?.aborted || !isServiceNowResponseTooLarge(error)) throw error;
-    if (matches.length === 1) {
-      matches[0]!.tooLarge = true;
-      return;
-    }
-    const half = Math.ceil(matches.length / 2);
-    await readBatch(client, signal, selected, matches.slice(0, half));
-    await readBatch(client, signal, selected, matches.slice(half));
   }
+  for (const match of matches) {
+    const body = bodies.get(match.sysId);
+    if (body !== undefined) match.body = body;
+  }
+  return pulled;
+}
+
+/**
+ * The rows of the page that the response can hold. The envelope keeps rows
+ * while their serialized size fits its byte limit and drops the rest, so a
+ * script read for a row past that point is a script nobody sees. Each row is
+ * counted at its size with a full-length snippet, a little over what it will be.
+ */
+function rowsTheResponseCanHold(page: readonly Match[]): Match[] {
+  let used = 0;
+  const held: Match[] = [];
+  for (const match of page) {
+    used += JSON.stringify({
+      table: match.selected.target.table,
+      table_label: match.selected.target.label,
+      sys_id: match.recordId,
+      name: match.name,
+      snippet: "x".repeat(SNIPPET_ROOM),
+      line: 99_999,
+    }).length + (match.selected.target.lookups.length > 0 ? ATF_NAME_ROOM : 0);
+    if (used > MAX_RESPONSE_BYTES_DEFAULT) break;
+    held.push(match);
+  }
+  return held;
 }
 
 /**
