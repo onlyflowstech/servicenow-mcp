@@ -8585,7 +8585,7 @@
         },
         "fields_only": {
           "default": false,
-          "description": "If true, return only a sorted list of field names",
+          "description": "If true, return only a sorted list of field names: the table's own fields only; inherited fields need the full schema",
           "type": "boolean"
         },
         "limit": {

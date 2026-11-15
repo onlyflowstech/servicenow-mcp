@@ -61,7 +61,9 @@ function compatibleInputSchema() {
       .boolean()
       .optional()
       .default(false)
-      .describe("If true, return only a sorted list of field names"),
+      .describe(
+        "If true, return only a sorted list of field names: the table's own fields only; inherited fields need the full schema"
+      ),
     limit: z
       .number()
       .int()
