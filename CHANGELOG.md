@@ -51,18 +51,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schema, 1 to 32 conditions. The filter union and the leaf-condition union
   are published once per tool, under `definitions`, and referred to with
   `$ref`, where each use used to be written out again; every `$ref` resolves
-  inside the same tool's `inputSchema`. `sn_batch` shares them and still
-  publishes no array option, and a list is still rejected there. Behaviour is
-  unchanged: the error messages (#27) and the nesting rule (a list of two or
-  more takes one group level) are as before. One difference stays between the
+  inside the same tool's `inputSchema`; the definitions are named
+  `StructuredQueryFilter` and `StructuredQueryCondition`, so clients that merge
+  `definitions` across tools or servers do not collide. `sn_batch` shares them
+  and still publishes no array option, and a list is still rejected there.
+  Behaviour is unchanged: the error messages (#27, including the specific one
+  for a bad field name, a control character or an over-long value inside a
+  list element, which now names the caller's own position, `filter[1].field`,
+  and not a position inside the wrapper group) and the nesting rule (a list of
+  two or more takes one group level) are as before. One difference stays between the
   schema and the server: the schema cannot say that a list of two or more
   takes a level, so it accepts a list that holds a 3-level group, which the
-  server rejects. `tools/list`: `sn_query` 16,574 to 10,063 characters,
-  `sn_batch` 14,818 to 8,223, the whole list 140,887 to 127,781 (the part a
-  model reads, without output schemas, 52,641 to 39,535). This delivers most of
+  server rejects. `tools/list`: `sn_query` 16,574 to 10,183 characters,
+  `sn_batch` 14,818 to 8,328, the whole list 140,887 to 128,006 (the part a
+  model reads, without output schemas, 52,641 to 39,760). This delivers most of
   the filter dedupe asked for in #9; stripping the bounds the server enforces
   anyway, and sharing the scalar value union, are not done. Clients that do not
-  resolve `$ref` to `definitions` are not served by this form.
+  resolve `$ref` to `definitions` are not served by this form, and a client that
+  dereferences `$ref` before it validates or shows the schema sees `sn_query` at
+  about 22.8k characters (the list option written out), against about 13.7k
+  before this change.
 - **Truncated responses keep `metadata.cache` and `metadata.timing` (#34).**
   The two fields were added only when the finished response still fit
   `max_response_bytes`, so a response fitted to within about 90 bytes of its
