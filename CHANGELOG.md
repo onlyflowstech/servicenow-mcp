@@ -14,10 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `basic`, which is marked legacy because ServiceNow is retiring Basic Auth for
   REST calls. Choosing OAuth prints a short note on what the instance needs (an
   Application Registry entry with a client ID and secret, the client credentials
-  grant, and an OAuth Application User) and where the README explains it. When a
-  Basic credential gets a 401, the wizard now asks what next: retry with the same
-  settings, switch to OAuth (keeping the profile name and instance, and
-  discarding the Basic credential), or stop. Nothing else changes for scripts:
+  grant, and an OAuth Application User with only the roles it needs, not an
+  administrator) and where the README explains it. When a Basic credential gets a
+  401, the wizard now asks what next: retry with the same settings, switch to
+  OAuth (keeping the profile name and instance, and discarding the Basic
+  credential), or stop; its 401 advice points at that menu, while `doctor --live`
+  tells the operator to re-run setup and choose oauth. Nothing else changes for scripts:
   `servicenow-mcp-profile create` without `--auth-type` still creates a Basic
   profile, now with a deprecation notice shown only in an interactive terminal,
   never in captured output (a future release may require the flag), and

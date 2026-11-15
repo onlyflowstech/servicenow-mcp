@@ -126,7 +126,8 @@ OAuth client credentials need these on the instance:
   - an Application Registry entry (System OAuth > Application Registry)
     with a client ID and client secret
   - the client credentials grant enabled for it
-  - an OAuth Application User: the integration user this server acts as
+  - an OAuth Application User: the integration user this server acts as,
+    with only the roles it needs, not an administrator
 Steps: README, section Authentication > OAuth 2.0.
 
 OAuth grant type:

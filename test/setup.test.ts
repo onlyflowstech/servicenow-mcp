@@ -1098,6 +1098,70 @@ describe("setup doctor", () => {
     expect(JSON.stringify(report)).not.toContain("not-a-real-value");
   });
 
+  it.each([
+    ["authType basic", { authType: "basic" as const }],
+    ["no authType", {}],
+  ])("doctor --live says to re-run setup, not to choose from a menu, on a Basic 401 with %s", async (_label, auth) => {
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      ...auth,
+      username: "u",
+      credential: "env:SN_PASSWORD",
+    });
+    vi.stubEnv("SN_PASSWORD", "not-a-real-value");
+    const verifyCredential = vi.fn(async (config: { instance: string }) =>
+      classifyVerificationFailure(
+        createToolError("authentication", "retry_after_correction"),
+        config as never
+      )
+    );
+
+    const report = await doctor(
+      ["doctor", "--profile", "dev", "--live", "--json"],
+      { HOME: home },
+      undefined,
+      () => true,
+      { verifyCredential }
+    );
+    const live = report.checks.find((check) => check.name === "profile dev: live instance");
+    expect(live?.ok).toBe(false);
+    expect(live?.remedy).toContain("snc_basic_auth_api_access");
+    expect(live?.remedy).toContain("OAuth client credentials are recommended.");
+    expect(live?.remedy).toContain(
+      "To switch this profile, re-run servicenow-mcp-setup and choose oauth."
+    );
+    // doctor shows no menu, so it must not point at one.
+    expect(live?.remedy).not.toMatch(/below/u);
+    expect(JSON.stringify(report)).not.toContain("not-a-real-value");
+  });
+
+  it("doctor --live leaves the OAuth 401 remedy and non-401 remedies as they are", async () => {
+    manager.addProfile("dev", {
+      instance: "https://dev00001.service-now.com",
+      authType: "oauth",
+      clientId: "client-1",
+      clientSecret: "env:SN_CLIENT_SECRET",
+    });
+    vi.stubEnv("SN_CLIENT_SECRET", "not-a-real-value");
+    const verifyCredential = vi.fn(async (config: { instance: string }) =>
+      classifyVerificationFailure(
+        createToolError("authentication", "retry_after_correction"),
+        config as never
+      )
+    );
+    const report = await doctor(
+      ["doctor", "--profile", "dev", "--live", "--json"],
+      { HOME: home },
+      undefined,
+      () => true,
+      { verifyCredential }
+    );
+    const live = report.checks.find((check) => check.name === "profile dev: live instance");
+    expect(live?.remedy).toBe(
+      "Check the OAuth client id and secret, and that the client is active on the instance."
+    );
+  });
+
   it("doctor --live probes profiles concurrently, with a short timeout, in name order", async () => {
     for (const name of ["zeta", "alpha"]) {
       manager.addProfile(name, {
@@ -2574,6 +2638,7 @@ describe("setup wizard authentication default", () => {
     expect(note).toContain("client credentials grant");
     expect(note).toContain("OAuth Application User");
     expect(note).toContain("integration user");
+    expect(note).toContain("with only the roles it needs, not an administrator");
     expect(note).toContain("README");
     expect(note).toContain("Authentication > OAuth 2.0");
     // Short: a handful of lines, not a manual.
@@ -2646,8 +2711,12 @@ describe("setup wizard authentication default", () => {
       expect(next?.[1]?.default).toBe("retry");
       expect(next?.[1]?.hints?.retry).toMatch(/same settings/u);
       expect(next?.[1]?.hints?.oauth).toMatch(/OAuth/u);
-      // The Basic failure's own explanation is still shown first.
-      expect(prompter.notes.join("\n")).toContain("snc_basic_auth_api_access");
+      // The Basic failure's own explanation is still shown first, and its
+      // ending points at the menu that is on screen.
+      const shown = prompter.notes.join("\n");
+      expect(shown).toContain("snc_basic_auth_api_access");
+      expect(shown).toContain("Choose oauth below to switch this profile.");
+      expect(shown).not.toContain("re-run servicenow-mcp-setup");
       expect(() => manager.getProfile("dev")).toThrow(/not found/u);
     });
 

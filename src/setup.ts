@@ -614,8 +614,13 @@ async function collectVerifiedCredential(
   let verification = await verify(config);
   while (!verification.ok) {
     prompter.note(`\n  FAILED  ${verification.detail}`);
-    if (verification.remedy) prompter.note(`  -> ${verification.remedy}`);
-    if (authType === "basic" && verification.authenticationRejected === true) {
+    const offersSwitch = authType === "basic" && verification.authenticationRejected === true;
+    if (verification.remedy) {
+      prompter.note(
+        `  -> ${verification.remedy}${offersSwitch ? BASIC_AUTH_SWITCH_IN_WIZARD : ""}`
+      );
+    }
+    if (offersSwitch) {
       // A 401 on Basic often means the instance no longer accepts Basic for
       // REST, which retrying cannot fix. Offer the way out next to the retry.
       const next = await prompter.ask("\nWhat next?", {
@@ -762,7 +767,8 @@ const OAUTH_REQUIREMENTS_NOTE =
   "  - an Application Registry entry (System OAuth > Application Registry)\n" +
   "    with a client ID and client secret\n" +
   "  - the client credentials grant enabled for it\n" +
-  "  - an OAuth Application User: the integration user this server acts as\n" +
+  "  - an OAuth Application User: the integration user this server acts as,\n" +
+  "    with only the roles it needs, not an administrator\n" +
   "Steps: README, section Authentication > OAuth 2.0.\n";
 
 async function askAuthType(prompter: WizardPrompter): Promise<AuthType> {
@@ -843,8 +849,28 @@ const BASIC_AUTH_401_REMEDY =
   "instance may be rejecting Basic Auth for REST API calls (KB3096078): " +
   "current instances require the role snc_basic_auth_api_access for REST " +
   "Basic auth, or a Web-Service-Access-Only account. ServiceNow is retiring " +
-  "Basic auth, so OAuth client credentials are recommended: choose oauth " +
-  "below to switch this profile.";
+  "Basic auth, so OAuth client credentials are recommended.";
+
+/**
+ * How to act on the OAuth recommendation, which depends on where the advice is
+ * read. The wizard has a menu right below it; `doctor` has none, so it names
+ * the command instead. Kept out of the shared remedy so neither points at a
+ * choice that is not on the screen.
+ */
+const BASIC_AUTH_SWITCH_IN_WIZARD = " Choose oauth below to switch this profile.";
+const BASIC_AUTH_SWITCH_IN_DOCTOR =
+  " To switch this profile, re-run servicenow-mcp-setup and choose oauth.";
+
+/** True for a 401 on a Basic credential, the case the OAuth advice is for. */
+function isBasicAuthRejection(
+  verification: CredentialVerification,
+  config: ServiceNowConfig
+): boolean {
+  return (
+    verification.authenticationRejected === true &&
+    (config.authType === undefined || config.authType === "basic")
+  );
+}
 
 /** Map a probe failure onto the thing the operator must actually change. */
 export function classifyVerificationFailure(
@@ -2036,11 +2062,15 @@ async function runLiveChecks(
         }
         try {
           const result = await verify(config);
+          const remedy =
+            result.remedy !== undefined && isBasicAuthRejection(result, config)
+              ? `${result.remedy}${BASIC_AUTH_SWITCH_IN_DOCTOR}`
+              : result.remedy;
           return {
             name: `profile ${name}: live instance`,
             ok: result.ok,
             detail: result.detail,
-            ...(result.remedy === undefined ? {} : { remedy: result.remedy }),
+            ...(remedy === undefined ? {} : { remedy }),
           };
         } catch {
           return {
