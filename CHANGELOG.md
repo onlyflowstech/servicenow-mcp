@@ -46,6 +46,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `oldvalue`, `newvalue` or `value` by name. No other table's access changes. The
   policy card and the setup wizard's wildcard note say the same.
 
+### Fixed
+
+- **`sn_atf_results` with action `get` no longer fails with an internal error on
+  a completed suite result whose rows have empty references.** Some result rows
+  carry an empty suite reference, and their test results an empty test
+  reference. The tool failed on the first one as soon as it had read the result
+  (and would have failed on the second), so every completed result of that kind
+  failed, while a running one that names its suite worked. Such a result now
+  returns normally: the run, its tests and its failures, without a `suite_id`,
+  with each test that has no reference identified by its test result's own id,
+  and with warnings that say so and that the result has no history or comparison
+  (the cache is kept per suite and per test). `run.suiteId` is therefore optional
+  in the output schema. A row of the wrong shape (a reference that is not a
+  sys_id, an unknown status) now ends the call with an upstream error instead of
+  an internal one.
+
 ## [2.3.0-dev.4] — 2026-11-15
 
 ### Changed

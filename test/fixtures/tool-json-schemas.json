@@ -1587,7 +1587,6 @@
                   },
                   "required": [
                     "runId",
-                    "suiteId",
                     "startedAt",
                     "status",
                     "durationMs",
@@ -2343,7 +2342,6 @@
               },
               "required": [
                 "runId",
-                "suiteId",
                 "startedAt",
                 "status",
                 "durationMs",

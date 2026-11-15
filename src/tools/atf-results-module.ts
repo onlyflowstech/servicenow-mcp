@@ -5,7 +5,7 @@ import { serviceNowSysIdSchema as id } from "../servicenow-identifiers.js";
 import { ok } from "../utils.js";
 import { defineServiceNowToolModule, withRequiredProfile } from "./tool-module.js";
 import { envelopeCompatibilityResult, productionToolOutputSchemas } from "./result-envelope.js";
-import { RESULT_TABLES, prepareAtfReads, progress, getAtfExecution, compareAtfRuns, readAtfRows, value, atfStepLabel } from "./atf-shared.js";
+import { guardAtfUpstream, RESULT_TABLES, prepareAtfReads, progress, getAtfExecution, compareAtfRuns, readAtfRows, value, atfStepLabel } from "./atf-shared.js";
 
 const schema = withRequiredProfile(z.object({
   action: z.enum(["get", "step", "history", "compare"]).describe("Fetch paginated results, retrieve complete step text, read cached history, or compare cached runs"),
@@ -42,7 +42,7 @@ export const atfResultsToolModule = defineServiceNowToolModule({
     if (args.suite_sys_id && args.test_sys_id || args.action !== "history" && args.test_sys_id || args.action !== "get" && args.progress_id || args.action === "history" && (args.result_id || args.previous_result_id)) throw new Error("Selectors do not match the requested action");
     return { args: prepareAtfReads(args, RESULT_TABLES), requests: RESULT_TABLES.map(table => ({ operation: "read" as const, table })) };
   },
-  handler: async (args, services) => {
+  handler: (args, services) => guardAtfUpstream(async () => {
     const finish = (data: Record<string, unknown>) => envelopeCompatibilityResult("sn_atf_results", args, ok({ action: args.action, ...data }));
     if (args.action === "step") {
       const rows = await readAtfRows(services, args, "sys_atf_test_result_step", `sys_id=${id.parse(args.step_result_id)}^type=step_result`, 1);
@@ -71,5 +71,5 @@ export const atfResultsToolModule = defineServiceNowToolModule({
     const previous = args.previous_result_id ? runs.find(run => run.runId === args.previous_result_id) : runs.find(run => run.runId !== current?.runId && run.startedAt <= (current?.startedAt ?? ""));
     if (!current || !previous) return finish({ message: "Two matching cached runs are required. Run sn_atf_run first." });
     return finish({ comparison: compareAtfRuns(previous, current, runs, Number(args.regression_percent)) });
-  },
+  }),
 });

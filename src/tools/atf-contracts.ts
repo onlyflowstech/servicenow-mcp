@@ -8,10 +8,17 @@ export const atfComparisonSchema = z.object({
   status_changed: z.array(id),
   duration_change_ms: z.number(), duration_regression: z.boolean(),
 }).strict();
+/**
+ * The run of one execution result. A result row can have an empty suite
+ * reference, so the suite is optional here; cached history always
+ * has one.
+ */
+export const atfExecutionRunSchema = atfRunSummarySchema.extend({ suiteId: id.optional() });
+export type AtfExecutionRun = z.infer<typeof atfExecutionRunSchema>;
 export const atfExecutionResultSchema = z.object({
   outcome: z.enum(["running", "completed", "unavailable"]),
   progress_id: id.optional(), result_id: id.optional(), suite_id: id.optional(), suite_name: name.optional(),
-  run: atfRunSummarySchema.optional(),
+  run: atfExecutionRunSchema.optional(),
   failures: z.array(z.object({ test_id: id, test_name: name, step: z.string().max(1000), message: z.string().max(1000), message_truncated: z.boolean(), test_result_id: id, step_result_id: id.optional(), step_id: id.optional() }).strict()),
   pagination: z.object({ tests_total: z.number().int(), tests_offset: z.number().int(), tests_next_offset: z.number().int().optional(), failures_total: z.number().int(), failures_offset: z.number().int(), failures_next_offset: z.number().int().optional() }).strict().optional(),
   comparison: atfComparisonSchema.optional(), warnings: z.array(z.string().max(1000)),

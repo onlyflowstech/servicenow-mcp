@@ -5,7 +5,7 @@ import { createToolError } from "../tool-error.js";
 import type { AtfRunSummary } from "../atf-result-cache.js";
 import type { ServiceNowToolHandlerServices } from "./tool-module.js";
 import { escapeQueryValue } from "../utils.js";
-import type { AtfExecutionResult } from "./atf-contracts.js";
+import type { AtfExecutionResult, AtfExecutionRun } from "./atf-contracts.js";
 
 export const ATF_READ_FIELDS: Record<string, string> = {
   sys_atf_test_suite: "sys_id,name,active,parent",
@@ -84,7 +84,23 @@ export function failureExcerpt(message: string): string {
   if (message.length <= 1000) return message;
   return `${message.slice(0, 450)}\n[… excerpt; retrieve full step details …]\n${message.slice(-450)}`.slice(0, 1000);
 }
-export async function getAtfExecution(services: ServiceNowToolHandlerServices, args: Record<string, unknown>, resultId: string): Promise<AtfExecutionResult> {
+/**
+ * Upstream rows are parsed strictly; a row that does not have the expected
+ * shape is an upstream fault, not an internal one. Only data-shape failures are
+ * mapped: cancellation and errors already issued as tool errors pass through.
+ */
+export async function guardAtfUpstream<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof z.ZodError) throw createToolError("upstream", "do_not_retry");
+    throw error;
+  }
+}
+export function getAtfExecution(services: ServiceNowToolHandlerServices, args: Record<string, unknown>, resultId: string): Promise<AtfExecutionResult> {
+  return guardAtfUpstream(() => readAtfExecution(services, args, resultId));
+}
+async function readAtfExecution(services: ServiceNowToolHandlerServices, args: Record<string, unknown>, resultId: string): Promise<AtfExecutionResult> {
   const result_id = id.parse(resultId);
   const response = record(await services.serviceNow.get(`/api/sn_cicd/testsuite/results/${result_id}`));
   const cicd = record(response.result);
@@ -93,7 +109,9 @@ export async function getAtfExecution(services: ServiceNowToolHandlerServices, a
   const suites = await readAtfRows(services, args, "sys_atf_test_suite_result", `sys_id=${result_id}`, 1);
   if (suites.length !== 1) return { ...output, outcome: "unavailable", warnings: ["CI/CD result has no matching suite-result row; detailed results and caching could not be verified."] };
   const suite = suites[0];
-  const suiteId = id.parse(value(suite.test_suite));
+  // A result row has no suite when its tests were run outside a saved suite.
+  const suiteRef = value(suite.test_suite);
+  const suiteId = suiteRef === "" ? undefined : id.parse(suiteRef);
   if (args.suite_sys_id && suiteId !== args.suite_sys_id) throw createToolError("upstream", "do_not_retry");
   const resultIds = new Set([result_id]);
   const pending = [result_id];
@@ -106,6 +124,15 @@ export async function getAtfExecution(services: ServiceNowToolHandlerServices, a
       resultIds.add(childId); pending.push(childId);
     }
   }
+  // Some test result rows have an empty test reference. They are identified by their own sys_id instead.
+  const unreferenced = new Set<string>();
+  const testReference = (test: Record<string, unknown>): string => {
+    const reference = value(test.test);
+    if (reference !== "") return id.parse(reference);
+    const own = id.parse(value(test.sys_id));
+    unreferenced.add(own);
+    return own;
+  };
   const tests = await readAtfRows(services, args, "sys_atf_test_result", `parentIN${[...resultIds].join(",")}`);
   const failing = tests.filter(test => failed(value(test.status)));
   const failureByTest = new Map<string, string>();
@@ -116,7 +143,7 @@ export async function getAtfExecution(services: ServiceNowToolHandlerServices, a
     const step = stepRows.find(row => value(row.sys_id) === value(test.first_failing_step) && value(row.test_result) === testResult);
     const rawMessage = value(step?.summary);
     const message = failureExcerpt(rawMessage);
-    const testId = id.parse(value(test.test));
+    const testId = testReference(test);
     failureByTest.set(testId, message.slice(0, 500));
     output.failures.push({ test_id: testId, test_name: value(test.test_name).slice(0, 100), step: atfStepLabel(step), message, message_truncated: rawMessage.length > 1000, test_result_id: testResult, ...(step ? { step_result_id: id.parse(value(step.sys_id)) } : {}), ...(value(step?.step) ? { step_id: id.parse(value(step?.step)) } : {}) });
   }
@@ -128,10 +155,10 @@ export async function getAtfExecution(services: ServiceNowToolHandlerServices, a
   const startedAt = instant(suite.start_time);
   const finishedAt = value(suite.end_time) ? instant(suite.end_time) : undefined;
   const statuses = ["pending", "running", "success", "failure", "error", "skipped", "canceled", "success_with_warnings"] as const;
-  const run: AtfRunSummary = { runId: result_id, suiteId, startedAt, ...(finishedAt ? { finishedAt } : {}),
+  const run: AtfExecutionRun = { runId: result_id, ...(suiteId === undefined ? {} : { suiteId }), startedAt, ...(finishedAt ? { finishedAt } : {}),
     status: z.enum(statuses).parse(value(suite.status) === "started" ? "running" : value(suite.status) === "completed" ? value(suite.success) === "true" ? "success" : "failure" : value(suite.status)), durationMs: finishedAt ? Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)) : 0,
     counts: { passed: 0, failed: 0, errors: 0, skipped: 0 },
-    tests: tests.map(test => { const testId = id.parse(value(test.test)); return { testId, status: z.enum(statuses).parse(["waiting", "paused"].includes(value(test.status)) ? "pending" : value(test.status)), ...(failureByTest.has(testId) ? { firstFailure: failureByTest.get(testId)! } : {}) }; }),
+    tests: tests.map(test => { const testId = testReference(test); return { testId, status: z.enum(statuses).parse(["waiting", "paused"].includes(value(test.status)) ? "pending" : value(test.status)), ...(failureByTest.has(testId) ? { firstFailure: failureByTest.get(testId)! } : {}) }; }),
   };
   for (const [key, field] of Object.entries({ passed: "success", failed: "failure", errors: "error", skipped: "skip" })) {
     const tableCount = value(suite[`rolled_up_test_${field}_count`]);
@@ -140,14 +167,18 @@ export async function getAtfExecution(services: ServiceNowToolHandlerServices, a
     run.counts[key as keyof typeof run.counts] = z.string().regex(/^\d+$/).transform(Number).pipe(z.number().int().nonnegative()).parse(tableCount || apiCount);
   }
   if (Object.values(run.counts).reduce((sum, count) => sum + count, 0) !== tests.length) output.warnings.push("Visible test details differ from roll-up counts; comparisons include only visible tests.");
-  output.run = run; output.suite_id = suiteId; output.suite_name = value(cicd.test_suite_name).slice(0, 100);
+  output.run = run; if (suiteId !== undefined) output.suite_id = suiteId; output.suite_name = value(cicd.test_suite_name).slice(0, 100);
   if (output.failures.length > 0 && failingStepIds.length !== failing.length) output.warnings.push("Some failing tests have no readable first-failing-step reference.");
   if (!finishedAt) output.outcome = "running";
-  if (finishedAt && services.atfResults) {
+  if (unreferenced.size > 0) output.warnings.push(`${unreferenced.size} test results have no test reference, so their test_id is the id of the test result itself.`);
+  if (suiteId === undefined || unreferenced.size > 0) {
+    if (finishedAt) output.warnings.push(`This result is not cached and has no history or comparison: ${suiteId === undefined ? "it has no test suite (its row has an empty suite reference)" : "some of its tests have no test reference"}.`);
+  } else if (finishedAt && services.atfResults) {
+    const cached: AtfRunSummary = { ...run, suiteId };
     const history = await services.atfResults.history(suiteId);
-    const previous = history.find(entry => entry.runId !== run.runId && entry.startedAt <= run.startedAt);
-    if (previous) output.comparison = compareAtfRuns(previous, run, history);
-    await services.atfResults.put(run);
+    const previous = history.find(entry => entry.runId !== cached.runId && entry.startedAt <= cached.startedAt);
+    if (previous) output.comparison = compareAtfRuns(previous, cached, history);
+    await services.atfResults.put(cached);
   }
   const testsOffset = Number(args.tests_offset ?? 0), testsLimit = Number(args.tests_limit ?? 200);
   const failuresOffset = Number(args.failures_offset ?? 0), failuresLimit = Number(args.failures_limit ?? 10);

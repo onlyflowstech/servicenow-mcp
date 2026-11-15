@@ -117,8 +117,8 @@ describe("tools/list size ledger (#19)", () => {
         "sn_atf": 4320,
         "sn_atf_author": 5647,
         "sn_atf_readiness": 3560,
-        "sn_atf_results": 13413,
-        "sn_atf_run": 8192,
+        "sn_atf_results": 13403,
+        "sn_atf_run": 8182,
         "sn_attach": 4690,
         "sn_batch": 8328,
         "sn_codesearch": 3784,
@@ -137,7 +137,7 @@ describe("tools/list size ledger (#19)", () => {
         "sn_schema": 3586,
         "sn_syslog": 4582,
         "sn_update": 3661,
-        "total": 128726,
+        "total": 128706,
       }
     `);
   });
@@ -157,7 +157,7 @@ describe("tools/list size ledger (#19)", () => {
     expect({ modelVisible, outputSchemas }).toMatchInlineSnapshot(`
       {
         "modelVisible": 40437,
-        "outputSchemas": 83727,
+        "outputSchemas": 83707,
       }
     `);
   });
