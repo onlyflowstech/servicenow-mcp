@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   settings, switch to OAuth (keeping the profile name and instance, and
   discarding the Basic credential), or stop. Nothing else changes for scripts:
   `servicenow-mcp-profile create` without `--auth-type` still creates a Basic
-  profile, now with a deprecation notice on standard error (a future release may
-  require the flag), and `SN_AUTH_TYPE` still defaults to `basic`. Saved
+  profile, now with a deprecation notice shown only in an interactive terminal,
+  never in captured output (a future release may require the flag), and
+  `SN_AUTH_TYPE` still defaults to `basic`. Saved
   profiles are never changed, and a saved profile with no `authType` is still
   read as Basic. The README quick start, the profile and client setup guides and
   their examples now show OAuth first.

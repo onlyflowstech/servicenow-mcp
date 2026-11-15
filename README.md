@@ -220,7 +220,8 @@ unaffected. `--non-interactive` forces it explicitly. Only the interactive
 wizard defaults to OAuth. `servicenow-mcp-profile create` has no default you
 should rely on: pass `--auth-type oauth` (recommended) or `--auth-type basic`.
 Left out, it still creates a Basic profile, as it always has, so existing
-scripts keep working, and it prints a deprecation notice on standard error. A
+scripts keep working, and it prints a deprecation notice only when standard
+error is an interactive terminal, so output a script captures is unchanged. A
 future release may require the flag.
 
 ```bash

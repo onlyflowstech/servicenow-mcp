@@ -50,21 +50,35 @@ export interface ProfileAdminDependencies {
   manager?: ProfileManager;
   keyProvider?: ProfileEncryptionKeyProvider;
   io?: ProfileAdminIO;
-  /** Where a deprecation notice goes. Defaults to standard error. */
+  /** Where a deprecation notice goes. Defaults to standard error, on a terminal only. */
   notice?: (text: string) => void;
 }
 
 /**
  * Printed when `create` is run without `--auth-type`. The command keeps
  * creating a Basic profile, as it always has, so a script written before the
- * setup wizard defaulted to OAuth keeps working. The notice goes to the
- * notice sink (standard error by default), never into the command's output.
+ * setup wizard defaulted to OAuth keeps working.
+ *
+ * This command writes its JSON result to standard error, so a notice on the
+ * same stream would sit in front of that JSON and break a script that parses
+ * it. The default sink therefore speaks only when standard error is a
+ * terminal: a person sees it, a captured stream never does.
  */
 export const AUTH_TYPE_OMITTED_NOTICE =
   "[servicenow-mcp] Deprecated: no --auth-type given, so this profile is created " +
   "as basic. ServiceNow is retiring Basic Auth for REST calls, and a future " +
   "release may require --auth-type. Pass --auth-type oauth (recommended) or " +
   "--auth-type basic to say which you mean.\n";
+
+/** A notice sink that writes to `stream` only when it is an interactive terminal. */
+export function defaultNotice(stream: {
+  isTTY?: boolean;
+  write(text: string): unknown;
+}): (text: string) => void {
+  return (text) => {
+    if (stream.isTTY === true) stream.write(text);
+  };
+}
 
 interface ParsedArguments {
   command: Command;
@@ -88,9 +102,7 @@ export async function runProfileAdmin(
   switch (parsed.command) {
     case "create": {
       if (!parsed.values.has("--auth-type")) {
-        (dependencies.notice ?? ((text) => void process.stderr.write(text)))(
-          AUTH_TYPE_OMITTED_NOTICE
-        );
+        (dependencies.notice ?? defaultNotice(process.stderr))(AUTH_TYPE_OMITTED_NOTICE);
       }
       const authType = parseChoice<AuthType>(
         parsed.values.get("--auth-type") ?? "basic",

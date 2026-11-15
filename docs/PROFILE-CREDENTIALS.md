@@ -18,7 +18,8 @@ servicenow-mcp-profile create \
 ```
 
 Always pass `--auth-type`. Left out, `create` still builds a Basic profile, as
-it always has, and prints a deprecation notice on standard error. ServiceNow is
+it always has, and prints a deprecation notice only when standard error is an
+interactive terminal, so captured output stays the single JSON result. ServiceNow is
 retiring Basic Auth for REST calls, so OAuth client credentials is the
 recommended type: [Authentication](../README.md#authentication).
 

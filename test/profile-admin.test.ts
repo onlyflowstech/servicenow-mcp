@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { Readable, Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -9,6 +11,7 @@ import {
   MAX_PROTECTED_INPUT_VALUES,
   MAX_SENSITIVE_VALUE_CHARACTERS,
   createProtectedInputIO,
+  defaultNotice,
   parseProfileAdminArguments,
   runProfileAdmin,
   type ProfileAdminIO,
@@ -335,7 +338,21 @@ describe("create without --auth-type (scripted setup)", () => {
     expect(savedProfile().username).toBeUndefined();
   });
 
-  it("writes the notice to standard error by default", async () => {
+  it("writes the default notice only when the stream is a terminal", () => {
+    const written: string[] = [];
+    const stream = (isTTY: boolean | undefined) => ({
+      ...(isTTY === undefined ? {} : { isTTY }),
+      write: (text: string) => written.push(text),
+    });
+    defaultNotice(stream(true))(AUTH_TYPE_OMITTED_NOTICE);
+    expect(written).toEqual([AUTH_TYPE_OMITTED_NOTICE]);
+    written.length = 0;
+    defaultNotice(stream(false))(AUTH_TYPE_OMITTED_NOTICE);
+    defaultNotice(stream(undefined))(AUTH_TYPE_OMITTED_NOTICE);
+    expect(written).toEqual([]);
+  });
+
+  it("uses the terminal-gated sink when none is injected, so captured stderr stays JSON", async () => {
     const manager = new ProfileManager({
       configFilePath: configPath,
       encryptionKeyProvider: keyProvider,
@@ -347,6 +364,7 @@ describe("create without --auth-type (scripted setup)", () => {
       return true;
     }) as typeof process.stderr.write;
     try {
+      // Under the test runner stderr is not a terminal.
       await runProfileAdmin(
         [...BASE, "--username", "admin", "--source", "encrypted"],
         { manager, keyProvider, io: scriptedIO(["pw"], []) }
@@ -354,7 +372,52 @@ describe("create without --auth-type (scripted setup)", () => {
     } finally {
       process.stderr.write = original;
     }
-    expect(written).toEqual([AUTH_TYPE_OMITTED_NOTICE]);
+    expect(written).toEqual([]);
+  });
+
+  describe("the real built command", () => {
+    const CLI = fileURLToPath(new URL("../dist/profile-admin.js", import.meta.url));
+    const KEY = Buffer.alloc(32, 0x42).toString("base64");
+
+    function runCli(args: readonly string[], secret: string) {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "sn-profile-cli-home-"));
+      try {
+        const result = spawnSync(process.execPath, [CLI, ...args], {
+          input: `${secret}\n`,
+          encoding: "utf8",
+          env: { PATH: process.env.PATH ?? "", HOME: home, USERPROFILE: home, SN_PROFILE_ENCRYPTION_KEY: KEY },
+        });
+        const saved = JSON.parse(
+          fs.readFileSync(path.join(home, ".servicenow-mcp", "config.json"), "utf8")
+        ).profiles.dev;
+        return { ...result, saved };
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    }
+
+    it("leaves captured output a single JSON document when --auth-type is omitted", () => {
+      const result = runCli(
+        [...BASE, "--username", "admin", "--source", "encrypted"],
+        "cli-password-value"
+      );
+      expect(result.status).toBe(0);
+      // The result goes to stderr; a script that parses it must still succeed.
+      const parsed = JSON.parse(result.stderr);
+      expect(parsed).toMatchObject({ name: "dev", auth_type: "basic" });
+      expect(result.stderr).not.toContain("Deprecated");
+      expect(result.stdout).toBe("");
+      expect(result.stderr).not.toContain("cli-password-value");
+      expect(result.saved.authType).toBe("basic");
+    });
+
+    it("gives the same output when --auth-type is explicit", () => {
+      const result = runCli(
+        [...BASE, "--auth-type", "basic", "--username", "admin", "--source", "encrypted"],
+        "cli-password-value"
+      );
+      expect(JSON.parse(result.stderr)).toMatchObject({ auth_type: "basic" });
+    });
   });
 });
 
