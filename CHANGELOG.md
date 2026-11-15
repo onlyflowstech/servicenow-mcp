@@ -32,19 +32,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grant; name them to read them.** A profile whose `readTables` (or
   `writeTables`) holds `"*"` used to reach both tables like any other. Their rows
   hold the old and new values of other tables' fields, comments and work notes,
-  so they are now granted by name only, the way a system table is. With `"*"`
-  alone, `sn_query`, `sn_get`, `sn_aggregate`, `sn_schema`, `sn_batch` and the
-  other tools refuse them, and the message names the table and the grant that
-  allows it: `servicenow-mcp-setup grant --profile <profile> --read sys_audit
-  --tools sn_query`. A profile that already names a table is unaffected, and a
-  `"*"` grant beside the name still covers everything else. Both tables are also
-  built-in system tables now (26 in all), so a `"*"` field entry does not narrow
-  them and a named `fieldPolicy` entry does. A read that names no `fields`
-  returns `sys_id`, `tablename`, `documentkey`, `fieldname`, `user` and
+  so they are now granted by name only. With `"*"` alone, `sn_query`, `sn_get`,
+  `sn_aggregate`, `sn_schema`, `sn_batch` and the other tools refuse them, and
+  the message names the table and the grant that allows it:
+  `servicenow-mcp-setup grant --profile <profile> --read sys_audit --tools
+  sn_query`. A profile that already names a table is unaffected, and a `"*"`
+  grant beside the name still covers everything else. A read that names no
+  `fields` returns `sys_id`, `tablename`, `documentkey`, `fieldname`, `user` and
   `sys_created_on` for `sys_audit`, and `sys_id`, `name`, `element_id`, `element`,
   `sys_created_by` and `sys_created_on` for `sys_journal_field`; ask for
   `oldvalue`, `newvalue` or `value` by name. No other table's access changes. The
   policy card and the setup wizard's wildcard note say the same.
+- **Four more tables are granted by name only, and a `"*"` field entry now
+  narrows all six.** `sys_history_line`, `sys_audit_delete`, `sys_attachment_doc`
+  and `sys_email` join `sys_audit` and `sys_journal_field`: a `"*"` table grant no
+  longer covers them, for read or write, and a profile reaches one only when
+  `tableAccess` names it. Their rows hold history built from audit, deleted
+  records, attachment content and email bodies. The refusal names the table and
+  the grant that allows it. A read that names no `fields` leaves out the value
+  columns (`old`, `new`, `old_value` and `new_value`; `payload`; `data`; `body`,
+  `body_text`, `subject`, `recipients`, `copied`, `blind_copied`, `reply_to`,
+  `headers` and `error_string`), so ask for them by name. For field policy
+  the six belong to the profile, as the ITSM tables do: once a profile names one,
+  its `"*"` field entry narrows it, and an entry for the table itself narrows or
+  widens it. The 24 system tables, which a `"*"` field entry never narrows, are
+  unchanged. `sn_attach` is unaffected: it uses the Attachment API and never
+  reads `sys_attachment_doc`.
+  A `relatedTables` list that reaches one of the six under a `"*"` grant still
+  stops the profile loading, and the message now names the table and says it
+  must be granted by name. `sn_profile` reports these tables with the class
+  `named_only`.
 
 ### Fixed
 

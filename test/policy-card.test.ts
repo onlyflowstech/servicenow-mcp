@@ -259,8 +259,27 @@ describe("policy card matches the enforced policy", () => {
     expect(byTable.get("sys_user")!.class).toBe("system");
     expect(byTable.get("sys_user")!.readable).toBe("*");
     expect(byTable.get("sys_user")!.writable).toBe("*");
-    expect(renderPolicyCard(result)).toContain("never the 26 system tables");
-    expect(BUILT_IN_TABLE_CLASSES.system).toHaveLength(26);
+    expect(renderPolicyCard(result)).toContain("never the 24 system tables");
+    expect(BUILT_IN_TABLE_CLASSES.system).toHaveLength(24);
+  });
+
+  it('reports a named named-only table as its own class, narrowed by the "*" field entry', () => {
+    const access: TableAccessPolicyInput = {
+      readTables: ["*", "sys_audit"],
+      targets: [target("sys_audit", ["sn_query"])],
+    };
+    const result = card(access, { fieldPolicy: { "*": { readable: ["sys_id", "fieldname"] } } });
+    const row = result.tables.find((entry) => entry.table === "sys_audit")!;
+    expect(row.class).toBe("named_only");
+    expect(row.read).toBe(true);
+    expect(row.readable).toEqual({ fields: ["fieldname", "sys_id"], more: 0 });
+    // The wildcard row makes no claim about a table it does not reach.
+    const other = result.other_tables!;
+    for (const table of NAMED_ONLY_TABLES) {
+      expect(other.system_tables.fully_readable).not.toContain(table);
+      expect(other.system_tables.read_narrowed).not.toContain(table);
+    }
+    expect(NAMED_ONLY_TABLES).toContain("sys_audit");
   });
 
   it("reports class and domain fields only where the profile lists them", () => {
@@ -948,7 +967,7 @@ describe("a wildcard profile states what the system tables keep", () => {
     expect(other.system_tables.fully_writable).toContain("sys_user");
     expect(
       other.system_tables.fully_writable.length + other.system_tables.write_narrowed.length
-    ).toBe(BUILT_IN_TABLE_CLASSES.system.length - NAMED_ONLY_TABLES.length);
+    ).toBe(BUILT_IN_TABLE_CLASSES.system.length);
     // A "*" table grant does not reach the named-only tables, so the wildcard
     // row says nothing about them.
     for (const table of NAMED_ONLY_TABLES) {
@@ -958,9 +977,9 @@ describe("a wildcard profile states what the system tables keep", () => {
       expect(other.system_tables.write_narrowed, table).not.toContain(table);
     }
     const text = renderPolicyCard(result);
-    expect(text).toContain("does not apply to the 26 system tables");
+    expect(text).toContain("does not apply to the 24 system tables");
     expect(text).toContain(
-      'A "*" table grant never covers sys_audit or sys_journal_field; they are granted by name only.'
+      'A "*" table grant never covers sys_audit, sys_journal_field, sys_history_line, sys_audit_delete, sys_attachment_doc, sys_email; they are granted by name only.'
     );
     expect(text).toContain("stay fully writable (every field)");
   });
@@ -1003,7 +1022,6 @@ describe("a wildcard profile states what the system tables keep", () => {
   it.each(shapes)("sweep (%s): card system_tables equals enforcement, reads and writes apart", (_name, policy) => {
     const system = card(wildcard, policy).other_tables!.system_tables;
     for (const table of BUILT_IN_TABLE_CLASSES.system) {
-      if (NAMED_ONLY_TABLES.includes(table)) continue;
       const read = enforcedReadable(policy, table, "script");
       const write = enforcedWritable(policy, table, "script");
       expect(system.fully_readable.includes(table), `${table} read`).toBe(read);
