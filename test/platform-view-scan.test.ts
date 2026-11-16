@@ -61,6 +61,37 @@ function scripted(respond: Responder): { instance: RecordingInstance; ops: Servi
   return { instance, ops };
 }
 
+/** Like `scripted`, but each read takes `delayOf(call)` ms; how many were in flight at once is kept. */
+function timed(respond: Responder, delayOf: (call: RecordedCall) => number = () => 5) {
+  const instance = recordingInstance();
+  const events: string[] = [];
+  let inFlight = 0;
+  const state = { maxInFlight: 0, checkMax: 0, checkInFlight: 0 };
+  const ops = {
+    ...instance.ops,
+    get: async (path: string, params?: Record<string, string>) => {
+      await instance.ops.get(path, params);
+      const call: RecordedCall = { operation: "get", path, params: { ...params } };
+      const isCheck = path.endsWith("/scan_check");
+      events.push(`start:${path.split("/").at(-1)}`);
+      inFlight += 1;
+      state.maxInFlight = Math.max(state.maxInFlight, inFlight);
+      if (isCheck) {
+        state.checkInFlight += 1;
+        state.checkMax = Math.max(state.checkMax, state.checkInFlight);
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayOf(call)));
+      inFlight -= 1;
+      if (isCheck) state.checkInFlight -= 1;
+      events.push(`end:${path.split("/").at(-1)}`);
+      const out = respond(call);
+      if (out instanceof Error) throw out;
+      return out ?? rows();
+    },
+  } as unknown as ServiceNowOperations;
+  return { instance, ops, events, state };
+}
+
 const tableOf = (call: RecordedCall) => call.path.split("/").at(-1);
 const isStats = (call: RecordedCall) => call.path.startsWith("/api/now/stats/");
 const tableReads = (instance: RecordingInstance, table: string) =>
@@ -211,6 +242,33 @@ describe("scan_findings: the result and its findings", () => {
     expect(new Set(asked).size).toBe(asked.length);
   });
 
+  it("reads the check chunks together, and the result does not depend on which finishes first", async () => {
+    const ids = Array.from({ length: 130 }, (_, index) => (index + 1).toString(16).padStart(32, "0"));
+    const findings = ids.slice(0, 120).map((check, index) => finding({ sys_id: (index + 1000).toString(16).padStart(32, "0"), check }));
+    const checkRows = (query: string) =>
+      rows(...query.replace("sys_idIN", "").split(",").map((id) => ({ sys_id: id, name: `check ${id.slice(-3)}`, category: "Security" })));
+    const respond: Responder = (call) =>
+      tableOf(call) === "scan_check" && !isStats(call)
+        ? checkRows(call.params.sysparm_query!)
+        : instanceWith({ groups: ids.map((id, index) => group(id, String(index + 1))), findings })(call);
+    const outcomes: Data[] = [];
+    // Once the first chunk is slow, once the second.
+    for (const slowFirst of [true, false]) {
+      const { instance, ops, state } = timed(respond, (call) => {
+        if (tableOf(call) !== "scan_check" || isStats(call)) return 2;
+        const first = call.params.sysparm_query!.replace("sys_idIN", "").split(",").length === 100;
+        return first === slowFirst ? 25 : 1;
+      });
+      outcomes.push(dataOf(await handleScanFindings(canonical({ limit: 120 }), { serviceNow: ops } as never)));
+      expect(tableReads(instance, "scan_check")).toHaveLength(2);
+      expect(state.checkMax).toBe(2);
+      expectReadsWithin(instance, PLAN);
+    }
+    expect(outcomes[0]).toEqual(outcomes[1]);
+    expect(outcomes[0].summary.by_check[0].name).toMatch(/^check /u);
+    expect(outcomes[0].results.every((row: Data) => row.check_name !== undefined)).toBe(true);
+  });
+
   it("pages the rows with a look-ahead row", async () => {
     const findings = [1, 2, 3].map((n) => finding({ sys_id: String(n).repeat(32) }));
     const { data, instance } = await run(instanceWith({ findings }), { limit: 2, offset: 6 });
@@ -324,6 +382,22 @@ describe("scan_findings: readiness", () => {
     const respond = instanceWith();
     const { data } = await run((call) => (tableOf(call) === "scan_finding" ? createToolError("authorization", "retry_after_correction") : respond(call)));
     expect(data).toMatchObject({ status: "denied", hint: SCAN_DENIED_HINT });
+  });
+
+  it("shows checks by sys_id with a warning when any chunk of scan_check is a 403", async () => {
+    const ids = Array.from({ length: 130 }, (_, index) => (index + 1).toString(16).padStart(32, "0"));
+    const findings = ids.slice(0, 120).map((check, index) => finding({ sys_id: (index + 1000).toString(16).padStart(32, "0"), check }));
+    const respond = instanceWith({ groups: ids.map((id) => group(id, "1")), findings });
+    let seen = 0;
+    const { instance, ops } = timed((call) => {
+      if (tableOf(call) !== "scan_check" || isStats(call)) return respond(call);
+      seen += 1;
+      return seen === 2 ? createToolError("authorization", "retry_after_correction") : rows();
+    });
+    const data = dataOf(await handleScanFindings(canonical({ limit: 120 }), { serviceNow: ops } as never));
+    expect(data.status).toBe("ok");
+    expect(data.warnings).toEqual(["Check details were not readable; checks are shown by sys_id."]);
+    expectReadsWithin(instance, PLAN);
   });
 
   it("shows checks by sys_id with a warning when scan_check is a 403", async () => {

@@ -60,6 +60,34 @@ function scripted(respond: Responder): { instance: RecordingInstance; ops: Servi
   return { instance, ops };
 }
 
+/**
+ * Like `scripted`, but each read takes `delayOf(call)` ms, and the order in
+ * which reads start and end, and how many were in flight at once, are kept.
+ */
+function timed(respond: Responder, delayOf: (call: RecordedCall) => number = () => 5) {
+  const instance = recordingInstance();
+  const events: string[] = [];
+  let inFlight = 0;
+  const state = { maxInFlight: 0 };
+  const ops = {
+    ...instance.ops,
+    get: async (path: string, params?: Record<string, string>) => {
+      await instance.ops.get(path, params);
+      const call: RecordedCall = { operation: "get", path, params: { ...params } };
+      events.push(`start:${call.path.split("/").at(-1)}`);
+      inFlight += 1;
+      state.maxInFlight = Math.max(state.maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, delayOf(call)));
+      inFlight -= 1;
+      events.push(`end:${call.path.split("/").at(-1)}`);
+      const out = respond(call);
+      if (out instanceof Error) throw out;
+      return out ?? rows();
+    },
+  } as unknown as ServiceNowOperations;
+  return { instance, ops, events, state };
+}
+
 const tableOf = (call: RecordedCall) => call.path.split("/").at(-1);
 const readsOf = (instance: RecordingInstance, table: string) => instance.calls.filter((call) => tableOf(call) === table);
 
@@ -234,8 +262,9 @@ describe("upgrade_skipped: the log is for upgrade_admin", () => {
     expect(data.results).toBeUndefined();
     expect(data.hint).toBe(UPGRADE_LOG_DENIED_HINT);
     expect(data.hint).toContain("`upgrade_admin`");
-    // No label read for rows that were never returned.
-    expect(readsOf(instance, "sys_choice")).toEqual([]);
+    // The label read started with the log read (see the overlap test); its answer is not used.
+    expect(data.results).toBeUndefined();
+    expect(readsOf(instance, "sys_choice")).toHaveLength(1);
   });
 
   it("does not read an error that is not an issued 403 as one", async () => {
@@ -259,6 +288,76 @@ describe("upgrade_skipped: the log is for upgrade_admin", () => {
     const { data } = await run((call) =>
       tableOf(call) === "sys_choice" ? createToolError("authorization", "retry_after_correction") : respond(call)
     );
+    expect(data.results[0].disposition_label).toBe("unknown(4)");
+    expect(data.warnings).toEqual(["Disposition labels were not readable; codes are shown as unknown(n)."]);
+  });
+});
+
+describe("upgrade_skipped: the label read overlaps the log read", () => {
+  it("starts the label read before the log read finishes, and uses it", async () => {
+    const { instance, ops, events, state } = timed(instanceWith({}));
+    const result = await handleUpgradeSkipped(canonical(), { serviceNow: ops } as never);
+    expect(dataOf(result).results[0].disposition_label).toBe("Skipped");
+    // The run first (nothing to overlap), then the log and the labels together.
+    expect(events.slice(0, 2)).toEqual(["start:sys_upgrade_history", "end:sys_upgrade_history"]);
+    expect(events.slice(2, 4).sort()).toEqual(["start:sys_choice", "start:sys_upgrade_history_log"]);
+    expect(state.maxInFlight).toBe(2);
+    expectReadsWithin(instance, PLAN);
+  });
+
+  it("gives the denied summary on a log 403 even when the label read fails too", async () => {
+    const respond = instanceWith({});
+    for (const choiceFailure of [createToolError("upstream", "retry_later"), new Error("boom")]) {
+      const { instance, ops, state } = timed((call) => {
+        if (tableOf(call) === "sys_upgrade_history_log") return createToolError("authorization", "retry_after_correction");
+        if (tableOf(call) === "sys_choice") return choiceFailure;
+        return respond(call);
+      });
+      const data = dataOf(await handleUpgradeSkipped(canonical(), { serviceNow: ops } as never));
+      expect(data.summary.log).toBe("denied");
+      expect(data.hint).toBe(UPGRADE_LOG_DENIED_HINT);
+      expect(data.results).toBeUndefined();
+      expect(state.maxInFlight).toBe(2);
+      expectReadsWithin(instance, PLAN);
+    }
+  });
+
+  it("degrades to codes with a warning when the label read fails, whatever the failure", async () => {
+    const respond = instanceWith({});
+    for (const failure of [
+      createToolError("authorization", "retry_after_correction"),
+      createToolError("upstream", "retry_later"),
+      createToolError("timeout", "retry_later"),
+      new Error("boom"),
+    ]) {
+      const { instance, ops } = timed((call) => (tableOf(call) === "sys_choice" ? failure : respond(call)));
+      const data = dataOf(await handleUpgradeSkipped(canonical(), { serviceNow: ops } as never));
+      expect(data.status).toBe("ok");
+      expect(data.results[0].disposition_label).toBe("unknown(4)");
+      expect(data.warnings).toEqual(["Disposition labels were not readable; codes are shown as unknown(n)."]);
+      expectReadsWithin(instance, PLAN);
+    }
+  });
+
+  it("ignores a failed label read when the log is empty, and still fails on a failed log read", async () => {
+    const respond = instanceWith({ log: rows() });
+    const empty = timed((call) => (tableOf(call) === "sys_choice" ? createToolError("upstream", "retry_later") : respond(call)));
+    const data = dataOf(await handleUpgradeSkipped(canonical(), { serviceNow: empty.ops } as never));
+    expect(data).toMatchObject({ status: "ok", results: [] });
+    expect(data.warnings).toBeUndefined();
+    expectReadsWithin(empty.instance, PLAN);
+
+    const failing = timed((call) =>
+      tableOf(call) === "sys_upgrade_history_log" ? createToolError("upstream", "retry_later") : instanceWith({})(call)
+    );
+    await expect(handleUpgradeSkipped(canonical(), { serviceNow: failing.ops } as never)).rejects.toThrow();
+    expectReadsWithin(failing.instance, PLAN);
+  });
+
+  it("does not read the labels when none of their fields is readable", async () => {
+    const access: PlatformViewFieldAccess = { canRead: (table) => table !== "sys_choice", filter: (_table, row) => ({ ...row }) };
+    const { data, instance } = await run(instanceWith({}), {}, access);
+    expect(readsOf(instance, "sys_choice")).toEqual([]);
     expect(data.results[0].disposition_label).toBe("unknown(4)");
     expect(data.warnings).toEqual(["Disposition labels were not readable; codes are shown as unknown(n)."]);
   });
@@ -505,7 +604,10 @@ describe("upgrade_skipped: behind the dispatcher", () => {
     const result = await call({ view: "upgrade_skipped", kind: "all", type: "Script Include", limit: 10 });
     expect(result.isError, textOf(result)).not.toBe(true);
     expect(dataOf(result).results[0].disposition_label).toBe("Skipped");
-    expect(instance.calls.map((entry) => tableOf(entry))).toEqual(["sys_upgrade_history", "sys_upgrade_history_log", "sys_choice"]);
+    // The run first; the log and the labels start together.
+    const order = instance.calls.map((entry) => tableOf(entry));
+    expect(order[0]).toBe("sys_upgrade_history");
+    expect(order.slice(1).sort()).toEqual(["sys_choice", "sys_upgrade_history_log"]);
     expectReadsWithin(instance, platformViewReadTables("upgrade_skipped", { kind: "all" }));
   });
 

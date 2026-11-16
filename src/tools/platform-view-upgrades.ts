@@ -9,7 +9,9 @@
  *    dispositions in {4, 9, 10, 11, 104} only. A 403 here is not an error: the
  *    run summary is returned with `log: "denied"` and a fixed hint that names
  *    the `upgrade_admin` role;
- * 3. `sys_choice`: the labels of the dispositions (only when there are rows).
+ * 3. `sys_choice`: the labels of the dispositions. Its query is fixed, so it
+ *    starts together with the log read, and its answer is used only when log
+ *    rows come back. It cannot fail the call: without it, codes are `unknown(n)`.
  *
  * The run's counters are exactly `skipped`, `skipped_error`,
  * `skipped_manual_merge` and `skipped_apply_once`. `kind` is a heuristic: a
@@ -29,7 +31,7 @@
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-import { runWithServiceNowRequestSignal } from "../client.js";
+import { isServiceNowRequestCancellation, runWithServiceNowRequestSignal } from "../client.js";
 import type { ServiceNowOperations } from "../client.js";
 import { filterReadableRecord, resolveReadableFields } from "../field-policy.js";
 import { uncachedOperations } from "../metadata-cache.js";
@@ -462,6 +464,28 @@ export function createUpgradeSkippedHandler(
     const orderClause = access.canRead("sys_upgrade_history_log", "file_name") ? "^ORDERBYfile_name^ORDERBYsys_id" : "^ORDERBYsys_id";
     const logQuery = `upgrade_history=${run.sys_id}^${dispositionClause}${typeClause}${orderClause}`;
 
+    // The label read has a fixed query, so it starts with the log read and is
+    // used only if log rows come back (a wasted read of about 1 KB when the
+    // log is empty or denied). It settles into a value either way: a failure
+    // is held until the rows are known and is never an unhandled rejection.
+    const choiceFields = readableOf(access, "sys_choice", CHOICE_FIELDS);
+    const choiceReadable = choiceFields.includes("value") && choiceFields.includes("label");
+    const choices: Promise<{ rows: Record<string, unknown>[] } | { error: unknown }> = choiceReadable
+      ? inOwnScope(signal, () =>
+          ops.get(
+            `${TABLE_PATH}sys_choice`,
+            listParams({
+              fields: choiceFields,
+              query: `name=sys_upgrade_history_log^element=disposition^valueIN${SKIPPED_DISPOSITIONS.join(",")}`,
+              limit: 100,
+            })
+          )
+        ).then(
+          (response) => ({ rows: rowsOf(response) }),
+          (error: unknown) => ({ error })
+        )
+      : Promise.resolve({ rows: [] });
+
     let logRows: Record<string, unknown>[] | undefined;
     try {
       logRows = rowsOf(
@@ -473,6 +497,7 @@ export function createUpgradeSkippedHandler(
         )
       );
     } catch (error) {
+      await choices;
       if (errorCategory(error) !== "authorization") throw error;
     }
 
@@ -485,30 +510,20 @@ export function createUpgradeSkippedHandler(
       });
     }
 
-    // 3. Labels, only when there is something to label.
+    // 3. Labels, only when there is something to label. A label read that
+    // failed for any reason but the call's own cancellation costs the labels,
+    // not the call.
     let labels = new Map<number, string>();
-    const choiceFields = readableOf(access, "sys_choice", CHOICE_FIELDS);
-    if (logRows.length > 0 && choiceFields.includes("value") && choiceFields.includes("label")) {
-      try {
-        const rows = rowsOf(
-          await inOwnScope(signal, () =>
-            ops.get(
-              `${TABLE_PATH}sys_choice`,
-              listParams({
-                fields: choiceFields,
-                query: `name=sys_upgrade_history_log^element=disposition^valueIN${SKIPPED_DISPOSITIONS.join(",")}`,
-                limit: 100,
-              })
-            )
-          )
-        );
-        labels = choiceLabels(rows.map((row) => readableRow(access, "sys_choice", row, choiceFields)));
-      } catch (error) {
-        if (errorCategory(error) !== "authorization") throw error;
+    const settled = await choices;
+    if (logRows.length > 0) {
+      if ("error" in settled) {
+        if (signal?.aborted === true || isServiceNowRequestCancellation(settled.error)) throw settled.error;
         warnings.push("Disposition labels were not readable; codes are shown as unknown(n).");
+      } else if (!choiceReadable) {
+        warnings.push("Disposition labels were not readable; codes are shown as unknown(n).");
+      } else {
+        labels = choiceLabels(settled.rows.map((row) => readableRow(access, "sys_choice", row, choiceFields)));
       }
-    } else if (logRows.length > 0) {
-      warnings.push("Disposition labels were not readable; codes are shown as unknown(n).");
     }
 
     const { page, hasMore } = pageOf(logRows, args.limit);

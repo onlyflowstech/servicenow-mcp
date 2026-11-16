@@ -9,7 +9,7 @@
  *    one page of the finding rows, both under the same filter;
  * 3. `scan_check`: names, categories and priorities of the checks the groups
  *    and rows name, in chunks of at most 100 ids (a check is looked up by
- *    sys_id only).
+ *    sys_id only). At most three chunks, read together.
  *
  * A `category`, `priority` or check-name filter is a dot-walk from the finding
  * to its check (`check.category=...`). That reads `scan_check`, which is in the
@@ -283,17 +283,22 @@ export function createScanFindingsHandler(
     // Without `sys_id` a row cannot be matched to its check, and an empty
     // projection would mean every field (`script` among them): read nothing.
     const ids = checkFields.includes("sys_id") ? [...wanted] : [];
+    const chunks: string[][] = [];
+    for (let start = 0; start < ids.length; start += CHECK_CHUNK) chunks.push(ids.slice(start, start + CHECK_CHUNK));
     try {
-      for (let start = 0; start < ids.length; start += CHECK_CHUNK) {
-        const chunk = ids.slice(start, start + CHECK_CHUNK);
-        const checkRows = rowsOf(
-          await inOwnScope(signal, () =>
+      // At most three chunks, read together; `Promise.all` keeps their order,
+      // so the result does not depend on which read finishes first.
+      const perChunk = await Promise.all(
+        chunks.map((chunk) =>
+          inOwnScope(signal, () =>
             ops.get(
               `${TABLE_PATH}scan_check`,
               listParams({ fields: checkFields, query: `sys_idIN${chunk.join(",")}`, limit: chunk.length })
             )
-          )
-        );
+          ).then(rowsOf)
+        )
+      );
+      for (const checkRows of perChunk) {
         for (const raw of checkRows) {
           const row = readableRow(access, "scan_check", raw, checkFields);
           const id = scalar(row.sys_id)?.trim().toLowerCase();
