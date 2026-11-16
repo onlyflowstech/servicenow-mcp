@@ -215,7 +215,7 @@ describe("the named-only table list", () => {
     });
     for (const table of [...earlier, ...BUILT_IN_TABLE_CLASSES.itsm]) {
       for (const operation of ["read", "write"] as const) {
-        // Writes to the two ATF step tables are covered by "*" for sn_atf_author only.
+        // Writes to the ATF step tables are covered by "*" for sn_atf_author only.
         if (operation === "write" && Object.hasOwn(WRITE_NAMED_ONLY_TABLES, table)) continue;
         expect(
           authorizeTableAccess(policy, { operation, table }, "sn_query"),

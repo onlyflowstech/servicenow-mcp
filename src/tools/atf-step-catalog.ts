@@ -135,14 +135,18 @@ function checkConditionFields(table: string, conditions: string): void {
 /**
  * Check the fields a set_field_values step sets against the table's writable
  * fields, the policy sn_update applies, so a step cannot set a field an update
- * would refuse. The terms are `field=value`; any other shape is refused.
+ * would refuse. The terms are `field=value`; any other shape is refused, and a
+ * value may hold only the pills a condition value may.
  */
 function checkAssignedFields(table: string, assignments: string): void {
   const fields: Record<string, string> = {};
   for (const term of assignments.split("^")) {
     if (term === "EQ") continue;
-    const field = /^(?<field>[a-z][a-z0-9_]*)=/su.exec(term)?.groups?.field;
-    if (field === undefined) throw new FieldPolicyError("invalid_field_selection");
+    const match = /^(?<field>[a-z][a-z0-9_]*)=/su.exec(term);
+    const field = match?.groups?.field;
+    if (match === null || field === undefined) throw new FieldPolicyError("invalid_field_selection");
+    // The values obey the same pill limit as a condition's.
+    checkConditionValue(term.slice(match[0].length));
     fields[field] = "";
   }
   validateWritableFields(table, fields);

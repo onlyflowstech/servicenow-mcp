@@ -111,15 +111,17 @@ const NAMED_ONLY_SET: ReadonlySet<string> = new Set(NAMED_ONLY_TABLES);
  * names the table for write.
  *
  * They are the tables that hold what sn_atf_author checks when it adds a step:
- * the step itself (its type and test) and the input values (the table a step
- * names, its conditions, its ACL setting). A generic write could change them
- * after the check, so sn_atf_author alone keeps its planned writes under "*".
+ * the step itself (its type and test), the input values (the table a step
+ * names, its conditions, its ACL setting) and the mapping rows that tie an
+ * input to a step-output pill. A generic write could change them after the
+ * check, so sn_atf_author alone keeps its planned writes under "*".
  * sys_atf_test, sys_atf_test_suite and sys_atf_test_suite_test are not listed:
  * sn_atf_author checks nothing stored in them. The list is deliberately short.
  */
 export const WRITE_NAMED_ONLY_TABLES: Readonly<Record<string, readonly string[]>> = Object.freeze({
   sys_atf_step: Object.freeze(["sn_atf_author"]),
   sys_variable_value: Object.freeze(["sn_atf_author"]),
+  sys_element_mapping: Object.freeze(["sn_atf_author"]),
 });
 
 const ISSUED_TABLE_POLICY_ERRORS = new WeakSet<object>();
