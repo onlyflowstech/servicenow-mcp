@@ -15,21 +15,34 @@
  * {@link EVALUATE_LIMITS}.MAX_SCOPES (12) scopes per call:
  * 1. resolve: the set (`sys_update_set` or `sys_remote_update_set`), its
  *    descendants one level per read through `parent` (depth and count
- *    capped, cycle-safe), and one Aggregate API count of its rows per set;
- * 2. rows: `sys_update_xml` pages of at most 50 rows with `payload`, keyed on
- *    `sys_id`, one scope per page. A page too large for its scope is read
- *    again at half the size; a single row too large for a scope is read
- *    without its payload and counts as not scanned. Rows stop at
- *    `max_updates` or when the scopes left are the ones the next steps need;
+ *    capped, cycle-safe; a level too large for the scope stops the descent
+ *    and makes the result partial), one Aggregate API count of its rows per
+ *    set, and one read of the sys_ids that have a description (set reads
+ *    never ask for the description itself);
+ * 2. rows: `sys_update_xml` pages with `payload`, keyed on `sys_id`, one
+ *    scope per page. The first page is 10 rows; later pages grow (at least
+ *    doubling, up to 50) while the measured payloads fit. A page too large
+ *    for its scope is read again at half the size, and that size becomes a
+ *    ceiling. A single row too large for a scope is read without its
+ *    payload and counts as not scanned. Rows stop at `max_updates`
+ *    (effectively 400 when not given) or when only the scopes the next steps
+ *    need are left;
  * 3. context, one scope: the tables the rows write to, from `sys_db_object`
  *    one level per read (the parent's name is a declared one-hop dot-walk),
  *    and the hidden-typed fields from one `sys_dictionary` read. These feed
  *    the shared credential-table list and type helper, so the type read stays
- *    inside this view's plan (`fieldTypesFromRows`);
- * 4. facts for the extra-read rules, when the `bp` group runs, one scope
- *    each: the preview problems of a remote scope, or, for a local scope, the
- *    same update names in other open sets (BP004); and the update versions of
- *    the rows' names (BP005, at most 500 names).
+ *    inside this view's plan (`fieldTypesFromRows`). A table whose hierarchy
+ *    is not known in full is treated as a possible credential table: its
+ *    rows are not scanned, and the result is partial. When the `bp` group
+ *    runs, the update versions of the rows' names (BP005, at most 500 names)
+ *    are counted in this scope too;
+ * 4. when the `bp` group runs, one more scope: the preview problems of a
+ *    remote scope, or, for a local scope, the same update names in other
+ *    open sets (BP004).
+ *
+ * Update names go into a `nameIN` list only when they are plain names with
+ * no script prefix ({@link isListableName}); any other name is not checked,
+ * and is counted.
  *
  * Payload: only `sys_update_xml.payload` is read, always by name in an
  * explicit field list, and only when field policy allows that field.
@@ -61,12 +74,14 @@ import {
   FIELD_TYPES_UNAVAILABLE,
   HIDDEN_FIELD_TYPES,
   MAX_HIDDEN_DICTIONARY_ROWS,
+  isHiddenFieldType,
   fieldTypesFromRows,
   hiddenTypedFields,
   type FieldTypes,
 } from "../hidden-values.js";
 import { uncachedOperations } from "../metadata-cache.js";
 import { createToolError } from "../tool-error.js";
+import { escapeQueryValue } from "../utils.js";
 import { ENGINE_LIMITS, evaluateUpdateSets, type EngineHooks } from "../update-set-eval/engine.js";
 import type {
   EngineLimits,
@@ -114,8 +129,19 @@ import type { ServiceNowToolHandlerServices } from "./tool-module.js";
 export const EVALUATE_LIMITS = Object.freeze({
   /** Response scopes per call, each under the client's 1 MiB cap. */
   MAX_SCOPES: 12,
-  /** Rows per `sys_update_xml` page, payload included. */
+  /** Rows per `sys_update_xml` page, payload included, at most. */
   PAGE_ROWS: 50,
+  /** The first page's rows; later pages grow while their payloads fit. */
+  FIRST_PAGE_ROWS: 10,
+  /** Payload characters a page is sized to, well under the 1 MiB scope. */
+  PAGE_TARGET_CHARS: 600_000,
+  /**
+   * `max_updates` when the caller sets none. The schema says 1,000, but the
+   * scope budget reaches about 400 rows (9 pages), so 400 is the effective
+   * default: an explicit `max_updates` warning, not the scope budget, says
+   * what was left out.
+   */
+  DEFAULT_MAX_UPDATES: 400,
   /** Sets in one scope (a set and its descendants). */
   MAX_SETS: 100,
   /** Levels of descendants read through `parent`. */
@@ -170,6 +196,8 @@ export const EVALUATE_WARNINGS = Object.freeze({
   problems_capped: `More than ${L.MAX_PROBLEMS} preview problems; the commit-blocking check is incomplete.`,
   collisions_unavailable: "Other open update sets could not be checked in full for the same updates.",
   baseline_unavailable: "Update versions could not be read in full; the baseline-record check is incomplete.",
+  descriptions_unavailable: "Set descriptions could not be checked; the missing-description check was not made.",
+  names_unlistable: "Some update names cannot be used in a query; their collision and baseline checks were not made.",
 });
 
 export type EvaluateWarning = keyof typeof EVALUATE_WARNINGS;
@@ -182,6 +210,12 @@ const LOCAL_SET_FIELDS = Object.freeze([
   "sys_id", "name", "state", "is_default", "application", "parent", "description",
 ]);
 const REMOTE_SET_FIELDS = Object.freeze(["sys_id", "name", "state", "parent", "description"]);
+/**
+ * Set reads never ask for `description`: it can be long, and a batch of long
+ * ones would fill the resolve scope. Whether a set has one is a separate read
+ * of sys_ids only (`descriptionISNOTEMPTY`).
+ */
+const withoutDescription = (fields: readonly string[]) => fields.filter((field) => field !== "description");
 /** Never `payload_diff`. `payload` is added only when field policy allows it. */
 const ROW_FIELDS = Object.freeze([
   "sys_id", "name", "type", "target_name", "action", "table", "application", "replace_on_upgrade",
@@ -220,11 +254,21 @@ const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 const UPDATE_NAME_TABLE = /^([a-z][a-z0-9_]{0,79})_[0-9a-f]{32}$/u;
 /** An update name that is safe in a `nameIN` list: no comma, no query syntax. */
 const LISTABLE_NAME = /^[A-Za-z0-9_.:-]{1,200}$/u;
+/**
+ * A script prefix ServiceNow evaluates in a query value, in any case and with
+ * any spacing before the colon. Update names are instance text (from another
+ * instance, for a retrieved set), so a name holding it is never listed.
+ */
+const SCRIPT_PREFIX = /javascript\s*:/iu;
 /** The payload's declared table, read from its first bytes only. */
 const ROOT_TABLE = /<record_update\b[^>]{0,400}?\btable="([a-z][a-z0-9_]{0,79})"/u;
 const ROOT_HEAD_CHARS = 1_024;
+/** A record element: a table-named element with an `action` attribute. */
+const RECORD_ELEMENT = /<([a-z][a-z0-9_]{0,79})\s+action="/gu;
 /** The base table of all metadata, which extends nothing. */
 const METADATA_ROOT = "sys_metadata";
+/** The credential check's answer for a table whose hierarchy is not known. */
+const UNKNOWN_TABLE = "unknown";
 
 // ---------------------------------------------------------------------------
 // Handler options
@@ -333,6 +377,8 @@ interface ResolvedScope {
   readonly sets: readonly EvaluateSet[];
   readonly setsCapped: boolean;
   readonly countsKnown: boolean;
+  /** False when whether each set has a description could not be read. */
+  readonly descriptionsKnown: boolean;
   readonly total: number;
 }
 
@@ -350,10 +396,14 @@ function rowSetField(source: Source): string {
   return source === "local" ? "update_set" : "remote_update_set";
 }
 
-function projectSet(source: Source, row: Readonly<Record<string, unknown>>, count: number): EvaluateSet | undefined {
+function projectSet(
+  source: Source,
+  row: Readonly<Record<string, unknown>>,
+  count: number,
+  description: boolean | undefined
+): EvaluateSet | undefined {
   const sysId = lowerId(row.sys_id);
   if (sysId === undefined) return undefined;
-  const description = "description" in row ? cleanText(row.description, 1) !== undefined : undefined;
   return {
     sys_id: sysId,
     name: cleanText(row.name, MAX_NAME_CHARS) ?? "",
@@ -373,7 +423,10 @@ async function resolveScope(
   warnings: Set<EvaluateWarning>
 ): Promise<Resolution> {
   const tableName = setTable(selector.source);
-  const fields = readableOf(access, tableName, selector.source === "local" ? LOCAL_SET_FIELDS : REMOTE_SET_FIELDS);
+  const fields = withoutDescription(
+    readableOf(access, tableName, selector.source === "local" ? LOCAL_SET_FIELDS : REMOTE_SET_FIELDS)
+  );
+  const descriptionReadable = access.canRead(tableName, "description");
   const required = ["sys_id", ...(selector.name !== undefined ? ["name"] : [])];
   if (firstUnreadable(access, tableName, required) !== undefined) throw new ViewStop("denied", FIELD_POLICY_HINT);
   const setField = rowSetField(selector.source);
@@ -409,26 +462,35 @@ async function resolveScope(
     const root = lowerId(rootRow.sys_id);
     if (root === undefined) return { kind: "not_found" as const };
 
-    // Descendants, one level per read, cycle-safe and capped.
+    // Descendants, one level per read, cycle-safe and capped. The descent
+    // stops at the first cap, and a level too large for the scope is a cap
+    // too: the sets read so far are evaluated and the result is partial.
     const rows = new Map<string, Record<string, unknown>>([[root, rootRow]]);
     let capped = false;
     if (children) {
       let frontier = [root];
-      for (let depth = 0; frontier.length > 0; depth += 1) {
+      for (let depth = 0; frontier.length > 0 && !capped; depth += 1) {
         if (depth >= L.MAX_DEPTH) {
           capped = true;
           break;
         }
-        const level = rowsOf(
-          await reader.ops.get(
-            path,
-            listParams({
-              fields,
-              query: `parentIN${frontier.join(",")}^ORDERBYsys_id`,
-              limit: L.MAX_SETS + 1,
-            })
-          )
-        ).map((row) => readableRow(access, tableName, row, fields));
+        let level: Record<string, unknown>[];
+        try {
+          level = rowsOf(
+            await reader.ops.get(
+              path,
+              listParams({
+                fields,
+                query: `parentIN${frontier.join(",")}^ORDERBYsys_id`,
+                limit: L.MAX_SETS + 1,
+              })
+            )
+          ).map((row) => readableRow(access, tableName, row, fields));
+        } catch (error) {
+          if (!isTooLarge(error)) throw error;
+          capped = true;
+          break;
+        }
         const next: string[] = [];
         for (const row of level) {
           const id = lowerId(row.sys_id);
@@ -466,14 +528,40 @@ async function resolveScope(
       if (isCancellation(error, reader.signal)) throw error;
       countsKnown = false;
     }
+    // Which sets have a description: their sys_ids only, never the text.
+    let described: Set<string> | undefined;
+    let descriptionsKnown = false;
+    if (descriptionReadable) {
+      try {
+        described = new Set(
+          rowsOf(
+            await reader.ops.get(
+              path,
+              listParams({ fields: ["sys_id"], query: `sys_idIN${ids.join(",")}^descriptionISNOTEMPTY`, limit: ids.length })
+            )
+          ).flatMap((row) => {
+            const id = lowerId(readableRow(access, tableName, row, ["sys_id"]).sys_id);
+            return id === undefined ? [] : [id];
+          })
+        );
+        descriptionsKnown = true;
+      } catch (error) {
+        if (isCancellation(error, reader.signal)) throw error;
+      }
+    }
     const sets = ids.flatMap((id) => {
-      const set = projectSet(selector.source, rows.get(id)!, countsKnown ? counts.get(id) ?? 0 : Number.NaN);
+      const set = projectSet(
+        selector.source,
+        rows.get(id)!,
+        countsKnown ? counts.get(id) ?? 0 : Number.NaN,
+        described === undefined ? undefined : described.has(id)
+      );
       return set === undefined ? [] : [set];
     });
     const total = countsKnown ? sets.reduce((sum, set) => sum + set.update_count, 0) : Number.NaN;
     return {
       kind: "scope" as const,
-      scope: { source: selector.source, root, sets, setsCapped: capped, countsKnown, total },
+      scope: { source: selector.source, root, sets, setsCapped: capped, countsKnown, descriptionsKnown, total },
     };
   });
   // The first scope of a call always exists.
@@ -481,6 +569,7 @@ async function resolveScope(
   if (read.value.kind === "scope") {
     if (read.value.scope.setsCapped) warnings.add("sets_capped");
     if (!read.value.scope.countsKnown) warnings.add("counts_unavailable");
+    if (!read.value.scope.descriptionsKnown) warnings.add("descriptions_unavailable");
   }
   return read.value;
 }
@@ -533,7 +622,13 @@ async function readRows(
   const wanted = Math.min(options.maxUpdates, known);
   const updates: EvaluateUpdate[] = [];
   let last: string | undefined;
-  let pageSize: number = L.PAGE_ROWS;
+  // The page starts small and grows while its payloads fit. A page too large
+  // for its scope sets a ceiling the size never climbs back over, so large
+  // payloads do not keep failing and spending scopes.
+  let pageSize: number = L.FIRST_PAGE_ROWS;
+  let ceiling: number = L.PAGE_ROWS;
+  /** The largest page size read with payloads so far. */
+  let lastGood = 0;
   let scopeBudgetHit = false;
   let exhausted = false;
   let invalid = 0;
@@ -562,11 +657,13 @@ async function readRows(
         break;
       }
       rows = rowsOf(read.value);
+      if (options.payload) lastGood = Math.max(lastGood, size);
     } catch (error) {
       if (!options.payload || !isTooLarge(error)) throw error;
       if (size > 1) {
         // A page of large payloads: the same rows again, half as many at a time.
         pageSize = Math.ceil(size / 2);
+        ceiling = pageSize;
         continue;
       }
       // One row too large for a scope: its metadata only, so paging can go on.
@@ -582,8 +679,12 @@ async function readRows(
       rows = rowsOf(single.value);
       payloadRead = false;
       warnings.add("row_too_large");
+      // That one row set the ceiling to 1; the rows after it may fit as many
+      // as the largest page that has fitted.
+      ceiling = Math.max(1, lastGood);
     }
     if (rows.length < size) exhausted = true;
+    let pageChars = 0;
     let lastOfPage: string | undefined;
     for (const raw of rows) {
       const id = lowerId(raw.sys_id);
@@ -592,11 +693,16 @@ async function readRows(
       const update = projectRow(scope.source, readableRow(access, "sys_update_xml", raw, fields), payloadRead);
       if (update === undefined) invalid += 1;
       else updates.push(update);
+      pageChars += update?.payload?.length ?? 0;
     }
     // Keyset paging: without a valid sys_id there is no next key.
     if (lastOfPage === undefined || (last !== undefined && lastOfPage <= last)) exhausted = true;
     last = lastOfPage;
-    pageSize = Math.min(L.PAGE_ROWS, pageSize * 2);
+    // Grow: at least double, or straight to what the measured payloads say
+    // fits; never past the ceiling.
+    const perRow = rows.length === 0 ? 0 : pageChars / rows.length;
+    const fits = perRow === 0 ? L.PAGE_ROWS : Math.floor(L.PAGE_TARGET_CHARS / perRow);
+    pageSize = Math.max(1, Math.min(ceiling, Math.max(pageSize * 2, fits)));
   }
   if (invalid > 0) warnings.add("rows_unreadable");
   const maxUpdatesHit = !exhausted && !scopeBudgetHit && updates.length + invalid >= options.maxUpdates && known > options.maxUpdates;
@@ -616,8 +722,14 @@ interface ContextRead {
   readonly fieldTypes: "available" | "unavailable";
 }
 
-/** Tables a row may write to: its `table` column, its update name and its payload's declared table. */
-export function candidateTables(updates: readonly EvaluateUpdate[]): string[] {
+/**
+ * Tables a row may write to: its `table` column, its update name, its
+ * payload's declared table, and every record element (a table-named element
+ * with an `action` attribute) in the part of the payload the engine reads.
+ * A table missed here has no facts, so the credential check treats it as
+ * unknown and the row is not scanned: a miss fails closed.
+ */
+export function candidateTables(updates: readonly EvaluateUpdate[], maxPayloadChars: number = ENGINE_LIMITS.maxPayloadBytes): string[] {
   const tables = new Set<string>();
   for (const update of updates) {
     if (typeof update.table === "string" && TABLE_NAME.test(update.table)) tables.add(update.table);
@@ -626,6 +738,7 @@ export function candidateTables(updates: readonly EvaluateUpdate[]): string[] {
     if (update.payload !== null) {
       const declared = ROOT_TABLE.exec(update.payload.slice(0, ROOT_HEAD_CHARS));
       if (declared !== null) tables.add(declared[1]!);
+      for (const match of update.payload.slice(0, maxPayloadChars).matchAll(RECORD_ELEMENT)) tables.add(match[1]!);
     }
   }
   return [...tables].sort();
@@ -656,11 +769,17 @@ function chainOf(table: string, parents: ReadonlyMap<string, string | null | und
   return { tables, complete: true };
 }
 
+/**
+ * The context reads, in one scope. `extra` (the update-version counts, small
+ * like these) runs in the same scope, alongside them; it handles its own
+ * failures and is told when no scope was left.
+ */
 async function readContext(
   reader: Reader,
   access: PlatformViewFieldAccess,
   updates: readonly EvaluateUpdate[],
-  warnings: Set<EvaluateWarning>
+  warnings: Set<EvaluateWarning>,
+  extra?: { readonly run: () => Promise<void>; readonly noScope: () => void }
 ): Promise<ContextRead> {
   const all = candidateTables(updates);
   if (all.length > L.MAX_CONTEXT_TABLES) warnings.add("context_tables_capped");
@@ -730,28 +849,38 @@ async function readContext(
       const tableName = scalar(entry.name);
       const element = scalar(entry.element);
       const type = scalar(entry.internal_type);
-      return tableName === undefined || element === undefined || type === undefined
+      // Hidden-typed rows only, as the shared loader keeps: a row of any other
+      // type the server returned must not override an inherited hidden field.
+      return tableName === undefined || element === undefined || !isHiddenFieldType(type)
         ? []
-        : [{ table: tableName, element, internal_type: type }];
+        : [{ table: tableName, element, internal_type: type! }];
     });
   };
 
-  if (tables.length > 0) {
+  if (tables.length > 0 || extra !== undefined) {
     const read = await inScope(reader, async () => {
-      // The two reads do not depend on each other. A failure costs the facts
-      // it would have given, never the call; a cancellation ends the call.
+      // The reads do not depend on each other. A failure costs the facts it
+      // would have given, never the call; a cancellation ends the call.
       await Promise.all([
-        readChains().catch((error: unknown) => {
-          if (isCancellation(error, reader.signal)) throw error;
-          hierarchyRead = false;
-        }),
-        readTypes().catch((error: unknown) => {
-          if (isCancellation(error, reader.signal)) throw error;
-          dictionaryRows = undefined;
-        }),
+        tables.length === 0
+          ? undefined
+          : readChains().catch((error: unknown) => {
+              if (isCancellation(error, reader.signal)) throw error;
+              hierarchyRead = false;
+            }),
+        tables.length === 0
+          ? undefined
+          : readTypes().catch((error: unknown) => {
+              if (isCancellation(error, reader.signal)) throw error;
+              dictionaryRows = undefined;
+            }),
+        extra?.run(),
       ]);
     });
-    if (read === undefined) hierarchyRead = false;
+    if (read === undefined) {
+      hierarchyRead = false;
+      extra?.noScope();
+    }
   }
 
   const chains = new Map<string, Chain>();
@@ -772,7 +901,13 @@ async function readContext(
     isCredentialTable(tableName) {
       if (isCredentialTable(tableName)) return true;
       const chain = chains.get(tableName);
-      return chain !== undefined && isCredentialTableHierarchy(chain.tables);
+      if (chain !== undefined && isCredentialTableHierarchy(chain.tables)) return true;
+      if (chain?.complete === true) return false;
+      // No row, an incomplete chain, a failed read or a table past the cap:
+      // it may extend a credential table. The engine reads an answer that is
+      // not a boolean as "credential" and counts it, so the row is not
+      // scanned and the result is partial.
+      return UNKNOWN_TABLE as unknown as boolean;
     },
     hiddenFieldNames(tableName) {
       return hiddenTypedFields(fieldTypes, tableName) ?? "unavailable";
@@ -804,11 +939,20 @@ interface Facts {
   unavailable: number;
 }
 
+/**
+ * True when an update name may go into a `nameIN` list as it is: only the
+ * allowed characters, no script prefix, and nothing `escapeQueryValue` would
+ * change. Any other name is not checked, and is counted.
+ */
+export function isListableName(name: string): boolean {
+  return LISTABLE_NAME.test(name) && !SCRIPT_PREFIX.test(name) && escapeQueryValue(name) === name;
+}
+
 function listableNames(updates: readonly EvaluateUpdate[]): { listable: string[]; unlistable: number } {
   const names = new Set<string>();
   let unlistable = 0;
   for (const update of updates) {
-    if (LISTABLE_NAME.test(update.name)) names.add(update.name);
+    if (isListableName(update.name)) names.add(update.name);
     else unlistable += 1;
   }
   return { listable: [...names].sort(), unlistable };
@@ -892,6 +1036,7 @@ async function readCollisions(
   }
   const checked = listable.slice(0, L.MAX_COLLISION_NAMES);
   const notChecked = listable.length - checked.length + unlistable;
+  if (unlistable > 0) warnings.add("names_unlistable");
   const collisions = new Map<string, number>();
   const exclude = scope.sets.map((set) => set.sys_id).join(",");
   try {
@@ -928,6 +1073,7 @@ async function readCollisions(
 }
 
 /** BP005: which names have a version from a source other than the customer's own sets. */
+/** BP005, run inside the context's scope (see {@link readContext}). */
 async function readBaseline(
   reader: Reader,
   access: PlatformViewFieldAccess,
@@ -942,29 +1088,29 @@ async function readBaseline(
   const { listable, unlistable } = listableNames(updates);
   const checked = listable.slice(0, L.MAX_BASELINE_NAMES);
   try {
-    const read = await inScope(reader, () =>
-      mapLimited(chunks(checked, L.NAME_CHUNK), L.CONCURRENCY, (chunk) =>
-        reader.ops.get(`${STATS_PATH}sys_update_version`, {
-          sysparm_query: `nameIN${chunk.join(",")}`,
-          sysparm_group_by: "name,source_table",
-          sysparm_count: "true",
-        })
-      )
+    const responses = await mapLimited(chunks(checked, L.NAME_CHUNK), L.CONCURRENCY, (chunk) =>
+      reader.ops.get(`${STATS_PATH}sys_update_version`, {
+        sysparm_query: `nameIN${chunk.join(",")}`,
+        sysparm_group_by: "name,source_table",
+        sysparm_count: "true",
+      })
     );
-    if (read === undefined) {
-      warnings.add("baseline_unavailable");
-      return;
-    }
-    // A checked name with no version is a new record: the customer's own.
+    // A checked name with no version is a new record: the customer's own. A
+    // version with no source says nothing, so a name with only such versions
+    // (and none from a baseline) is left out: the engine counts it unchecked.
     const baseline = new Map<string, "baseline" | "customer">(checked.map((name) => [name, "customer"]));
-    for (const response of read.value) {
+    const unsourced = new Set<string>();
+    for (const response of responses) {
       for (const group of groupsOf(response)) {
         const name = group.fields.get("name");
         const source = group.fields.get("source_table")?.trim().toLowerCase() ?? "";
-        if (name === undefined || !baseline.has(name) || source === "") continue;
-        if (!CUSTOMER_VERSION_SOURCES.has(source)) baseline.set(name, "baseline");
+        if (name === undefined || !baseline.has(name)) continue;
+        if (source === "") unsourced.add(name);
+        else if (!CUSTOMER_VERSION_SOURCES.has(source)) baseline.set(name, "baseline");
       }
     }
+    for (const name of unsourced) if (baseline.get(name) !== "baseline") baseline.delete(name);
+    if (unsourced.size > 0) warnings.add("baseline_unavailable");
     facts.baseline = baseline;
   } catch (error) {
     if (isCancellation(error, reader.signal)) throw error;
@@ -972,7 +1118,8 @@ async function readBaseline(
     return;
   }
   // Names left out are missing from the map; the engine counts each one.
-  if (listable.length > checked.length || unlistable > 0) warnings.add("baseline_unavailable");
+  if (listable.length > checked.length) warnings.add("baseline_unavailable");
+  if (unlistable > 0) warnings.add("names_unlistable");
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,8 +1208,9 @@ export function createEvaluateHandler(defaults: EvaluateHandlerOptions = {}): Fi
 
       // 2. Rows, leaving the scopes the context and the facts need.
       const payloadAccess = access.canRead("sys_update_xml", "payload") ? "granted" : "denied";
-      // One scope for the context, and two for the facts when they are read.
-      const reserved = 1 + (factsWanted ? 2 : 0);
+      // One scope for the context (with the update-version counts), and one
+      // for the problems or collisions when the facts are read.
+      const reserved = 1 + (factsWanted ? 1 : 0);
       let rows: RowRead;
       try {
         rows = await readRows(
@@ -1070,7 +1218,7 @@ export function createEvaluateHandler(defaults: EvaluateHandlerOptions = {}): Fi
           access,
           scope,
           {
-            maxUpdates: args.max_updates ?? 1_000,
+            maxUpdates: args.max_updates ?? L.DEFAULT_MAX_UPDATES,
             reserved,
             payload: payloadAccess === "granted",
           },
@@ -1083,11 +1231,19 @@ export function createEvaluateHandler(defaults: EvaluateHandlerOptions = {}): Fi
 
       // 3 and 4. Context and facts, together: none depends on another.
       const facts: Facts = { unavailable: 0 };
-      const steps: Promise<unknown>[] = [readContext(reader, access, rows.updates, warnings)];
+      // A set whose description could not be checked is a check not made.
+      if (factsWanted && !scope.descriptionsKnown) facts.unavailable += 1;
+      const baseline =
+        factsWanted && rows.updates.length > 0
+          ? {
+              run: () => readBaseline(reader, access, rows.updates, facts, warnings),
+              noScope: () => warnings.add("baseline_unavailable"),
+            }
+          : undefined;
+      const steps: Promise<unknown>[] = [readContext(reader, access, rows.updates, warnings, baseline)];
       if (factsWanted && rows.updates.length > 0) {
         if (scope.source === "remote") steps.push(readProblems(reader, access, scope, facts, warnings));
         else steps.push(readCollisions(reader, access, scope, rows.updates, facts, warnings));
-        steps.push(readBaseline(reader, access, rows.updates, facts, warnings));
       } else if (factsWanted && scope.source === "remote") {
         // An empty remote scope still needs its problems: a problem with no row blocks too.
         steps.push(readProblems(reader, access, scope, facts, warnings));

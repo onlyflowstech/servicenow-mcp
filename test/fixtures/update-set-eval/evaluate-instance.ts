@@ -49,6 +49,7 @@ export const STANDARD_TABLES: Record<string, string | null> = {
   sys_rest_message: "sys_metadata",
   sp_widget: "sys_metadata",
   sys_ui_policy: "sys_metadata",
+  sys_security_acl_role: "sys_metadata",
   task: null,
   incident: "task",
   sys_user: null,
@@ -128,7 +129,7 @@ function conditions(query: string): { field: string; op: string; value: string }
     .split("^")
     .filter((clause) => clause !== "" && !clause.startsWith("ORDERBY"))
     .map((clause) => {
-      const match = /^(?:OR)?([a-z0-9_.]+)(NOT IN|IN|>|=)(.*)$/u.exec(clause);
+      const match = /^(?:OR)?([a-z0-9_.]+)(ISNOTEMPTY|NOT IN|IN|>|=)(.*)$/u.exec(clause);
       if (match === null) throw new Error(`fixture cannot read clause ${clause}`);
       return { field: match[1]!, op: match[2]!, value: match[3]! };
     });
@@ -137,6 +138,7 @@ function conditions(query: string): { field: string; op: string; value: string }
 function matches(row: Row, query: string): boolean {
   return conditions(query).every(({ field, op, value }) => {
     const actual = String(row[field] ?? "");
+    if (op === "ISNOTEMPTY") return actual !== "";
     if (op === "=") return actual === value;
     if (op === ">") return actual > value;
     if (op === "IN") return value.split(",").includes(actual);
@@ -154,6 +156,11 @@ export interface ScriptOptions {
   readonly fail?: (call: RecordedCall) => Error | undefined;
   /** A row page whose payload characters exceed this is too large for its scope. */
   readonly pageBytes?: number;
+  /**
+   * Return every dictionary row, whatever the query's type filter says, as a
+   * misbehaving server might. By default the filter is honoured.
+   */
+  readonly dictionaryIgnoresTypeFilter?: boolean;
 }
 
 /** A recording instance that answers from `world`. */
@@ -225,8 +232,14 @@ export function scripted(world: InstanceModel, options: ScriptOptions = {}): Scr
             .map((name) => ({ name, "super_class.name": world.tables[name] ?? "" }))
         );
       }
-      case "sys_dictionary":
-        return rows(world.dictionary.map((row) => ({ ...row })));
+      case "sys_dictionary": {
+        const types = conditions(query).find((c) => c.field === "internal_type" && c.op === "IN")?.value.split(",");
+        return rows(
+          world.dictionary
+            .filter((row) => options.dictionaryIgnoresTypeFilter === true || types === undefined || types.includes(row.internal_type))
+            .map((row) => ({ ...row }))
+        );
+      }
       default:
         throw new Error(`fixture has no table ${table}`);
     }

@@ -1,6 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
 
+import { ServiceNowResponseTooLargeError } from "../../src/client.js";
 import { createToolError, trustedToolErrorDescriptor } from "../../src/tool-error.js";
 import {
   canonicalPlatformViewArgs,
@@ -18,11 +19,13 @@ import {
   EVALUATE_WARNINGS,
   candidateTables,
   createEvaluateHandler,
+  isListableName,
   renderEvaluateText,
   type EvaluateHandlerOptions,
 } from "../../src/tools/platform-view-evaluate.js";
 import { FIELD_POLICY_HINT, type PlatformViewFieldAccess } from "../../src/tools/platform-view-upgrades.js";
 import { platformViewToolModule } from "../../src/tools/platform-view-module.js";
+import { ENGINE_LIMITS, YIELD_AFTER_MS, evaluateUpdateSets } from "../../src/update-set-eval/engine.js";
 import { RULE_IDS } from "../../src/update-set-eval/rules.js";
 import {
   callLabel,
@@ -35,7 +38,7 @@ import {
   type Row,
   type ScriptOptions,
 } from "../fixtures/update-set-eval/evaluate-instance.js";
-import { RULE_CASES, SET_ID, sid, update } from "../fixtures/update-set-eval/rule-cases.js";
+import { RULE_CASES, SET_ID, input, sid, update } from "../fixtures/update-set-eval/rule-cases.js";
 import { expectReadsWithin, harness, readPolicy, textOf, type RecordedCall } from "../platform-view-harness.js";
 
 const PLAN = platformViewReadTables("evaluate", {});
@@ -97,11 +100,13 @@ describe("evaluate: a local set", () => {
       "table:sys_update_set",
       "table:sys_update_set", // descendants: none
       "stats:sys_update_xml",
+      "table:sys_update_set", // which sets have a description: sys_ids only
       "table:sys_update_xml",
       // context, facts: started together
-      ...labels(instance.calls.slice(4)),
+      ...labels(instance.calls.slice(5)),
     ]);
-    expect(new Set(labels(instance.calls.slice(4)))).toEqual(
+    expect(instance.calls[3]!.params).toMatchObject({ sysparm_fields: "sys_id", sysparm_query: `sys_idIN${SET_ID}^descriptionISNOTEMPTY` });
+    expect(new Set(labels(instance.calls.slice(5)))).toEqual(
       new Set(["table:sys_db_object", "table:sys_dictionary", "stats:sys_update_xml", "stats:sys_update_version"])
     );
     expect(ruleIds(data)).toEqual(expect.arrayContaining(["PERF002", "SEC011"]));
@@ -153,7 +158,10 @@ describe("evaluate: a local set", () => {
       localSet({ sys_id: grandchild, name: "Grandchild", parent: child }),
     ];
     const { data, instance } = await run(model({ localSets: sets, rows: rowsOf(shared, inChild) }), { batch_root: SET_ID });
-    const levels = instance.calls.filter((call) => callLabel(call) === "table:sys_update_set").map((call) => call.params.sysparm_query);
+    const setReads = instance.calls.filter((call) => callLabel(call) === "table:sys_update_set");
+    // Set reads never ask for descriptions; one read of sys_ids says which sets have one.
+    for (const call of setReads) expect(call.params.sysparm_fields!.split(",")).not.toContain("description");
+    const levels = setReads.map((call) => call.params.sysparm_query).filter((query) => !query!.includes("descriptionISNOTEMPTY"));
     expect(levels).toEqual([
       `sys_id=${SET_ID}`,
       `parentIN${SET_ID}^ORDERBYsys_id`,
@@ -174,7 +182,7 @@ describe("evaluate: a local set", () => {
 
   it("evaluates only the set when include_children is false", async () => {
     const { instance } = await run(model(), { update_set: SET_ID, include_children: false });
-    expect(labels(instance.calls).filter((label) => label === "table:sys_update_set")).toHaveLength(1);
+    expect(instance.calls.filter((call) => (call.params.sysparm_query ?? "").startsWith("parentIN"))).toEqual([]);
   });
 
   it("pages findings with limit and offset", async () => {
@@ -286,25 +294,44 @@ describe("evaluate: bounds", () => {
     const rows = rowsOf(...Array.from({ length: 2_000 }, (_, i) => update("sys_script", { name: `R${i}`, script: "gs.info('ok');" })));
     const { data, instance } = await run(model({ rows }), { update_set: SET_ID, max_updates: 5_000 });
     expect(data.summary.coverage.upstream_scopes).toBe(EVALUATE_LIMITS.MAX_SCOPES);
-    // 1 resolve, 8 pages, 1 context, 2 facts.
-    expect(data.summary.coverage).toMatchObject({ rows_read: 400, scope_budget_hit: true, partial: true, not_evaluated: 1_600 });
+    // 1 resolve, 9 pages, 1 context (with the version counts), 1 for collisions.
+    expect(data.summary.coverage).toMatchObject({ rows_read: 410, scope_budget_hit: true, partial: true, not_evaluated: 1_590 });
     expect(data.warnings).toContain(EVALUATE_WARNINGS.scope_budget);
     const pages = instance.calls.filter((call) => callLabel(call) === "table:sys_update_xml");
-    expect(pages).toHaveLength(8);
-    expect(pages.every((call) => call.params.sysparm_limit === "50")).toBe(true);
-    // Every request is bounded: 3 to resolve, 8 pages, 2 for the context, 4 + 4 name chunks.
-    expect(instance.calls.length).toBeLessThanOrEqual(21);
+    // The first page is small; small payloads let the next ones go straight to 50.
+    expect(pages.map((call) => call.params.sysparm_limit)).toEqual(["10", ...Array<string>(8).fill("50")]);
+    // Every request is bounded: 4 to resolve, 9 pages, 2 for the context, 5 + 5 name chunks.
+    expect(instance.calls.length).toBeLessThanOrEqual(25);
+  });
+
+  it("stops at the effective default of 400 rows, with the max_updates warning, before the scope budget", async () => {
+    const rows = rowsOf(...Array.from({ length: 2_000 }, (_, i) => update("sys_script", { name: `R${i}`, script: "gs.info('ok');" })));
+    const { data } = await run(model({ rows }), { update_set: SET_ID });
+    expect(EVALUATE_LIMITS.DEFAULT_MAX_UPDATES).toBe(400);
+    expect(data.summary.coverage).toMatchObject({ rows_read: 400, scope_budget_hit: false, partial: true });
+    expect(data.warnings).toContain(EVALUATE_WARNINGS.max_updates);
+    expect(data.warnings).not.toContain(EVALUATE_WARNINGS.scope_budget);
   });
 
   it("honours a smaller scope budget and max_updates", async () => {
     const rows = rowsOf(...Array.from({ length: 300 }, (_, i) => update("sys_script", { name: `R${i}` })));
     const small = await run(model({ rows }), { update_set: SET_ID }, { handler: { maxScopes: 6 } });
-    expect(small.data.summary.coverage).toMatchObject({ rows_read: 100, upstream_scopes: 6, partial: true });
+    expect(small.data.summary.coverage).toMatchObject({ rows_read: 110, upstream_scopes: 6, partial: true });
     const capped = await run(model({ rows }), { update_set: SET_ID, max_updates: 120 });
     expect(capped.data.summary.coverage).toMatchObject({ rows_read: 120, not_evaluated: 180, partial: true, scope_budget_hit: false });
     expect(capped.data.warnings).toContain(EVALUATE_WARNINGS.max_updates);
     const pages = capped.instance.calls.filter((call) => callLabel(call) === "table:sys_update_xml").map((call) => call.params.sysparm_limit);
-    expect(pages).toEqual(["50", "50", "20"]);
+    expect(pages).toEqual(["10", "50", "50", "10"]);
+  });
+
+  it("keeps a page ceiling once a page was too large, instead of climbing back into the failure", async () => {
+    const rows = rowsOf(...Array.from({ length: 40 }, (_, i) => br(`gs.log('${i}'); // ${"x".repeat(6_000)}`, `R${i}`)));
+    const { data, instance } = await run(model({ rows }), { update_set: SET_ID }, { script: { pageBytes: 20_000 } });
+    const limits = instance.calls.filter((call) => callLabel(call) === "table:sys_update_xml").map((call) => Number(call.params.sysparm_limit));
+    // 10 and 5 are too large; 3 fits and stays the ceiling.
+    expect(limits.slice(0, 3)).toEqual([10, 5, 3]);
+    expect(limits.slice(2).every((limit) => limit <= 3)).toBe(true);
+    expect(data.summary.coverage.rows_read).toBe((limits.length - 2) * 3);
   });
 
   it("halves a page that is too large for its scope, and reads a single oversized row without its payload", async () => {
@@ -330,9 +357,12 @@ describe("evaluate: no payload text leaves the view", () => {
         for (const u of evaluation.updates) {
           if (u.payload === null) continue;
           const payload = u.payload
-            .replace("</record_update>", `<u_note>${CANARY} password='${CANARY}'</u_note></record_update>`)
+            .replace(/(<\/[a-z0-9_]+>)<\/record_update>$/u, `<u_note>${CANARY} password='${CANARY}'</u_note>$1</record_update>`)
             .replace(/<script>/gu, `<script>/* ${CANARY} */ var key = '${CANARY}';`);
           rows.push(xmlRow({ ...u, update_set: SET_ID, payload }));
+          // The same canary in a sibling element with no table facts: that row is not scanned at all.
+          const sibling = u.payload.replace("</record_update>", `<u_note>${CANARY} password='${CANARY}'</u_note></record_update>`);
+          rows.push(xmlRow({ ...u, sys_id: `f${u.sys_id.slice(1)}`, update_set: SET_ID, payload: sibling }));
         }
       }
     }
@@ -631,5 +661,159 @@ describe("evaluate: recording client behind the real dispatcher", () => {
     expect(ruleIds(dataOf(result))).toContain("SEC005");
     expect(JSON.stringify(result)).not.toContain(CANARY);
     expectReadsWithin(instance, PLAN, EVALUATE_DOT_WALKS);
+  });
+});
+
+describe("evaluate: instance text never shapes a query", () => {
+  it("never lists an update name holding a script prefix, in any case or spacing", () => {
+    for (const name of ["JavaScript:gs.userID", "javascript:x", "JAVASCRIPT:x", "x_javascript:y", "javascript :x", "a,b", "a^b", "a b"]) {
+      expect(isListableName(name), name).toBe(false);
+    }
+    expect(isListableName(`sys_script_${sid(1)}`)).toBe(true);
+    expect(isListableName("sys_ui_section_incident_null.x-y")).toBe(true);
+  });
+
+  it("leaves such names out of every nameIN read, counts them, and stays inside the plan behind the dispatcher", async () => {
+    const evil = br("gs.info(1);", "x");
+    const rows = [
+      xmlRow({ ...evil, name: "JavaScript:gs.userID" }),
+      xmlRow({ ...evil, sys_id: sid(0xe1), name: "javascript:gs.getSession()" }),
+      xmlRow(br("gs.info(2);", "y")),
+    ];
+    const { instance, ops } = scripted(model({ rows }));
+    const { call } = await harness(ops, { tableAccess: readPolicy(PLAN), modules: [platformViewToolModule] });
+    const data = dataOf(await call({ view: "evaluate", update_set: SET_ID }));
+    // The harness refuses any query that holds `javascript:`.
+    expectReadsWithin(instance, PLAN, EVALUATE_DOT_WALKS);
+    for (const c of instance.calls) expect((c.params.sysparm_query ?? "").toLowerCase()).not.toContain("javascript");
+    // The two update-name reads (collisions, versions) list the one safe name only.
+    const named = instance.calls.filter((c) => callLabel(c).startsWith("stats:") && (c.params.sysparm_query ?? "").startsWith("nameIN"));
+    expect(named).toHaveLength(2);
+    for (const c of named) expect(c.params.sysparm_query!.split("^")[0]).toBe(`nameIN${String(rows[2]!.name)}`);
+    expect(data.summary.coverage.partial).toBe(true);
+    expect(data.summary.coverage.checks_unavailable).toBeGreaterThanOrEqual(2);
+    expect(data.warnings).toContain(EVALUATE_WARNINGS.names_unlistable);
+  });
+});
+
+describe("evaluate: a table whose hierarchy is unknown is treated as a credential table", () => {
+  const credentialChild = () => update("u_cred_child", { name: "c", password: "fake-not-a-secret", script: "eval(x)" });
+
+  for (const groups of [undefined, ["perf"], ["bp"]] as const) {
+    it(`does not scan a table with no sys_db_object row, or whose hierarchy read fails (groups ${String(groups)})`, async () => {
+      const extra = groups === undefined ? {} : { groups };
+      const missing = await run(model({ rows: [xmlRow(credentialChild())] }), { update_set: SET_ID, ...extra });
+      const failed = await run(
+        model({ rows: [xmlRow(credentialChild())], tables: { ...model().tables, u_cred_child: "discovery_credentials" } }),
+        { update_set: SET_ID, ...extra },
+        { script: { fail: (c) => (c.path.endsWith("/sys_db_object") ? new Error("boom") : undefined) } }
+      );
+      for (const { data } of [missing, failed]) {
+        expect(data.summary.coverage).toMatchObject({ credential_rows: 1, scanned: 0, partial: true });
+        expect(ruleIds(data)).not.toContain("SEC004");
+      }
+    });
+  }
+
+  it("does not scan a credential table pushed past the table cap", async () => {
+    const decoys = Array.from({ length: 67 }, (_, i) => {
+      const t = (n: number) => `a${String(i * 3 + n).padStart(3, "0")}`;
+      return xmlRow(update(t(0), { u: "1" }), { table: t(1), name: `${t(2)}_${sid(0xd000 + i)}` });
+    });
+    const ssh = update("ssh_credentials", { name: "c", password: "fake-not-a-secret", script: "eval(x)" });
+    const { data } = await run(model({ rows: [...decoys, xmlRow(ssh)] }), { update_set: SET_ID, limit: 200 });
+    expect(data.warnings).toContain(EVALUATE_WARNINGS.context_tables_capped);
+    const own = (data.results as Data[]).filter((finding) => finding.update?.sys_id === ssh.sys_id).map((finding) => finding.rule_id);
+    expect(own).toContain("SEC010");
+    expect(own).not.toContain("SEC004");
+    expect(data.summary.coverage.partial).toBe(true);
+  });
+
+  it("finds nested record tables, so a row with a known nested record is still scanned", () => {
+    const acl = update("sys_security_acl", { name: "incident", operation: "read" });
+    const nested = { ...acl, payload: acl.payload!.replace("</record_update>", `<sys_security_acl_role action="INSERT_OR_UPDATE"><sys_user_role>${sid(3)}</sys_user_role></sys_security_acl_role></record_update>`) };
+    expect(candidateTables([nested])).toEqual(["sys_security_acl", "sys_security_acl_role"]);
+  });
+});
+
+describe("evaluate: type hiding at parity with the shared loader", () => {
+  it("keeps an inherited hidden field hidden when the server returns a non-hidden row for it on the child", async () => {
+    const dictionary = [
+      { name: "sys_user", element: "user_password", internal_type: "password" },
+      { name: "u_vendor", element: "u_api_password", internal_type: "password2" },
+      { name: "u_vendor", element: "u_mask", internal_type: "masked" },
+      { name: "u_vendor_child", element: "u_api_password", internal_type: "string" },
+      { name: "u_vendor_child", element: "u_mask", internal_type: "string" },
+    ];
+    for (const field of ["u_api_password", "u_mask"]) {
+      const child = update("u_vendor_child", { u_name: "x", [field]: "fake-not-a-secret" });
+      const { data, result } = await run(model({ rows: [xmlRow(child)], dictionary }), { update_set: SET_ID }, { script: { dictionaryIgnoresTypeFilter: true } });
+      expect(ruleIds(data), field).toContain("SEC010");
+      expect(JSON.stringify(result)).not.toContain("fake-not-a-secret");
+    }
+  });
+
+  it("asks the dictionary for hidden types only, and the fixture honours that filter by default", async () => {
+    const { instance } = await run(model({ rows: [xmlRow(update("u_vendor_child", { u_name: "x", u_api_password: "fake-not-a-secret" }))] }));
+    const dictionaryRead = instance.calls.find((c) => c.path.endsWith("/sys_dictionary"))!;
+    expect(dictionaryRead.params.sysparm_query).toBe("internal_typeINpassword,password2,masked,encrypted_text^ORDERBYname^ORDERBYelement");
+  });
+});
+
+describe("evaluate: resolving the scope", () => {
+  it("turns an oversized descendant read into a partial result, not an error", async () => {
+    const { data } = await run(model({ rows: rowsOf(br("gs.info(1);")) }), { update_set: SET_ID }, {
+      script: { fail: (c) => ((c.params.sysparm_query ?? "").startsWith("parentIN") ? new ServiceNowResponseTooLargeError("too large") : undefined) },
+    });
+    expect(data.status).toBe("ok");
+    expect(data.summary.coverage).toMatchObject({ sets_capped: true, partial: true, evaluated: 1 });
+    expect(data.warnings).toContain(EVALUATE_WARNINGS.sets_capped);
+  });
+
+  it("stops descending at the set cap", async () => {
+    const children = Array.from({ length: 120 }, (_, i) => localSet({ sys_id: sid(0x2000 + i), name: `C${i}`, parent: SET_ID }));
+    const grandchildren = children.map((child, i) => localSet({ sys_id: sid(0x3000 + i), name: `G${i}`, parent: child.sys_id }));
+    const { data, instance } = await run(model({ localSets: [localSet(), ...children, ...grandchildren] }), { update_set: SET_ID });
+    expect(instance.calls.filter((c) => (c.params.sysparm_query ?? "").startsWith("parentIN"))).toHaveLength(1);
+    expect(data.summary.scope.sets_total).toBe(EVALUATE_LIMITS.MAX_SETS);
+    expect(data.summary.coverage.sets_capped).toBe(true);
+  });
+
+  it("reports a set with no description, and counts the check when descriptions cannot be read", async () => {
+    const rows = rowsOf(br("gs.info(1);"));
+    const empty = await run(model({ localSets: [localSet({ description: "" })], rows }), { update_set: SET_ID });
+    expect(ruleIds(empty.data)).toContain("BP006");
+    const failed = await run(model({ rows }), { update_set: SET_ID }, {
+      script: { fail: (c) => ((c.params.sysparm_query ?? "").includes("descriptionISNOTEMPTY") ? new Error("boom") : undefined) },
+    });
+    expect(ruleIds(failed.data)).not.toContain("BP006");
+    expect(failed.data.summary.coverage.partial).toBe(true);
+    expect(failed.data.warnings).toContain(EVALUATE_WARNINGS.descriptions_unavailable);
+  });
+
+  it("does not read a version with no source as the customer's own", async () => {
+    const rows = rowsOf(br("gs.info(1);", "A"));
+    const name = String(rows[0]!.name);
+    const { data } = await run(model({ rows, versions: { [name]: [""] } }), { update_set: SET_ID });
+    expect(ruleIds(data)).not.toContain("BP005");
+    expect(data.summary.coverage.partial).toBe(true);
+    expect(data.warnings).toContain(EVALUATE_WARNINGS.baseline_unavailable);
+  });
+});
+
+describe("evaluate: the engine yields on time as well as on rows", () => {
+  it("yields after YIELD_AFTER_MS of work, and does not charge the yield to the budget", async () => {
+    const updates = Array.from({ length: 10 }, (_, i) => update("sys_script", { name: `R${i}`, script: "gs.info(1);" }));
+    let clock = 0;
+    let yields = 0;
+    const result = await evaluateUpdateSets(input(updates), {}, { ...ENGINE_LIMITS, cpuBudgetMs: 1_000 }, {
+      now: () => (clock += YIELD_AFTER_MS),
+      yieldToLoop: async () => {
+        yields += 1;
+        clock += 60_000; // time spent elsewhere while yielded
+      },
+    });
+    expect(yields).toBeGreaterThanOrEqual(9);
+    expect(result.coverage).toMatchObject({ evaluated: 10, cpu_budget_hit: false });
   });
 });
