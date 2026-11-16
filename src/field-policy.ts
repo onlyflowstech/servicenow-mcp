@@ -758,6 +758,62 @@ const POLICY_DEFINITIONS = {
     ],
     writable: [],
   },
+  // The platform tables (PLATFORM_BUILT_INS): customer updates, the upgrade
+  // log and Instance Scan. A "*" table grant covers them like any table, and
+  // for field policy they belong to the profile, so a profile's "*" field
+  // entry narrows them. Each default projection names the row and leaves out
+  // the columns that carry script, XML or matched code; those are read only
+  // when asked for by name.
+  //
+  // A customer update. Never in the default projection: payload (the record's
+  // XML, scripts included).
+  sys_update_xml: {
+    defaults: ["sys_id", "name", "type", "target_name", "table", "action", "update_set", "application", "sys_updated_on"],
+    readable: [
+      "sys_id", "name", "type", "target_name", "table", "action", "update_set", "application",
+      "replace_on_upgrade", "remote_update_set", "update_guid", "payload", "payload_hash",
+      "sys_updated_by", "sys_updated_on", "sys_created_on",
+    ],
+    writable: [],
+  },
+  // One file of an upgrade or app-install run. Never in the default
+  // projection: payload and payload_diff (the file's XML and its diff).
+  sys_upgrade_history_log: {
+    defaults: ["sys_id", "upgrade_history", "file_name", "type", "target_name", "disposition", "resolution_status", "change_type", "plugin"],
+    readable: [
+      "sys_id", "upgrade_history", "file_name", "type", "target_name", "disposition",
+      "resolution_status", "change_type", "plugin", "payload", "payload_diff", "sys_created_on",
+    ],
+    writable: [],
+  },
+  // An Instance Scan finding. Never in the default projection:
+  // finding_details (it can hold the matched code), task and user.
+  scan_finding: {
+    defaults: ["sys_id", "result", "check", "source_table", "source", "count", "muted", "sys_created_on"],
+    readable: [
+      "sys_id", "result", "check", "source_table", "source", "count", "muted", "finding_details",
+      "task", "user", "check_version", "product_family", "scan_mute_rule", "sys_created_on",
+    ],
+    writable: [],
+  },
+  // An Instance Scan run. Never in the default projection: message.
+  scan_result: {
+    defaults: ["sys_id", "number", "state", "finding_count", "scan_type", "sys_created_on"],
+    readable: [
+      "sys_id", "number", "state", "finding_count", "scan_type", "execution_time", "message",
+      "sys_created_on",
+    ],
+    writable: [],
+  },
+  // An Instance Scan check. Never in the default projection: script.
+  scan_check: {
+    defaults: ["sys_id", "name", "category", "priority", "short_description", "active"],
+    readable: [
+      "sys_id", "name", "category", "priority", "short_description", "description", "active",
+      "finding_type", "script", "sys_updated_on",
+    ],
+    writable: [],
+  },
 } as const satisfies Record<string, TableFieldPolicyDefinition>;
 
 /**
@@ -775,8 +831,9 @@ const POLICY_DEFINITIONS = {
  * a granted custom table needs no field-policy entry to be usable.
  *
  * A profile's own "*" entry reaches further: it also covers the ITSM tables
- * (ITSM_TABLES), the named-only tables (NAMED_ONLY_BUILT_INS) and every table
- * the profile names, key by key, wherever the table's own entry is silent.
+ * (ITSM_TABLES), the named-only tables (NAMED_ONLY_BUILT_INS), the platform
+ * tables (PLATFORM_BUILT_INS) and every table the profile names, key by key,
+ * wherever the table's own entry is silent.
  * Only the system tables (SYSTEM_TABLES) are never covered by a "*" entry.
  */
 const FIELD_POLICY_BASE: Readonly<Record<string, TableFieldPolicyDefinition>> =
@@ -829,8 +886,8 @@ const ITSM_TABLES: ReadonlySet<string> = new Set([
  *
  * This list is written out rather than derived as "built-in minus ITSM", so
  * a new built-in entry never escapes every profile's "*" entry by default.
- * Each built-in entry must be in exactly one of ITSM_TABLES, SYSTEM_TABLES
- * and NAMED_ONLY_BUILT_INS; a test enforces this through
+ * Each built-in entry must be in exactly one of ITSM_TABLES, SYSTEM_TABLES,
+ * NAMED_ONLY_BUILT_INS and PLATFORM_BUILT_INS; a test enforces this through
  * BUILT_IN_TABLE_CLASSES.
  */
 const SYSTEM_TABLES: ReadonlySet<string> = new Set([
@@ -872,6 +929,24 @@ const SYSTEM_TABLES: ReadonlySet<string> = new Set([
 const NAMED_ONLY_BUILT_INS: ReadonlySet<string> = new Set(NAMED_ONLY_TABLES);
 
 /**
+ * The platform tables: customer updates, the upgrade log and Instance Scan.
+ * A "*" table grant covers them, as it covers any table. For field policy
+ * they are profile-owned like the ITSM and named-only tables: `readable` and
+ * `writable` resolve from the profile's own entry for the table, then its "*"
+ * entry, then the built-in "*" (open), so a profile that narrows reads with
+ * "*" narrows these too, whether or not it names them. Their built-in
+ * `defaults` leave out the script, XML and matched-code columns and are
+ * clamped to the effective readable set.
+ */
+const PLATFORM_BUILT_INS: ReadonlySet<string> = new Set([
+  "sys_update_xml",
+  "sys_upgrade_history_log",
+  "scan_finding",
+  "scan_result",
+  "scan_check",
+]);
+
+/**
  * The built-in tables and how each is classified for a profile's "*" entry.
  * Frozen copies for tests; the policy reads the sets above.
  */
@@ -880,11 +955,13 @@ export const BUILT_IN_TABLE_CLASSES: Readonly<{
   itsm: readonly string[];
   system: readonly string[];
   namedOnly: readonly string[];
+  platform: readonly string[];
 }> = Object.freeze({
   builtIn: Object.freeze(Object.keys(POLICY_DEFINITIONS)),
   itsm: Object.freeze([...ITSM_TABLES]),
   system: Object.freeze([...SYSTEM_TABLES]),
   namedOnly: Object.freeze([...NAMED_ONLY_BUILT_INS]),
+  platform: Object.freeze([...PLATFORM_BUILT_INS]),
 });
 
 const GENERIC_RECORD_TABLES = new Set([
@@ -1807,9 +1884,10 @@ function mergeFieldPolicyDefinitions(
   configured: Readonly<Record<string, MutableTableFieldPolicyDefinition>>
 ): Record<string, TableFieldPolicyDefinition> {
   const merged: Record<string, TableFieldPolicyDefinition> = { ...base };
-  // A profile's "*" entry also covers the ITSM tables and the named-only
-  // tables it does not name, so they are merged even without an entry of their
-  // own.
+  // A profile's "*" entry also covers the ITSM, named-only and platform tables
+  // it does not name, so they are merged even without an entry of their own.
+  // A built-in class left out here would keep its open base under a narrowing
+  // "*" entry.
   const profileWildcard = Object.hasOwn(configured, FIELD_POLICY_WILDCARD)
     ? configured[FIELD_POLICY_WILDCARD]
     : undefined;
@@ -1817,13 +1895,14 @@ function mergeFieldPolicyDefinitions(
   if (profileWildcard !== undefined) {
     for (const table of ITSM_TABLES) tables.add(table);
     for (const table of NAMED_ONLY_BUILT_INS) tables.add(table);
+    for (const table of PLATFORM_BUILT_INS) tables.add(table);
   }
   for (const table of tables) {
     const definition: MutableTableFieldPolicyDefinition = Object.hasOwn(configured, table)
       ? configured[table]!
       : {};
     const existing = merged[table];
-    // Every table but the system tables (ITSM, named-only and custom alike) resolves each
+    // Every table but the system tables (ITSM, named-only, platform and custom alike) resolves each
     // set from its own entry, then the profile's "*" entry, then the base. A
     // named custom table therefore cannot escape a narrowing "*" by stating
     // only the other key. System tables never take the "*" entry.

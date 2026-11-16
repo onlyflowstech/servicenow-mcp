@@ -1240,6 +1240,14 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
     "sys_attachment_doc",
     "sys_email",
   ] as const;
+  /** Built-in platform tables; profile-owned for fields, covered by a "*" grant. */
+  const PLATFORM_TABLES = [
+    "sys_update_xml",
+    "sys_upgrade_history_log",
+    "scan_finding",
+    "scan_result",
+    "scan_check",
+  ] as const;
 
   function reason(action: () => unknown): string {
     try {
@@ -1253,7 +1261,7 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
 
   /** What every built-in table resolves to with no field policy at all. */
   const builtIn = new Map(
-    [...ITSM_TABLES, ...SYSTEM_TABLES, ...NAMED_ONLY_TABLES].map((table) => [
+    [...ITSM_TABLES, ...SYSTEM_TABLES, ...NAMED_ONLY_TABLES, ...PLATFORM_TABLES].map((table) => [
       table,
       {
         defaults: resolveReadableFields(table),
@@ -1262,9 +1270,12 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
     ])
   );
 
-  it("splits the 41 built-in tables into 11 ITSM, 24 system and 6 named-only tables", () => {
-    expect(new Set([...ITSM_TABLES, ...SYSTEM_TABLES, ...NAMED_ONLY_TABLES]).size).toBe(41);
+  it("splits the 46 built-in tables into 11 ITSM, 24 system, 6 named-only and 5 platform tables", () => {
+    expect(
+      new Set([...ITSM_TABLES, ...SYSTEM_TABLES, ...NAMED_ONLY_TABLES, ...PLATFORM_TABLES]).size
+    ).toBe(46);
     expect(SYSTEM_TABLES).toHaveLength(24);
+    expect(BUILT_IN_TABLE_CLASSES.builtIn).toHaveLength(46);
     for (const [table, resolved] of builtIn) {
       expect(resolved.all, table).toEqual(["*"]);
     }
@@ -1275,29 +1286,37 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
     }
   });
 
-  it("classifies every built-in entry as exactly one of ITSM, system or named-only (RR2)", () => {
+  it("classifies every built-in entry as exactly one of ITSM, system, named-only or platform (RR2)", () => {
     // A new built-in entry must be classified on purpose. SYSTEM_TABLES is an
     // explicit list, so an unclassified entry would escape a profile's "*"
     // entry whenever the profile does not name it.
-    const { builtIn: entries, itsm, system, namedOnly } = BUILT_IN_TABLE_CLASSES;
+    const { builtIn: entries, itsm, system, namedOnly, platform } = BUILT_IN_TABLE_CLASSES;
     for (const table of entries) {
       expect(
-        [itsm.includes(table), system.includes(table), namedOnly.includes(table)].filter(Boolean),
+        [
+          itsm.includes(table),
+          system.includes(table),
+          namedOnly.includes(table),
+          platform.includes(table),
+        ].filter(Boolean),
         table
       ).toHaveLength(1);
     }
-    for (const table of [...itsm, ...system, ...namedOnly]) {
+    for (const table of [...itsm, ...system, ...namedOnly, ...platform]) {
       expect(entries, table).toContain(table);
     }
     expect(new Set(itsm).size).toBe(itsm.length);
     expect(new Set(system).size).toBe(system.length);
     expect(new Set(namedOnly).size).toBe(namedOnly.length);
+    expect(new Set(platform).size).toBe(platform.length);
     // The classification the policy uses is the one these tests pin.
     expect([...itsm].sort()).toEqual([...ITSM_TABLES].sort());
     expect([...system].sort()).toEqual([...SYSTEM_TABLES].sort());
     expect([...namedOnly].sort()).toEqual([...NAMED_ONLY_TABLES].sort());
+    expect([...platform].sort()).toEqual([...PLATFORM_TABLES].sort());
     expect(Object.isFrozen(BUILT_IN_TABLE_CLASSES.system)).toBe(true);
     expect(Object.isFrozen(BUILT_IN_TABLE_CLASSES.namedOnly)).toBe(true);
+    expect(Object.isFrozen(BUILT_IN_TABLE_CLASSES.platform)).toBe(true);
   });
 
   it('denies ITSM writes under "*" writable [] unless the table is named', () => {
