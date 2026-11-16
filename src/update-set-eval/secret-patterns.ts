@@ -442,10 +442,10 @@ const RULES: readonly SecretRule[] = Object.freeze([
   {
     // ?api_key=value, &access_token=value, &sig=value; also a key=value
     // string that starts at its quote ('password=x&…') and connection
-    // strings (;password=x; and ;PWD=x;).
+    // strings (;password=x;, ;PWD=x; and the ADO.NET style ; Password=x;).
     id: "url_query_secret",
     anchor:
-      /[?&;'"](?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|client[_-]?secret|secret|password|passwd|pwd|sig|signature|key)=/giu,
+      /(?:[?&'"]|;[ \t]{0,4})(?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|client[_-]?secret|secret|password|passwd|pwd|sig|signature|key)=/giu,
     read(text, _anchorStart, anchorEnd) {
       // Stops at ? & ; and quotes too, so no anchor can start inside a value.
       let end = anchorEnd;

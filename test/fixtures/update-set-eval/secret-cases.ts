@@ -164,6 +164,9 @@ export const SECRET_CASES: Readonly<Record<SecretPatternId, PatternCases>> = {
       p('r.setRequestBody("client_secret=', "Zq9-form-secret", '&grant_type=client_credentials");'),
       p("var url = 'jdbc:sqlserver://db:1433;databaseName=x;user=sa;password=", "Zq9-jdbc", ";';"),
       p('var cs = "Driver={x};Server=db;UID=sa;PWD=', "Zq9-odbc", ';";'),
+      // ADO.NET style: spaces or a tab after the semicolon.
+      p('var cs = "Server=db; User Id=sa; Password=', "Zq9-ado", ';";'),
+      p("var cs = 'Data Source=db;\tPwd=", "Zq9-tab", ";';"),
     ],
     negative: [
       "'https://api.example.com/v1?api_key=' + key",
@@ -173,6 +176,9 @@ export const SECRET_CASES: Readonly<Record<SecretPatternId, PatternCases>> = {
       "r.setRequestBody('password=' + pw + '&username=svc');",
       'var cs = "Server=db;UID=sa;PWD=" + pwd + ";";',
       "var cs = 'Server=db;Trusted_Connection=yes;';",
+      'var cs = "Server=db; User Id=sa; Password=" + pwd + ";";',
+      // More than four spaces after the semicolon is past the bound.
+      "var cs = 'Server=db;     Password=Zq9-far;';",
     ],
   },
   private_key_block: {
