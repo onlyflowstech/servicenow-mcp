@@ -13,8 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not only by name.** A field whose internal type is `password`, `password2`,
   `masked` or `encrypted_text` is refused when named, left out of `fields=all`,
   detailed and default reads, `"*"` responses and write echoes, refused as a
-  filter, order, aggregate or group-by field, and refused as a write key,
-  whatever it is called. A `sys_properties` row shows `value` only when its
+  filter, order, aggregate, group-by or ATF step-condition field, and refused
+  as a write key, whatever it is called. A `sys_properties` row shows `value` only when its
   `type` is a known non-secret type. The types come from one cached
   `sys_dictionary` read per credential. While they cannot be read, field-policy
   tools refuse with a message naming the access needed, unless the profile sets
