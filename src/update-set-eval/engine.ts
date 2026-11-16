@@ -3,7 +3,8 @@
  * has read, within a CPU budget, and reports what it covered.
  *
  * - CPU: the budget (250 ms) counts the time the engine itself runs, checked
- *   between rows; the time it spends yielding (every 50 rows) is not counted,
+ *   between rows; the time it spends yielding (every 50 rows, or after 20 ms
+ *   of work) is not counted,
  *   because other requests run then. When the budget runs out, the rows left
  *   are `not_evaluated` and the result is `partial`. One row can overshoot by
  *   at most its own cost, which the per-payload byte cap bounds.
@@ -50,6 +51,9 @@ export const ENGINE_LIMITS: EngineLimits = Object.freeze({
   maxPayloadBytes: 262_144,
   maxTotalBytes: 16 * 1024 * 1024,
 });
+
+/** Work, in ms, after which the engine yields even before `yieldEvery` rows. */
+export const YIELD_AFTER_MS = 20;
 
 export interface EngineHooks {
   /** Milliseconds, monotonic. Tests pass a fake clock. */
@@ -338,12 +342,17 @@ export async function evaluateUpdateSets(
   let bytesCapHit = false;
 
   for (let index = 0; index < input.updates.length; index++) {
-    if (index > 0 && index % limits.yieldEvery === 0) {
-      spent += now() - segmentStart;
+    // Yield every `yieldEvery` rows, and also after YIELD_AFTER_MS of work,
+    // so a few large rows cannot hold the event loop for the whole budget.
+    // The time spent so far is charged before the yield, as before.
+    let elapsed = now() - segmentStart;
+    if (index > 0 && (index % limits.yieldEvery === 0 || elapsed >= YIELD_AFTER_MS)) {
+      spent += elapsed;
       await yieldToLoop();
       segmentStart = now();
+      elapsed = 0;
     }
-    if (spent + (now() - segmentStart) >= limits.cpuBudgetMs) {
+    if (spent + elapsed >= limits.cpuBudgetMs) {
       cpuBudgetHit = true;
       break;
     }
