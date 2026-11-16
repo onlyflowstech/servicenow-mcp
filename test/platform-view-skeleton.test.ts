@@ -21,6 +21,7 @@ import { handleUpgradeSkipped } from "../src/tools/platform-view-upgrades.js";
 import {
   closeHarnesses,
   expectReadsWithin,
+  queryFields,
   harness,
   readPolicy,
   recordingInstance,
@@ -387,10 +388,36 @@ describe("recording client: a handler reads only tables in its view's plan", () 
     expect(() => expectReadsWithin(odd.instance, BATCH_PLAN)).toThrow(/unclassified parameter sysparm_future_param/u);
   });
 
+  it("fails the test when a read is made after the last check", async () => {
+    const { instance } = await runHandler((ops) => ops.get(table("sys_update_set")).then(() => undefined));
+    expectReadsWithin(instance, BATCH_PLAN);
+    expect(instance.judged).toBe(1);
+    // A later read, outside the plan, that nothing judges.
+    await instance.ops.get(table("sys_audit"));
+    expect(instance.calls).toHaveLength(2);
+    await expect(closeHarnesses()).rejects.toThrow(/after the last check/u);
+    // Judging the whole record afterwards is what catches it.
+    expect(() => expectReadsWithin(instance, BATCH_PLAN)).toThrow(/outside the plan/u);
+  });
+
+  it("restores fetch when the harnesses close", async () => {
+    const before = globalThis.fetch;
+    const { instance } = await runHandler(async () => undefined);
+    expectReadsWithin(instance, BATCH_PLAN);
+    expect(globalThis.fetch).not.toBe(before);
+    await closeHarnesses();
+    expect(globalThis.fetch).toBe(before);
+  });
+
+  it("parses INSTANCEOF as its own operator, not as IN", () => {
+    expect(queryFields("sys_class_nameINSTANCEOFcmdb_ci_server")).toEqual(["sys_class_name"]);
+    expect(queryFields("sys_class_nameINSTANCEOFx^ORstateINa,b")).toEqual(["sys_class_name", "state"]);
+  });
+
   it("fails the test when a recording instance made calls that nobody checked", async () => {
     const { instance } = await runHandler((ops) => ops.get(table("sys_update_set")).then(() => undefined));
     expect(instance.calls).toHaveLength(1);
-    await expect(closeHarnesses()).rejects.toThrow(/no test checked/u);
+    await expect(closeHarnesses()).rejects.toThrow(/no test judged/u);
     // closeHarnesses cleared the list, so the afterEach hook has nothing left to fail on.
   });
 });

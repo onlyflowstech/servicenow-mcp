@@ -54,8 +54,11 @@ export interface RecordingInstance {
   readonly ops: ServiceNowOperations;
   /** Every attempt, in order, including each one the fake refused. */
   readonly calls: RecordedCall[];
-  /** Set by `expectReadsWithin`; a used instance that was never checked fails the test. */
-  checked: boolean;
+  /**
+   * How many of `calls` `expectReadsWithin` has judged. A call made after the
+   * last check is never judged, so closing with more calls than this fails.
+   */
+  judged: number;
 }
 
 const instances: RecordingInstance[] = [];
@@ -66,7 +69,7 @@ const instances: RecordingInstance[] = [];
  * recorded and then refused. Neither is judged here: `expectReadsWithin` judges
  * the whole record against the call's plan, so a handler that swallows the
  * refusal's exception still fails the test. An instance that made calls and was
- * never checked fails when the harnesses close.
+ * never judged in full fails when the harnesses close.
  */
 export function recordingInstance(): RecordingInstance {
   const calls: RecordedCall[] = [];
@@ -96,7 +99,7 @@ export function recordingInstance(): RecordingInstance {
     delete: refuse("delete"),
     postBinary: refuse("postBinary"),
   }) as unknown as ServiceNowOperations;
-  const instance: RecordingInstance = { ops, calls, checked: false };
+  const instance: RecordingInstance = { ops, calls, judged: 0 };
   instances.push(instance);
   return instance;
 }
@@ -139,7 +142,7 @@ const BOOLEAN_PARAMS = [
 /** A field: one name, or one dot-walk hop. More hops are judged separately. */
 const FIELD = /^[a-z0-9_]+(?:\.[a-z0-9_]+)*$/u;
 /** The operators of the encoded-query policy (`SUPPORTED_ENCODED_QUERY_OPERATORS`). */
-const OPERATORS = "ISNOTEMPTY|ISEMPTY|STARTSWITH|ENDSWITH|NOT LIKE|NOT IN|BETWEEN|>=|<=|!=|LIKE|IN|=|>|<";
+const OPERATORS = "ISNOTEMPTY|ISEMPTY|STARTSWITH|ENDSWITH|NOT LIKE|NOT IN|BETWEEN|INSTANCEOF|>=|<=|!=|LIKE|IN|=|>|<";
 const CONDITION = new RegExp(`^(?:OR|NQ)?([a-z0-9_]+(?:\\.[a-z0-9_]+)?)(?:${OPERATORS})(.*)$`, "u");
 const SORT_OR_GROUP = /^(?:ORDERBYDESC|ORDERBY|GROUPBY)([a-z0-9_]+(?:\.[a-z0-9_]+)?)$/u;
 /** Query constructs that read another table or run script, wherever they appear. */
@@ -200,7 +203,7 @@ export function expectReadsWithin(
   dotWalks: readonly DeclaredDotWalk[] = []
 ): void {
   const calls = Array.isArray(source) ? (source as readonly RecordedCall[]) : (source as RecordingInstance).calls;
-  if (!Array.isArray(source)) (source as RecordingInstance).checked = true;
+  if (!Array.isArray(source)) (source as RecordingInstance).judged = calls.length;
   for (const call of calls) {
     const label = `${call.operation} ${call.path}`;
     expect(READ_OPERATIONS, `${label}: not a read operation (the harness refused it)`).toContain(call.operation);
@@ -245,14 +248,20 @@ let realFetch: typeof globalThis.fetch | undefined;
  * test checked. Registered below for every test file that imports this module.
  */
 export async function closeHarnesses(): Promise<void> {
-  while (open.length > 0) await open.pop()!.close();
-  if (realFetch !== undefined) {
-    globalThis.fetch = realFetch;
-    realFetch = undefined;
+  try {
+    while (open.length > 0) await open.pop()!.close();
+  } finally {
+    if (realFetch !== undefined) {
+      globalThis.fetch = realFetch;
+      realFetch = undefined;
+    }
   }
-  const unchecked = instances.splice(0).filter((instance) => instance.calls.length > 0 && !instance.checked);
-  if (unchecked.length > 0) {
-    throw new Error(`${unchecked.length} recording instance(s) made calls that no test checked with expectReadsWithin`);
+  const unjudged = instances.splice(0).filter((instance) => instance.calls.length > instance.judged);
+  if (unjudged.length > 0) {
+    throw new Error(
+      `${unjudged.length} recording instance(s) made calls that no test judged with expectReadsWithin ` +
+        "(none, or some made after the last check)"
+    );
   }
 }
 
