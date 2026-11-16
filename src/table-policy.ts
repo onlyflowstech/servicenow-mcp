@@ -81,16 +81,24 @@ const TABLE_ALLOWLIST_WILDCARD = "*";
 /**
  * Tables a "*" grant never covers. An allowlist reaches one of these only
  * when it names the table, for read and for write alike. Their rows hold the
- * old and new values of other tables' fields, comments and work notes, so a
- * blanket grant is not a deliberate choice to expose them.
+ * old and new values of other tables' fields, comments and work notes, deleted
+ * records, attachment content and email bodies, so a blanket grant is not a
+ * deliberate choice to expose them.
  *
- * Every entry is also a built-in system table (SYSTEM_TABLES in
- * field-policy.ts), which a test enforces. The list is deliberately short:
- * it applies to these tables only, and no other table's reach changes.
+ * Every entry has a built-in field-policy entry whose default projection
+ * leaves out its value columns, and is profile-owned for field policy, like
+ * the ITSM tables: a profile's "*" field entry applies to it (see
+ * BUILT_IN_TABLE_CLASSES.namedOnly in field-policy.ts, which a test keeps in
+ * step with this list). The list is deliberately short: it applies to these
+ * tables only, and no other table's reach changes.
  */
 export const NAMED_ONLY_TABLES: readonly string[] = Object.freeze([
   "sys_audit",
   "sys_journal_field",
+  "sys_history_line",
+  "sys_audit_delete",
+  "sys_attachment_doc",
+  "sys_email",
 ]);
 
 const NAMED_ONLY_SET: ReadonlySet<string> = new Set(NAMED_ONLY_TABLES);
@@ -365,9 +373,17 @@ function validateRelatedPermissions(
   for (const target of targets) {
     for (const allowlist of [readTables, writeTables]) {
       if (!allowlistGrantsTable(allowlist, target.table)) continue;
-      if (target.relatedTables.some((related) => !allowlistGrantsTable(allowlist, related))) {
+      const missing = target.relatedTables.find(
+        (related) => !allowlistGrantsTable(allowlist, related)
+      );
+      if (missing !== undefined) {
+        // The name comes from the operator's own configuration and has passed
+        // normalizeTableName; the rest of the text is fixed.
         throw new TypeError(
-          "table access target backing tables require the same operation permission"
+          NAMED_ONLY_SET.has(missing) && allowlistGrantsAllTables(allowlist)
+            ? `table access target backing tables require the same operation permission: ` +
+              `"${missing}" must be granted by name, because a "*" grant does not cover it`
+            : "table access target backing tables require the same operation permission"
         );
       }
     }

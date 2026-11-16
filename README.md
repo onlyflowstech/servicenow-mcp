@@ -1001,8 +1001,8 @@ and must be valid ServiceNow identifiers.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SN_ALLOWED_READ_TABLES` | ❌ | deny all | Tables permitted for read operations on the explicit `SN_PROFILE_NAME` environment profile only. Use `*` to allow every readable table except `sys_audit` and `sys_journal_field`, which are covered only when named (see [Field policy](#field-policy)). |
-| `SN_ALLOWED_WRITE_TABLES` | ❌ | deny all | Tables permitted for create, update, incident journal append, delete, upload, and confirmed batch operations on the explicit `SN_PROFILE_NAME` environment profile only. Use `*` to allow every writable table except `sys_audit` and `sys_journal_field`, which are covered only when named. Write permission never implies read permission. |
+| `SN_ALLOWED_READ_TABLES` | ❌ | deny all | Tables permitted for read operations on the explicit `SN_PROFILE_NAME` environment profile only. Use `*` to allow every readable table except `sys_audit`, `sys_journal_field`, `sys_history_line`, `sys_audit_delete`, `sys_attachment_doc` and `sys_email`, which are covered only when named (see [Field policy](#field-policy)). |
+| `SN_ALLOWED_WRITE_TABLES` | ❌ | deny all | Tables permitted for create, update, incident journal append, delete, upload, and confirmed batch operations on the explicit `SN_PROFILE_NAME` environment profile only. Use `*` to allow every writable table except the same six named-only tables. Write permission never implies read permission. |
 | `SN_TABLE_ACCESS_TARGETS` | Required for exact allowlisted caller-addressable tables; optional with `*` | `[]` | Trusted JSON classification with `table`, exact permitted `tools`, `kind` (`canonical`, `alias`, `view`, or `extension`), literal `closureComplete: true`, and `relatedTables`: the target itself plus any backing or parent tables the operator declares. The loader checks that every related table has the target's operation permission; it does not derive the list from the instance, and the list grants no access. A self-only list is valid for a `canonical` target; `alias`, `view` and `extension` targets must name at least one backing table, and a view or alias should declare every table it reads, because it returns data from each of them whatever the list says. With `*`, omitted target entries use the wildcard operation grant; explicit target entries can still narrow tools and check their related tables. |
 | `SN_FIELD_POLICY_DEFINITIONS` | ❌ | no narrowing | Field policy for the explicit `SN_PROFILE_NAME` environment profile only, like the `SN_ALLOWED_*` variables. **If `~/.servicenow-mcp/config.json` exists, setting this variable stops startup**; give those profiles their own `fieldPolicy` instead. The value is trusted JSON, at most 65,536 characters: either a table map keyed by table name or `*`, the same shape as a profile's `fieldPolicy`, or an object holding the profile keys (`fieldPolicy`, or `readableTableFields` / `writableTableFields`), not both. Each field set is a list of exact field names or `"*"`; `["*"]` means `"*"` in that exact form only, and patterns such as `"u_*"` are rejected. A malformed value stops startup with the key named. Sensitive field names are always denied. See [Field policy](#field-policy). |
 | `SN_ENCODED_QUERY_READ_POLICY` | ❌ | deny all | Trusted JSON object containing bounded `rules` for an exact `sn_query`/table pair. Each rule requires `maxLength`, `maxTerms`, readable `fields`, supported `operators`, `maxLimit`, `maxOffset`, and `maxResponseBytes`. No rule can authorize a write or another tool. |
@@ -1150,21 +1150,23 @@ The same policy in the list form:
 }
 ```
 
-**Which tables a `"*"` entry reaches.** Tables fall into three groups:
+**Which tables a `"*"` entry reaches.** Tables fall into four groups:
 
 - **ITSM tables:** `incident`, `change_request`, `problem`, `sc_request`,
   `sc_req_item`, `sc_task`, `task`, `cmdb_ci`, `cmdb_ci_server`,
   `cmdb_ci_computer`, `kb_knowledge`.
 - **Every table without a built-in entry:** `u_*` and `x_*` tables, and
   platform tables such as `change_task` and `sys_properties`.
-- **The 25 system tables:** `sys_script`, `sys_script_include`,
+- **The 23 system tables:** `sys_script`, `sys_script_include`,
   `sys_script_client`, `sys_ui_script`, `sys_ws_operation`, `sys_user`,
   `sys_user_group`, `sys_user_grmember`, `sys_db_object`, `sys_app`,
   `sys_store_app`, `v_plugin`, `sys_atf_test`, `sys_atf_test_suite`,
   `sys_atf_test_suite_test`, `sys_atf_test_result`, `sys_atf_step`,
   `sys_element_mapping`, `sys_variable_value`, `sys_atf_test_suite_result`,
-  `sys_atf_test_result_step`, `sys_atf_agent`, `syslog`, `sys_audit`,
-  `sys_journal_field`.
+  `sys_atf_test_result_step`, `sys_atf_agent`, `syslog`.
+- **The 6 named-only tables:** `sys_audit`, `sys_journal_field`,
+  `sys_history_line`, `sys_audit_delete`, `sys_attachment_doc`, `sys_email`. A
+  `"*"` entry reaches them once the profile names them in `tableAccess` (below).
 
 On an ITSM table or a table without a built-in entry, named in the policy or
 not, `readable` and `writable` each resolve from the table's own entry, then
@@ -1181,18 +1183,30 @@ client-side code, and the user and group tables (`sys_user`,
 `sys_user_group`, `sys_user_grmember`). Name a system table to narrow it, and
 grant it in `tableAccess` only deliberately.
 
-**`sys_audit` and `sys_journal_field` are granted by name.** A `"*"` entry in
-`readTables` or `writeTables` covers every other table, but not these two: their
-rows hold the old and new values of other tables' fields, comments and work
-notes. A profile reaches them only when `tableAccess` names them, for example
+**Six tables are granted by name.** A `"*"` entry in `readTables` or
+`writeTables` covers every other table, but not `sys_audit`, `sys_journal_field`,
+`sys_history_line`, `sys_audit_delete`, `sys_attachment_doc` or `sys_email`.
+Their rows hold the old and new values of other tables' fields, comments and
+work notes, the history built from them, deleted records, attachment content
+and email bodies. A profile reaches one only when `tableAccess` names it, for
+example
 `servicenow-mcp-setup grant --profile <profile> --read sys_audit --tools sn_query`.
-Without that, every tool refuses them, `sn_query`, `sn_get`, `sn_aggregate`,
-`sn_schema` and `sn_batch` included, with the usual table-access denial. Once named, they are system tables like the rest: a `"*"`
-field entry does not narrow them, a named `fieldPolicy` entry does, and a read
-that names no `fields` returns the identifying columns (`tablename`,
-`documentkey`, `fieldname` and `user` for `sys_audit`; `name`, `element_id` and
-`element` for `sys_journal_field`) and leaves `oldvalue`, `newvalue` and `value`
-to be asked for by name.
+Without that, every tool refuses it, `sn_query`, `sn_get`, `sn_aggregate`,
+`sn_schema` and `sn_batch` included, with the usual table-access denial. A `relatedTables` list that reaches one of them under a
+`"*"` grant stops the profile loading, and the message names the table and says
+to grant it by name.
+
+Once named, these tables follow the profile's field policy like an ITSM table:
+a `"*"` field entry narrows them, and an entry for the table narrows or widens
+them. A read that names no `fields` leaves out the value columns, which are asked
+for by name: `oldvalue` and `newvalue` for `sys_audit`; `value` for
+`sys_journal_field`; `old`, `new`, `old_value` and `new_value` for
+`sys_history_line`; `payload` for `sys_audit_delete`; `data` for
+`sys_attachment_doc`; and `body`, `body_text`, `subject`, `recipients`,
+`copied`, `blind_copied`, `reply_to`, `headers` and `error_string` for
+`sys_email`. `sn_attach` is unchanged: it uses the Attachment API, under the
+grants for `sys_attachment` and the record's table, and never reads
+`sys_attachment_doc`.
 
 **Read-only profiles.** A `"*"` entry with `writable: []` does not make a
 profile read-only, because it never reaches the system tables. To make a

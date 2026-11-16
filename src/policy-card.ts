@@ -52,7 +52,7 @@ export type CardFieldSet = "*" | { fields: string[]; more: number };
 
 export interface CardTableRow {
   table: string;
-  class: "itsm" | "system" | "other";
+  class: "itsm" | "system" | "named_only" | "other";
   read: boolean;
   write: boolean;
   /** Tools the table's target permits; "any" when only a "*" grant reaches it. */
@@ -93,8 +93,9 @@ export interface PolicyCard {
      * the sensitive-name blocklist) for that operation, each judged on its
      * own: narrowing only a table's readable fields leaves it fully writable.
      * A list is empty when the profile has no wildcard grant for the operation.
-     * The named-only tables (NAMED_ONLY_TABLES) are in neither: a "*" table
-     * grant does not reach them.
+     * The named-only tables (NAMED_ONLY_TABLES) are not system tables: a "*"
+     * table grant does not reach them, and a "*" field entry narrows them when
+     * a profile names them.
      */
     system_tables: {
       star_field_entry_applies: false;
@@ -146,9 +147,6 @@ function systemTableAccess(
     write_narrowed: [] as string[],
   };
   for (const table of [...BUILT_IN_TABLE_CLASSES.system].sort()) {
-    // A "*" grant never reaches a named-only table, so the wildcard row says
-    // nothing about it. When the profile names it, it has a row of its own.
-    if (NAMED_ONLY_TABLES.includes(table)) continue;
     const fields = describeFieldPolicy(table);
     if (read) (fields.readable === "*" ? out.fully_readable : out.read_narrowed).push(table);
     if (write) (fields.writable === "*" ? out.fully_writable : out.write_narrowed).push(table);
@@ -159,6 +157,7 @@ function systemTableAccess(
 function classOf(table: string): CardTableRow["class"] {
   if (BUILT_IN_TABLE_CLASSES.system.includes(table)) return "system";
   if (BUILT_IN_TABLE_CLASSES.itsm.includes(table)) return "itsm";
+  if (BUILT_IN_TABLE_CLASSES.namedOnly.includes(table)) return "named_only";
   return "other";
 }
 
@@ -364,9 +363,9 @@ export function renderPolicyCard(card: PolicyCard): string {
     "",
     "Fields: all* = every field except sensitive-name fields (password, token, secret,",
     "  key, ...), which are never readable or writable.",
-    `A "*" field-policy entry covers ITSM and custom tables, never the ${BUILT_IN_TABLE_CLASSES.system.length} system tables;`,
+    `A "*" field-policy entry covers ITSM, named-only and custom tables, never the ${BUILT_IN_TABLE_CLASSES.system.length} system tables;`,
     "  a system table is narrowed only by naming it.",
-    `A "*" table grant never covers ${NAMED_ONLY_TABLES.join(" or ")}; they are granted by name only.`,
+    `A "*" table grant never covers ${NAMED_ONLY_TABLES.join(", ")}; they are granted by name only.`,
     `Explicit-listing fields (${card.explicit_write_fields.join(", ")}): writable only where`,
     "  a profile lists them by name; a writable wildcard never covers them. A listed one is",
     "  shown in [+...] after the writable fields."

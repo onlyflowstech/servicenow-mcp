@@ -1194,8 +1194,15 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
     "v_plugin",
     "syslog",
     "sys_element_mapping",
+  ] as const;
+  /** Built-in tables a "*" table grant never covers; profile-owned for fields. */
+  const NAMED_ONLY_TABLES = [
     "sys_audit",
     "sys_journal_field",
+    "sys_history_line",
+    "sys_audit_delete",
+    "sys_attachment_doc",
+    "sys_email",
   ] as const;
 
   function reason(action: () => unknown): string {
@@ -1210,7 +1217,7 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
 
   /** What every built-in table resolves to with no field policy at all. */
   const builtIn = new Map(
-    [...ITSM_TABLES, ...SYSTEM_TABLES].map((table) => [
+    [...ITSM_TABLES, ...SYSTEM_TABLES, ...NAMED_ONLY_TABLES].map((table) => [
       table,
       {
         defaults: resolveReadableFields(table),
@@ -1219,8 +1226,9 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
     ])
   );
 
-  it("splits the 36 built-in tables into 11 ITSM and 25 system tables", () => {
-    expect(new Set([...ITSM_TABLES, ...SYSTEM_TABLES]).size).toBe(36);
+  it("splits the 40 built-in tables into 11 ITSM, 23 system and 6 named-only tables", () => {
+    expect(new Set([...ITSM_TABLES, ...SYSTEM_TABLES, ...NAMED_ONLY_TABLES]).size).toBe(40);
+    expect(SYSTEM_TABLES).toHaveLength(23);
     for (const [table, resolved] of builtIn) {
       expect(resolved.all, table).toEqual(["*"]);
     }
@@ -1231,26 +1239,29 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
     }
   });
 
-  it("classifies every built-in entry as exactly one of ITSM or system (RR2)", () => {
+  it("classifies every built-in entry as exactly one of ITSM, system or named-only (RR2)", () => {
     // A new built-in entry must be classified on purpose. SYSTEM_TABLES is an
     // explicit list, so an unclassified entry would escape a profile's "*"
     // entry whenever the profile does not name it.
-    const { builtIn: entries, itsm, system } = BUILT_IN_TABLE_CLASSES;
+    const { builtIn: entries, itsm, system, namedOnly } = BUILT_IN_TABLE_CLASSES;
     for (const table of entries) {
       expect(
-        [itsm.includes(table), system.includes(table)].filter(Boolean),
+        [itsm.includes(table), system.includes(table), namedOnly.includes(table)].filter(Boolean),
         table
       ).toHaveLength(1);
     }
-    for (const table of [...itsm, ...system]) {
+    for (const table of [...itsm, ...system, ...namedOnly]) {
       expect(entries, table).toContain(table);
     }
     expect(new Set(itsm).size).toBe(itsm.length);
     expect(new Set(system).size).toBe(system.length);
+    expect(new Set(namedOnly).size).toBe(namedOnly.length);
     // The classification the policy uses is the one these tests pin.
     expect([...itsm].sort()).toEqual([...ITSM_TABLES].sort());
     expect([...system].sort()).toEqual([...SYSTEM_TABLES].sort());
+    expect([...namedOnly].sort()).toEqual([...NAMED_ONLY_TABLES].sort());
     expect(Object.isFrozen(BUILT_IN_TABLE_CLASSES.system)).toBe(true);
+    expect(Object.isFrozen(BUILT_IN_TABLE_CLASSES.namedOnly)).toBe(true);
   });
 
   it('denies ITSM writes under "*" writable [] unless the table is named', () => {
@@ -1351,6 +1362,96 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
       );
       expect(validateWritableFields("sys_script_include", { script: "x" })).toEqual({
         script: "x",
+      });
+    });
+  });
+
+  describe("the named-only tables are profile-owned for field policy", () => {
+    const VALUE_COLUMNS: Record<(typeof NAMED_ONLY_TABLES)[number], readonly string[]> = {
+      sys_audit: ["oldvalue", "newvalue"],
+      sys_journal_field: ["value"],
+      sys_history_line: ["old", "new", "old_value", "new_value"],
+      sys_audit_delete: ["payload"],
+      sys_attachment_doc: ["data"],
+      sys_email: ["body", "body_text", "subject", "recipients", "copied", "blind_copied", "reply_to", "headers", "error_string"],
+    };
+
+    it("leave every value column out of the default projection, open by default otherwise", () => {
+      for (const table of NAMED_ONLY_TABLES) {
+        const defaults = resolveReadableFields(table);
+        expect(defaults[0], table).toBe("sys_id");
+        for (const column of VALUE_COLUMNS[table]) {
+          expect(defaults, `${table}.${column}`).not.toContain(column);
+        }
+        // Asked for by name, or with fields=all, they are readable.
+        for (const column of VALUE_COLUMNS[table]) {
+          expect(resolveReadableFields(table, { fields: column }), `${table}.${column}`).toEqual([
+            column,
+          ]);
+        }
+        expect(resolveReadableFields(table, { fields: "all" }), table).toEqual(["*"]);
+      }
+    });
+
+    it('a narrowing "*" readable entry applies, so a value column is not readable', () => {
+      const narrowing = { "*": { readable: ["sys_id", "name", "sys_created_on"] } };
+      expect(() => validateFieldPolicyConfiguration({ fieldPolicy: narrowing })).not.toThrow();
+      withFieldPolicy(narrowing, () => {
+        for (const table of NAMED_ONLY_TABLES) {
+          for (const column of VALUE_COLUMNS[table]) {
+            expect(reason(() => resolveReadableFields(table, { fields: column })), `${table}.${column}`).toBe(
+              "unreadable_field"
+            );
+          }
+          expect(resolveReadableFields(table, { fields: "sys_id" }), table).toEqual(["sys_id"]);
+          // fields=all reads only what the "*" entry allows, and defaults are clamped to it.
+          const all = resolveReadableFields(table, { fields: "all" });
+          expect(all, table).not.toEqual(["*"]);
+          for (const column of VALUE_COLUMNS[table]) expect(all, `${table}.${column}`).not.toContain(column);
+          for (const field of resolveReadableFields(table)) {
+            expect(narrowing["*"].readable, `${table}.${field}`).toContain(field);
+          }
+        }
+      });
+    });
+
+    it('a narrowing "*" writable entry applies to them, and a named entry still narrows or widens', () => {
+      withFieldPolicy({ "*": { writable: [] } }, () => {
+        for (const table of NAMED_ONLY_TABLES) {
+          expect(reason(() => validateWritableFields(table, { u_x: "1" })), table).toBe(
+            "non_writable_field"
+          );
+        }
+      });
+      // A named entry replaces the "*" entry for its table, key by key.
+      withFieldPolicy(
+        {
+          "*": { readable: ["sys_id"] },
+          sys_audit: { readable: ["sys_id", "newvalue"] },
+          sys_email: { readable: "*" },
+        },
+        () => {
+          expect(resolveReadableFields("sys_audit", { fields: "newvalue" })).toEqual(["newvalue"]);
+          expect(reason(() => resolveReadableFields("sys_audit", { fields: "oldvalue" }))).toBe(
+            "unreadable_field"
+          );
+          expect(resolveReadableFields("sys_email", { fields: "body" })).toEqual(["body"]);
+          expect(reason(() => resolveReadableFields("sys_journal_field", { fields: "value" }))).toBe(
+            "unreadable_field"
+          );
+        }
+      );
+    });
+
+    it("with no field policy, or none for them, are unchanged from the built-in entry", () => {
+      for (const table of NAMED_ONLY_TABLES) {
+        expect(resolveReadableFields(table), table).toEqual(builtIn.get(table)!.defaults);
+      }
+      withFieldPolicy({ u_custom: { writable: [] } }, () => {
+        for (const table of NAMED_ONLY_TABLES) {
+          expect(resolveReadableFields(table), table).toEqual(builtIn.get(table)!.defaults);
+          expect(resolveReadableFields(table, { fields: "all" }), table).toEqual(["*"]);
+        }
       });
     });
   });

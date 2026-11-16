@@ -15,6 +15,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { types as nodeUtilTypes } from "node:util";
 
+import { NAMED_ONLY_TABLES } from "./table-policy.js";
+
 export type ResponseFormat = "concise" | "detailed";
 
 export interface ReadFieldSelectionInput {
@@ -676,12 +678,15 @@ const POLICY_DEFINITIONS = {
     readable: ["sys_id", "name", "status", "browser_name", "browser_version", "os_name", "os_version", "sys_updated_on"],
     writable: [],
   },
+  // The named-only tables (NAMED_ONLY_TABLES in table-policy.ts). A "*" table
+  // grant never covers them: a profile reaches them only by naming them in
+  // tableAccess. For field policy they belong to the profile, like the ITSM
+  // tables, so a profile's "*" field entry narrows them. Each default
+  // projection names the record and field a row is about and leaves the value
+  // columns to be asked for by name.
+  //
   // The audit and journal tables hold the old and new values of other tables'
-  // fields, and their comments and work notes. A "*" table grant never covers
-  // them (NAMED_ONLY_TABLES in table-policy.ts): a profile reaches them only
-  // by naming them in tableAccess. The default projection names the record and
-  // field a row is about and leaves the value columns (oldvalue and newvalue,
-  // value) to be asked for.
+  // fields, and their comments and work notes (oldvalue, newvalue, value).
   sys_audit: {
     defaults: ["sys_id", "tablename", "documentkey", "fieldname", "user", "sys_created_on"],
     readable: ["sys_id", "tablename", "documentkey", "fieldname", "oldvalue", "newvalue", "user", "reason", "sys_created_on"],
@@ -690,6 +695,39 @@ const POLICY_DEFINITIONS = {
   sys_journal_field: {
     defaults: ["sys_id", "name", "element_id", "element", "sys_created_by", "sys_created_on"],
     readable: ["sys_id", "name", "element_id", "element", "value", "sys_created_by", "sys_created_on"],
+    writable: [],
+  },
+  // The history built from audit for a record's history view. Value columns:
+  // old, new, old_value, new_value. user_id and email name the actor and stay
+  // out of the default projection.
+  sys_history_line: {
+    defaults: ["sys_id", "set", "field", "label", "update", "update_time", "type"],
+    readable: ["sys_id", "set", "field", "label", "update", "update_time", "type", "user_name", "old", "new", "old_value", "new_value", "sys_created_on"],
+    writable: [],
+  },
+  // A deleted record, kept whole. Value column: payload (the record's XML).
+  sys_audit_delete: {
+    defaults: ["sys_id", "tablename", "documentkey", "display_value", "sys_created_on", "sys_created_by"],
+    readable: ["sys_id", "tablename", "documentkey", "display_value", "payload", "sys_created_on", "sys_created_by"],
+    writable: [],
+  },
+  // Attachment content, in chunks. Value column: data. sn_attach does not read
+  // this table: it uses the Attachment API, under the grants of sys_attachment
+  // and the parent table.
+  sys_attachment_doc: {
+    defaults: ["sys_id", "sys_attachment", "position", "length", "sys_created_on"],
+    readable: ["sys_id", "sys_attachment", "position", "length", "data", "sys_created_on"],
+    writable: [],
+  },
+  // Notification copies. Content columns: body, body_text, subject,
+  // recipients, copied, blind_copied, reply_to, headers, error_string.
+  sys_email: {
+    defaults: ["sys_id", "type", "state", "target_table", "instance", "sys_created_on"],
+    readable: [
+      "sys_id", "type", "state", "notification_type", "target_table", "instance", "mailbox",
+      "subject", "body", "body_text", "recipients", "copied", "blind_copied", "reply_to",
+      "headers", "error_string", "sys_created_on",
+    ],
     writable: [],
   },
 } as const satisfies Record<string, TableFieldPolicyDefinition>;
@@ -709,9 +747,9 @@ const POLICY_DEFINITIONS = {
  * a granted custom table needs no field-policy entry to be usable.
  *
  * A profile's own "*" entry reaches further: it also covers the ITSM tables
- * (ITSM_TABLES) and every table the profile names, key by key, wherever the
- * table's own entry is silent. Only the system tables (SYSTEM_TABLES) are
- * never covered by a "*" entry.
+ * (ITSM_TABLES), the named-only tables (NAMED_ONLY_BUILT_INS) and every table
+ * the profile names, key by key, wherever the table's own entry is silent.
+ * Only the system tables (SYSTEM_TABLES) are never covered by a "*" entry.
  */
 const FIELD_POLICY_BASE: Readonly<Record<string, TableFieldPolicyDefinition>> =
   Object.freeze({
@@ -763,8 +801,9 @@ const ITSM_TABLES: ReadonlySet<string> = new Set([
  *
  * This list is written out rather than derived as "built-in minus ITSM", so
  * a new built-in entry never escapes every profile's "*" entry by default.
- * Each built-in entry must be in exactly one of ITSM_TABLES and
- * SYSTEM_TABLES; a test enforces this through BUILT_IN_TABLE_CLASSES.
+ * Each built-in entry must be in exactly one of ITSM_TABLES, SYSTEM_TABLES
+ * and NAMED_ONLY_BUILT_INS; a test enforces this through
+ * BUILT_IN_TABLE_CLASSES.
  */
 const SYSTEM_TABLES: ReadonlySet<string> = new Set([
   "sys_user",
@@ -790,9 +829,18 @@ const SYSTEM_TABLES: ReadonlySet<string> = new Set([
   "sys_atf_test_suite_result",
   "sys_atf_test_result_step",
   "sys_atf_agent",
-  "sys_audit",
-  "sys_journal_field",
 ]);
+
+/**
+ * Built-in tables that a "*" table grant never covers (NAMED_ONLY_TABLES, in
+ * table-policy.ts, the one list). For field policy they are profile-owned like
+ * the ITSM tables: `readable` and `writable` resolve from the profile's own
+ * entry for the table, then its "*" entry, then the built-in "*" (open), so a
+ * profile that narrows reads with "*" narrows these too. Their built-in
+ * `defaults` leave out the value columns and are clamped to the effective
+ * readable set. A table's own entry still narrows or widens it.
+ */
+const NAMED_ONLY_BUILT_INS: ReadonlySet<string> = new Set(NAMED_ONLY_TABLES);
 
 /**
  * The built-in tables and how each is classified for a profile's "*" entry.
@@ -802,10 +850,12 @@ export const BUILT_IN_TABLE_CLASSES: Readonly<{
   builtIn: readonly string[];
   itsm: readonly string[];
   system: readonly string[];
+  namedOnly: readonly string[];
 }> = Object.freeze({
   builtIn: Object.freeze(Object.keys(POLICY_DEFINITIONS)),
   itsm: Object.freeze([...ITSM_TABLES]),
   system: Object.freeze([...SYSTEM_TABLES]),
+  namedOnly: Object.freeze([...NAMED_ONLY_BUILT_INS]),
 });
 
 const GENERIC_RECORD_TABLES = new Set([
@@ -1466,21 +1516,23 @@ function mergeFieldPolicyDefinitions(
   configured: Readonly<Record<string, MutableTableFieldPolicyDefinition>>
 ): Record<string, TableFieldPolicyDefinition> {
   const merged: Record<string, TableFieldPolicyDefinition> = { ...base };
-  // A profile's "*" entry also covers the ITSM tables it does not name, so
-  // they are merged even without an entry of their own.
+  // A profile's "*" entry also covers the ITSM tables and the named-only
+  // tables it does not name, so they are merged even without an entry of their
+  // own.
   const profileWildcard = Object.hasOwn(configured, FIELD_POLICY_WILDCARD)
     ? configured[FIELD_POLICY_WILDCARD]
     : undefined;
   const tables = new Set(Object.keys(configured));
   if (profileWildcard !== undefined) {
     for (const table of ITSM_TABLES) tables.add(table);
+    for (const table of NAMED_ONLY_BUILT_INS) tables.add(table);
   }
   for (const table of tables) {
     const definition: MutableTableFieldPolicyDefinition = Object.hasOwn(configured, table)
       ? configured[table]!
       : {};
     const existing = merged[table];
-    // Every table but the system tables (ITSM and custom alike) resolves each
+    // Every table but the system tables (ITSM, named-only and custom alike) resolves each
     // set from its own entry, then the profile's "*" entry, then the base. A
     // named custom table therefore cannot escape a narrowing "*" by stating
     // only the other key. System tables never take the "*" entry.

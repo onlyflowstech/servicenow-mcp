@@ -68,6 +68,7 @@ import { buildPolicyCard, renderPolicyCard } from "./policy-card.js";
 import { riskyGrantWarning } from "./risky-grants.js";
 import { trustedToolErrorDescriptor } from "./tool-error.js";
 import {
+  NAMED_ONLY_TABLES,
   createTableAccessPolicy,
   type TableAccessPolicyInput,
   type TableAccessTargetInput,
@@ -929,7 +930,8 @@ async function askTableSelection(
         "  per-user ACLs are then the only remaining boundary, so the integration\n" +
         "  account's roles become the whole control. It also skips the per-tool\n" +
         "  binding and the related-table closure check. It does not cover\n" +
-        "  sys_audit or sys_journal_field; name them to allow them.\n"
+        `  ${NAMED_ONLY_TABLES.join(", ")};\n` +
+        "  name them to allow them.\n"
     );
     return Object.freeze(["*"]);
   }
