@@ -132,6 +132,27 @@ describe("maskSecrets", () => {
   it("masks a cut-off literal to the end of the text", () => {
     expect(masked("var password = 'abcdef")).toBe(`var password = '${SECRET_MASK}`);
   });
+
+  it("masks a value longer than 64 KiB to its real end", () => {
+    const tail = "Zq9-tail-after-64k";
+    for (const text of [
+      `var password = '${"A".repeat(70_000)}${tail}';`,
+      `r.setBasicAuth('u', '${"A".repeat(70_000)}${tail}');`,
+      `gr.setValue('password', "${"A".repeat(70_000)}${tail}");`,
+    ]) {
+      const out = masked(text);
+      expect(out).not.toContain(tail);
+      expect(out.length).toBeLessThan(100);
+    }
+  });
+
+  it("finds the credential after a repeated scheme word", () => {
+    const basic = Buffer.from("svc:Zq9-basic", "utf8").toString("base64");
+    expect(masked(`Authorization: Basic Basic ${basic}`)).toBe(`Authorization: Basic Basic ${SECRET_MASK}`);
+    expect(masked("Authorization: Bearer Bearer 8f2c1e9a7b6d5c4e3f2a")).toBe(
+      `Authorization: Bearer Bearer ${SECRET_MASK}`
+    );
+  });
 });
 
 describe("no pattern text leaves the module", () => {

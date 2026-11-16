@@ -107,6 +107,17 @@ export const SECRET_CASES: Readonly<Record<SecretPatternId, PatternCases>> = {
       p('this.userPassword="', "p@ss", '";'),
       p("if (pwd === '", "letmein", "') {"),
       p("var aws_secret_access_key = '", j("wJalrXUtnFEMI", "/K7MDENG/", "bPxRfiCYFAKEKEY"), "';"),
+      // ServiceNow call shapes: the key is a call's first argument.
+      p("gr.setValue('password', '", "Zq9-set-value-1", "');"),
+      p('gr.setValue("user_password", "', "Zq9-set-value-2", '");'),
+      p("gr.setValue('password',\n    '", "Zq9-set-value-3", "');"),
+      p("gs.setProperty('x_acme.integration.password', '", "Zq9-property", "');"),
+      p("r.setStringParameterNoEscape('client_secret', '", "Zq9-client-secret", "');"),
+      p("r.setQueryParameter('api_key', '", "Zq9-query-key", "');"),
+      p('params.put("apiKey", "', "Zq9-map-put", '");'),
+      // Escaped JSON inside a string.
+      p('r.setRequestBody("{\\"password\\":\\"', "Zq9-escaped-json", '\\"}");'),
+      p("r.setRequestBody('{\\'client_secret\\': \\'", "Zq9-escaped-single", "\\'}');"),
     ],
     negative: [
       "var password = gs.getProperty('my.integration.password');",
@@ -117,6 +128,17 @@ export const SECRET_CASES: Readonly<Record<SecretPatternId, PatternCases>> = {
       "var tokenType = 'Bearer';",
       "g_form.setValue('password', newValue);",
       "password: '****'",
+      // The value is a variable, not a literal.
+      "gr.setValue('password', newValue);",
+      "gs.setProperty('x_acme.integration.password', current.u_value);",
+      "r.setStringParameterNoEscape('client_secret', secret);",
+      "r.setQueryParameter('api_key', this.key);",
+      'params.put("apiKey", apiKey);',
+      'r.setRequestBody("{\\"password\\":\\"" + pw + "\\"}");',
+      "gr.setValue('password', '');",
+      // A comma only separates a call's first argument from its value.
+      "var fields = ['user_name', 'password', 'email'];",
+      "var pair = ['password', 'shown'];",
     ],
   },
   url_credentials: {
@@ -137,12 +159,20 @@ export const SECRET_CASES: Readonly<Record<SecretPatternId, PatternCases>> = {
       p("'https://api.example.com/v1/items?api_key=", "9f8e7d6c5b4a", "&limit=10'"),
       p("'https://graph.example.com/me?fields=id&access_token=", "EAAB1234xyz", "'"),
       p("https://acct.blob.core.windows.net/c?sv=2022-11-02&sig=", "abcd%2Bef%3D", " "),
+      // key=value strings that start at their quote, and connection strings.
+      p("r.setRequestBody('password=", "Zq9-form-first", "&username=svc');"),
+      p('r.setRequestBody("client_secret=', "Zq9-form-secret", '&grant_type=client_credentials");'),
+      p("var url = 'jdbc:sqlserver://db:1433;databaseName=x;user=sa;password=", "Zq9-jdbc", ";';"),
+      p('var cs = "Driver={x};Server=db;UID=sa;PWD=', "Zq9-odbc", ';";'),
     ],
     negative: [
       "'https://api.example.com/v1?api_key=' + key",
       "'https://api.example.com/v1?limit=10&offset=0'",
       "`https://api.example.com/v1?key=${apiKey}`",
       "'https://api.example.com/v1?token=abc'",
+      "r.setRequestBody('password=' + pw + '&username=svc');",
+      'var cs = "Server=db;UID=sa;PWD=" + pwd + ";";',
+      "var cs = 'Server=db;Trusted_Connection=yes;';",
     ],
   },
   private_key_block: {
@@ -150,14 +180,14 @@ export const SECRET_CASES: Readonly<Record<SecretPatternId, PatternCases>> = {
       p(pemBegin("RSA "), PEM_BODY, pemEnd("RSA ")),
       p(pemBegin(""), PEM_BODY, pemEnd("")),
       p(pemBegin("OPENSSH "), PEM_BODY, pemEnd("OPENSSH ")),
-      p(j("-----BEGIN PGP ", "PRIVATE", " KEY BLOCK-----"), PEM_BODY, "-----END PGP PRIVATE KEY BLOCK-----"),
+      p(j("-----BEGIN PGP ", "PRIVATE", " KEY BLOCK-----"), PEM_BODY, j("-----END PGP ", "PRIVATE", " KEY BLOCK-----")),
       // No END line: everything after the header is masked.
       p(pemBegin("EC "), PEM_BODY),
     ],
     negative: [
       "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\n-----END PUBLIC KEY-----",
       "-----BEGIN CERTIFICATE-----\nMIIDdzCCAl+gAwIBAgIE\n-----END CERTIFICATE-----",
-      "// BEGIN PRIVATE KEY handling is done by the MID server",
+      j("// BEGIN ", "PRIVATE", " KEY handling is done by the MID server"),
     ],
   },
   aws_access_key_id: {

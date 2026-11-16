@@ -51,11 +51,12 @@ export const SECRET_MASK = "[masked]";
 export const SECRET_SCAN_MAX_CHARS = 1_048_576;
 
 /**
- * A quoted literal longer than this is masked up to here and the scan moves
- * on. It bounds one read; the rest of such a literal is not a credential shape
- * any rule would match on its own.
+ * The cap on a speculative read: the user argument of `setBasicAuth` and a
+ * header name, which only decide whether a rule applies and are never masked.
+ * A value read has no cap. It runs to its real end, and the scan resumes past
+ * it, so the work stays linear.
  */
-const MAX_LITERAL_READ = 65_536;
+const MAX_SPECULATIVE_READ = 65_536;
 
 /** One match: the pattern, and the half-open span of the secret value. */
 export interface SecretMatch {
@@ -140,18 +141,21 @@ interface Literal {
   readonly interpolated: boolean;
 }
 
+const isQuote = (c: number) => c === QUOTE_SINGLE || c === QUOTE_DOUBLE;
+
 /**
  * Reads a JavaScript string literal whose opening quote is at `at`. A `'` or
  * `"` literal ends at its closing quote or at a line break (an unterminated
  * literal is still read, so a cut-off value is still masked); a backtick
  * literal ends at its closing backtick. Escapes are skipped two characters at
- * a time. Returns null when there is no quote at `at`.
+ * a time. `cap` bounds a speculative read only. Returns null when there is no
+ * quote at `at`.
  */
-function readLiteral(text: string, at: number): Literal | null {
+function readLiteral(text: string, at: number, cap = Number.POSITIVE_INFINITY): Literal | null {
   const quote = text.charCodeAt(at);
   if (quote !== QUOTE_SINGLE && quote !== QUOTE_DOUBLE && quote !== BACKTICK) return null;
   const start = at + 1;
-  const limit = Math.min(text.length, start + MAX_LITERAL_READ);
+  const limit = Math.min(text.length, start + cap);
   let interpolated = false;
   let i = start;
   while (i < limit) {
@@ -167,6 +171,60 @@ function readLiteral(text: string, at: number): Literal | null {
   }
   const end = Math.min(i, text.length);
   return { start, end, next: end, interpolated };
+}
+
+/**
+ * Reads a string nested in another string, whose quotes are escaped: the
+ * `\"x\"` in `"{\"password\":\"x\"}"`. It starts at a backslash followed by a
+ * quote, and ends at the next backslash and that quote, at the outer literal's
+ * bare quote, at a line break, or at the end of the text. A value that itself
+ * holds a doubly escaped quote ends there, early.
+ */
+function readEscapedLiteral(text: string, at: number): Literal | null {
+  const quote = text.charCodeAt(at + 1);
+  if (text.charCodeAt(at) !== BACKSLASH || !isQuote(quote)) return null;
+  const start = at + 2;
+  let i = start;
+  while (i < text.length) {
+    const c = text.charCodeAt(i);
+    if (c === BACKSLASH) {
+      if (text.charCodeAt(i + 1) === quote) return { start, end: i, next: i + 2, interpolated: false };
+      i += 2;
+      continue;
+    }
+    if (c === quote || c === 10 || c === 13) return { start, end: i, next: i, interpolated: false };
+    i++;
+  }
+  return { start, end: text.length, next: text.length, interpolated: false };
+}
+
+/** A plain or an escaped string literal at `at`. */
+function readValue(text: string, at: number): Literal | null {
+  return readLiteral(text, at) ?? readEscapedLiteral(text, at);
+}
+
+/**
+ * True when the quoted key that ends at `keyEnd` (its keyword starting at
+ * `keywordStart`) is a call's first argument: `setValue('password', …)`, not
+ * `['user_name', 'password', 'email']`. The backward read stops at the key's
+ * opening quote, at a line break, or after 256 characters. Only keys followed
+ * by a quote reach it, so no two reads overlap and the work stays linear.
+ */
+function isFirstArgument(text: string, keywordStart: number, quote: number): boolean {
+  const floor = Math.max(0, keywordStart - 256);
+  let i = keywordStart - 1;
+  while (i >= floor) {
+    const c = text.charCodeAt(i);
+    if (c === quote) break;
+    if (c === 10 || c === 13) return false;
+    i--;
+  }
+  if (i < floor) return false;
+  i--;
+  if (text.charCodeAt(i) === BACKSLASH) i--;
+  const stop = Math.max(0, i - 16);
+  while (i >= stop && isSpace(text.charCodeAt(i))) i--;
+  return text.charCodeAt(i) === 40; // (
 }
 
 /** True when the literal is a constant with at least `min` non-space characters. */
@@ -251,7 +309,7 @@ const RULES: readonly SecretRule[] = Object.freeze([
     anchor: /setBasicAuth[ \t\r\n]{0,16}\([ \t\r\n]{0,16}/gu,
     read(text, _anchorStart, anchorEnd) {
       let i = anchorEnd;
-      const user = readLiteral(text, i);
+      const user = readLiteral(text, i, MAX_SPECULATIVE_READ);
       if (user) {
         i = user.next;
       } else {
@@ -282,9 +340,11 @@ const RULES: readonly SecretRule[] = Object.freeze([
       let end = body;
       while (end < body + 2 && text.charCodeAt(end) === 61) end++; // =
       const length = end - anchorEnd;
-      if (length < 8 || length % 4 !== 0 || isWord(text.charCodeAt(end))) return miss(body);
+      // A miss resumes at the anchor's end, so `Basic Basic <b64>` still finds
+      // the second; no anchor starts inside the run, so this stays linear.
+      if (length < 8 || length % 4 !== 0 || isWord(text.charCodeAt(end))) return miss(anchorEnd);
       const decoded = Buffer.from(text.slice(anchorEnd, end), "base64");
-      return decoded.includes(58) ? { span: [anchorEnd, end], resume: end } : miss(end); // :
+      return decoded.includes(58) ? { span: [anchorEnd, end], resume: end } : miss(anchorEnd); // :
     },
   },
   {
@@ -296,10 +356,10 @@ const RULES: readonly SecretRule[] = Object.freeze([
       let end = body;
       while (end < body + 2 && text.charCodeAt(end) === 61) end++;
       const length = body - anchorEnd;
-      if (length < 16) return miss(body);
+      if (length < 16) return miss(anchorEnd);
       let digit = false;
       for (let i = anchorEnd; i < body && !digit; i++) digit = isDigit(text.charCodeAt(i));
-      return digit || length >= 40 ? { span: [anchorEnd, end], resume: end } : miss(end);
+      return digit || length >= 40 ? { span: [anchorEnd, end], resume: end } : miss(anchorEnd);
     },
   },
   {
@@ -307,7 +367,7 @@ const RULES: readonly SecretRule[] = Object.freeze([
     id: "key_header",
     anchor: /setRequestHeader[ \t\r\n]{0,16}\([ \t\r\n]{0,16}/gu,
     read(text, _anchorStart, anchorEnd) {
-      const name = readLiteral(text, anchorEnd);
+      const name = readLiteral(text, anchorEnd, MAX_SPECULATIVE_READ);
       if (!name || name.end === name.next || name.end - name.start > 64) return miss(anchorEnd);
       if (!CREDENTIAL_HEADER.test(text.slice(name.start, name.end))) return miss(name.next);
       let i = skip(text, name.next, isSpace, 16);
@@ -322,21 +382,33 @@ const RULES: readonly SecretRule[] = Object.freeze([
     },
   },
   {
-    // password = 'x', clientSecret: "x", 'x-api-key': 'x', headers['api_key'] = 'x'.
-    // The keyword must end the identifier; anything may come before it.
+    // password = 'x', clientSecret: "x", 'x-api-key': 'x', headers['api_key'] = 'x',
+    // gr.setValue('password', 'x'), gs.setProperty('x.password', 'x'),
+    // map.put("apiKey", "x") and escaped JSON, "{\"password\":\"x\"}".
+    // The keyword must end the identifier or the key; anything may come before it.
     id: "credential_assignment",
     anchor:
       /(?:pass(?:word|wd|phrase)|pwd|secret|(?:api|access|private|client|encryption|signing|auth|secret)[_-]?key|apikey|(?:access|auth|refresh|bearer|api|session|id)[_-]?token|credentials?)(?![A-Za-z0-9_$])/giu,
-    read(text, _anchorStart, anchorEnd) {
+    read(text, anchorStart, anchorEnd) {
       let i = anchorEnd;
+      // A key that ends a quoted literal: ', ", or an escaped \' or \".
+      let keyQuote = 0;
       const c = text.charCodeAt(i);
-      if (c === QUOTE_SINGLE || c === QUOTE_DOUBLE) i++;
+      if (isQuote(c)) {
+        keyQuote = c;
+        i++;
+      } else if (c === BACKSLASH && isQuote(text.charCodeAt(i + 1))) {
+        keyQuote = text.charCodeAt(i + 1);
+        i += 2;
+      }
       if (text.charCodeAt(i) === 93) i++; // ]
-      i = skip(text, i, isInlineSpace, 16);
-      i = readSeparator(text, i);
+      i = skip(text, i, keyQuote === 0 ? isInlineSpace : isSpace, 16);
+      // A comma separates only a quoted key that is a call's first argument.
+      const argument = keyQuote !== 0 && text.charCodeAt(i) === 44 && isFirstArgument(text, anchorStart, keyQuote);
+      i = argument ? i + 1 : readSeparator(text, i);
       if (i < 0) return miss(anchorEnd);
-      i = skip(text, i, isInlineSpace, 16);
-      const value = readLiteral(text, i);
+      i = skip(text, i, argument ? isSpace : isInlineSpace, 16);
+      const value = readValue(text, i);
       if (!value) return miss(i);
       return isConstantLiteral(text, value, 1)
         ? { span: [value.start, value.end], resume: value.next }
@@ -368,17 +440,19 @@ const RULES: readonly SecretRule[] = Object.freeze([
     },
   },
   {
-    // ?api_key=value, &access_token=value, &sig=value
+    // ?api_key=value, &access_token=value, &sig=value; also a key=value
+    // string that starts at its quote ('password=x&…') and connection
+    // strings (;password=x; and ;PWD=x;).
     id: "url_query_secret",
     anchor:
-      /[?&](?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|client[_-]?secret|secret|password|passwd|pwd|sig|signature|key)=/giu,
+      /[?&;'"](?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|client[_-]?secret|secret|password|passwd|pwd|sig|signature|key)=/giu,
     read(text, _anchorStart, anchorEnd) {
-      // Stops at ? and & too, so no anchor can start inside a value.
+      // Stops at ? & ; and quotes too, so no anchor can start inside a value.
       let end = anchorEnd;
       while (end < text.length) {
         const c = text.charCodeAt(end);
         if (
-          c === 38 || c === 63 || c === 35 || isSpace(c) || c === QUOTE_SINGLE || c === QUOTE_DOUBLE ||
+          c === 38 || c === 63 || c === 59 || c === 35 || isSpace(c) || c === QUOTE_SINGLE || c === QUOTE_DOUBLE ||
           c === BACKTICK || c === 60 || c === 62 || c === BACKSLASH
         ) {
           break;
@@ -484,8 +558,10 @@ function matchLimit(options: SecretScanOptions | undefined): number {
 
 /**
  * Finds credential literals in `text`. Returns pattern ids and offsets only.
- * Text longer than `SECRET_SCAN_MAX_CHARS` is refused (`too_large`), so a
- * caller truncates first and then scans, rather than getting a partial scan.
+ * Text longer than `SECRET_SCAN_MAX_CHARS` is refused (`too_large`) rather
+ * than scanned in part. A caller that shows a capped excerpt masks the whole
+ * text first and cuts it afterwards, so no value is split at the cut; text
+ * too large to mask is not shown.
  */
 export function scanSecrets(text: string, options?: SecretScanOptions): SecretScanResult {
   const limit = matchLimit(options);
