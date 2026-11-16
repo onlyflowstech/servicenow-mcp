@@ -92,6 +92,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stops the profile loading, and the message now names the table and says it
   must be granted by name. `sn_profile` reports these tables with the class
   `named_only`.
+- **`sn_batch` and `sn_query` refuse a `structured_query` filter or order on a
+  field the table does not have.** A confirmed `sn_batch` update or delete, its
+  dry run and an `sn_query` read stop with a fixed message that names the field
+  ("was not found on the table, or is not readable by this user") before any
+  record is changed or listed; for `sn_batch` that is before the sample or the
+  write. No extra request is made: the fields a filter or order uses are added to
+  the read's `sysparm_fields`, looked for in the rows that come back, and left out
+  of the result. A field counts as present when any returned row carries it, an
+  existing column with no value is still returned, and a read that returns no
+  rows is returned as before, since there is nothing to check. A raw encoded
+  `query` is not checked; it is only accepted through a policy rule that pins
+  the query and its fields. The extra columns add bytes to each fetched row, and
+  a filter on a very large text field that is not in `fields` can take a wide
+  read past the 1 MiB upstream response limit: the call then says so and asks for
+  a lower `limit`.
 
 ### Security
 

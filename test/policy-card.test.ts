@@ -46,6 +46,7 @@ import {
 } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
 import { noHiddenFieldTypes } from "./fixtures/field-types.js";
+import { echoFields } from "./fixtures/echo-fields.js";
 
 const INSTANCE = "https://card.service-now.com";
 
@@ -367,10 +368,27 @@ async function connect(options: {
   get?: (path: string, params: Record<string, string>) => Promise<unknown>;
   client?: unknown;
 }) {
-  const get = vi.fn(
+  const answer =
     options.get ??
-      (async () => ({ result: [{ sys_id: SYS_ID_A, number: "INC0010001" }] }))
-  );
+    (async () => ({ result: [{ sys_id: SYS_ID_A, number: "INC0010001" }] }));
+  // A lookup answers like a table that has the columns it was asked for, as
+  // the filter's own field must come back on a row. The sample read, which
+  // addresses records by sys_id, answers exactly as scripted.
+  const get = vi.fn(async (path: string, params: Record<string, string>) => {
+    const response = (await answer(path, params)) as { result?: unknown };
+    if (
+      params?.sysparm_query?.startsWith("sys_idIN") === true ||
+      !Array.isArray(response?.result)
+    ) {
+      return response;
+    }
+    return {
+      ...response,
+      result: response.result.map((row) =>
+        echoFields(row as Record<string, unknown>, params)
+      ),
+    };
+  });
   const serviceNow = {
     get,
     getWithMeta: vi.fn(async () => ({ data: { result: [] }, status: 200, headers: new Headers() })),
@@ -827,7 +845,7 @@ describe("sn_batch dry-run sample deadline", () => {
       vi.fn(async (url: string | URL, init?: RequestInit) => {
         const query = new URL(String(url)).searchParams.get("sysparm_query") ?? "";
         if (!query.startsWith("sys_idIN")) {
-          return new Response(JSON.stringify({ result: [{ sys_id: sysId }] }), {
+          return new Response(JSON.stringify({ result: [{ sys_id: sysId, active: "true" }] }), {
             status: 200,
             headers: { "content-type": "application/json" },
           });

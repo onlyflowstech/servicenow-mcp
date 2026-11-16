@@ -22,12 +22,19 @@ import {
   typeHiddenFieldNames,
 } from "../field-policy.js";
 import { ok, err } from "../utils.js";
+import {
+  echoFilterFields,
+  firstMissingFilterField,
+  isFilterEchoTooLarge,
+} from "../unknown-filter-fields.js";
 import { serviceNowSysIdPathSegment } from "../servicenow-identifiers.js";
 import {
   compileStructuredQuery,
   structuredQuerySchema,
 } from "../structured-query.js";
 import {
+  createFilterFieldsTooLargeError,
+  createUnknownFilterFieldError,
   trustedToolErrorDescriptor,
   type ToolErrorCategory,
   type ToolErrorDescriptor,
@@ -123,11 +130,23 @@ export async function handler(
     // from the metadata cache: a cached answer can be stale within the
     // watermark's gaps, and would update or delete records that no longer
     // match.
-    const resp = await uncachedOperations(client).get(`/api/now/table/${args.table}`, {
-      sysparm_fields: "sys_id",
-      sysparm_limit: String(limit),
-      sysparm_query: structuredPlan.encodedQuery,
-    });
+    // The filter's own fields ride along so the rows show whether the table
+    // has them (see unknown-filter-fields.ts).
+    const echo = echoFilterFields("sys_id", structuredPlan.referencedFields);
+    let resp;
+    try {
+      resp = await uncachedOperations(client).get(`/api/now/table/${args.table}`, {
+        sysparm_fields: echo.sysparmFields!,
+        sysparm_limit: String(limit),
+        sysparm_query: structuredPlan.encodedQuery,
+      });
+    } catch (error) {
+      if (isFilterEchoTooLarge(error, echo)) throw createFilterFieldsTooLargeError();
+      throw error;
+    }
+    // Refused here, before the sample, the target list or any other request.
+    const missingField = firstMissingFilterField(resp.result, echo.probe);
+    if (missingField !== undefined) throw createUnknownFilterFieldError(missingField);
 
     const filtered = filterReadableRecord(resp.result || [], readableFields);
     const results = Array.isArray(filtered)
