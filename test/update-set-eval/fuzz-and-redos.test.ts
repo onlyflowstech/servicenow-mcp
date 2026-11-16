@@ -17,12 +17,15 @@ import {
 } from "../../src/update-set-eval/xml-reader.js";
 import { hostileSecretInputs, hostileXmlInputs, prng } from "../fixtures/update-set-eval/hostile-inputs.js";
 
-// The evaluator's CPU budget for a whole call is 250 ms. One hostile input at the
-// largest size each module accepts (four times the evaluator's per-payload
-// cap) must fit inside it. Measured locally: under 15 ms for the secret scan
-// and under 25 ms for the XML reader, so the bound leaves room for a slow,
-// loaded runner while still failing on anything super-linear.
-const TIME_BOUND_MS = 250;
+// A linear-time regression guard, not a CPU budget. Each hostile input is at
+// the largest size its module accepts (1 Mi). Measured locally, the worst
+// takes under 15 ms for the secret scan and under 25 ms for the XML reader. A
+// quadratic regex or reader at 1 Mi would take minutes, so 2,000 ms still
+// catches one, and leaves room for a slow, loaded runner. The bound is
+// absolute rather than a ratio, because the small-size baselines are
+// sub-millisecond and too noisy to divide by. The evaluator's per-call CPU
+// budget is tested with its engine, between rows.
+const TIME_BOUND_MS = 2_000;
 
 function elapsed(run: () => unknown): number {
   const start = performance.now();
