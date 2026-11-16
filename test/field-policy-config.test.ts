@@ -107,7 +107,7 @@ function policyReason(action: () => unknown): FieldPolicyError["reason"] | "allo
   }
 }
 
-describe('["*"] means "*" (#8)', () => {
+describe('["*"] as a field list means "*"', () => {
   const customWrite = { u_custom: "v", state: "2" };
 
   it.each<[string, FieldPolicyConfigurationInput, FieldPolicyConfigurationInput]>([
@@ -238,7 +238,7 @@ describe('["*"] means "*" (#8)', () => {
   });
 });
 
-describe("malformed field policy fails at profile load (#8)", () => {
+describe("malformed field policy fails at profile load", () => {
   it('rejects writable ["u_*"] naming the table and the key', () => {
     writeProfiles({
       audit: { fieldPolicy: { u_audit: { writable: ["u_*"] } } },
@@ -782,7 +782,7 @@ describe('a "__proto__" key is rejected like any other unknown key (RR1)', () =>
   });
 });
 
-describe("SN_FIELD_POLICY_DEFINITIONS configures only the environment profile (#9)", () => {
+describe("SN_FIELD_POLICY_DEFINITIONS configures only the environment profile", () => {
   function environmentProfile(name = "env-profile"): void {
     vi.stubEnv("SN_PROFILE_NAME", name);
     vi.stubEnv("SN_INSTANCE", "https://env-profile.service-now.com");

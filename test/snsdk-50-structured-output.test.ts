@@ -798,7 +798,7 @@ describe.each(clients)(
           expect(result.structuredContent, name).toEqual({
             profile: PROFILE,
             data: VALID_DATA[name],
-            // The server adds the call's timing (#21); the handler's own
+            // The server adds the call's timing; the handler's own
             // metadata is otherwise passed through untouched.
             metadata: {
               ...VALID_METADATA,
@@ -843,7 +843,7 @@ describe.each(clients)(
       }
     });
 
-    it("ignores cache and timing a handler sets itself (#21)", async () => {
+    it("ignores cache and timing a handler sets itself", async () => {
       const [spoofer] = spoofingModules;
       const forged = defineContextOnlyToolModule({
         runtime: "context-only",

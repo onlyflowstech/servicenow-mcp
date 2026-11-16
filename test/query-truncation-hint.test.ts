@@ -607,7 +607,7 @@ async function readTruncated(
   return result.structuredContent as unknown as Truncated;
 }
 
-describe("the truncation hint gives values a caller can use (#29)", () => {
+describe("the truncation hint gives values a caller can use", () => {
   it("names the limit that fit and a budget that holds the next row, and both work", async () => {
     let compared = 0;
     for (let rowBytes = 100; rowBytes <= 700; rowBytes += 25) {
@@ -698,7 +698,7 @@ describe("the truncation hint gives values a caller can use (#29)", () => {
     expect(parseTruncationHint(hint)?.neededBytes).toBe(Number.POSITIVE_INFINITY);
   });
 
-  it("says which figure is for the next row and which for the whole page, and the page figure returns the page (#37)", async () => {
+  it("says which figure is for the next row and which for the whole page, and the page figure returns the page", async () => {
     // The shape the owner saw: 50 rows, a budget that holds none of them. The
     // next row's budget buys one row; only the page figure returns all 50.
     const connected = await tableOf(scriptRows(50, 300));
@@ -723,7 +723,7 @@ describe("the truncation hint gives values a caller can use (#29)", () => {
     expect(page.data.hint).toBeUndefined();
   });
 
-  it("names only the next row when the whole page is more than the maximum (#37)", async () => {
+  it("names only the next row when the whole page is more than the maximum", async () => {
     const connected = await tableOf(scriptRows(30, 60_000));
     const page = await readTruncated(connected, { limit: 30, max_response_bytes: 100_000 });
     const hint = page.data.hint ?? "";

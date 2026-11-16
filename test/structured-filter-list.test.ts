@@ -35,7 +35,7 @@ async function query(
   });
 }
 
-describe("sn_query reads a list filter as an implicit AND (#17)", () => {
+describe("sn_query reads a list filter as an implicit AND", () => {
   it("reads a one-element list as that element", async () => {
     const connected = await harness();
     expect((await query(connected, "incident", [ACTIVE])).isError).toBeUndefined();
@@ -144,7 +144,7 @@ describe("sn_query reads a list filter as an implicit AND (#17)", () => {
   });
 });
 
-describe("a fault inside a list element keeps its own message (#33)", () => {
+describe("a fault inside a list element keeps its own message", () => {
   // The texts below are what 53d39ea (before the list was published) answers
   // for the same fault in the same list. A fault that is only a check (a bad
   // field name, a control character, an over-long value) used to be reported
@@ -204,7 +204,7 @@ describe("a fault inside a list element keeps its own message (#33)", () => {
   });
 });
 
-describe("sn_batch keeps its write filter strict (#17)", () => {
+describe("sn_batch keeps its write filter strict", () => {
   it("rejects a list filter through the server, before any lookup or write", async () => {
     const connected = await harness();
     // Every way the tool can reach the instance: reads (`get`, `getWithMeta`)

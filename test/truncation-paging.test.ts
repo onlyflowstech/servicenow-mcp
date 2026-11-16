@@ -1,5 +1,5 @@
 /**
- * has_more and next_offset when rows are dropped for size (#28), through the
+ * has_more and next_offset when rows are dropped for size, through the
  * real MCP server path with synthetic rows. The contract:
  *
  * - `record_count`, `truncated` and `dropped_records` keep their meaning.
@@ -92,7 +92,7 @@ const MIXED_ROWS: readonly Row[] = Array.from({ length: 22 }, (_, index) =>
   row(index, 250 + ((index * 137) % 400))
 );
 
-describe("has_more and next_offset account for rows dropped for size (#28)", () => {
+describe("has_more and next_offset account for rows dropped for size", () => {
   it("pages through every row exactly once by following next_offset alone", async () => {
     const connected = await tableHarness(MIXED_ROWS);
     const seen: string[] = [];
@@ -256,7 +256,7 @@ describe("has_more and next_offset account for rows dropped for size (#28)", () 
   });
 });
 
-describe("a drop made only by the envelope keeps the hint and next_offset in agreement (#28)", () => {
+describe("a drop made only by the envelope keeps the hint and next_offset in agreement", () => {
   /** Tiny rows: the tool's own payload fits the budget, the envelope's metadata does not. */
   const tiny = (count: number, size: number) =>
     Array.from({ length: count }, (_, index) => row(index, size));
@@ -307,7 +307,7 @@ describe("a drop made only by the envelope keeps the hint and next_offset in agr
   });
 });
 
-describe("restating a tool's continuation hint (#28)", () => {
+describe("restating a tool's continuation hint", () => {
   it("points a continuation hint at the first row not returned, and says so when none fit", () => {
     const hint = "More records available. Call sn_query again with offset=22.";
     expect(restateContinuationHint(hint, { offset: 0, nextOffset: 14 })).toBe(
@@ -342,7 +342,7 @@ describe("restating a tool's continuation hint (#28)", () => {
   });
 });
 
-describe("the shared envelope applies the same rule to every collection tool (#28)", () => {
+describe("the shared envelope applies the same rule to every collection tool", () => {
   const profile = "p";
   const big = (count: number) =>
     Array.from({ length: count }, (_, index) => ({

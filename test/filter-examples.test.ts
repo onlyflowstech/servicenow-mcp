@@ -27,7 +27,7 @@ async function listed(name: string) {
   };
 }
 
-describe("working filter examples in tools/list (#19)", () => {
+describe("working filter examples in tools/list", () => {
   it("sn_query's filter says a list is read as AND and shows a working example", async () => {
     const { connected, filter } = await listed("sn_query");
     expect(filter?.description).toBe(STRUCTURED_FILTER_LIST_DESCRIPTION);
@@ -100,7 +100,7 @@ describe("working filter examples in tools/list (#19)", () => {
   });
 });
 
-describe("tools/list size ledger (#19)", () => {
+describe("tools/list size ledger", () => {
   // Sizes of each entry as the client receives it, in characters of JSON.
   // A change here is a change in what every client pays for on every session:
   // update the numbers on purpose, and say why in the commit.
@@ -162,7 +162,7 @@ describe("tools/list size ledger (#19)", () => {
     `);
   });
 
-  it("publishes the filter once: the sn_query entry stays under 10,300 characters (#33)", async () => {
+  it("publishes the filter once: the sn_query entry stays under 10,300 characters", async () => {
     const connected = await harness();
     const { tools } = await connected.client.listTools();
     const entry = tools.find((tool) => tool.name === "sn_query");

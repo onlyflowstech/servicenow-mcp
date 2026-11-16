@@ -168,7 +168,7 @@ function structuredData(result: Awaited<ReturnType<Client["callTool"]>>): unknow
   return (result.structuredContent as { data?: unknown } | undefined)?.data;
 }
 
-describe("write-only field policy (#10)", () => {
+describe("write-only field policy", () => {
   const writeOnly = { fieldPolicy: { u_audit: { readable: [], writable: "*" } } };
 
   it("lets sn_update succeed and returns { sys_id } only", async () => {
@@ -261,7 +261,7 @@ describe("write-only field policy (#10)", () => {
   });
 });
 
-describe("the written record keeps its sys_id (#11)", () => {
+describe("the written record keeps its sys_id", () => {
   it("lets sn_create return sys_id when readable omits it", async () => {
     const connected = await harness(
       { fieldPolicy: { change_request: { readable: ["number"] } } },
@@ -504,7 +504,7 @@ describe("the written record keeps its sys_id (#11)", () => {
   });
 });
 
-describe("dot-walked and variables.* write keys (#12)", () => {
+describe("dot-walked and variables.* write keys", () => {
   it.each([
     ["incident", "caller_id.email"],
     ["sc_req_item", "variables.requested_for"],

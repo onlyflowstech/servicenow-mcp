@@ -5,7 +5,7 @@ import { CallMetrics } from "../src/call-metrics.js";
 import { closeHarnesses, harness } from "./structured-filter-harness.js";
 
 /**
- * metadata.cache and metadata.timing (#21), end to end: a real MCP server and
+ * metadata.cache and metadata.timing, end to end: a real MCP server and
  * the real metadata cache over a scripted ServiceNow. Rows are placeholders.
  */
 

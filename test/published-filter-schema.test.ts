@@ -13,7 +13,7 @@ import {
 
 /**
  * What a client that validates arguments against `tools/list` sees for
- * `structured_query.filter` (#33): the list form is published for sn_query and
+ * `structured_query.filter`: the list form is published for sn_query and
  * not for sn_batch, both by reference to definitions that sit inside each
  * tool's own inputSchema, and a strict validator and the server agree.
  */
@@ -89,7 +89,7 @@ function argumentsFor(tool: string, filter: unknown): Record<string, unknown> {
     : { profile: "p", table: "incident", structured_query: { filter } };
 }
 
-describe("the published filter (#33)", () => {
+describe("the published structured_query.filter schema", () => {
   it("gives sn_query an array option and sn_batch none", async () => {
     const tools = await listed(await harness());
     const query = tools.get("sn_query")!;
@@ -142,7 +142,7 @@ describe("the published filter (#33)", () => {
   });
 });
 
-describe("the advertised examples validate against the published schema (#33)", () => {
+describe("the advertised examples validate against the published schema", () => {
   async function examples() {
     const connected = await harness();
     const tools = await listed(connected);
@@ -218,7 +218,7 @@ describe("the advertised examples validate against the published schema (#33)", 
   });
 });
 
-describe("a strict validator and the server agree on the published filter (#33)", () => {
+describe("a strict validator and the server agree on the published filter", () => {
   const BETWEEN = { type: "range", field: "priority", operator: "between", lower: 1, upper: 3 };
   const SET = { type: "set", field: "priority", operator: "in", values: [1, 2] };
   const NULLISH = { type: "null", field: "active", operator: "is_null" };

@@ -1,6 +1,6 @@
 /**
  * The smallest budgets, where the shared envelope's own metadata leaves room
- * for little beside the counts. The labelled truncation hint (#37) is longer
+ * for little beside the counts. The labelled truncation hint is longer
  * than the bare one was; at 1000 bytes with a wide row, no row fitted beside
  * it and the call failed as an internal error. A truncated read must always
  * come back as a normal truncated result, whatever the budget.

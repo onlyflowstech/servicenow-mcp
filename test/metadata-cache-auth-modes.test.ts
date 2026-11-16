@@ -347,7 +347,7 @@ describe.each([
     const second = await query(client);
     const hit = calls().slice(afterMiss);
 
-    // The same answer, except for what the call reports about itself (#21).
+    // The same answer, except for the call's own cache and timing report.
     const answer = (result: Awaited<ReturnType<typeof query>>) => {
       const { metadata, ...rest } = result.structuredContent as { metadata: object };
       const { cache, timing, ...stable } = metadata as Record<string, unknown>;

@@ -594,8 +594,8 @@ async function cachedGetWithMeta<T>(
 /**
  * Count a read the cache did not serve and did not keep: the rows come from
  * ServiceNow, in one request, without a watermark. Reported as a miss, which
- * is what it is to the caller; a distinct outcome for it (#30) would change
- * only this function.
+ * is what it is to the caller; a distinct outcome for it would change only
+ * this function.
  */
 function recordReadThrough(): void {
   recordCacheOutcome("miss");

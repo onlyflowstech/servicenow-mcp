@@ -781,7 +781,7 @@ describe("setup grant", () => {
     });
   });
 
-  describe("code search follows a read grant on a code table (issue #2)", () => {
+  describe("code search follows a read grant on a code table", () => {
     const CODE_SEARCH_ARGS = {
       search_term: "GlideRecord",
       table: "sys_script_include",

@@ -10,7 +10,7 @@ import { ACTIVE, NAMED, callError, closeHarnesses, group, harness, nested } from
 
 afterEach(closeHarnesses);
 
-describe("structured_query.filter errors reach the client (#18)", () => {
+describe("structured_query.filter errors reach the client", () => {
   it("carries the custom message through the real MCP server for each kind of mistake", async () => {
     const connected = await harness();
     const mistakes: Record<string, unknown> = {
@@ -108,7 +108,7 @@ async function queryError(
   return message;
 }
 
-describe("structured_query.filter errors name the mistake (#27)", () => {
+describe("structured_query.filter errors name the mistake", () => {
   it("names a bad operator, with the valid operators of that condition type", async () => {
     const connected = await harness();
     const cases: Array<[string, unknown, string]> = [

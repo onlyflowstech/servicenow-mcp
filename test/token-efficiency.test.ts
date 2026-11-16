@@ -209,7 +209,7 @@ describe("sn_query pagination metadata", () => {
     expect(payload.hint).toBeUndefined();
   });
 
-  it("keeps has_more true on every page but the last of a multi-page read (issue #1)", async () => {
+  it("keeps has_more true on every page but the last of a multi-page read", async () => {
     // A 45-row table read 20 at a time. The stub answers like the instance
     // under sysparm_no_count: up to limit + 1 rows, X-Total-Count equal to
     // the number of rows in that response. Trusting the header made page 2
