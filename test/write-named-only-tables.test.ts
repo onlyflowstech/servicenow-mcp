@@ -25,6 +25,7 @@ import {
   type TableAccessPolicyInput,
 } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const SYS_ID = "a".repeat(32);
 
@@ -94,6 +95,8 @@ async function connect(
         ...(fieldPolicy === undefined ? {} : { fieldPolicy }),
       }),
     },
+    // Stands in for the field-type lookup this double does not serve.
+    fieldTypeLoader: noHiddenFieldTypes,
     auditSink: {
       write: (record) => records.push(record),
       writePreContext: () => {},

@@ -33,6 +33,7 @@ import {
   withResolvedProfileOutput,
   type ToolModuleContract,
 } from "../src/tools/index.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const TEST_TABLE_ACCESS = Object.freeze({
   readTables: Object.freeze(["incident"]),
@@ -153,6 +154,8 @@ function testDependencies(overrides: Partial<ExecutionContextDependencies> = {})
         tableAccess: TEST_TABLE_ACCESS,
       }),
     },
+    // Stands in for the field-type lookup this double does not serve.
+    fieldTypeLoader: noHiddenFieldTypes,
     auditSink: {
       write: (record) => {
         records.push(record);
@@ -1725,6 +1728,8 @@ describe("registry context and audit boundary", () => {
   it("isolates audit sink failures and prevents audit-record mutation", async () => {
     let observed: ToolAuditRecord | undefined;
     const { dependencies } = testDependencies({
+      // Stands in for the field-type lookup this double does not serve.
+      fieldTypeLoader: noHiddenFieldTypes,
       auditSink: {
         write: (record) => {
           observed = record;
@@ -1752,6 +1757,8 @@ describe("registry context and audit boundary", () => {
   it("does not await a never-settling audit sink after handler success", async () => {
     const neverSettles = new Promise<void>(() => {});
     const { dependencies } = testDependencies({
+      // Stands in for the field-type lookup this double does not serve.
+      fieldTypeLoader: noHiddenFieldTypes,
       auditSink: {
         write: () => neverSettles,
         writePreContext: () => {},
@@ -1786,6 +1793,8 @@ describe("registry context and audit boundary", () => {
     process.on("unhandledRejection", unhandled);
     try {
       const { dependencies } = testDependencies({
+        // Stands in for the field-type lookup this double does not serve.
+        fieldTypeLoader: noHiddenFieldTypes,
         auditSink: {
           write: () =>
             new Promise<void>((_resolve, reject) => {

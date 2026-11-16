@@ -43,6 +43,7 @@ import {
 import { schema as relationshipSchema } from "../src/tools/relationships.js";
 import { schema as querySchema } from "../src/tools/query.js";
 import { schema as syslogSchema } from "../src/tools/syslog.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const PROFILE = "production-east";
 
@@ -98,6 +99,8 @@ async function callRegisteredQuery(records: Array<Record<string, unknown>>) {
         tableAccess: REGISTERED_QUERY_TABLE_ACCESS,
       }),
     },
+    // Stands in for the field-type lookup this double does not serve.
+    fieldTypeLoader: noHiddenFieldTypes,
     auditSink: { write: () => {}, writePreContext: () => {} },
   };
   const server = await createMcpServer({

@@ -21,6 +21,7 @@ import {
 } from "../src/table-policy.js";
 import { serviceNowToolModules } from "../src/tools/catalog.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const CONFIG: ServiceNowConfig = {
   instance: "https://policy-test.service-now.com",
@@ -93,6 +94,8 @@ async function createHarness(
         ...(fieldPolicy === undefined ? {} : { fieldPolicy }),
       }),
     },
+    // Stands in for the field-type lookup this double does not serve.
+    fieldTypeLoader: noHiddenFieldTypes,
     auditSink: {
       write: (record) => records.push(record),
       writePreContext: () => {},

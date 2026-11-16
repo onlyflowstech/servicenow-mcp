@@ -25,6 +25,7 @@ import {
   registerServiceNowTools,
   toolModules,
 } from "../src/tools/index.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const TOKEN = "snsdk-55-release-matrix-token-01234567890123456789";
 const AUTHORIZATION = `Bearer ${TOKEN}`;
@@ -353,6 +354,8 @@ describe("SNSDK-55 cross-client release matrix", () => {
               tableAccess: INCIDENT_POLICY,
             }),
           },
+          // Stands in for the field-type lookup this double does not serve.
+          fieldTypeLoader: noHiddenFieldTypes,
           auditSink: {
             write: (record) => auditRecords.push(record),
             writePreContext: preContextAudit,

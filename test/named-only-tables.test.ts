@@ -32,6 +32,7 @@ import {
 } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
 import { resolveToolTableAccess } from "../src/tool-table-access.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const NAMED_ONLY = [
   "sys_audit",
@@ -156,6 +157,8 @@ async function connect(
         ...(fieldPolicy === undefined ? {} : { fieldPolicy }),
       }),
     },
+    // Stands in for the field-type lookup this double does not serve.
+    fieldTypeLoader: noHiddenFieldTypes,
     auditSink: {
       write: (record) => records.push(record),
       writePreContext: () => {},

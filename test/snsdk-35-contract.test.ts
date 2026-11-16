@@ -11,6 +11,7 @@ import type {
 import type { Profile, ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const PROFILE = "journal";
 const INSTANCE = "https://journal.service-now.com";
@@ -78,6 +79,8 @@ async function harness(options: {
           : { readTables: [], writeTables: [], targets: [] },
       }),
     },
+    // Stands in for the field-type lookup this double does not serve.
+    fieldTypeLoader: noHiddenFieldTypes,
     auditSink: { write: (record) => records.push(record), writePreContext: () => {} },
   };
   const server = await createMcpServer({

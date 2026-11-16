@@ -31,6 +31,7 @@ import {
   trustedToolErrorDescriptor,
 } from "../src/tool-error.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const PROFILE = "journal-write";
 const CONFIG: ServiceNowConfig = {
@@ -167,6 +168,8 @@ async function createHarness(
           : { fieldPolicy: options.fieldPolicy }),
       }),
     },
+    // Stands in for the field-type lookup this double does not serve.
+    fieldTypeLoader: noHiddenFieldTypes,
     auditSink: {
       write: (record) => records.push(record),
       writePreContext: () => {},

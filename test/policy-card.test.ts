@@ -45,6 +45,7 @@ import {
   type TableAccessPolicyInput,
 } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const INSTANCE = "https://card.service-now.com";
 
@@ -408,6 +409,8 @@ async function connect(options: {
         ...(options.fieldPolicy === undefined ? {} : { fieldPolicy: options.fieldPolicy }),
       }),
     },
+    // Stands in for the field-type lookup this double does not serve.
+    fieldTypeLoader: noHiddenFieldTypes,
     auditSink: { write: () => {}, writePreContext: () => {} },
   };
   const server = await createMcpServer({

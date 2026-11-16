@@ -26,6 +26,7 @@ import {
   toolModules,
   type ToolModuleContract,
 } from "../../src/tools/index.js";
+import { noHiddenFieldTypes } from "./field-types.js";
 
 export type MockServiceNowOperation =
   | "get"
@@ -216,6 +217,8 @@ export async function createMockServiceNowHarness(
         ...(options.atf === undefined ? {} : { atf: options.atf }),
       }),
     },
+    // Stands in for the field-type lookup this double does not serve.
+    fieldTypeLoader: noHiddenFieldTypes,
     auditSink: {
       write: (record) => audits.push(record),
       writePreContext: () => {},

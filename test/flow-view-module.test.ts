@@ -35,6 +35,7 @@ import {
 } from "../src/tools/flow-view-module.js";
 import type { FlowFieldPlan } from "../src/tools/flow-view-policy.js";
 import { registerServiceNowToolModules, toolModules } from "../src/tools/index.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 // Every response scope the module opens gets a number, so calls can be
 // attributed to the scope they ran in, and its signal, so the fake can refuse
@@ -338,6 +339,8 @@ async function harness(
         ...(options.fieldPolicy === undefined ? {} : { fieldPolicy: options.fieldPolicy }),
       }),
     },
+    // Stands in for the field-type lookup this double does not serve.
+    fieldTypeLoader: noHiddenFieldTypes,
     auditSink: { write: () => {}, writePreContext: () => {} },
   };
   const server = await createMcpServer({

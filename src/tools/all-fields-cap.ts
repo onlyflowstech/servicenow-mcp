@@ -24,6 +24,7 @@ import {
   readableSelectionForTable,
   typeHiddenFieldNames,
 } from "../field-policy.js";
+import { isHiddenFieldType } from "../hidden-values.js";
 import { FORCE_RECACHE_PARAM } from "../metadata-cache.js";
 import { escapeQueryValue } from "../utils.js";
 import { resolveTableHierarchy } from "./table-hierarchy.js";
@@ -113,7 +114,9 @@ async function dictionaryColumns(
       sysparm_query:
         `nameIN${hierarchy.map((name) => escapeQueryValue(name)).join(",")}` +
         "^internal_type!=collection^ORDERBYelement",
-      sysparm_fields: "element",
+      // The type comes with each column, so a column that became password-typed
+      // since the call's type map was loaded is still never requested.
+      sysparm_fields: "element,internal_type",
       sysparm_limit: String(MAX_DICTIONARY_ROWS),
       sysparm_display_value: "false",
       sysparm_exclude_reference_link: "true",
@@ -128,6 +131,7 @@ async function dictionaryColumns(
     if (typeof row !== "object" || row === null) continue;
     const element = (row as Record<string, unknown>).element;
     if (typeof element !== "string") continue;
+    if (isHiddenFieldType(storedType((row as Record<string, unknown>).internal_type))) continue;
     const normalized = element.trim().toLowerCase();
     // A sensitive name must never be *requested*. Under a wildcard selection
     // the value was scrubbed from the response after arriving; naming it in
@@ -151,4 +155,11 @@ export function allFieldsCapNotice(bounded: BoundedAllFields, table: string): st
     : `Field selection "all" was capped at ${bounded.fields.length} of ` +
         `${bounded.total} columns on ${table}. Other columns exist and are ` +
         `readable -- name them explicitly to retrieve them.`;
+}
+
+/** A stored reference or string value, as the dictionary read returns it. */
+function storedType(candidate: unknown): unknown {
+  return typeof candidate === "object" && candidate !== null && !Array.isArray(candidate)
+    ? (candidate as Record<string, unknown>).value
+    : candidate;
 }
