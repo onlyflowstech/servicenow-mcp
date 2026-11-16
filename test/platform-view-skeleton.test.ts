@@ -1,7 +1,10 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { ServiceNowOperations } from "../src/client.js";
 import { trustedToolErrorDescriptor } from "../src/tool-error.js";
+import { envelopeCompatibilityResult } from "../src/tools/result-envelope.js";
+import { ok } from "../src/utils.js";
 import {
   PLATFORM_VIEWS,
   PLATFORM_VIEW_ALL_TABLES,
@@ -181,60 +184,137 @@ describe("the access plan is authorized before any handler runs", () => {
 });
 
 describe("recording client: a handler reads only tables in its view's plan", () => {
-  /** A handler that reads each table it is given, through the call's services. */
-  function readingHandlers(tablesFor: (view: PlatformView) => readonly string[]) {
-    return Object.fromEntries(
-      PLATFORM_VIEWS.map((view) => [
-        view,
-        (async (args, services) => {
-          for (const table of tablesFor(view)) {
-            await services.serviceNow.get(`/api/now/table/${table}`, { sysparm_limit: String(args.limit) });
-          }
-          return { content: [{ type: "text" as const, text: "read" }] };
-        }) satisfies PlatformViewHandler,
-      ])
-    ) as unknown as Record<PlatformView, PlatformViewHandler>;
+  /**
+   * Run one handler, the same for every view, behind the real dispatcher. The
+   * handler swallows what its reads throw, as a careless one could, and returns
+   * a valid result, so what the test sees is only what the recorder kept.
+   */
+  async function runHandler(
+    act: (ops: ServiceNowOperations) => Promise<void>,
+    view: PlatformView = "batch"
+  ) {
+    const instance = recordingInstance();
+    const handler: PlatformViewHandler = async (args, services) => {
+      try {
+        await act(services.serviceNow);
+      } catch {
+        /* swallowed on purpose */
+      }
+      return envelopeCompatibilityResult(
+        "sn_platform_view" as never,
+        args as unknown as Record<string, unknown>,
+        ok({ view: args.view, status: "ok", results: [] })
+      );
+    };
+    const module = createPlatformViewToolModule(
+      Object.fromEntries(PLATFORM_VIEWS.map((name) => [name, handler])) as Record<PlatformView, PlatformViewHandler>
+    );
+    const { call } = await harness(instance.ops, { tableAccess: readPolicy(PLATFORM_VIEW_ALL_TABLES), modules: [module] });
+    const result = await call({ view, ...MINIMAL[view] });
+    return { instance, result };
   }
+
+  const BATCH_PLAN = platformViewReadTables("batch", MINIMAL.batch);
+  const table = (name: string) => `/api/now/table/${name}`;
 
   it("holds the shipped handlers to their plans (they read nothing yet)", async () => {
     for (const view of PLATFORM_VIEWS) {
       const instance = recordingInstance();
       const { call } = await harness(instance.ops, { tableAccess: readPolicy(PLATFORM_VIEW_ALL_TABLES) });
       await call({ view, ...WIDEST[view] });
-      expectReadsWithin(instance.calls, platformViewReadTables(view, WIDEST[view]));
+      expect(instance.calls, view).toEqual([]);
+      expectReadsWithin(instance, platformViewReadTables(view, WIDEST[view]));
       await closeHarnesses();
     }
   });
 
-  it("accepts a handler that reads its whole closure", async () => {
-    for (const view of PLATFORM_VIEWS) {
-      const instance = recordingInstance();
-      const module = createPlatformViewToolModule(readingHandlers((name) => platformViewReadTables(name, WIDEST[name])));
-      const { call } = await harness(instance.ops, { tableAccess: readPolicy(PLATFORM_VIEW_ALL_TABLES), modules: [module] });
-      // The reads are what is checked. The fake's text result is not a result
-      // envelope (that entry is added with the registration), so the call itself
-      // is not asserted to succeed.
-      await call({ view, ...WIDEST[view] });
-      const plan = platformViewReadTables(view, WIDEST[view]);
-      expect(instance.calls.map((entry) => tableOfCall(entry))).toEqual([...plan]);
-      expectReadsWithin(instance.calls, plan);
-      await closeHarnesses();
+  it("accepts a handler that reads its closure by every read method, a record by sys_id, and a declared dot-walk", async () => {
+    const { instance, result } = await runHandler(async (ops) => {
+      await ops.get(table("sys_update_set"), { sysparm_query: "state=complete^ORDERBYDESCsys_updated_on", sysparm_fields: "sys_id,name,application.name", sysparm_limit: "26" });
+      await ops.getWithMeta(`${table("sys_update_xml")}/${SYS_ID}`, { sysparm_fields: "sys_id" });
+      await ops.get("/api/now/stats/sys_update_xml", { sysparm_group_by: "update_set", sysparm_count: "true", sysparm_sum_fields: "sys_mod_count", sysparm_max_fields: "sys_updated_on" });
+      await ops.getRaw(table("sys_update_set"));
+    });
+    // The call succeeds: the result is a valid envelope and the plan was authorized.
+    expect(result.isError, textOf(result)).not.toBe(true);
+    expect(instance.calls.map((call) => call.operation)).toEqual(["get", "getWithMeta", "get", "getRaw"]);
+    expect(instance.calls.map((call) => tableOfCall(call))).toEqual(["sys_update_set", "sys_update_xml", "sys_update_xml", "sys_update_set"]);
+    expectReadsWithin(instance, [...BATCH_PLAN, "sys_scope"], [{ from: "sys_update_set", field: "application", target: "sys_scope" }]);
+  });
+
+  it("catches an out-of-plan table read through get, getWithMeta and getRaw, even when the handler swallows the error", async () => {
+    for (const method of ["get", "getWithMeta", "getRaw"] as const) {
+      const { instance, result } = await runHandler(async (ops) => {
+        await ops.get(table("sys_update_set"));
+        await (ops[method] as (path: string) => Promise<unknown>)(table("sys_audit"));
+      });
+      expect(result.isError, method).not.toBe(true);
+      expect(instance.calls.at(-1), method).toMatchObject({ operation: method, path: table("sys_audit") });
+      expect(() => expectReadsWithin(instance, BATCH_PLAN), method).toThrow(/outside the plan/u);
     }
   });
 
-  it("catches a handler that reads a table outside its plan", async () => {
-    const instance = recordingInstance();
-    const module = createPlatformViewToolModule(
-      readingHandlers((view) => [...platformViewReadTables(view, MINIMAL[view]), "sys_audit"])
-    );
-    const { call } = await harness(instance.ops, { tableAccess: readPolicy(PLATFORM_VIEW_ALL_TABLES), modules: [module] });
-    await call({ view: "batch", update_set: SYS_ID });
-    expect(() => expectReadsWithin(instance.calls, platformViewReadTables("batch", MINIMAL.batch))).toThrow(/outside the plan/u);
+  it("catches a read of an out-of-plan table by sys_id, and of a path that is not a table read", async () => {
+    const byId = await runHandler((ops) => ops.getWithMeta(`${table("sys_user")}/${SYS_ID}`).then(() => undefined));
+    expect(() => expectReadsWithin(byId.instance, BATCH_PLAN)).toThrow(/outside the plan/u);
+    for (const path of ["/api/sn_cicd/update_set/commit/x", `${table("sys_update_set")}?sysparm_query=x`, "/api/now/attachment/file", `${table("sys_update_set")}/short`]) {
+      const other = await runHandler((ops) => ops.get(path).then(() => undefined));
+      expect(() => expectReadsWithin(other.instance, BATCH_PLAN), path).toThrow(/not a Table or Stats API read/u);
+    }
   });
 
-  it("catches a read that is not a Table or Stats API read", async () => {
-    expect(() => expectReadsWithin([{ path: "/api/sn_cicd/update_set/commit/x", params: {} }], ["sys_update_set"])).toThrow(
-      /not a Table or Stats API read/u
-    );
+  it("catches every write operation, which the fake refuses and records", async () => {
+    const { instance } = await runHandler(async (ops) => {
+      await ops.post(table("sys_update_set"), {}).catch(() => undefined);
+      await ops.patch(`${table("sys_update_set")}/${SYS_ID}`, {}).catch(() => undefined);
+      await ops.delete(`${table("sys_update_set")}/${SYS_ID}`).catch(() => undefined);
+      await ops.postBinary(table("sys_update_set"), Buffer.alloc(0), "text/plain").catch(() => undefined);
+    });
+    expect(instance.calls.map((call) => call.operation)).toEqual(["post", "patch", "delete", "postBinary"]);
+    expect(() => expectReadsWithin(instance, BATCH_PLAN)).toThrow(/not a read operation/u);
+  });
+
+  it("catches an undeclared dot-walk in the query, the fields, the order and the group", async () => {
+    const walks: Record<string, Record<string, string>> = {
+      "sysparm_query": { sysparm_query: "application.name=Global" },
+      "or clause": { sysparm_query: "state=complete^ORapplication.scope=x" },
+      "order by": { sysparm_query: "state=complete^ORDERBYapplication.name" },
+      "order by desc": { sysparm_query: "ORDERBYDESCapplication.name" },
+      "group by clause": { sysparm_query: "GROUPBYapplication.name" },
+      "sysparm_fields": { sysparm_fields: "sys_id,application.name" },
+      "sysparm_group_by": { sysparm_group_by: "application.name" },
+      "sysparm_orderby": { sysparm_orderby: "application.name" },
+      "sysparm_sum_fields": { sysparm_sum_fields: "update_set.sys_mod_count" },
+    };
+    for (const [label, params] of Object.entries(walks)) {
+      const { instance } = await runHandler((ops) => ops.get(table("sys_update_set"), params).then(() => undefined));
+      expect(() => expectReadsWithin(instance, BATCH_PLAN), label).toThrow(/dot-walk .* is not declared by the view/u);
+    }
+  });
+
+  it("catches a declared dot-walk whose target is outside the plan, and one that is more than one hop", async () => {
+    const declared = [{ from: "sys_update_set", field: "application", target: "sys_scope" }];
+    const named = await runHandler((ops) => ops.get(table("sys_update_set"), { sysparm_query: "application.name=Global" }).then(() => undefined));
+    expect(() => expectReadsWithin(named.instance, BATCH_PLAN, declared)).toThrow(/reads sys_scope, outside the plan/u);
+    expect(() => expectReadsWithin(named.instance, [...BATCH_PLAN, "sys_scope"], declared)).not.toThrow();
+    const deep = await runHandler((ops) => ops.get(table("sys_update_set"), { sysparm_fields: "application.parent.name" }).then(() => undefined));
+    expect(() => expectReadsWithin(deep.instance, [...BATCH_PLAN, "sys_scope"], declared)).toThrow(/more than one hop/u);
+    // A declaration on another table or another field declares nothing here.
+    const other = await runHandler((ops) => ops.get(table("sys_update_set"), { sysparm_fields: "application.name" }).then(() => undefined));
+    expect(() => expectReadsWithin(other.instance, [...BATCH_PLAN, "sys_scope"], [{ from: "sys_update_xml", field: "application", target: "sys_scope" }])).toThrow(/not declared/u);
+  });
+
+  it("does not mistake a dot in a value for a dot-walk, and refuses an unclassified parameter", async () => {
+    const plain = await runHandler((ops) => ops.get(table("sys_update_set"), { sysparm_query: "nameLIKEv1.2.3^description=a.b^ORupdate_set=x.y" }).then(() => undefined));
+    expect(() => expectReadsWithin(plain.instance, BATCH_PLAN)).not.toThrow();
+    const odd = await runHandler((ops) => ops.get(table("sys_update_set"), { sysparm_future_param: "application.name" }).then(() => undefined));
+    expect(() => expectReadsWithin(odd.instance, BATCH_PLAN)).toThrow(/unclassified parameter sysparm_future_param/u);
+  });
+
+  it("fails the test when a recording instance made calls that nobody checked", async () => {
+    const { instance } = await runHandler((ops) => ops.get(table("sys_update_set")).then(() => undefined));
+    expect(instance.calls).toHaveLength(1);
+    await expect(closeHarnesses()).rejects.toThrow(/no test checked/u);
+    // closeHarnesses cleared the list, so the afterEach hook has nothing left to fail on.
   });
 });
