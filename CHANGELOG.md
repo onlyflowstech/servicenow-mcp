@@ -80,7 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three tables as outside the wildcard row's write access.
 - **`sys_audit` and `sys_journal_field` are no longer covered by a `"*"` table
   grant; name them to read them.** A profile whose `readTables` (or
-  `writeTables`) holds `"*"` used to reach both tables like any other. Their rows
+  `writeTables`) holds `"*"` now reaches them only when it names them. Their rows
   hold the old and new values of other tables' fields, comments and work notes,
   so they are now granted by name only. With `"*"` alone, `sn_query`, `sn_get`,
   `sn_aggregate`, `sn_schema`, `sn_batch` and the other tools refuse them, and

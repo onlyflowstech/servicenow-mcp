@@ -340,7 +340,7 @@ export interface FlowTableFieldSpec {
 
 // ===========================================================================
 // Table and column names, confirmed against sys_dictionary on Brazil patch 0
-// (flow capture, scratchpad/reports/flow-capture.md §4). FLOW_VIEW_TABLES
+// (from a flow capture). FLOW_VIEW_TABLES
 // and FLOW_TABLE_FIELDS are the only places these names live;
 // FLOW_ELEMENT_SOURCES must reference only fields declared here, and a test
 // checks every field against the captured schema.

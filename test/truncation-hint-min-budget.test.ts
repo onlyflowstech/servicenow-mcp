@@ -126,7 +126,7 @@ const BUDGETS: number[] = [];
 for (let budget = 1_000; budget <= 1_300; budget += 10) BUDGETS.push(budget);
 for (let budget = 1_400; budget <= 3_000; budget += 200) BUDGETS.push(budget);
 
-describe("a truncated read at the smallest budgets (regression in 77448fa, #37)", () => {
+describe("a truncated read at the smallest budgets (regression in 77448fa)", () => {
   it("returns a normal truncated result for the owner's step 5 call", async () => {
     const connected = await harness(rowsFor(OWNER_FIELDS, 22));
     const result = await connected.client.callTool({
