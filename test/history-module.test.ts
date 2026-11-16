@@ -341,9 +341,9 @@ describe("sources the profile cannot read", () => {
       journal: { status: "not_granted", returned: 0, has_more: false },
       flows: { status: "ok", returned: 1, has_more: false },
     });
-    // The narrowing "*" also hides the dictionary columns: no values, and the
-    // flow's user and test flag are simply not requested.
-    expect(data.warnings).toEqual([DICTIONARY_UNAVAILABLE_WARNING]);
+    // Only flows are left, which need no field types; the flow's user and
+    // test flag are simply not requested.
+    expect(data.warnings).toBeUndefined();
     expect(eventsOf(data)).toEqual([
       { time: "2026-01-01 09:00:00", source: "flows", flow: { name: "Fake Flow 1", state: "COMPLETE" } },
     ]);

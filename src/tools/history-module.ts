@@ -17,13 +17,15 @@
  * The mirror tables (`sys_history_line`, `sys_audit_delete`,
  * `sys_email`) are never read.
  *
- * Reads, at most six per page:
+ * Reads, at most six per page (four once the class's types are memoized):
  * 1. the record (`GET <table>/<sys_id>`, `sys_id,sys_class_name`). A record
  *    that is missing or that the instance refuses is `not_found`; a record
  *    whose class is not `table` is refused with the class to call with;
  * 2. the class's extension chain (`sys_db_object`) and every dictionary row
- *    of that chain (`sys_dictionary`), through the metadata cache. The chain
- *    counts only when it reaches the table that defines `sys_id`;
+ *    of that chain (`sys_dictionary`), uncached and then kept for an hour in
+ *    the per-credential memo, so a warm call skips both. Skipped as well when
+ *    no source on the page needs types. The chain counts only when it
+ *    reaches the table that defines `sys_id`;
  * 3. each planned source, newest first, `limit + 1` rows, uncached. The
  *    journal and flow reads run with step 2; the audit read follows it, so
  *    its query leaves out the chain's journal fields. A source whose page is
@@ -76,13 +78,15 @@ import {
   resolveReadableFields,
 } from "../field-policy.js";
 import {
+  FIELD_TYPES_TTL_MS,
   FIELD_TYPES_UNAVAILABLE,
+  FIELD_TYPES_UNAVAILABLE_TTL_MS,
   classifyField,
   fieldTypesFromRows,
   type DictionaryRow,
   type FieldTypes,
 } from "../hidden-values.js";
-import { uncachedOperations } from "../metadata-cache.js";
+import { derivedMetadataMemo, uncachedOperations } from "../metadata-cache.js";
 import { serviceNowSysIdPathSegment } from "../servicenow-identifiers.js";
 import {
   TablePolicyError,
@@ -430,12 +434,46 @@ interface ClassTypes {
 
 const NO_TYPES: ClassTypes = Object.freeze({ types: FIELD_TYPES_UNAVAILABLE, auditEnabled: null });
 
+/** What one read of a class's chain and dictionary found; kept in the per-credential memo. */
+interface ClassTypesEntry {
+  readonly chain: readonly string[];
+  readonly rows: readonly DictionaryRow[];
+  readonly auditEnabled: boolean | null;
+  /** Some table of the chain defines `sys_id`: the chain reached its base table. */
+  readonly complete: boolean;
+  /** The dictionary read filled its page, so it may be cut short. */
+  readonly full: boolean;
+}
+
+const CLASS_TYPES_MEMO_PREFIX = "sn_history:class-types:v1:";
+
+function isClassTypesEntry(candidate: unknown): candidate is ClassTypesEntry {
+  if (typeof candidate !== "object" || candidate === null) return false;
+  const entry = candidate as Partial<Record<keyof ClassTypesEntry, unknown>>;
+  return Array.isArray(entry.chain) && Array.isArray(entry.rows) && typeof entry.complete === "boolean" && typeof entry.full === "boolean";
+}
+
+function typesOf(entry: ClassTypesEntry, recordClass: string): ClassTypes {
+  if (entry.full) return NO_TYPES;
+  if (!entry.complete) return { types: FIELD_TYPES_UNAVAILABLE, auditEnabled: entry.auditEnabled, unconfirmedChain: true };
+  return {
+    types: fieldTypesFromRows(entry.rows, { [recordClass]: entry.chain }, { complete: true }),
+    auditEnabled: entry.auditEnabled,
+  };
+}
+
 /**
  * The class's field types: its chain, then every dictionary row of the chain,
  * each field typed by its nearest definition (`incident.work_notes` is
- * defined on `task`). Through the metadata cache. A refusal, an error, no
- * field rows or a full page give the `unavailable` state; a cancellation
- * rethrows.
+ * defined on `task`).
+ *
+ * The reads go straight to the instance, and what they find is kept in the
+ * metadata cache's per-credential memo for an hour (the type-hiding memo's
+ * time), as `loadFieldTypes` does: a warm call reads nothing here, and a wide
+ * chain never pays for a `sys_dictionary` watermark. Concurrent calls for one
+ * class share one read. A refusal or an error is not kept and gives the
+ * `unavailable` state; a full page or a chain that stops short is kept for
+ * 30 seconds and gives it too. A cancellation rethrows.
  *
  * The chain is only trusted when it reaches the table that defines `sys_id`:
  * every chain ends at a base table, which owns it, while an extended table
@@ -444,17 +482,49 @@ const NO_TYPES: ClassTypes = Object.freeze({ types: FIELD_TYPES_UNAVAILABLE, aud
  * table, so its types are `unavailable` too.
  */
 async function readClassTypes(
-  meta: ServiceNowOperations,
+  services: ServiceNowOperations,
   recordClass: string,
   plan: HistoryPlan,
   signal: AbortSignal | undefined
 ): Promise<ClassTypes> {
   if (!plan.dictionary) return NO_TYPES;
+  const memo = derivedMetadataMemo(services);
+  const memoKey = `${CLASS_TYPES_MEMO_PREFIX}${plan.auditFlag ? "audit" : "plain"}:${recordClass}`;
+  const known = memo?.get(memoKey);
+  if (isClassTypesEntry(known)) return typesOf(known, recordClass);
+  const pending = memo?.pending(memoKey);
+  if (pending !== undefined) {
+    try {
+      const shared = await pending;
+      if (isClassTypesEntry(shared)) return typesOf(shared, recordClass);
+    } catch {
+      // That call was cancelled; read for this one.
+    }
+  }
+  const read = readClassTypesEntry(uncachedOperations(services), recordClass, plan, signal);
+  const entry = await (memo === undefined ? read : memo.track(memoKey, read));
+  if (entry === undefined) return NO_TYPES;
+  memo?.set(
+    memoKey,
+    entry,
+    128 + JSON.stringify(entry).length,
+    entry.complete && !entry.full ? FIELD_TYPES_TTL_MS : FIELD_TYPES_UNAVAILABLE_TTL_MS
+  );
+  return typesOf(entry, recordClass);
+}
+
+/** One uncached read of the chain and its dictionary rows; undefined when either fails. */
+async function readClassTypesEntry(
+  reader: ServiceNowOperations,
+  recordClass: string,
+  plan: HistoryPlan,
+  signal: AbortSignal | undefined
+): Promise<ClassTypesEntry | undefined> {
   try {
-    const chain = await inOwnScope(signal, () => resolveTableHierarchy(meta, recordClass, MAX_HIERARCHY_DEPTH, false));
+    const chain = await inOwnScope(signal, () => resolveTableHierarchy(reader, recordClass, MAX_HIERARCHY_DEPTH, false));
     const fields = [...HISTORY_DICTIONARY_FIELDS, ...(plan.auditFlag ? [HISTORY_DICTIONARY_AUDIT_FIELD] : [])];
     const response = await inOwnScope(signal, () =>
-      meta.get(`${TABLE_PATH}sys_dictionary`, {
+      reader.get(`${TABLE_PATH}sys_dictionary`, {
         sysparm_query: `nameIN${chain.join(",")}^ORDERBYname^ORDERBYelement`,
         sysparm_fields: fields.join(","),
         sysparm_limit: String(MAX_HISTORY_DICTIONARY_ROWS),
@@ -463,7 +533,9 @@ async function readClassTypes(
       })
     );
     const rows = rowsOf(response);
-    if (rows.length >= MAX_HISTORY_DICTIONARY_ROWS) return NO_TYPES;
+    if (rows.length >= MAX_HISTORY_DICTIONARY_ROWS) {
+      return Object.freeze({ chain, rows: [], auditEnabled: null, complete: false, full: true });
+    }
     const dictionaryRows: DictionaryRow[] = [];
     let auditEnabled: boolean | null = null;
     for (const row of rows) {
@@ -478,18 +550,18 @@ async function readClassTypes(
         }
         continue;
       }
-      dictionaryRows.push({ table, element, internal_type: type });
+      dictionaryRows.push(Object.freeze({ table, element, internal_type: type }));
     }
-    if (!dictionaryRows.some((row) => row.element === "sys_id")) {
-      return { types: FIELD_TYPES_UNAVAILABLE, auditEnabled, unconfirmedChain: true };
-    }
-    return {
-      types: fieldTypesFromRows(dictionaryRows, { [recordClass]: chain }, { complete: true }),
+    return Object.freeze({
+      chain: Object.freeze([...chain]),
+      rows: Object.freeze(dictionaryRows),
       auditEnabled,
-    };
+      complete: dictionaryRows.some((row) => row.element === "sys_id"),
+      full: false,
+    });
   } catch (error) {
     if (isServiceNowRequestCancellation(error) || signal?.aborted) throw error;
-    return NO_TYPES;
+    return undefined;
   }
 }
 
@@ -811,7 +883,13 @@ async function handleHistory(
   // and flow reads start with the types; the audit read waits for them, to
   // leave journal fields out of its query.
   const journalInCall = plan.sources.some((source) => source.source === "journal" && source.granted);
-  const typesRead = readClassTypes(services.serviceNow, recordClass, plan, signal);
+  // Types are needed only by a source this page reads that has audit rows
+  // to judge or journal values to show; a flows-only page skips them.
+  const live = (source: HistorySourcePlan) => source.granted && (args.cursor === undefined || args.cursor[source.source] !== undefined);
+  const needsTypes = plan.sources.some(
+    (source) => live(source) && (source.source === "audit" || (source.source === "journal" && source.values))
+  );
+  const typesRead = needsTypes ? readClassTypes(services.serviceNow, recordClass, plan, signal) : Promise.resolve(NO_TYPES);
   const [classTypes, reads] = await Promise.all([
     typesRead,
     Promise.all(
@@ -852,7 +930,7 @@ async function handleHistory(
   });
 
   const warnings: string[] = [];
-  if (args.include_values && classTypes.types.state !== "available") {
+  if (needsTypes && args.include_values && classTypes.types.state !== "available") {
     warnings.push(classTypes.unconfirmedChain === true ? CHAIN_UNCONFIRMED_WARNING : DICTIONARY_UNAVAILABLE_WARNING);
   }
   for (const source of plan.sources) {

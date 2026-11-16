@@ -136,11 +136,61 @@ describe("the plan", () => {
     ]);
   });
 
-  it("never plans a read the dispatcher would not authorize", async () => {
+  it("reads only the record and the flows when flows are all the profile may read", async () => {
     const instance = fakeInstance(incidentFixture());
     const tableAccess = wildcardPolicy();
     const { call } = await harness(instance.ops, { tableAccess });
     dataOf(await call(BASE));
-    expect(instance.calls.map(tableOfCall).sort()).toEqual(["incident", "sys_db_object", "sys_dictionary", "sys_flow_context"]);
+    expect(instance.calls.map(tableOfCall).sort()).toEqual(["incident", "sys_flow_context"]);
+  });
+});
+
+describe("requests per call", () => {
+  const tableAccess = namedPolicy(FULL_TABLES);
+  const tables = (calls: readonly Parameters<typeof tableOfCall>[0][]) => calls.map(tableOfCall).sort();
+
+  it("reads the chain and dictionary once, then serves them from the memo", async () => {
+    const instance = fakeInstance(incidentFixture());
+    const { call } = await harness(instance.ops, { tableAccess, metadataCache: {} });
+    dataOf(await call(BASE));
+    expect(tables(instance.calls)).toEqual(["incident", "sys_audit", "sys_db_object", "sys_dictionary", "sys_flow_context", "sys_journal_field"]);
+    const first = instance.calls.length;
+    const warm = dataOf(await call(BASE));
+    expect(tables(instance.calls.slice(first))).toEqual(["incident", "sys_audit", "sys_flow_context", "sys_journal_field"]);
+    // The memoized types still judge the rows: the journal field's audit row stays out.
+    expect((warm.events as Record<string, unknown>[]).some((event) => event.source === "audit" && event.field === "work_notes")).toBe(false);
+    expect(warm.audit_enabled).toBe(true);
+    expectReadsWithin(instance.calls, planFor(BASE, tableAccess));
+  });
+
+  it("never reads the dictionary through the cache, so it never pays for a watermark", async () => {
+    const instance = fakeInstance(incidentFixture());
+    const { call } = await harness(instance.ops, { tableAccess, metadataCache: { smallReadBytes: 0 } });
+    dataOf(await call(BASE));
+    dataOf(await call(BASE));
+    for (const read of instance.calls) {
+      expect(read.params.sysparm_fields ?? "", read.path).not.toContain("sys_updated_on");
+    }
+  });
+
+  it("keeps a chain that stops short only as unavailable", async () => {
+    const instance = fakeInstance(incidentFixture({ parents: {} }));
+    const { call } = await harness(instance.ops, { tableAccess, metadataCache: {} });
+    for (let n = 0; n < 2; n += 1) {
+      const data = dataOf(await call(BASE));
+      expect(JSON.stringify(data.events)).not.toMatch(/"(?:old|new)"/u);
+    }
+  });
+
+  it("skips the type reads when no source on the page needs them", async () => {
+    const instance = fakeInstance(incidentFixture());
+    const { call } = await harness(instance.ops, { tableAccess });
+    const flowsOnly = dataOf(await call({ ...BASE, sources: ["flows"] }));
+    expect(tables(instance.calls)).toEqual(["incident", "sys_flow_context"]);
+    expect(flowsOnly.warnings).toBeUndefined();
+    expect(flowsOnly.audit_enabled).toBeNull();
+    instance.calls.length = 0;
+    dataOf(await call({ ...BASE, sources: ["journal"], include_values: false }));
+    expect(tables(instance.calls)).toEqual(["incident", "sys_journal_field"]);
   });
 });

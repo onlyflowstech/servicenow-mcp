@@ -20,6 +20,7 @@ import type { ServiceNowClient, ServiceNowOperations } from "../src/client.js";
 import type { ServiceNowConfig } from "../src/config.js";
 import type { ExecutionContextDependencies } from "../src/execution-context.js";
 import { runWithFieldPolicyConfiguration, type FieldPolicyConfigurationInput } from "../src/field-policy.js";
+import type { MetadataCacheConfigInput } from "../src/metadata-cache.js";
 import { fieldTypesFromRows, type DictionaryRow, type FieldTypeLoader } from "../src/hidden-values.js";
 import type { Profile, ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
@@ -305,6 +306,8 @@ export function expectReadsWithin(calls: readonly RecordedCall[], plan: readonly
 // ---------------------------------------------------------------------------
 
 const open: Array<{ close(): Promise<void> }> = [];
+/** Each harness with the metadata cache on gets its own credential, so no two share a cache scope. */
+let cachedHarnesses = 0;
 let realFetch: typeof globalThis.fetch | undefined;
 
 afterEach(async () => {
@@ -325,6 +328,8 @@ export async function harness(
     readonly fieldPolicy?: FieldPolicyConfigurationInput;
     /** The dispatcher's type lookup; by default it finds no hidden-typed field. */
     readonly fieldTypeLoader?: FieldTypeLoader;
+    /** Turns the metadata cache, and its per-credential memo, on. Off by default under test. */
+    readonly metadataCache?: MetadataCacheConfigInput;
   }
 ) {
   if (realFetch === undefined) {
@@ -342,10 +347,11 @@ export async function harness(
   const config: ServiceNowConfig = Object.freeze({
     instance: INSTANCE,
     user: "history-user",
-    password: "history-test-secret",
+    password: options.metadataCache === undefined ? "history-test-secret" : `history-test-secret-${(cachedHarnesses += 1)}`,
     displayValue: "true",
     relDepth: 3,
     authType: "basic" as const,
+    ...(options.metadataCache === undefined ? {} : { metadataCache: options.metadataCache }),
   });
   const manager = {
     getProfile: () => profile,
