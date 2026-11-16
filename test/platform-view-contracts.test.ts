@@ -292,14 +292,15 @@ describe("model-visible size", () => {
   // Measured as test/filter-examples.test.ts measures it: what a model reads
   // (name, description, input schema) as listed, with the shared profile
   // selector included, and without the output schema.
-  const BUDGET = 1_800;
+  // The skeleton's 1,800, plus 300 for the update set views' description lines.
+  const BUDGET = 2_100;
 
-  it("keeps the schema and description at or under 1,800 characters", async () => {
+  it("keeps the schema and description at or under 2,100 characters", async () => {
     const { client } = await harness(recordingInstance().ops);
     const tool = (await client.listTools()).tools[0]!;
     const size = JSON.stringify({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }).length;
     // Recorded, so a change here is made on purpose: the entry is paid for by every client on every session.
-    expect(size).toBe(1_791);
+    expect(size).toBe(2_046);
     expect(size).toBeLessThanOrEqual(BUDGET);
   });
 });

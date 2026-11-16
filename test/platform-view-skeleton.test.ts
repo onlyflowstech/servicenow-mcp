@@ -1,4 +1,3 @@
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
 
 import type { ServiceNowOperations } from "../src/client.js";
@@ -41,20 +40,9 @@ const MINIMAL: Readonly<Record<PlatformView, Record<string, unknown>>> = {
 const WIDEST: Readonly<Record<PlatformView, Record<string, unknown>>> = {
   ...MINIMAL,
   changes: { update_set: SYS_ID, change: SYS_ID, payload: true },
-  remote_update_sets: { problems: true },
+  remote_update_sets: { remote_update_set: SYS_ID, problems: true },
 };
 
-/** Views whose handler is implemented; the others are still stubs. */
-const IMPLEMENTED: readonly PlatformView[] = ["upgrade_skipped", "scan_findings", "evaluate"];
-const STUB_VIEWS = PLATFORM_VIEWS.filter((view) => !IMPLEMENTED.includes(view));
-
-function expectFixedInternalError(result: CallToolResult): void {
-  expect(result.isError).toBe(true);
-  const text = textOf(result);
-  expect(text).toContain("Error category: internal.");
-  expect(text).toContain("Retry unchanged is not recommended.");
-  expect(result.structuredContent).toBeUndefined();
-}
 
 describe("sn_platform_view dispatcher", () => {
   it("lists one read-only tool, with the schema's keys and the declared tables", async () => {
@@ -64,15 +52,6 @@ describe("sn_platform_view dispatcher", () => {
     expect(platformViewToolModule.definition.name).toBe("sn_platform_view");
     expect(platformViewToolModule.runtime).toBe("servicenow");
     expect(PLATFORM_VIEW_ALL_TABLES.length).toBeGreaterThan(0);
-  });
-
-  it("answers every view with the fixed not-implemented error, and reads nothing", async () => {
-    const instance = recordingInstance();
-    const { call } = await harness(instance.ops, { tableAccess: readPolicy(PLATFORM_VIEW_ALL_TABLES) });
-    for (const view of STUB_VIEWS) {
-      expectFixedInternalError(await call({ view, ...MINIMAL[view] }));
-    }
-    expect(instance.calls).toEqual([]);
   });
 
   it("refuses a selector the view does not take with a correctable error, before any handler runs", async () => {
@@ -133,12 +112,8 @@ describe("the access plan is authorized before any handler runs", () => {
       const instance = recordingInstance();
       const granted = await harness(instance.ops, { tableAccess: readPolicy(plan) });
       const reached = await granted.call({ view, ...WIDEST[view] });
-      if (IMPLEMENTED.includes(view)) {
-        expect(reached.isError, view).not.toBe(true);
-        expectReadsWithin(instance, plan);
-      } else {
-        expectFixedInternalError(reached);
-      }
+      expect(reached.isError, view).not.toBe(true);
+      expectReadsWithin(instance, plan);
       await closeHarnesses();
       for (const missing of plan) {
         const short = await harness(recordingInstance().ops, {
@@ -155,13 +130,17 @@ describe("the access plan is authorized before any handler runs", () => {
 
   it("asks for the payload and problem tables only when the call does", async () => {
     const plain = readPolicy(PLATFORM_VIEW_TABLES.changes);
-    const { call } = await harness(recordingInstance().ops, { tableAccess: plain });
-    expectFixedInternalError(await call({ view: "changes", update_set: SYS_ID }));
+    const changes = recordingInstance();
+    const { call } = await harness(changes.ops, { tableAccess: plain });
+    expect((await call({ view: "changes", update_set: SYS_ID })).isError).not.toBe(true);
     const payload = await call({ view: "changes", update_set: SYS_ID, change: SYS_ID, payload: true });
     expect(textOf(payload)).toContain("denied by policy");
-    const problems = await harness(recordingInstance().ops, { tableAccess: readPolicy(PLATFORM_VIEW_TABLES.remote_update_sets) });
-    expectFixedInternalError(await problems.call({ view: "remote_update_sets" }));
-    expect(textOf(await problems.call({ view: "remote_update_sets", problems: true }))).toContain("denied by policy");
+    expectReadsWithin(changes, PLATFORM_VIEW_TABLES.changes);
+    const remote = recordingInstance();
+    const problems = await harness(remote.ops, { tableAccess: readPolicy(PLATFORM_VIEW_TABLES.remote_update_sets) });
+    expect((await problems.call({ view: "remote_update_sets" })).isError).not.toBe(true);
+    expect(textOf(await problems.call({ view: "remote_update_sets", remote_update_set: SYS_ID, problems: true }))).toContain("denied by policy");
+    expectReadsWithin(remote, PLATFORM_VIEW_TABLES.remote_update_sets);
   });
 
   it("denies a write: the tool declares reads only", async () => {
@@ -211,12 +190,11 @@ describe("recording client: a handler reads only tables in its view's plan", () 
   const BATCH_PLAN = platformViewReadTables("batch", MINIMAL.batch);
   const table = (name: string) => `/api/now/table/${name}`;
 
-  it("holds the shipped handlers to their plans (the stubs read nothing)", async () => {
+  it("holds the shipped handlers to their plans", async () => {
     for (const view of PLATFORM_VIEWS) {
       const instance = recordingInstance();
       const { call } = await harness(instance.ops, { tableAccess: readPolicy(PLATFORM_VIEW_ALL_TABLES) });
       await call({ view, ...WIDEST[view] });
-      if (!IMPLEMENTED.includes(view)) expect(instance.calls, view).toEqual([]);
       expectReadsWithin(instance, platformViewReadTables(view, WIDEST[view]));
       await closeHarnesses();
     }

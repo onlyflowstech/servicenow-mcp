@@ -96,6 +96,9 @@ export const PLATFORM_VIEW_DESCRIPTION =
   "A view takes only its own selectors. " +
   "state: in progress, complete, ignore (update_sets) or a remote set state. update_set: sys_id or name. " +
   "upgrade, result: latest or sys_id. updated_since: YYYY-MM-DD[ hh:mm:ss]. groups: perf, sec, bp. " +
+  "application: scope sys_id or global. changes: update_set or remote_update_set; payload: true needs change " +
+  "and shows its XML masked, only if the profile names payload in its sys_update_xml fields. batch: any member. " +
+  "problems: true needs remote_update_set. " +
   PLATFORM_VIEW_UNTRUSTED_SENTENCE;
 
 // ---------------------------------------------------------------------------

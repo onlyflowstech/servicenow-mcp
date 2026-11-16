@@ -36,6 +36,7 @@ import {
 } from "./platform-view-contracts.js";
 import { handleEvaluate } from "./platform-view-evaluate.js";
 import { handleScanFindings } from "./platform-view-scan.js";
+import { handleUpdateSetViews } from "./platform-view-update-sets.js";
 import { handleUpgradeSkipped } from "./platform-view-upgrades.js";
 import { withStructuredResultEnvelope } from "./result-envelope.js";
 import {
@@ -45,11 +46,6 @@ import {
 } from "./tool-module.js";
 
 const schema = withRequiredProfile(platformViewInputSchema);
-
-/** The update set views have no handler yet: the same fixed error as the stub files. */
-const handleUpdateSetViews: PlatformViewHandler = async () => {
-  throw createToolError("internal", "do_not_retry");
-};
 
 /** One handler per view. Implementing a view replaces its entry. */
 const VIEW_HANDLERS: Readonly<Record<PlatformView, PlatformViewHandler>> = Object.freeze({
