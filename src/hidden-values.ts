@@ -333,6 +333,13 @@ export interface LoadFieldTypesOptions {
   readonly forceRecache?: boolean;
 }
 
+/** The shape of {@link loadFieldTypes}, for an injected test double. */
+export type FieldTypeLoader = (
+  client: ServiceNowOperations,
+  tables: Iterable<string>,
+  options?: LoadFieldTypesOptions
+) => Promise<FieldTypes>;
+
 /**
  * Resolve the hidden-typed fields of every table in `tables`.
  *
@@ -869,4 +876,18 @@ export function fieldTypesConfigFromEnvironment(
 /** True when the profile opted out of requiring the field types. */
 export function dictionaryNotRequired(config: FieldTypesConfigInput | undefined): boolean {
   return config?.dictionary === "not_required";
+}
+
+/**
+ * The startup warning for profiles that opted out of requiring the field
+ * types, or undefined when none did. Profile names are JSON-quoted.
+ */
+export function fieldTypesOptOutWarning(profiles: readonly string[]): string | undefined {
+  if (profiles.length === 0) return undefined;
+  return (
+    `[servicenow-mcp] WARNING: ${profiles.length} profile(s) set fieldTypes.dictionary ` +
+    `to "not_required" (${profiles.map((name) => JSON.stringify(name)).join(", ")}): while ` +
+    "the instance's field types cannot be read, their tools hide password-type fields " +
+    "by name only.\n"
+  );
 }

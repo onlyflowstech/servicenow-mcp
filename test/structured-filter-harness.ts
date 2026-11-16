@@ -16,7 +16,7 @@ import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy, type TableAccessPolicyInput } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
 import { withQueryFields } from "./fixtures/echo-fields.js";
-import { fieldTypeAnswer } from "./fixtures/field-types.js";
+import { fieldTypeAnswer, noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const CONFIG: ServiceNowConfig = {
   instance: "https://structured-filter.service-now.com",
@@ -73,6 +73,11 @@ export interface HarnessOptions {
   readonly tableAccess?: TableAccessPolicyInput;
   /** The profile's field policy entries, as `fieldPolicy: { fieldPolicy }` on the effective policy. */
   readonly fieldPolicy?: Record<string, unknown>;
+  /**
+   * Run the real field-type lookup, answered by the synthetic fixture, instead
+   * of the injected stand-in that finds no hidden-typed field.
+   */
+  readonly realFieldTypes?: boolean;
 }
 
 const CODE_TABLES = [
@@ -184,6 +189,7 @@ export async function harness(
       }),
     },
     auditSink: { write: () => {}, writePreContext: () => {} },
+    ...(options.realFieldTypes === true ? {} : { fieldTypeLoader: noHiddenFieldTypes }),
   };
   const server = await createMcpServer({
     dependencies: { profileManager, executionContext },

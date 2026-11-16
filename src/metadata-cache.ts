@@ -413,15 +413,6 @@ export function uncachedOperations(operations: ServiceNowOperations): ServiceNow
 }
 
 /**
- * True when `operations` is a cached wrapper. Every production call gets one;
- * only an unconfigured cache under NODE_ENV=test is a bare passthrough (see
- * createCachedServiceNowOperations).
- */
-export function isCachedOperations(operations: ServiceNowOperations): boolean {
-  return UNCACHED_OPERATIONS.has(operations);
-}
-
-/**
  * @param scope Cache partition key. Must identify the ServiceNow instance
  *   *and* the credential identity reading from it -- see the module docstring.
  */

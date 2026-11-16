@@ -39,6 +39,7 @@ import {
 import { tableAccessPolicyInputFromEnvironment, type TableAccessPolicyInput } from "./table-policy.js";
 import { metadataCacheConfigFromEnvironment, type MetadataCacheConfigInput } from "./metadata-cache.js";
 import {
+  dictionaryNotRequired,
   fieldTypesConfigFromEnvironment,
   FieldTypesConfigurationError,
   validateFieldTypesConfig,
@@ -268,6 +269,17 @@ export class ProfileManager {
    * Basic Auth restriction program). Unconfigured placeholder profiles
    * (empty instance) are skipped.
    */
+  /**
+   * Profiles that opted out of requiring the field types
+   * (`fieldTypes.dictionary: "not_required"`): while the instance's field
+   * types cannot be read, they hide fields by name only.
+   */
+  getFieldTypesNotRequiredProfileNames(): string[] {
+    return Object.entries(this.config.profiles)
+      .filter(([, profile]) => dictionaryNotRequired(profile.fieldTypes))
+      .map(([name]) => name);
+  }
+
   getBasicAuthProfileNames(): string[] {
     return Object.entries(this.config.profiles)
       .filter(

@@ -60,6 +60,7 @@ import {
   registerServiceNowTools,
 } from "./tools/index.js";
 import { VERSION } from "./version.js";
+import { fieldTypesOptOutWarning } from "./hidden-values.js";
 
 function createRestrictedPolicyProvider(
   profileManager: ProfileManagerType,
@@ -142,6 +143,9 @@ async function main(): Promise<void> {
       maxPendingLines: 256,
     }),
   });
+
+  const optOut = fieldTypesOptOutWarning(profileManager.getFieldTypesNotRequiredProfileNames());
+  if (optOut !== undefined) stderrWrite(optOut);
 
   const basicProfiles = profileManager.getBasicAuthProfileNames();
   if (basicProfiles.length > 0) {

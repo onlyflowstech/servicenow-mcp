@@ -13,6 +13,7 @@ import type { ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const CONFIG: ServiceNowConfig = {
   instance: "https://field-policy-test.service-now.com",
@@ -227,6 +228,8 @@ async function createHarness() {
         tableAccess,
       }),
     },
+    // Stands in for the field-type lookup this double does not serve.
+    fieldTypeLoader: noHiddenFieldTypes,
     auditSink: { write: () => {}, writePreContext: () => {} },
   };
   const server = await createMcpServer({

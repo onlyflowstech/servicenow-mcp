@@ -21,6 +21,7 @@ import {
   dictionaryNotRequired,
   validateFieldTypesConfig,
   type DictionaryRequirement,
+  type FieldTypeLoader,
   type FieldTypesConfigInput,
 } from "./hidden-values.js";
 import type { FieldPolicyConfigurationInput } from "./field-policy.js";
@@ -270,6 +271,14 @@ export interface ExecutionContextDependencies {
   readonly toolAuditObserver?: ToolAuditObserver;
   /** Runtime request signal; omission is a non-cancellable local/test invocation. */
   readonly requestSignal?: AbortSignal;
+  /**
+   * Replaces the field-type lookup (`loadFieldTypes`) for a test double that
+   * does not serve it. Only code that builds these dependencies can set it:
+   * no profile, configuration key or environment variable reaches it, and
+   * the production entry points never do. Omitted, the real lookup runs for
+   * every tool with field policies.
+   */
+  readonly fieldTypeLoader?: FieldTypeLoader;
 }
 
 /** Printable bounded identifiers; JSON encoding makes punctuation log-safe. */

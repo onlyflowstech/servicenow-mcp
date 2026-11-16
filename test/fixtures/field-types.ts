@@ -1,3 +1,5 @@
+import { fieldTypesFromRows, type FieldTypeLoader } from "../../src/hidden-values.js";
+
 /**
  * Synthetic answers to the field-type lookup the dispatcher makes before a
  * field-policy tool call (hidden-values.ts): the instance-wide sys_dictionary
@@ -102,3 +104,13 @@ export function fieldTypeResponse(
   headers.set("content-type", "application/json");
   return new Response(JSON.stringify(typed.data), { status: typed.status, headers });
 }
+
+/**
+ * An injected `fieldTypeLoader` for a test double that does not serve the
+ * lookup: every planned table resolves, with no hidden-typed field. The type
+ * step still runs (the plan is prepared again in its scope); it only finds
+ * nothing to hide. Set through the execution-context dependencies, which no
+ * profile, configuration or environment variable can reach.
+ */
+export const noHiddenFieldTypes: FieldTypeLoader = async (_client, tables) =>
+  fieldTypesFromRows([], Object.fromEntries([...tables].map((table) => [table, [table]])));

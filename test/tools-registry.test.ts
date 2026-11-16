@@ -22,6 +22,7 @@ import {
   registerServiceNowTools,
 } from "../src/tools/index.js";
 import { DEFAULT_FIELDS } from "../src/table-defaults.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const config: ServiceNowConfig = {
   instance: "https://example.service-now.com",
@@ -144,6 +145,8 @@ async function createHarness(
         tableAccess: TEST_TABLE_ACCESS,
       }),
     },
+    // Stands in for the field-type lookup this double does not serve.
+    fieldTypeLoader: noHiddenFieldTypes,
     auditSink: { write: () => {}, writePreContext: () => {} },
     ...(requestSignal === undefined ? {} : { requestSignal }),
   };
@@ -330,6 +333,8 @@ describe("high-level tool discovery", () => {
           tableAccess: TEST_TABLE_ACCESS,
         }),
       },
+      // Stands in for the field-type lookup this double does not serve.
+      fieldTypeLoader: noHiddenFieldTypes,
       auditSink: {
         write: (_record: ToolAuditRecord) => {},
         writePreContext: () => {},

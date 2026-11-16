@@ -29,6 +29,7 @@ import {
   withRequiredProfile,
   type ToolModuleContract,
 } from "../src/tools/index.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const TOKEN = "snsdk-50-output-token-012345678901234567890123456";
 const AUTHORIZATION = `Bearer ${TOKEN}`;
@@ -235,6 +236,8 @@ async function createHarness(options: {
             },
           }),
         },
+        // Stands in for the field-type lookup this double does not serve.
+        fieldTypeLoader: noHiddenFieldTypes,
         auditSink: { write: auditWrite, writePreContext: () => {} },
       };
       return createMcpServer({

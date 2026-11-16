@@ -10,6 +10,10 @@
  * A `password2` display value can be the decrypted text, so the whole field
  * must go, never just its `value`. Synthetic data only.
  */
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -27,6 +31,7 @@ import {
 import {
   classifyField,
   FIELD_TYPES_UNAVAILABLE_MESSAGE,
+  fieldTypesOptOutWarning,
   fieldTypesFromRows,
   hiddenTypedFields,
   loadFieldTypes,
@@ -38,7 +43,7 @@ import {
 } from "../src/hidden-values.js";
 import { createCachedServiceNowOperations } from "../src/metadata-cache.js";
 import { buildPolicyCard, renderPolicyCard } from "../src/policy-card.js";
-import type { ProfileManager } from "../src/profile-manager.js";
+import { ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy } from "../src/table-policy.js";
 import { createEncodedQueryAccessPolicy } from "../src/encoded-query-policy.js";
@@ -120,7 +125,8 @@ interface HarnessOptions {
   readonly dictionary?: "required" | "not_required";
   readonly rows?: (path: string, params: Record<string, string>) => unknown[];
   readonly writeResult?: Record<string, unknown>;
-  readonly metadataCache?: NonNullable<ServiceNowConfig["metadataCache"]>;
+  /** `null`: the profile states no cache (under NODE_ENV=test, a bare passthrough). */
+  readonly metadataCache?: NonNullable<ServiceNowConfig["metadataCache"]> | null;
   readonly instance?: string;
   /** Holds every field-type lookup read open this long. */
   readonly lookupDelayMs?: number;
@@ -149,9 +155,9 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     password: "unused-test-placeholder",
     displayValue: "true",
     relDepth: 3,
-    // The type step runs on cached operations, which every production call
-    // has; a test turns the cache on to get them.
-    metadataCache: options.metadataCache ?? { smallReadBytes: 0 },
+    // The memo lives in the metadata cache's scope, so most tests turn the
+    // cache on; the type step itself runs either way.
+    ...(options.metadataCache === null ? {} : { metadataCache: options.metadataCache ?? { smallReadBytes: 0 } }),
   };
   const reads: Recorded[] = [];
   const writes: { method: string; path: string; body: unknown }[] = [];
@@ -525,6 +531,86 @@ describe("unavailable field types", () => {
     const result = await h.call("sn_query", { table: "u_vault", fields: "key" });
     expect(result.text).toContain(SENSITIVE_MESSAGE);
     expect(h.warnings).toHaveLength(0);
+  });
+});
+
+describe("no switch turns type hiding off", () => {
+  it("still refuses and drops hidden-typed fields under NODE_ENV=test with no cache configured", async () => {
+    expect(process.env.NODE_ENV).toBe("test");
+    const h = await harness({ metadataCache: null });
+    const named = await h.call("sn_query", { table: "u_vault", fields: "sys_id,secure_value,key" });
+    expect(named.text).toContain(SENSITIVE_MESSAGE);
+    const all = await h.call("sn_query", { table: "u_vault", response_format: "detailed" });
+    expect(all.isError, all.text).toBe(false);
+    expectNoSecret(all.text);
+    // Without the memo the lookup costs its two reads on every call.
+    const typeReads = h.reads.filter((read) => read.params.sysparm_query?.startsWith("internal_typeIN"));
+    const chainReads = h.reads.filter(
+      (read) => read.path.endsWith("/sys_db_object") && read.params.sysparm_query?.startsWith("nameIN")
+    );
+    expect(typeReads).toHaveLength(2);
+    expect(chainReads).toHaveLength(2);
+  });
+});
+
+describe("fields=all staleness", () => {
+  it("drops a column its own dictionary read types as hidden, even when the type map predates it", async () => {
+    const h = await harness({
+      rows: (path) =>
+        path === "/api/now/table/sys_dictionary"
+          ? [
+              { element: "name", internal_type: "string" },
+              { element: "fresh_secret", internal_type: { value: "password2" } },
+              { element: "sys_id", internal_type: "GUID" },
+            ]
+          : [vaultRow({ fresh_secret: `${SECRET}-fresh` })],
+    });
+    const result = await h.call("sn_query", { table: "u_vault", fields: "all" });
+    expect(result.isError, result.text).toBe(false);
+    expect(result.text).not.toContain(`${SECRET}-fresh`);
+    const read = tableReads(h, "u_vault").at(-1)!;
+    expect(read.params.sysparm_fields!.split(",")).not.toContain("fresh_secret");
+    expect(read.params.sysparm_fields!.split(",")).toContain("name");
+  });
+});
+
+describe("load-time warning", () => {
+  it("names the profiles that opted out, and nothing when none did", () => {
+    expect(fieldTypesOptOutWarning([])).toBeUndefined();
+    const text = fieldTypesOptOutWarning(["dev", "ops"])!;
+    expect(text).toContain("WARNING: 2 profile(s)");
+    expect(text).toContain('"dev", "ops"');
+    expect(text).toContain("by name only");
+  });
+
+  it("lists exactly the opted-out profiles from the profile file", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "field-types-warning-"));
+    try {
+      const configFilePath = path.join(directory, "config.json");
+      const profile = (extra: Record<string, unknown>) => ({
+        instance: "https://warn.service-now.com",
+        authType: "basic",
+        username: "u",
+        credential: "env:FIELD_TYPES_WARNING_SECRET",
+        ...extra,
+      });
+      fs.writeFileSync(
+        configFilePath,
+        JSON.stringify({
+          version: 2,
+          profiles: {
+            strict: profile({}),
+            explicit: profile({ fieldTypes: { dictionary: "required" } }),
+            relaxed: profile({ fieldTypes: { dictionary: "not_required" } }),
+          },
+        }),
+        { mode: 0o600 }
+      );
+      const manager = new ProfileManager({ configFilePath });
+      expect(manager.getFieldTypesNotRequiredProfileNames()).toEqual(["relaxed"]);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 

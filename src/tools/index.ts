@@ -23,7 +23,7 @@ import {
 } from "../client.js";
 import type { ServiceNowConfig } from "../config.js";
 import { CallMetrics } from "../call-metrics.js";
-import { createCachedServiceNowOperations, isCachedOperations } from "../metadata-cache.js";
+import { createCachedServiceNowOperations } from "../metadata-cache.js";
 import {
   FIELD_TYPES_UNAVAILABLE,
   FIELD_TYPES_UNAVAILABLE_MESSAGE,
@@ -679,19 +679,21 @@ function registerStandardTool(
       // prepare the plan again inside that scope, so every field check in it
       // and in the handler also refuses or drops those fields.
       //
-      // Every production call has cached operations. Only an unconfigured
-      // cache under NODE_ENV=test is a bare passthrough (the same switch that
-      // turns the metadata cache off for tests); those calls keep name-only
-      // hiding, and a test opts in by configuring the metadata cache.
+      // It runs for every tool with field policies, whatever the cache or
+      // the environment: without the memo (a bare passthrough) it costs its
+      // two reads on every call. Only an injected `fieldTypeLoader` (code
+      // that builds the dependencies; never a profile, config or env) can
+      // stand in for the lookup.
       let hiddenFieldScope: HiddenFieldScope | undefined;
-      if (tool.requirements.fieldPolicies.length > 0 && isCachedOperations(serviceNow)) {
+      if (tool.requirements.fieldPolicies.length > 0) {
+        const loader = contextDependencies.fieldTypeLoader ?? loadFieldTypes;
         const tables = access.requests.map((entry) => entry.table);
         let types: FieldTypes;
         try {
           types = await runWithServiceNowRequestSignal(
             context.signal,
             () =>
-              loadFieldTypes(serviceNow, tables, {
+              loader(serviceNow, tables, {
                 forceRecache: authorizedArgs.force_recache === true,
               }),
             // Its own metrics: the call's reported cache outcome and upstream

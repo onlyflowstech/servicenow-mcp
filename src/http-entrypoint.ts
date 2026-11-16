@@ -79,6 +79,7 @@ import {
   registerServiceNowTools,
 } from "./tools/index.js";
 import { VERSION } from "./version.js";
+import { fieldTypesOptOutWarning } from "./hidden-values.js";
 
 function createRestrictedPolicyProvider(
   profileManager: ProfileManagerType,
@@ -274,6 +275,9 @@ export async function runHttpService(): Promise<void> {
     ...(allowedHosts === undefined ? {} : { allowedHosts }),
     ...(allowedOrigins === undefined ? {} : { allowedOrigins }),
   });
+
+  const optOut = fieldTypesOptOutWarning(profileManager.getFieldTypesNotRequiredProfileNames());
+  if (optOut !== undefined) process.stderr.write(optOut);
 
   const basicProfiles = profileManager.getBasicAuthProfileNames();
   if (basicProfiles.length > 0) {

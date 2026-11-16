@@ -30,6 +30,7 @@ import {
   createMockServiceNowFixture,
   type MockServiceNowStep,
 } from "./fixtures/mock-servicenow.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const PROFILE = "projection";
 const INSTANCE = "https://projection-test.service-now.com";
@@ -115,6 +116,8 @@ async function harness(
         fieldPolicy,
       }),
     },
+    // Stands in for the field-type lookup this double does not serve.
+    fieldTypeLoader: noHiddenFieldTypes,
     auditSink: {
       write: (record) => audits.push(record),
       writePreContext: () => {},

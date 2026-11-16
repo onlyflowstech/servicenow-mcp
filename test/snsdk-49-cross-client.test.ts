@@ -20,6 +20,7 @@ import {
   REGISTERED_TOOL_COUNT,
   registerServiceNowTools,
 } from "../src/tools/index.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 const TOKEN = "snsdk-49-cross-client-token-012345678901234567890123";
 const AUTHORIZATION = `Bearer ${TOKEN}`;
@@ -133,6 +134,8 @@ async function createHarness(options: {
             },
           }),
         },
+        // Stands in for the field-type lookup this double does not serve.
+        fieldTypeLoader: noHiddenFieldTypes,
         auditSink: { write: auditWrite, writePreContext: auditPreWrite },
       };
       return createMcpServer({

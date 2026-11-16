@@ -489,8 +489,8 @@ group field there.
   message naming this access.
 - **`"fieldTypes": { "dictionary": "not_required" }`** on a profile (or
   `SN_FIELD_TYPES_DICTIONARY=not_required` for the environment profile) lets
-  those calls run with name-only hiding instead. The server logs a warning each
-  time it falls back, and the policy card flags the profile. Approve it only
+  those calls run with name-only hiding instead. The server warns at startup
+  and each time it falls back, and the policy card flags the profile. Approve it only
   where the granted tables hold no password-type field.
 - Masked catalog variables (`sc_item_option`, `question_answer`) are not
   covered: their secrecy is per row. Narrow `value` on those tables with field
