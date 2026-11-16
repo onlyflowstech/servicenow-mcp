@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update><!ENTITY xxe SYSTEM "file:///etc/hosts"><name>x</name></record_update>

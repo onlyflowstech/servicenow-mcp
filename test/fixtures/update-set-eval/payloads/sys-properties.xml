@@ -1,0 +1,1 @@
+﻿<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_properties"><sys_properties action="INSERT_OR_UPDATE"><description>Session timeout in minutes</description><name>glide.ui.session_timeout</name><type>integer</type><value>30</value></sys_properties></record_update>

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- An ACL with its role row: two records in one update. -->
+<record_update table="sys_security_acl">
+  <sys_security_acl action="INSERT_OR_UPDATE">
+    <active>true</active>
+    <admin_overrides>true</admin_overrides>
+    <condition/>
+    <name>incident.u_notes</name>
+    <operation display_value="read">read</operation>
+    <script><![CDATA[answer = true;]]></script>
+    <sys_id>2c3d4e5f60718293a4b5c6d7e8f90a1b</sys_id>
+    <type display_value="record">record</type>
+  </sys_security_acl>
+  <sys_security_acl_role action="INSERT_OR_UPDATE">
+    <sys_security_acl display_value="incident.u_notes">2c3d4e5f60718293a4b5c6d7e8f90a1b</sys_security_acl>
+    <sys_user_role display_value="itil">282bf1fac6112285017366cb5f867469</sys_user_role>
+  </sys_security_acl_role>
+</record_update>

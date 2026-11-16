@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_script"><?php echo "x"; ?><name>x</name></record_update>

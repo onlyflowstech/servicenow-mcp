@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="global" table="sys_script"><sys_script action="INSERT_OR_UPDATE"><abort_action>false</abort_action><action_delete>false</action_delete><action_insert>true</action_insert><action_query>false</action_query><action_update>true</action_update><active>true</active><advanced>true</advanced><collection>incident</collection><condition/><description/><name>Set priority from impact</name><order>100</order><script><![CDATA[(function executeRule(current, previous /*null when async*/) {
+	if (current.impact == 1 && current.urgency == 1) {
+		current.priority = 1;
+	}
+})(current, previous);]]></script><sys_class_name>sys_script</sys_class_name><sys_id>0a1b2c3d4e5f60718293a4b5c6d7e8f9</sys_id><sys_name>Set priority from impact</sys_name><sys_package display_value="Global" source="global">global</sys_package><sys_scope display_value="Global">global</sys_scope><sys_update_name>sys_script_0a1b2c3d4e5f60718293a4b5c6d7e8f9</sys_update_name><when>before</when></sys_script></record_update>

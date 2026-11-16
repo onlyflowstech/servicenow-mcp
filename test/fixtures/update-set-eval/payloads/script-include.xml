@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>global.PriorityUtils</api_name>
+        <client_callable>false</client_callable>
+        <description>Helpers for &lt;priority&gt; checks &#8212; &#x2713; reviewed</description>
+        <name>PriorityUtils</name>
+        <script>var PriorityUtils = Class.create();
+PriorityUtils.prototype = {
+    initialize: function() {},
+    isHigh: function(gr) {
+        return gr.getValue('priority') &lt;= 2 &amp;&amp; gr.getValue('state') != &quot;7&quot;;
+    },
+    type: &apos;PriorityUtils&apos;
+};</script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_id>1b2c3d4e5f60718293a4b5c6d7e8f90a</sys_id>
+        <sys_update_name>sys_script_include_1b2c3d4e5f60718293a4b5c6d7e8f90a</sys_update_name>
+    </sys_script_include>
+</record_update>
