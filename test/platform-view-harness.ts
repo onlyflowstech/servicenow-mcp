@@ -21,6 +21,7 @@ import { registerServiceNowToolModules } from "../src/tools/index.js";
 import { platformViewReadTables, type PlatformView } from "../src/tools/platform-view-contracts.js";
 import { platformViewToolModule } from "../src/tools/platform-view-module.js";
 import type { ToolModuleContract } from "../src/tools/tool-module.js";
+import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
 export const PROFILE = "platform-view-test";
 const INSTANCE = "https://platform-view-test.service-now.com";
@@ -313,6 +314,11 @@ export async function harness(
       }),
     },
     auditSink: { write: () => {}, writePreContext: () => {} },
+    // Stands in for the dispatcher's field-type lookup (sys_dictionary and
+    // sys_db_object, outside a view's plan), so the recording client sees only
+    // the view's own reads and judges every one of them as before. The type
+    // step still runs; the stand-in finds no hidden-typed field.
+    fieldTypeLoader: noHiddenFieldTypes,
   };
   const server = await createMcpServer({
     dependencies: {},
