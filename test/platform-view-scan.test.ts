@@ -17,6 +17,7 @@ import {
   SCAN_CHECK_FIELDS,
   SCAN_DENIED_HINT,
   SCAN_FINDING_FIELDS,
+  SCAN_FINDINGS_FIELD_PLAN,
   SCAN_RESULT_FIELDS,
   SCAN_UNAVAILABLE_HINT,
   createScanFindingsHandler,
@@ -487,6 +488,7 @@ describe("scan_findings: field access supplied by the module", () => {
   it("is denied with a fixed hint, before any read, when a field it needs or filters on is hidden", async () => {
     const cases: [string, string, Record<string, unknown>][] = [
       ["scan_result", "state", {}],
+      ["scan_result", "sys_created_on", {}],
       ["scan_finding", "check", {}],
       ["scan_finding", "result", {}],
       ["scan_finding", "muted", {}],
@@ -511,6 +513,15 @@ describe("scan_findings: field access supplied by the module", () => {
     expect(data.summary.by_check[0]).toEqual({ check: CHECK_A, findings: 4, occurrences: 9 });
     const noSysId: PlatformViewFieldAccess = { canRead: (table, field) => !(table === "scan_check" && field === "sys_id"), filter: (_table, row) => ({ ...row }) };
     expect(tableReads((await run(instanceWith(), {}, noSysId)).instance, "scan_check")).toEqual([]);
+  });
+
+  it("needs sys_created_on only for the sorted read: a named result is read without it", async () => {
+    const access: PlatformViewFieldAccess = { canRead: (t, f) => !(t === "scan_result" && f === "sys_created_on"), filter: (_t, row) => ({ ...row }) };
+    const named = await run(instanceWith(), { result: RESULT }, access);
+    expect(named.data.status).toBe("ok");
+    expect(tableReads(named.instance, "scan_result")[0]!.params.sysparm_query).toBe(`sys_id=${RESULT}`);
+    expect(SCAN_FINDINGS_FIELD_PLAN.scan_result).toContain("sys_created_on");
+    expect(SCAN_FINDINGS_FIELD_PLAN.scan_finding).toContain("result");
   });
 
   it("does not need a filter field that no selector uses", async () => {

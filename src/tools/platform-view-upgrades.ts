@@ -291,7 +291,8 @@ export const UPGRADE_LOG_FIELDS = Object.freeze([
   "change_type",
   "plugin",
 ]);
-const LOG_REQUIRED = Object.freeze(["sys_id", "disposition"]);
+/** `upgrade_history` is filtered on, not requested. */
+const LOG_REQUIRED = Object.freeze(["sys_id", "disposition", "upgrade_history"]);
 const CHOICE_FIELDS = Object.freeze(["value", "label", "language"]);
 
 /**
@@ -301,7 +302,7 @@ const CHOICE_FIELDS = Object.freeze(["value", "label", "language"]);
  */
 export const UPGRADE_SKIPPED_FIELD_PLAN: Readonly<Record<string, readonly string[]>> = Object.freeze({
   sys_upgrade_history: RUN_FIELDS,
-  sys_upgrade_history_log: UPGRADE_LOG_FIELDS,
+  sys_upgrade_history_log: [...UPGRADE_LOG_FIELDS, "upgrade_history"],
   sys_choice: CHOICE_FIELDS,
 });
 
@@ -408,8 +409,12 @@ export function createUpgradeSkippedHandler(
       throw createToolError("conflict", "retry_after_correction");
     }
 
+    // Every field the view filters or sorts on must be readable, or the query
+    // would tell a profile something about a field it cannot see. "Latest"
+    // sorts on `sys_created_on`; a named run does not.
+    const sortsRuns = args.upgrade === undefined || args.upgrade === "latest";
     const hidden =
-      firstUnreadable(access, "sys_upgrade_history", RUN_REQUIRED) ??
+      firstUnreadable(access, "sys_upgrade_history", [...RUN_REQUIRED, ...(sortsRuns ? ["sys_created_on"] : [])]) ??
       firstUnreadable(access, "sys_upgrade_history_log", [...LOG_REQUIRED, ...(args.type === undefined ? [] : ["type"])]);
     if (hidden !== undefined) {
       return viewResult(args, { view: "upgrade_skipped", status: "denied", hint: FIELD_POLICY_HINT });

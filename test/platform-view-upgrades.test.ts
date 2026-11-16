@@ -19,6 +19,7 @@ import {
   SKIPPED_DISPOSITIONS,
   UPGRADE_LOG_DENIED_HINT,
   UPGRADE_LOG_FIELDS,
+  UPGRADE_SKIPPED_FIELD_PLAN,
   createUpgradeSkippedHandler,
   dispositionLabel,
   handleUpgradeSkipped,
@@ -552,6 +553,9 @@ describe("upgrade_skipped: field access supplied by the module", () => {
       ["sys_upgrade_history", "from_version"],
       ["sys_upgrade_history", "to_version"],
       ["sys_upgrade_history_log", "disposition"],
+      // Filtered on and sorted on, so also required.
+      ["sys_upgrade_history_log", "upgrade_history"],
+      ["sys_upgrade_history", "sys_created_on"],
     ]) {
       const access: PlatformViewFieldAccess = {
         canRead: (table, field) => !(table === hidden[0] && field === hidden[1]),
@@ -561,6 +565,23 @@ describe("upgrade_skipped: field access supplied by the module", () => {
       expect(data).toMatchObject({ view: "upgrade_skipped", status: "denied", hint: "Field policy hides a field this view needs." });
       expect(instance.calls, hidden.join(".")).toEqual([]);
     }
+  });
+
+  it("needs sys_created_on only for the sorted read: a named run is read without it", async () => {
+    const access: PlatformViewFieldAccess = {
+      canRead: (table, field) => !(table === "sys_upgrade_history" && field === "sys_created_on"),
+      filter: (_table, row) => ({ ...row }),
+    };
+    const named = await run(instanceWith({}), { upgrade: RUN }, access);
+    expect(named.data.status).toBe("ok");
+    expect(readsOf(named.instance, "sys_upgrade_history")[0]!.params.sysparm_query).toBe(`sys_id=${RUN}`);
+    expect((await run(instanceWith({}), {}, access)).data.status).toBe("denied");
+  });
+
+  it("lists every field it filters or sorts on in the field plan", () => {
+    expect(UPGRADE_SKIPPED_FIELD_PLAN.sys_upgrade_history_log).toContain("upgrade_history");
+    expect(UPGRADE_SKIPPED_FIELD_PLAN.sys_upgrade_history).toContain("sys_created_on");
+    expect(UPGRADE_SKIPPED_FIELD_PLAN.sys_upgrade_history_log).toEqual(expect.arrayContaining(["type", "file_name", "disposition", "sys_id"]));
   });
 
   it("refuses a type filter on a hidden field instead of filtering on it", async () => {

@@ -171,7 +171,11 @@ export function createScanFindingsHandler(
       ],
     };
     if (
-      firstUnreadable(access, "scan_result", RESULT_REQUIRED) !== undefined ||
+      // "Latest" sorts on `sys_created_on`; a named result does not.
+      firstUnreadable(access, "scan_result", [
+        ...RESULT_REQUIRED,
+        ...(args.result === undefined || args.result === "latest" ? ["sys_created_on"] : []),
+      ]) !== undefined ||
       firstUnreadable(access, "scan_finding", filterFields.scan_finding!) !== undefined ||
       firstUnreadable(access, "scan_check", filterFields.scan_check!) !== undefined
     ) {
