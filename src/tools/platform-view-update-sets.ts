@@ -460,8 +460,31 @@ interface Tree {
 }
 
 /**
- * The descendants of `root` through `parent`, one read per level, in the
- * caller's scope. Stops at `maxDepth` levels (reading one row past the last
+ * The children of `parents`, in sys_id order: one read per
+ * {@link UPDATE_SET_VIEW_LIMITS}.STATS_CHUNK parents (so a level's query stays
+ * well under URL limits), read together and merged as one read would return
+ * them. Each read asks for at most `limit` rows.
+ */
+async function childrenOf(
+  ctx: Ctx,
+  table: "sys_update_set" | "sys_remote_update_set",
+  parents: readonly string[],
+  fields: readonly string[],
+  limit: number
+): Promise<Record<string, unknown>[]> {
+  const chunks: string[][] = [];
+  for (let start = 0; start < parents.length; start += L.STATS_CHUNK) chunks.push(parents.slice(start, start + L.STATS_CHUNK));
+  const reads = await Promise.all(
+    chunks.map((chunk) => readRows(ctx, table, fields, `parentIN${chunk.join(",")}^ORDERBYsys_id`, limit))
+  );
+  if (reads.length === 1) return reads[0]!;
+  const key = (row: Record<string, unknown>) => lowerId(row.sys_id) ?? "";
+  return reads.flat().sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+}
+
+/**
+ * The descendants of `root` through `parent`, one read per level (per 100
+ * sets of a level), in the caller's scope. Stops at `maxDepth` levels (reading one row past the last
  * level to know whether it was the last) and at `maxNodes` sets; a set seen
  * twice is a cycle, counted once and not followed.
  */
@@ -480,11 +503,11 @@ async function descend(
   for (let depth = 1; frontier.length > 0 && !nodesCapped; depth += 1) {
     if (depth > L.MAX_DEPTH) {
       // One row is enough to know whether the tree goes deeper.
-      const deeper = await readRows(ctx, table, ["sys_id"], `parentIN${frontier.join(",")}^ORDERBYsys_id`, 1);
+      const deeper = await childrenOf(ctx, table, frontier, ["sys_id"], 1);
       depthCapped = deeper.length > 0;
       break;
     }
-    const level = await readRows(ctx, table, fields, `parentIN${frontier.join(",")}^ORDERBYsys_id`, maxNodes + 1);
+    const level = await childrenOf(ctx, table, frontier, fields, maxNodes + 1);
     const next: string[] = [];
     for (const row of level) {
       const id = lowerId(row.sys_id);

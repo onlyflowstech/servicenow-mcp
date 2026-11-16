@@ -448,6 +448,27 @@ describe("batch", () => {
     expect(labels(instance.calls).filter((label) => label === "stats:sys_update_xml")).toHaveLength(2);
   });
 
+  it("reads a level of more than 100 sets in reads of at most 100 parents, merged in sys_id order", async () => {
+    // 150 children, each with one child; the grandchildren's sys_ids run opposite to their parents'.
+    const children = Array.from({ length: 150 }, (_, n) => node(n + 1, SET_ID));
+    const grandchildren = Array.from({ length: 150 }, (_, n) =>
+      localSet({ sys_id: sid(0x9000 + (149 - n)), name: `Grandchild ${n}`, parent: sid(0x8000 + n + 1), base_update_set: SET_ID })
+    );
+    const { instance, data } = await run(world({ localSets: [localSet(), ...children, ...grandchildren] }), {
+      view: "batch", update_set: SET_ID, limit: 200,
+    });
+    const levelReads = instance.calls.filter((call) => call.params.sysparm_query?.startsWith("parentIN"));
+    for (const call of levelReads) {
+      const ids = /^parentIN([^^]*)/u.exec(call.params.sysparm_query!)![1]!.split(",");
+      expect(ids.length).toBeLessThanOrEqual(100);
+    }
+    expect(levelReads.map((call) => /^parentIN([^^]*)/u.exec(call.params.sysparm_query!)![1]!.split(",").length)).toEqual([1, 100, 50]);
+    // The same 200 sets one read per level would give: the root, every child, and the 49 lowest grandchildren.
+    expect(data.summary).toMatchObject({ sets: 200, sets_capped: true });
+    const level2 = data.results.filter((row: Data) => row.depth === 2).map((row: Data) => row.sys_id);
+    expect(level2).toEqual(Array.from({ length: 49 }, (_, n) => sid(0x9000 + n)));
+  });
+
   it("says not found for an unknown member", async () => {
     const { data } = await run(world(), { view: "batch", update_set: sid(0xdead) });
     expect(data.hint).toBe(NOT_FOUND_HINT);
