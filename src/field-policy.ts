@@ -964,6 +964,16 @@ export const BUILT_IN_TABLE_CLASSES: Readonly<{
   platform: Object.freeze([...PLATFORM_BUILT_INS]),
 });
 
+/**
+ * Every built-in table a profile's "*" entry covers: each one that is not a
+ * system table, whatever its class. Derived rather than listed by class, so a
+ * built-in entry or class added later is covered by a narrowing "*" entry
+ * without touching the merge.
+ */
+const PROFILE_OWNED_BUILT_INS: readonly string[] = Object.freeze(
+  Object.keys(POLICY_DEFINITIONS).filter((table) => !SYSTEM_TABLES.has(table))
+);
+
 const GENERIC_RECORD_TABLES = new Set([
   "incident",
   "change_request",
@@ -1884,18 +1894,15 @@ function mergeFieldPolicyDefinitions(
   configured: Readonly<Record<string, MutableTableFieldPolicyDefinition>>
 ): Record<string, TableFieldPolicyDefinition> {
   const merged: Record<string, TableFieldPolicyDefinition> = { ...base };
-  // A profile's "*" entry also covers the ITSM, named-only and platform tables
-  // it does not name, so they are merged even without an entry of their own.
-  // A built-in class left out here would keep its open base under a narrowing
-  // "*" entry.
+  // A profile's "*" entry also covers every built-in table that is not a
+  // system table (the ITSM, named-only and platform tables) when the profile
+  // does not name it, so each is merged even without an entry of its own.
   const profileWildcard = Object.hasOwn(configured, FIELD_POLICY_WILDCARD)
     ? configured[FIELD_POLICY_WILDCARD]
     : undefined;
   const tables = new Set(Object.keys(configured));
   if (profileWildcard !== undefined) {
-    for (const table of ITSM_TABLES) tables.add(table);
-    for (const table of NAMED_ONLY_BUILT_INS) tables.add(table);
-    for (const table of PLATFORM_BUILT_INS) tables.add(table);
+    for (const table of PROFILE_OWNED_BUILT_INS) tables.add(table);
   }
   for (const table of tables) {
     const definition: MutableTableFieldPolicyDefinition = Object.hasOwn(configured, table)

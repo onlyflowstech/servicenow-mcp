@@ -124,6 +124,52 @@ describe("the platform class", () => {
   });
 });
 
+describe('a profile\'s "*" field entry covers every built-in class but system', () => {
+  // Every class BUILT_IN_TABLE_CLASSES lists, apart from the full list and the
+  // system class. A class added later is picked up here without editing the test.
+  const classes = Object.entries(BUILT_IN_TABLE_CLASSES).filter(
+    ([name]) => name !== "builtIn" && name !== "system"
+  );
+
+  it("lists the ITSM, named-only and platform classes, each non-empty", () => {
+    expect(classes.map(([name]) => name).sort()).toEqual(["itsm", "namedOnly", "platform"]);
+    for (const [name, members] of classes) expect(members.length, name).toBeGreaterThan(0);
+  });
+
+  it('{"*": {readable: ["sys_id"]}} narrows every table of every such class', () => {
+    const star = { "*": { readable: ["sys_id"] } };
+    expect(() => validateFieldPolicyConfiguration({ fieldPolicy: star })).not.toThrow();
+    withFieldPolicy(star, () => {
+      for (const [name, members] of classes) {
+        for (const table of members) {
+          const label = `${name}: ${table}`;
+          expect(resolveReadableFields(table, { fields: "all" }), label).toEqual(["sys_id"]);
+          expect(resolveReadableFields(table), label).toEqual(["sys_id"]);
+          expect(reason(() => resolveReadableFields(table, { fields: "sys_created_on" })), label).toBe(
+            "unreadable_field"
+          );
+        }
+      }
+      // The system tables keep their own open entry.
+      for (const table of BUILT_IN_TABLE_CLASSES.system) {
+        expect(resolveReadableFields(table, { fields: "all" }), `system: ${table}`).toEqual(["*"]);
+      }
+    });
+  });
+
+  it('{"*": {writable: []}} denies writes on every table of every such class', () => {
+    withFieldPolicy({ "*": { writable: [] } }, () => {
+      for (const [name, members] of classes) {
+        for (const table of members) {
+          expect(reason(() => validateWritableFields(table, { u_x: "1" })), `${name}: ${table}`).toBe(
+            "non_writable_field"
+          );
+        }
+      }
+    });
+  });
+});
+
 describe("the default projections", () => {
   it("lead with sys_id and leave out every never-default column", () => {
     for (const table of PLATFORM) {
