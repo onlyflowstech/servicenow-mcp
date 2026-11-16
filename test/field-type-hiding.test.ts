@@ -588,14 +588,38 @@ describe("a child table whose parent link cannot be read", () => {
     expect(h.warnings).toContain("field_types.names_only");
   });
 
-  it("keeps no incomplete chain in the memo: the next call reads it again", async () => {
-    const h = await harness({ fieldTypes: cases["a parent reference with no name"]! });
-    await h.call("sn_query", { table: "u_vault_child", fields: "name" });
-    await h.call("sn_query", { table: "u_vault_child", fields: "name" });
-    const chainReads = h.reads.filter(
-      (read) => read.path === "/api/now/table/sys_db_object" && read.params.sysparm_query === "nameINu_vault_child"
-    );
-    expect(chainReads).toHaveLength(2);
+  describe("the incomplete verdict, kept for 30 seconds", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+    const chainReads = (h: Harness) =>
+      h.reads.filter((read) => read.path === "/api/now/table/sys_db_object" && read.params.sysparm_query === "nameINu_vault_child");
+
+    it("reads an incomplete chain once within the window, refusing every call, and again after it", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-11-16T12:00:00Z"));
+      const h = await harness({ fieldTypes: cases["a parent reference with no name"]! });
+      for (let call = 0; call < 3; call += 1) {
+        const result = await h.call("sn_query", { table: "u_vault_child", fields: "name,key" });
+        expect(result.text).toContain(FIELD_TYPES_UNAVAILABLE_MESSAGE);
+      }
+      expect(chainReads(h)).toHaveLength(1);
+      vi.setSystemTime(new Date("2026-11-16T12:00:29Z"));
+      expect((await h.call("sn_get", { table: "u_vault_child", sys_id: SYS_ID })).text).toContain(FIELD_TYPES_UNAVAILABLE_MESSAGE);
+      expect(chainReads(h)).toHaveLength(1);
+      vi.setSystemTime(new Date("2026-11-16T12:00:31Z"));
+      expect((await h.call("sn_query", { table: "u_vault_child", fields: "name" })).text).toContain(FIELD_TYPES_UNAVAILABLE_MESSAGE);
+      expect(chainReads(h)).toHaveLength(2);
+      expect(tableReads(h, "u_vault_child")).toHaveLength(0);
+    });
+
+    it("is skipped by force_recache", async () => {
+      const h = await harness({ fieldTypes: cases["a parent reference with no name"]! });
+      await h.call("sn_query", { table: "u_vault_child", fields: "name" });
+      const forced = await h.call("sn_query", { table: "u_vault_child", fields: "name", force_recache: true });
+      expect(forced.text).toContain(FIELD_TYPES_UNAVAILABLE_MESSAGE);
+      expect(chainReads(h)).toHaveLength(2);
+    });
   });
 });
 

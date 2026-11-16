@@ -281,6 +281,23 @@ describe("loadFieldTypesInPlan: unresolved tables", () => {
     expect(hiddenTypedFields(loaded.types, deepest)).toBeUndefined();
   });
 
+  it("reads a chain of up to 12 tables in full, as the instance-wide loader does, and no further", async () => {
+    // u_depth_<n>_1 extends u_depth_<n>_2 … up to u_depth_<n>_<n>, which extends nothing.
+    const chainOf = (length: number): Record<string, string | null> =>
+      Object.fromEntries(
+        Array.from({ length }, (_, index) => [`u_depth_${length}_${index + 1}`, index + 1 < length ? `u_depth_${length}_${index + 2}` : null])
+      );
+    for (const [length, complete] of [[9, true], [12, true], [13, false]] as const) {
+      const { instance, ops } = fake({ ...WORLD, tables: { ...WORLD.tables, ...chainOf(length) } });
+      const loaded = await loadFieldTypesInPlan(ops, [`u_depth_${length}_1`]);
+      expectReadsWithin(instance, PLAN, PLAN_FIELD_TYPE_DOT_WALKS);
+      expect(loaded.chains.get(`u_depth_${length}_1`)?.complete, String(length)).toBe(complete);
+      expect(loaded.hierarchyRead, String(length)).toBe(complete);
+      expect(instance.calls.filter((c) => c.path.endsWith("/sys_db_object")), String(length)).toHaveLength(Math.min(length, 12));
+    }
+    expect(PLAN_CHAIN_LEVELS).toBe(12);
+  });
+
   it("treats a parent that is not a table name, or a cycle, as an incomplete chain", async () => {
     const { instance, ops } = fake({
       ...WORLD,

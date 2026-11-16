@@ -481,8 +481,10 @@ export type FieldTypeLoader = (
  * gives `unavailable`. A table whose chain or view cannot be resolved is left
  * out of `tables`, so its fields are `unknown_type`: that includes a chain
  * that is not complete ({@link TableChain}), such as a parent reference whose
- * name did not come back, or a chain longer than 12 tables. Only complete
- * chains are kept in the memo. A cancelled read rethrows.
+ * name did not come back, or a chain longer than 12 tables. A complete chain
+ * is kept in the memo for the hour; an incomplete one for
+ * {@link FIELD_TYPES_UNAVAILABLE_TTL_MS}, so a table whose parent cannot be
+ * read is not read again on every call. A cancelled read rethrows.
  */
 export async function loadFieldTypes(
   client: ServiceNowOperations,
@@ -502,11 +504,22 @@ export async function loadFieldTypes(
   const chains = new Map<string, ChainState>();
   const views = new Map<string, readonly ViewSource[]>();
   const remember = (table: string, entry: TableShape) =>
-    memo?.set(TABLE_MEMO_PREFIX + table, entry, 128 + JSON.stringify(entry).length, FIELD_TYPES_TTL_MS);
+    memo?.set(
+      TABLE_MEMO_PREFIX + table,
+      entry,
+      128 + JSON.stringify(entry).length,
+      entry.kind === "incomplete" ? FIELD_TYPES_UNAVAILABLE_TTL_MS : FIELD_TYPES_TTL_MS
+    );
+  /** What a read found for `table`, kept: a complete chain for the hour, an incomplete one briefly. */
+  const rememberChain = (table: string, chain: ChainState) => {
+    if (isKnownChain(chain)) remember(table, Object.freeze({ kind: "table", chain }));
+    else if (chain === INCOMPLETE_CHAIN) remember(table, INCOMPLETE_SHAPE);
+  };
   const recall = (table: string): boolean => {
     const known = force ? undefined : memo?.get(TABLE_MEMO_PREFIX + table);
     if (!isTableShape(known)) return false;
     if (known.kind === "table") chains.set(table, known.chain);
+    else if (known.kind === "incomplete") chains.set(table, INCOMPLETE_CHAIN);
     else {
       chains.set(table, null);
       views.set(table, known.sources);
@@ -526,7 +539,7 @@ export async function loadFieldTypes(
   if (pending.length > 0) {
     for (const [table, chain] of read) {
       chains.set(table, chain);
-      if (isKnownChain(chain)) remember(table, Object.freeze({ kind: "table", chain }));
+      rememberChain(table, chain);
     }
     const absent = pending.filter((table) => read.get(table) === null);
     if (absent.length > 0) {
@@ -543,7 +556,7 @@ export async function loadFieldTypes(
   if (joined.length > 0) {
     for (const [table, chain] of await sharedChains(reader, memo, joined)) {
       chains.set(table, chain);
-      if (isKnownChain(chain)) remember(table, Object.freeze({ kind: "table", chain }));
+      rememberChain(table, chain);
     }
   }
 
@@ -555,17 +568,25 @@ export async function loadFieldTypes(
   return Object.freeze({ state: "available", tables });
 }
 
-/** What the memo keeps per table: its chain, or a view's joined tables. */
+/**
+ * What the memo keeps per table: its complete chain, a view's joined tables,
+ * or, for {@link FIELD_TYPES_UNAVAILABLE_TTL_MS} only, that its chain was
+ * incomplete (the table stays unresolved until the entry expires).
+ */
 type TableShape =
   | { readonly kind: "table"; readonly chain: readonly string[] }
-  | { readonly kind: "view"; readonly sources: readonly ViewSource[] };
+  | { readonly kind: "view"; readonly sources: readonly ViewSource[] }
+  | { readonly kind: "incomplete" };
+
+const INCOMPLETE_SHAPE: TableShape = Object.freeze({ kind: "incomplete" });
 
 function isTableShape(candidate: unknown): candidate is TableShape {
   if (typeof candidate !== "object" || candidate === null) return false;
   const shape = candidate as Partial<Record<string, unknown>>;
   return (
     (shape.kind === "table" && Array.isArray(shape.chain)) ||
-    (shape.kind === "view" && Array.isArray(shape.sources))
+    (shape.kind === "view" && Array.isArray(shape.sources)) ||
+    shape.kind === "incomplete"
   );
 }
 
@@ -860,8 +881,8 @@ export const PLAN_FIELD_TYPE_DOT_WALKS = Object.freeze([
   Object.freeze({ from: "sys_db_object", field: "super_class", target: "sys_db_object" }),
 ]);
 
-/** `sys_db_object` levels read per call, at most. */
-export const PLAN_CHAIN_LEVELS = 8;
+/** `sys_db_object` levels read per call, at most: the dispatcher's 12-table chain. */
+export const PLAN_CHAIN_LEVELS = 12;
 /** Tables in one chain, at most; a longer chain is incomplete. */
 const PLAN_CHAIN_TABLES = 16;
 const PLAN_PARENT_LINK = "super_class";

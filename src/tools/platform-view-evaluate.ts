@@ -145,7 +145,7 @@ export const EVALUATE_LIMITS = Object.freeze({
   /** Work, in ms, spent finding record-element tables before the rest are left unknown. */
   CANDIDATE_BUDGET_MS: 100,
   /** `sys_db_object` levels read to build those hierarchies. */
-  MAX_CHAIN_LEVELS: 8,
+  MAX_CHAIN_LEVELS: 12,
   /** Update names per `nameIN` read. */
   NAME_CHUNK: 100,
   /** Update names checked for collisions in other open sets (BP004, local). */
