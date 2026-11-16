@@ -647,6 +647,126 @@ changes listed under 2.3.0-dev.1 below and nothing else.
   `\mcp`, which the server's own path check reads as `/mcp`) now gets 400 Bad
   Request.
 
+## [2.2.1] — 2026-11-16
+
+### Changed
+
+- **Read tools hide `password`/`password2`-typed fields by dictionary type as
+  well as by name.** A field whose internal type is `password`, `password2`,
+  `masked` or `encrypted_text` is refused when named, left out of `fields=all`,
+  detailed and default reads, `"*"` responses and write echoes, refused as a
+  filter, order, aggregate, group-by or ATF step-condition field, and refused
+  as a write key, whatever it is called. A `sys_properties` row shows `value`
+  only when its `type` is a known non-secret type. The types come from one
+  cached `sys_dictionary` read per credential. While they cannot be read,
+  field-policy tools refuse with a message naming the access needed, unless the
+  profile sets `"fieldTypes": { "dictionary": "not_required" }`, which falls
+  back to name-only hiding and is flagged on the policy card. `tools/list` is
+  unchanged.
+
+- **`sn_atf_author` checks the table, conditions and ACL setting of ATF steps
+  when it adds them.** A `record_query`, `record_validation`,
+  `field_values_validation` or `open_existing_record` step needs a read grant on
+  the table it names, and an `open_new_form` or `set_field_values` step a write
+  grant, with the same refusal as any table access (a named-only table such as
+  `sys_audit` must be named). The conditions of `record_query`,
+  `record_validation` and `field_values_validation` are checked against the
+  table's field policy: a field the profile may not read, a dot-walk (`a.b`), a
+  condition that is only a pasted step output, and a term the check does not
+  recognise are refused, and only the operators that compare a field with a
+  literal are allowed (`=`, `!=`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`,
+  `STARTSWITH`, `ENDSWITH`, `IN`, `NOT IN`, `ISEMPTY`, `ISNOTEMPTY`, `BETWEEN`),
+  so an operator that takes a second field, such as `SAMEAS` or `GT_FIELD`, is
+  refused. `enforce_security: false` is refused on `record_query` and
+  `record_validation` with a fixed message (leave it out, or pass `true`; it
+  stays `true` by default). A refused step refuses the whole call, before any
+  write. A condition value, and a `set_field_values` value, may refer to an earlier
+  step's output only by record id or sys_id (`record_id`, `first_record`,
+  `sys_id`, `user`), and the fields a
+  `set_field_values` step sets must be writable on its table, as for `sn_update`.
+  The impersonated user's ACLs still apply on top; suites authored in the
+  instance are not checked by the server's table grants, and `atf.execute` stays
+  opt-in. The README and `docs/PRODUCTION-SECURITY.md` now also say that a
+  database view or extension table over one of the six named-only tables is not
+  covered by the name list.
+- **A `"*"` write grant does not cover `sys_atf_step`, `sys_variable_value`
+  and `sys_element_mapping` for the generic write tools.** These tables hold the
+  step types, input values and pill mappings that `sn_atf_author` checks when it
+  adds a step. Under `"*"`,
+  `sn_atf_author` still writes them, but `sn_create`, `sn_update`, `sn_delete`,
+  `sn_batch` and attachment uploads reach them only when the profile names the
+  table for write, for example `servicenow-mcp-setup grant --profile <profile>
+  --write sys_atf_step --tools sn_update`; a refusal is the usual table-access
+  denial. Reads are unchanged, and no other table's access changes.
+  `sys_variable_value` and `sys_element_mapping` also hold other variables'
+  values and mappings (catalog variables, for example), so a profile that writes
+  those with the generic tools must now name them. The policy card lists the
+  three tables as outside the wildcard row's write access.
+- **`sys_audit` and `sys_journal_field` are granted by name only: a `"*"` table
+  grant does not cover them.** Their rows hold the old and new values of other
+  tables' fields, comments and work notes. With `"*"` alone, `sn_query`, `sn_get`,
+  `sn_aggregate`, `sn_schema`, `sn_batch` and the other tools refuse them with
+  the usual table-access denial. To read one, name it:
+  `servicenow-mcp-setup grant --profile <profile> --read sys_audit --tools
+  sn_query`. A profile that already names a table is unaffected, and a `"*"`
+  grant beside the name still covers everything else. A read that names no
+  `fields` returns `sys_id`, `tablename`, `documentkey`, `fieldname`, `user` and
+  `sys_created_on` for `sys_audit`, and `sys_id`, `name`, `element_id`, `element`,
+  `sys_created_by` and `sys_created_on` for `sys_journal_field`; ask for
+  `oldvalue`, `newvalue` or `value` by name. No other table's access changes. The
+  policy card and the setup wizard's wildcard note say the same.
+- **Four more tables are granted by name only, and a `"*"` field entry now
+  narrows all six.** `sys_history_line`, `sys_audit_delete`, `sys_attachment_doc`
+  and `sys_email` join `sys_audit` and `sys_journal_field`: a `"*"` table grant does
+  not cover them, for read or write, and a profile reaches one only when
+  `tableAccess` names it. Their rows hold history built from audit, deleted
+  records, attachment content and email bodies. A refusal is the usual
+  table-access denial. A read that names no `fields` leaves out the value
+  columns (`old`, `new`, `old_value` and `new_value`; `payload`; `data`; `body`,
+  `body_text`, `subject`, `recipients`, `copied`, `blind_copied`, `reply_to`,
+  `headers` and `error_string`), so ask for them by name. For field policy
+  the six belong to the profile, as the ITSM tables do: once a profile names one,
+  its `"*"` field entry narrows it, and an entry for the table itself narrows or
+  widens it. The 23 system tables, which a `"*"` field entry never narrows, are
+  unchanged. `sn_attach` is unaffected: it uses the Attachment API and never
+  reads `sys_attachment_doc`.
+  A `relatedTables` list that reaches one of the six under a `"*"` grant still
+  stops the profile loading, and the message now names the table and says it
+  must be granted by name. `sn_profile` reports these tables with the class
+  `named_only`.
+- **`sn_batch` and `sn_query` refuse a `structured_query` filter or order on a
+  field the table does not have.** A confirmed `sn_batch` update or delete, its
+  dry run and an `sn_query` read stop with a fixed message that names the field
+  ("was not found on the table, or is not readable by this user") before any
+  record is changed or listed; for `sn_batch` that is before the sample or the
+  write. No extra request is made: the fields a filter or order uses are added to
+  the read's `sysparm_fields`, looked for in the rows that come back, and left out
+  of the result. A field counts as present when any returned row carries it, an
+  existing column with no value is still returned, and a read that returns no
+  rows is returned as before, since there is nothing to check. A raw encoded
+  `query` is not checked; it is only accepted through a policy rule that pins
+  the query and its fields. The extra columns add bytes to each fetched row, and
+  a filter on a very large text field that is not in `fields` can take a wide
+  read past the 1 MiB upstream response limit: the call then says so and asks for
+  a lower `limit`.
+
+### Security
+
+- **HTTP server dependencies.** `@hono/node-server` moves from 2.1.3 to 2.1.7
+  and `hono` (transitive, through the MCP SDK) from 4.13.13 to 4.13.18,
+  clearing the advisories that `npm audit --omit=dev` reported:
+  GHSA-qv5m-9pm6-hqp3 and GHSA-jpvv-r467-5p4w in `@hono/node-server`, and
+  GHSA-4m76-xfj5-7975, GHSA-h7mg-cq63-vhpq, GHSA-3gg2-335m-rxc6,
+  GHSA-4h7h-rv7c-7m2v and GHSA-46wx-v44x-9hh2 in `hono`. The same releases
+  also carry the fixes for GHSA-7v5p-43qr-wch5 and GHSA-fj57-4f93-cfw6
+  (`@hono/node-server`) and GHSA-92p4-j3wq-jmqx, GHSA-39q9-qp46-w8xg and
+  GHSA-74fm-fwc7-3fwp (`hono`). The `tools/inspector` lock moves to `hono`
+  4.13.18 and `@hono/node-server` 2.1.8. In the published package, only the
+  dormant HTTP transport uses these packages. One behaviour
+  change: a request to `/mcp` whose raw path contains a backslash (for example
+  `\mcp`, which the server's own path check reads as `/mcp`) now gets 400 Bad
+  Request.
+
 ## [2.2.0] — 2026-10-30
 
 2.2.0 is the first stable release since 2.1.0. It contains everything
