@@ -1,8 +1,8 @@
 /**
  * Tables where a write changes who may do what or what runs: role
  * assignments, group membership, role inheritance, delegations, ACLs,
- * approvals, server-side scripts, system properties, users and groups, and
- * authentication settings.
+ * approvals, server-side scripts, system properties, users and groups,
+ * authentication settings, and the MID Server queue.
  *
  * This list drives warnings only. It denies nothing: these tables
  * are controlled by the profile's own configuration (its table grant and field
@@ -43,14 +43,34 @@ export const RISKY_WRITE_TABLES: readonly string[] = Object.freeze([
   "sys_certificate",
   "sys_auth_profile",
   "sys_auth_profile_basic",
+  // The MID Server queue: an output record can run commands on MID Server
+  // hosts. Its numbered rotation shards (ecc_queue0000, ...) count too.
+  "ecc_queue",
 ]);
 
 const RISKY_SET: ReadonlySet<string> = new Set(RISKY_WRITE_TABLES);
 
+/** Risky tables the platform rotates into shards: the base name, then digits only. */
+const RISKY_SHARD_BASES: ReadonlySet<string> = new Set(["ecc_queue"]);
+
+function isRiskyTable(table: string): boolean {
+  if (RISKY_SET.has(table)) return true;
+  const base = table.replace(/\d+$/u, "");
+  return base !== table && RISKY_SHARD_BASES.has(base);
+}
+
+/** True for `ecc_queue` and its numbered rotation shards. */
+export function isMidServerQueue(table: string): boolean {
+  return table.replace(/\d+$/u, "") === "ecc_queue";
+}
+
+/** The note shown wherever a risky write grant reaches the MID Server queue. */
+export const MID_SERVER_QUEUE_NOTE = "Records written to ecc_queue can run commands on MID Server hosts.";
+
 /** The risky tables among `writeTables`; `"*"` covers all of them. */
 export function riskyWriteTables(writeTables: readonly string[]): readonly string[] {
   if (writeTables.includes("*")) return RISKY_WRITE_TABLES;
-  return Object.freeze(writeTables.filter((table) => RISKY_SET.has(table)).sort());
+  return Object.freeze(writeTables.filter(isRiskyTable).sort());
 }
 
 /**
@@ -72,6 +92,7 @@ export function riskyGrantWarning(
     "  Writes to these tables change who holds roles, who is in a group, who\n" +
     "  approves, and what code or settings the instance runs. An agent using this\n" +
     "  profile could grant itself access, approve its own changes, or run code.\n" +
+    (risky.some(isMidServerQueue) ? `  ${MID_SERVER_QUEUE_NOTE}\n` : "") +
     "  The grant is still allowed: only this profile's table grant and field\n" +
     "  policy control these tables. Keep it only if you intend it, and review the\n" +
     `  result with: servicenow-mcp-setup policy show --profile ${profile}\n`

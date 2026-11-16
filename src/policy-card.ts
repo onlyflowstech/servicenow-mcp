@@ -22,7 +22,7 @@ import {
   runWithFieldPolicyConfiguration,
   type FieldPolicyConfigurationInput,
 } from "./field-policy.js";
-import { riskyWriteTables } from "./risky-grants.js";
+import { MID_SERVER_QUEUE_NOTE, isMidServerQueue, riskyWriteTables } from "./risky-grants.js";
 import {
   NAMED_ONLY_TABLES,
   WRITE_NAMED_ONLY_TABLES,
@@ -397,6 +397,7 @@ export function renderPolicyCard(card: PolicyCard): string {
       "",
       `WARNING: write access on privilege-sensitive tables: ${card.risky_write_tables.join(", ")}`
     );
+    if (card.risky_write_tables.some(isMidServerQueue)) lines.push(`  ${MID_SERVER_QUEUE_NOTE}`);
   }
   lines.push(
     "",

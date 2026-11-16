@@ -72,7 +72,7 @@ interface TableFieldPolicyDefinition {
   /**
    * The `readable` and `writable` lists of the profile's own entry for this
    * table, as written (internal: set by the merge, never by configuration).
-   * Only they can open a RECORD_XML_COLUMNS column on a RECORD_XML_TABLES table.
+   * Only they can open a record payload column (RECORD_PAYLOAD_COLUMNS).
    */
   readonly ownReadable?: FieldPolicySet;
   readonly ownWritable?: FieldPolicySet;
@@ -110,9 +110,9 @@ interface TableFieldPolicy {
   readonly writable: readonly string[];
   readonly allowAnyReadable: boolean;
   readonly allowAnyWritable: boolean;
-  /** The record XML columns of this table its own entry lists in `readable`. */
+  /** The record payload columns of this table its own entry lists in `readable`. */
   readonly explicitReadable: readonly string[];
-  /** The record XML columns of this table its own entry lists in `writable`. */
+  /** The record payload columns of this table its own entry lists in `writable`. */
   readonly explicitWritable: readonly string[];
 }
 
@@ -173,55 +173,99 @@ const EXPLICIT_WRITE_FIELDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Columns that hold a whole record as XML, or a diff of one, on the tables in
- * RECORD_XML_TABLES.
+ * Record payload columns: per table, the columns that carry other records'
+ * content (whole records as XML, diffs, serialized queue and replication
+ * messages, change payloads, flow snapshots) or other packaged content.
  *
- * On those tables a wildcard never covers these columns, for reads or writes:
- * not the built-in default, a `"*"` table entry, a profile's `"*"` field entry,
- * or `"*"` on the table's own entry. A column is read only where the profile's
+ * A wildcard never covers these columns, for reads or writes: not the
+ * built-in default, a `"*"` table entry, a profile's `"*"` field entry, or
+ * `"*"` on the table's own entry. A column is read only where the profile's
  * own entry for that exact table lists it in `readable`, and written only
- * where that entry lists it in `writable`. Until listed, a column is refused by
- * name (to return, filter, order, group, aggregate or write) and dropped from
- * every wildcard, default, detailed, all-fields and write-response projection.
+ * where that entry lists it in `writable`. Until listed, a column is refused
+ * by name (to return, filter, order, group, aggregate or write) and dropped
+ * from every wildcard, default, detailed, all-fields and write-response
+ * projection. Columns a given release lacks are listed anyway, harmlessly.
  */
-const RECORD_XML_COLUMNS: ReadonlySet<string> = Object.freeze(
-  new Set(["payload", "payload_diff"])
-) as ReadonlySet<string>;
+const RECORD_PAYLOAD_COLUMNS: ReadonlyMap<string, ReadonlySet<string>> = new Map(
+  (
+    [
+      // Customer updates and their versions, previews and diffs, team
+      // development previews, application metadata, the upgrade log, and
+      // deleted, archived or clone-preserved records.
+      ["sys_update_xml", ["payload", "payload_diff"]],
+      ["sys_update_version", ["payload", "payload_diff"]],
+      ["sys_update_preview_xml", ["payload", "payload_diff"]],
+      ["sys_update_diff", ["payload", "payload_diff"]],
+      ["sys_sync_preview_remote", ["payload", "payload_diff"]],
+      ["sys_upgrade_history_log", ["payload", "payload_diff"]],
+      ["sys_metadata_link", ["payload", "payload_diff"]],
+      ["sys_metadata_delete", ["payload", "payload_diff"]],
+      ["sys_audit_delete", ["payload", "payload_diff"]],
+      ["sys_archive_log", ["payload", "payload_diff"]],
+      ["clone_preserved_data", ["payload", "payload_diff"]],
+      // MID Server, replication and change-data-capture queues.
+      ["ecc_queue", ["payload"]],
+      ["sys_replication_queue", ["payload", "payload_short"]],
+      ["data_replication_queue", ["payload"]],
+      ["cdc_queue_ih", ["payload", "previous_payload"]],
+      ["cdc_queue_par", ["payload", "previous_payload"]],
+      ["cdc_queue_uxa_user_props", ["payload", "previous_payload"]],
+      ["sys_rt_change_log", ["payload"]],
+      // Flow snapshots and versions.
+      ["sys_hub_snapshot", ["payload"]],
+      ["sys_hub_snapshot_chunk", ["data"]],
+      ["sys_hub_flow_version", ["payload"]],
+      // Certificate management.
+      ["sn_disco_certmgmt_certificate_ca_credentials", ["encoded_keystore"]],
+    ] as const
+  ).map(([table, columns]) => [
+    table,
+    Object.freeze(new Set<string>(columns)) as ReadonlySet<string>,
+  ])
+);
 
 /**
- * Tables whose `payload` or `payload_diff` holds record XML: customer updates
- * and their versions, previews and diffs, team-development previews,
- * application metadata links and deletions, the upgrade log, and deleted,
- * archived or clone-preserved records. Both columns are listed on every table,
- * whether or not a given release has both.
+ * Tables the platform rotates into numbered shards (`ecc_queue0003`,
+ * `sys_replication_queue5`), each a separate table that a `"*"` grant reaches
+ * by name. A shard is the base name followed by digits only.
  */
-const RECORD_XML_TABLES: ReadonlySet<string> = new Set([
-  "sys_update_xml",
-  "sys_update_version",
-  "sys_update_preview_xml",
-  "sys_update_diff",
-  "sys_sync_preview_remote",
-  "sys_upgrade_history_log",
-  "sys_metadata_link",
-  "sys_metadata_delete",
-  "sys_audit_delete",
-  "sys_archive_log",
-  "clone_preserved_data",
+const ROTATION_SHARD_BASES: ReadonlySet<string> = new Set([
+  "ecc_queue",
+  "sys_replication_queue",
+  "data_replication_queue",
+  "cdc_queue_ih",
+  "cdc_queue_par",
+  "cdc_queue_uxa_user_props",
 ]);
+
+const TRAILING_DIGITS = /\d+$/u;
 
 const NO_FIELDS: readonly string[] = Object.freeze([]);
 
-/** The record XML columns of `table`, or undefined when it has none. */
-function recordXmlColumns(table: string): ReadonlySet<string> | undefined {
-  return RECORD_XML_TABLES.has(table) ? RECORD_XML_COLUMNS : undefined;
+/**
+ * The record payload columns of `table` (a normalized name), or undefined.
+ * A rotation shard takes its base table's columns. Lookups only: nothing is
+ * stored per name, so arbitrary names never grow any state.
+ */
+function recordPayloadColumns(table: string): ReadonlySet<string> | undefined {
+  const exact = RECORD_PAYLOAD_COLUMNS.get(table);
+  if (exact !== undefined) return exact;
+  const base = table.replace(TRAILING_DIGITS, "");
+  return base !== table && ROTATION_SHARD_BASES.has(base) ? RECORD_PAYLOAD_COLUMNS.get(base) : undefined;
 }
 
-/** Each RECORD_XML_TABLES table and the columns its own entry must list. */
+/**
+ * Each base table and the columns its own entry must list. A rotation shard
+ * (see ROTATION_SHARD_BASE_NAMES) has its base table's columns.
+ */
 export const EXPLICIT_READ_FIELD_NAMES: Readonly<Record<string, readonly string[]>> = Object.freeze(
   Object.fromEntries(
-    [...RECORD_XML_TABLES].map((table) => [table, Object.freeze([...RECORD_XML_COLUMNS])])
+    [...RECORD_PAYLOAD_COLUMNS].map(([table, columns]) => [table, Object.freeze([...columns])])
   )
 );
+
+/** The base tables whose numbered rotation shards share their columns. */
+export const ROTATION_SHARD_BASE_NAMES: readonly string[] = Object.freeze([...ROTATION_SHARD_BASES]);
 
 const INCIDENT_DEFAULTS = [
   "sys_id",
@@ -1134,11 +1178,11 @@ export function fieldPolicyDenialMessage(error: FieldPolicyError): string {
     case "field_types_unavailable":
       return FIELD_TYPES_UNAVAILABLE_MESSAGE;
     case "explicit_field_required":
-      // Only EXPLICIT_WRITE_FIELDS and RECORD_XML_COLUMNS names reach this
+      // Only EXPLICIT_WRITE_FIELDS and record payload column names reach this
       // case; each is a fixed name that passed FIELD_NAME.
       if (table && field && !EXPLICIT_WRITE_FIELDS.has(field)) {
         return (
-          `Write denied by policy: field "${field}" on "${table}" holds whole records as XML, ` +
+          `Write denied by policy: field "${field}" on "${table}" holds record payloads, ` +
           "so a writable wildcard never covers it. List it explicitly in " +
           `fieldPolicy.${table}.writable to allow this write.`
         );
@@ -1149,12 +1193,12 @@ export function fieldPolicyDenialMessage(error: FieldPolicyError): string {
             `in fieldPolicy.${table}.writable to allow this write.`
         : "Write denied by policy: a field that a writable wildcard never covers must be listed explicitly in the writable set.";
     case "explicit_read_required":
-      // Only RECORD_XML_COLUMNS names reach this case, on a fixed table.
+      // Only record payload column names reach this case, on a fixed table.
       return table && field
-        ? `Read denied by policy: field "${field}" on "${table}" holds whole records as XML, ` +
+        ? `Read denied by policy: field "${field}" on "${table}" holds record payloads, ` +
             "so a readable wildcard never covers it. List it explicitly in " +
             `fieldPolicy.${table}.readable to allow this read.`
-        : "Read denied by policy: a whole-record XML field must be listed explicitly in its table's readable set.";
+        : "Read denied by policy: a record payload field must be listed explicitly in its table's readable set.";
     case "unsupported_field_path":
       // The key itself is not echoed: as a whole it did not pass FIELD_NAME.
       return (
@@ -1248,7 +1292,7 @@ export function resolveReadableFields(
   for (const candidate of trimmed.split(",")) {
     const field = normalizeFieldName(candidate);
     if (seen.has(field)) throw new FieldPolicyError("invalid_field_selection");
-    // A whole-record XML column the profile's own entry for the table does
+    // A record payload column the profile's own entry for the table does
     // not list. Checked first: unlike a hidden-typed field, configuration can
     // open it, so the refusal says how.
     if (explicitDenied.has(field)) {
@@ -1309,8 +1353,8 @@ export function validateWritableFields(
     if (EXPLICIT_WRITE_FIELDS.has(field) && !policy.writable.includes(field)) {
       throw new FieldPolicyError("explicit_field_required", { table: policy.table, field });
     }
-    // A record XML column is written only where the table's own entry lists it.
-    if (recordXmlColumns(policy.table)?.has(field) && !policy.explicitWritable.includes(field)) {
+    // A record payload column is written only where the table's own entry lists it.
+    if (recordPayloadColumns(policy.table)?.has(field) && !policy.explicitWritable.includes(field)) {
       throw new FieldPolicyError("explicit_field_required", { table: policy.table, field });
     }
     if (!fieldSetAllows(policy.writable, policy.allowAnyWritable, field)) {
@@ -1628,17 +1672,18 @@ export function typeHiddenFieldNames(tableCandidate: unknown): ReadonlySet<strin
   return typeHiddenFields(normalizeTableName(tableCandidate));
 }
 
-/** Per policy map, each table's closed record XML columns. */
+/** Per policy map, the closed record payload columns of each table it names. */
 const EXPLICIT_READ_DENIED = new WeakMap<TableFieldPolicyMap, Map<string, ReadonlySet<string>>>();
 
 /**
- * The record XML columns of `table` that the current policy does not open:
- * every one, unless the profile's own entry for the table lists it in
- * `readable`. Cached per policy map and table, so the same set comes back on
- * every call and projections built from it are reused.
+ * The record payload columns of `table` that the current policy does not
+ * open: every one, unless the profile's own entry for the table lists it in
+ * `readable`. With nothing listed the answer is the table's fixed column set,
+ * so nothing is stored; a partial opening is cached per policy map and table,
+ * and only tables the configuration names can reach that cache.
  */
 function explicitReadDeniedFields(table: string): ReadonlySet<string> {
-  const fields = recordXmlColumns(table);
+  const fields = recordPayloadColumns(table);
   if (fields === undefined) return EMPTY_FIELDS;
   let policies: TableFieldPolicyMap;
   try {
@@ -1646,18 +1691,16 @@ function explicitReadDeniedFields(table: string): ReadonlySet<string> {
   } catch {
     return fields;
   }
+  // A table with no entry of its own resolves through "*", which lists none.
+  const listed = policies.get(table)?.explicitReadable ?? NO_FIELDS;
+  if (listed.length === 0) return fields;
   let byTable = EXPLICIT_READ_DENIED.get(policies);
   if (!byTable) EXPLICIT_READ_DENIED.set(policies, (byTable = new Map()));
   const cached = byTable.get(table);
   if (cached !== undefined) return cached;
-  // A table with no entry of its own resolves through "*", which lists none.
-  const listed = policies.get(table)?.explicitReadable ?? [];
-  const denied =
-    listed.length === 0
-      ? fields
-      : (Object.freeze(
-          new Set([...fields].filter((field) => !listed.includes(field)))
-        ) as ReadonlySet<string>);
+  const denied = Object.freeze(
+    new Set([...fields].filter((field) => !listed.includes(field)))
+  ) as ReadonlySet<string>;
   byTable.set(table, denied);
   return denied;
 }
@@ -1669,8 +1712,8 @@ const READ_HIDDEN_UNIONS = new WeakMap<
 
 /**
  * Every field a read of `table` treats as hidden: its hidden-typed fields and
- * the record XML columns its policy leaves closed. Writes check types here
- * and record XML columns in validateWritableFields.
+ * the record payload columns its policy leaves closed. Writes check types
+ * here and record payload columns in validateWritableFields.
  */
 function readHiddenFields(table: string): ReadonlySet<string> {
   const typed = typeHiddenFields(table);
@@ -1689,7 +1732,7 @@ function readHiddenFields(table: string): ReadonlySet<string> {
 
 /**
  * Fields of `table` that may never filter, order, group or aggregate a read:
- * its hidden-typed fields, the record XML columns its policy leaves closed,
+ * its hidden-typed fields, the record payload columns its policy leaves closed,
  * and its row rule's value field. The sensitive-name check applies on top,
  * wherever a caller checks names.
  */
@@ -2086,7 +2129,7 @@ function mergeFieldPolicyDefinitions(
       // writes has not asked for a restriction, and tableAccess already
       // decided whether this table is reachable at all.
       writable: definition.writable ?? fallback?.writable ?? existing?.writable,
-      // Only the table's own entry can list a record XML column; the "*"
+      // Only the table's own entry can list a record payload column; the "*"
       // entry and the base never do.
       ...(definition.readable === undefined ? {} : { ownReadable: definition.readable }),
       ...(definition.writable === undefined ? {} : { ownWritable: definition.writable }),
@@ -2186,7 +2229,7 @@ function buildFieldPolicyMap(
           }
         }
       }
-      const xmlColumns = recordXmlColumns(table);
+      const payloadColumns = recordPayloadColumns(table);
       return [
         table,
         Object.freeze({
@@ -2196,14 +2239,14 @@ function buildFieldPolicyMap(
           writable: writableFields,
           allowAnyReadable: readable === FIELD_POLICY_WILDCARD,
           allowAnyWritable: writable === FIELD_POLICY_WILDCARD,
-          explicitReadable: listedRecordXmlColumns(
-            xmlColumns,
+          explicitReadable: listedPayloadColumns(
+            payloadColumns,
             definition.ownReadable,
             definition.readable,
             readable
           ),
-          explicitWritable: listedRecordXmlColumns(
-            xmlColumns,
+          explicitWritable: listedPayloadColumns(
+            payloadColumns,
             definition.ownWritable,
             definition.writable,
             writable
@@ -2215,11 +2258,11 @@ function buildFieldPolicyMap(
 }
 
 /**
- * The record XML columns an own-entry list names. The merge passes the own
+ * The record payload columns an own-entry list names. The merge passes the own
  * list through as the resolved list, so its normalized form is reused rather
  * than normalized twice. A wildcard own list names nothing.
  */
-function listedRecordXmlColumns(
+function listedPayloadColumns(
   columns: ReadonlySet<string> | undefined,
   own: FieldPolicySet | undefined,
   resolvedSource: FieldPolicySet | undefined,

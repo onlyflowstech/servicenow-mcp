@@ -245,7 +245,9 @@ servicenow-mcp-setup grant --profile dev --read incident,problem --write inciden
 `grant` and the wizard print a warning, and still grant, when write access
 lands on a privilege-sensitive table: role, group, approval, script,
 property, user or authentication tables such as `sys_user_has_role`,
-`sysapproval_approver` or `sys_script`.
+`sysapproval_approver` or `sys_script`, and the MID Server queue
+(`ecc_queue` and its rotation shards), whose records can run commands on MID
+Server hosts.
 
 `--force` regenerates the owner/client identifiers but deliberately preserves
 `SN_PROFILE_ENCRYPTION_KEY`, which decrypts every credential envelope in
@@ -1575,20 +1577,29 @@ Otherwise the write is denied with:
 Write denied by policy: field "sys_domain" on "incident" changes the record's class or domain, so a writable wildcard never covers it. List it explicitly in fieldPolicy.incident.writable to allow this write.
 ```
 
-**Record XML columns.** `payload` and `payload_diff` on `sys_update_xml`,
+**Record payload columns.** Some columns carry other records' content or
+packaged content, so no wildcard covers them: not the open default of a
+profile with no field policy, a `"*"` entry, or `"*"` on the table's own
+entry. They are `payload` and `payload_diff` on `sys_update_xml`,
 `sys_update_version`, `sys_update_preview_xml`, `sys_update_diff`,
 `sys_sync_preview_remote`, `sys_upgrade_history_log`, `sys_metadata_link`,
 `sys_metadata_delete`, `sys_audit_delete`, `sys_archive_log` and
-`clone_preserved_data` hold whole records as XML, so no wildcard covers them:
-not the open default of a profile with no field policy, a `"*"` entry, or
-`"*"` on the table's own entry. Each is read only where it is named in that
-table's own `readable`, and written only where it is named in its own
-`writable`. Until then it is refused by name and as a filter, order, group-by,
-aggregate or write field, and is left out of `fields=all`, detailed and
-default reads and write echoes. A named read is denied with:
+`clone_preserved_data`; `payload` on `ecc_queue`, `data_replication_queue`,
+`sys_rt_change_log`, `sys_hub_snapshot` and `sys_hub_flow_version`; `payload`
+and `payload_short` on `sys_replication_queue`; `payload` and
+`previous_payload` on `cdc_queue_ih`, `cdc_queue_par` and
+`cdc_queue_uxa_user_props`; `data` on `sys_hub_snapshot_chunk`; and
+`encoded_keystore` on `sn_disco_certmgmt_certificate_ca_credentials`. The
+numbered rotation shards of the queue tables (`ecc_queue0003`,
+`sys_replication_queue5`, ...) are covered too, each as its own table. Each
+column is read only where it is named in that table's own `readable`, and
+written only where it is named in its own `writable`. Until then it is
+refused by name and as a filter, order, group-by, aggregate or write field,
+and is left out of `fields=all`, detailed and default reads and write
+echoes. A named read is denied with:
 
 ```text
-Read denied by policy: field "payload" on "sys_update_xml" holds whole records as XML, so a readable wildcard never covers it. List it explicitly in fieldPolicy.sys_update_xml.readable to allow this read.
+Read denied by policy: field "payload" on "sys_update_xml" holds record payloads, so a readable wildcard never covers it. List it explicitly in fieldPolicy.sys_update_xml.readable to allow this read.
 ```
 
 **`readable: []` and `writable: []`.** `readable: []` makes a table

@@ -327,6 +327,8 @@ describe("policy card matches the enforced policy", () => {
     const result = card({ readTables: ["*"], writeTables: ["*"], targets: [] });
     expect(result.write_all_tables).toBe(true);
     expect(result.risky_write_tables).toContain("sys_user_has_role");
+    expect(result.risky_write_tables).toContain("ecc_queue");
+    expect(renderPolicyCard(result)).toContain("Records written to ecc_queue can run commands on MID Server hosts.");
   });
 
   it("reports auth type and batch limits and carries no credential material", () => {

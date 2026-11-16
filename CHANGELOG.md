@@ -9,20 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Record XML columns are readable only when a profile's field policy names
-  them.** `payload` and `payload_diff` on `sys_update_xml`, `sys_update_version`,
-  `sys_update_preview_xml`, `sys_update_diff`, `sys_sync_preview_remote`,
-  `sys_upgrade_history_log`, `sys_metadata_link`, `sys_metadata_delete`,
-  `sys_audit_delete`, `sys_archive_log` and `clone_preserved_data` hold whole
-  records as XML. No wildcard covers them any more: not the open default of a
-  profile with no field policy, a `"*"` field entry, or `"*"` on the table's own
-  entry. Each is read only where that table's own `readable` lists it, and
-  written only where its own `writable` lists it (`fieldPolicy.<table>`, or the
-  table's `readableTableFields`/`writableTableFields` entry). Until then it is
-  refused by name, as a filter, order, group-by, aggregate or write field, and
-  is left out of `fields=all`, detailed and default reads, write echoes and
-  aggregate groups. The refusal names the key to set. `tools/list` is
-  unchanged.
+- **Record payload columns are readable only when a profile's field policy
+  names them.** These columns, and the numbered rotation shards of the queue
+  tables (`ecc_queue0003`, `sys_replication_queue5`, ...), are covered:
+  - `payload` and `payload_diff` on `sys_update_xml`, `sys_update_version`,
+    `sys_update_preview_xml`, `sys_update_diff`, `sys_sync_preview_remote`,
+    `sys_upgrade_history_log`, `sys_metadata_link`, `sys_metadata_delete`,
+    `sys_audit_delete`, `sys_archive_log` and `clone_preserved_data`;
+  - `payload` on `ecc_queue`, `data_replication_queue`, `sys_rt_change_log`,
+    `sys_hub_snapshot` and `sys_hub_flow_version`; `payload` and
+    `payload_short` on `sys_replication_queue`; `payload` and
+    `previous_payload` on `cdc_queue_ih`, `cdc_queue_par` and
+    `cdc_queue_uxa_user_props`; `data` on `sys_hub_snapshot_chunk`; and
+    `encoded_keystore` on `sn_disco_certmgmt_certificate_ca_credentials`.
+
+  No wildcard covers them any more: not the open default of a profile with no
+  field policy, a `"*"` field entry, or `"*"` on the table's own entry. Each is
+  read only where that table's own `readable` lists it, and written only where
+  its own `writable` lists it (`fieldPolicy.<table>`, or the table's
+  `readableTableFields`/`writableTableFields` entry); a shard is its own table.
+  Until then it is refused by name, as a filter, order, group-by, aggregate or
+  write field, and is left out of `fields=all`, detailed and default reads,
+  write echoes and aggregate groups. The refusal names the key to set.
+  `tools/list` is unchanged.
+
+- **`ecc_queue` is on the privilege-sensitive write list.** A write grant that
+  reaches `ecc_queue` or one of its rotation shards, including `"*"`, is still
+  allowed, but `grant`, the wizard and the policy card now flag it: records
+  written to `ecc_queue` can run commands on MID Server hosts.
 
 ## [2.3.0-dev.5] — 2026-11-16
 

@@ -1,8 +1,10 @@
 /**
- * Record XML columns (`payload` and `payload_diff` on the update, upgrade,
- * metadata, archive and delete tables) are read and written only where the
+ * Record payload columns (per table: `payload` and `payload_diff` on the
+ * update, upgrade, metadata, archive and delete tables; the queue, change-log,
+ * flow snapshot and certificate columns) are read and written only where the
  * profile's own field-policy entry for the table lists them. No wildcard
  * covers them: not the open default, a "*" field entry, or "*" on the table.
+ * Numbered rotation shards of the queue tables are covered by name.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -16,6 +18,7 @@ import type {
 } from "../src/execution-context.js";
 import {
   EXPLICIT_READ_FIELD_NAMES,
+  ROTATION_SHARD_BASE_NAMES,
   FieldPolicyError,
   fieldPolicyDenialMessage,
   filterAggregateResult,
@@ -39,33 +42,59 @@ import { createTableAccessPolicy } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
 import { noHiddenFieldTypes } from "./fixtures/field-types.js";
 
-const TABLES = [
-  "sys_update_xml",
-  "sys_update_version",
-  "sys_update_preview_xml",
-  "sys_update_diff",
-  "sys_sync_preview_remote",
-  "sys_upgrade_history_log",
-  "sys_metadata_link",
-  "sys_metadata_delete",
-  "sys_audit_delete",
-  "sys_archive_log",
-  "clone_preserved_data",
-] as const;
-const COLUMNS = ["payload", "payload_diff"] as const;
-const PAIRS = TABLES.flatMap((table) => COLUMNS.map((column) => [table, column] as const));
+const XML_PAIR = ["payload", "payload_diff"] as const;
+/** Each table and its payload columns, as the policy lists them. */
+const TABLE_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  sys_update_xml: XML_PAIR,
+  sys_update_version: XML_PAIR,
+  sys_update_preview_xml: XML_PAIR,
+  sys_update_diff: XML_PAIR,
+  sys_sync_preview_remote: XML_PAIR,
+  sys_upgrade_history_log: XML_PAIR,
+  sys_metadata_link: XML_PAIR,
+  sys_metadata_delete: XML_PAIR,
+  sys_audit_delete: XML_PAIR,
+  sys_archive_log: XML_PAIR,
+  clone_preserved_data: XML_PAIR,
+  ecc_queue: ["payload"],
+  sys_replication_queue: ["payload", "payload_short"],
+  data_replication_queue: ["payload"],
+  cdc_queue_ih: ["payload", "previous_payload"],
+  cdc_queue_par: ["payload", "previous_payload"],
+  cdc_queue_uxa_user_props: ["payload", "previous_payload"],
+  sys_rt_change_log: ["payload"],
+  sys_hub_snapshot: ["payload"],
+  sys_hub_snapshot_chunk: ["data"],
+  sys_hub_flow_version: ["payload"],
+  sn_disco_certmgmt_certificate_ca_credentials: ["encoded_keystore"],
+};
+/** One numbered shard per rotation base, and the base it belongs to. */
+const SHARDS: Readonly<Record<string, string>> = {
+  ecc_queue0003: "ecc_queue",
+  sys_replication_queue5: "sys_replication_queue",
+  data_replication_queue0006: "data_replication_queue",
+  cdc_queue_ih0000: "cdc_queue_ih",
+  cdc_queue_par0009: "cdc_queue_par",
+  cdc_queue_uxa_user_props0006: "cdc_queue_uxa_user_props",
+};
+const columnsOf = (table: string): readonly string[] => TABLE_COLUMNS[SHARDS[table] ?? table] ?? [];
+const TABLES = [...Object.keys(TABLE_COLUMNS), ...Object.keys(SHARDS)];
+const PAIRS = TABLES.flatMap((table) => columnsOf(table).map((column) => [table, column] as const));
 /** The tables a "*" table grant reaches (sys_audit_delete must be named). */
 const STAR_TABLES = TABLES.filter((table) => table !== "sys_audit_delete");
 
 const SYS_ID = "d".repeat(32);
-const MARKER = "XML-COLUMN-MARKER-41c2";
-const XML =
+const MARKER = "PAYLOAD-COLUMN-MARKER-41c2";
+const CONTENT =
   '<?xml version="1.0" encoding="UTF-8"?><record_update table="u_example_widget">' +
   `<u_example_widget action="INSERT_OR_UPDATE"><short_description>${MARKER}</short_description>` +
   `<sys_id>${SYS_ID}</sys_id></u_example_widget></record_update>`;
 
-function rowFor(): Record<string, string> {
-  return { sys_id: SYS_ID, name: "u_example_widget_" + SYS_ID, payload: XML, payload_diff: XML };
+/** A row of `table` carrying the marker in each of its payload columns. */
+function rowFor(table: string): Record<string, string> {
+  const row: Record<string, string> = { sys_id: SYS_ID, name: "u_example_widget_" + SYS_ID };
+  for (const column of columnsOf(table)) row[column] = CONTENT;
+  return row;
 }
 
 function withFieldPolicy<T>(configuration: FieldPolicyConfigurationInput, action: () => T): T {
@@ -82,13 +111,61 @@ function reason(action: () => unknown): string {
   }
 }
 
-describe("the record XML column list", () => {
-  it("is payload and payload_diff on each listed table", () => {
-    expect(Object.keys(EXPLICIT_READ_FIELD_NAMES).sort()).toEqual([...TABLES].sort());
-    for (const table of TABLES) expect(EXPLICIT_READ_FIELD_NAMES[table]).toEqual(["payload", "payload_diff"]);
+describe("the record payload column list", () => {
+  it("is each listed table's own columns", () => {
+    expect(EXPLICIT_READ_FIELD_NAMES).toEqual(TABLE_COLUMNS);
     expect(Object.isFrozen(EXPLICIT_READ_FIELD_NAMES)).toBe(true);
+    expect([...ROTATION_SHARD_BASE_NAMES].sort()).toEqual([...new Set(Object.values(SHARDS))].sort());
   });
 });
+
+describe("rotation shards", () => {
+  it.each(Object.entries(SHARDS))("%s takes the columns of %s", (shard, base) => {
+    for (const column of TABLE_COLUMNS[base]!) {
+      expect(reason(() => resolveReadableFields(shard, { fields: column })), `${shard}.${column}`).toBe(
+        "explicit_read_required"
+      );
+      expect(reason(() => validateWritableFields(shard, { [column]: "x" })), `${shard}.${column}`).toBe(
+        "explicit_field_required"
+      );
+    }
+  });
+
+  it.each([
+    "ecc_queue_0001",
+    "ecc_queue_example",
+    "xecc_queue0001",
+    "ecc_queue0001a",
+    "ecc_queuex",
+    "u_ecc_queue0001",
+    "sys_update_xml0001",
+    "sys_hub_snapshot01",
+    "cdc_queue0001",
+    "cdc_queue_state0001",
+  ])("%s is not a shard: its payload column follows the ordinary rules", (table) => {
+    expect(resolveReadableFields(table, { fields: "payload" })).toEqual(["payload"]);
+    expect(validateWritableFields(table, { payload: "x" })).toEqual({ payload: "x" });
+  });
+
+  it("naming the base table does not open a shard, and naming a shard opens only that shard", () => {
+    withFieldPolicy({ fieldPolicy: { ecc_queue: { readable: ["sys_id", "payload"] } } }, () => {
+      expect(resolveReadableFields("ecc_queue", { fields: "payload" })).toEqual(["payload"]);
+      expect(reason(() => resolveReadableFields("ecc_queue0003", { fields: "payload" }))).toBe(
+        "explicit_read_required"
+      );
+    });
+    withFieldPolicy({ fieldPolicy: { ecc_queue0003: { readable: ["sys_id", "payload"] } } }, () => {
+      expect(resolveReadableFields("ecc_queue0003", { fields: "payload" })).toEqual(["payload"]);
+      expect(reason(() => resolveReadableFields("ecc_queue0004", { fields: "payload" }))).toBe(
+        "explicit_read_required"
+      );
+      expect(reason(() => resolveReadableFields("ecc_queue", { fields: "payload" }))).toBe(
+        "explicit_read_required"
+      );
+    });
+  });
+});
+
 
 describe("with no field policy", () => {
   it.each(PAIRS)("%s.%s is refused by name, with the key that opens it", (table, column) => {
@@ -118,14 +195,14 @@ describe("with no field policy", () => {
       resolveReadableFields(table),
     ]) {
       expect(selection).not.toContain(column);
-      expect(JSON.stringify(filterReadableRecord(rowFor(), selection))).not.toContain(MARKER);
+      expect(JSON.stringify(filterReadableRecord(rowFor(table), selection))).not.toContain(MARKER);
     }
   });
 
   it.each(PAIRS)("%s.%s is left out of a caller-built projection", (table, column) => {
     const selection = readableSelectionForTable(table, ["sys_id", "name", column]);
     expect(selection).not.toContain(column);
-    expect(JSON.stringify(filterReadableRecord(rowFor(), selection))).not.toContain(MARKER);
+    expect(JSON.stringify(filterReadableRecord(rowFor(table), selection))).not.toContain(MARKER);
   });
 
   it.each(PAIRS)("%s.%s is dropped from an aggregate grouped on it", (table, column) => {
@@ -136,13 +213,13 @@ describe("with no field policy", () => {
 
   it.each(PAIRS)("%s.%s is refused as a write key, with the key that opens it", (table, column) => {
     try {
-      validateWritableFields(table, { [column]: "<x/>" });
+      validateWritableFields(table, { [column]: "x" });
       throw new Error("expected a refusal");
     } catch (error) {
       expect(error).toBeInstanceOf(FieldPolicyError);
       expect((error as FieldPolicyError).reason).toBe("explicit_field_required");
       const message = fieldPolicyDenialMessage(error as FieldPolicyError);
-      expect(message).toContain("holds whole records as XML");
+      expect(message).toContain("holds record payloads");
       expect(message).toContain(`fieldPolicy.${table}.writable`);
     }
     expect(validateWritableFields(table, { name: "x" })).toEqual({ name: "x" });
@@ -151,14 +228,14 @@ describe("with no field policy", () => {
   it.each(TABLES)("%s: a projection built outside the policy is held to the call's tables", (table) => {
     const { scope } = hiddenFieldScope(fieldTypesFromRows([], { [table]: [table] }), [table], false);
     runWithHiddenFieldScope(scope!, () => {
-      const filtered = filterReadableRecord(rowFor(), ["*"]);
+      const filtered = filterReadableRecord(rowFor(table), ["*"]);
       expect(JSON.stringify(filtered)).not.toContain(MARKER);
       expect(filtered).toMatchObject({ sys_id: SYS_ID });
     });
   });
 
   it("leaves a same-named column on another table alone", () => {
-    for (const table of ["u_example_widget", "sys_update_set", "sys_hub_flow_version"]) {
+    for (const table of ["u_example_widget", "sys_update_set", "sys_hub_flow"]) {
       expect(resolveReadableFields(table, { fields: "payload" }), table).toEqual(["payload"]);
       expect(validateWritableFields(table, { payload: "x" }), table).toEqual({ payload: "x" });
     }
@@ -174,7 +251,7 @@ describe("only the table's own entry opens a column", () => {
       expect(resolveReadableFields(table, { fields: column, purpose: "query" })).toEqual([column]);
       expect(resolveReadableFields(table, { fields: "all" })).toContain(column);
       expect(
-        JSON.stringify(filterReadableRecord(rowFor(), resolveReadableFields(table, { fields: column })))
+        JSON.stringify(filterReadableRecord(rowFor(table), resolveReadableFields(table, { fields: column })))
       ).toContain(MARKER);
       expect(queryDeniedFields(table).has(column)).toBe(false);
       // Reading it does not open writing it.
@@ -222,13 +299,15 @@ describe("only the table's own entry opens a column", () => {
   });
 
   it("opens only the table and the column it names", () => {
+    // sys_hub_snapshot_chunk's column is `data`: a `payload` column there is ordinary.
+    expect(resolveReadableFields("sys_hub_snapshot_chunk", { fields: "payload" })).toEqual(["payload"]);
     withFieldPolicy({ fieldPolicy: { sys_upgrade_history_log: { readable: ["sys_id", "payload"] } } }, () => {
       expect(resolveReadableFields("sys_upgrade_history_log", { fields: "payload" })).toEqual(["payload"]);
       expect(reason(() => resolveReadableFields("sys_upgrade_history_log", { fields: "payload_diff" }))).toBe(
         "explicit_read_required"
       );
       for (const table of TABLES.filter((name) => name !== "sys_upgrade_history_log")) {
-        expect(reason(() => resolveReadableFields(table, { fields: "payload" })), table).toBe(
+        expect(reason(() => resolveReadableFields(table, { fields: columnsOf(table)[0]! })), table).toBe(
           "explicit_read_required"
         );
       }
@@ -262,18 +341,24 @@ afterEach(async () => {
 
 async function connect(fieldPolicy?: FieldPolicyConfigurationInput) {
   const records: ToolAuditRecord[] = [];
-  const answer = (path: string) =>
-    path.startsWith("/api/now/stats/")
-      ? { result: [{ stats: { count: "1" }, groupby_fields: [{ field: "payload", value: MARKER }] }] }
-      : /^\/api\/now\/table\/[a-z0-9_]+\/[0-9a-f]{32}$/u.test(path)
-        ? { result: rowFor() }
-        : { result: [rowFor()] };
+  // `/api/now/(table|stats)/<table>[/<sys_id>]`.
+  const tableOf = (path: string) => /^\/api\/now\/(?:table|stats)\/([a-z0-9_]+)/u.exec(path)?.[1] ?? "";
+  const answer = (path: string) => {
+    const table = tableOf(path);
+    if (path.startsWith("/api/now/stats/")) {
+      const field = columnsOf(table)[0] ?? "payload";
+      return { result: [{ stats: { count: "1" }, groupby_fields: [{ field, value: MARKER }] }] };
+    }
+    return /^\/api\/now\/table\/[a-z0-9_]+\/[0-9a-f]{32}$/u.test(path)
+      ? { result: rowFor(table) }
+      : { result: [rowFor(table)] };
+  };
   const serviceNowClient = {
     get: vi.fn(async (path: string) => answer(path)),
     getWithMeta: vi.fn(async (path: string) => ({ data: answer(path), status: 200, headers: new Headers() })),
-    post: vi.fn(async () => ({ result: rowFor() })),
-    patch: vi.fn(async () => ({ result: rowFor() })),
-    put: vi.fn(async () => ({ result: rowFor() })),
+    post: vi.fn(async (path: string) => ({ result: rowFor(tableOf(path)) })),
+    patch: vi.fn(async (path: string) => ({ result: rowFor(tableOf(path)) })),
+    put: vi.fn(async (path: string) => ({ result: rowFor(tableOf(path)) })),
   } as unknown as ServiceNowClient;
   const getClient = vi.fn(() => serviceNowClient);
   const profileManager = {
@@ -351,7 +436,7 @@ async function expectServedWithout(connected: Connected, name: string, args: Rec
 describe('the generic tools under a "*" grant with no field policy', () => {
   it.each(STAR_TABLES)("%s: each column is refused as a field, filter, order, group or aggregate field", async (table) => {
     const connected = await connect();
-    for (const column of COLUMNS) {
+    for (const column of columnsOf(table)) {
       await expectRefused(connected, "sn_query", { table, fields: `sys_id,${column}` });
       await expectRefused(connected, "sn_get", { table, sys_id: SYS_ID, fields: column });
       await expectRefused(connected, "sn_query", {
@@ -377,8 +462,8 @@ describe('the generic tools under a "*" grant with no field policy', () => {
 
   it.each(STAR_TABLES)("%s: a write of either column is refused, and another write's echo omits them", async (table) => {
     const connected = await connect();
-    for (const column of COLUMNS) {
-      await expectRefused(connected, "sn_update", { table, sys_id: SYS_ID, fields: { [column]: "<x/>" } });
+    for (const column of columnsOf(table)) {
+      await expectRefused(connected, "sn_update", { table, sys_id: SYS_ID, fields: { [column]: "x" } });
     }
     await expectServedWithout(connected, "sn_update", { table, sys_id: SYS_ID, fields: { name: "renamed" } });
   });
@@ -386,14 +471,15 @@ describe('the generic tools under a "*" grant with no field policy', () => {
 
 describe("the generic tools once the table's own entry lists the column", () => {
   it.each(STAR_TABLES)("%s: sn_query returns it and may filter on it", async (table) => {
-    const connected = await connect({ fieldPolicy: { [table]: { readable: ["sys_id", "name", "payload"] } } });
-    const named = await call(connected, "sn_query", { table, fields: "sys_id,payload" });
+    const column = columnsOf(table)[0]!;
+    const connected = await connect({ fieldPolicy: { [table]: { readable: ["sys_id", "name", column] } } });
+    const named = await call(connected, "sn_query", { table, fields: `sys_id,${column}` });
     expect(named.isError).toBeFalsy();
     expect(JSON.stringify(named)).toContain(MARKER);
     const filtered = await call(connected, "sn_query", {
       table,
       fields: "sys_id",
-      structured_query: { filter: { type: "text", field: "payload", operator: "contains", value: "example" } },
+      structured_query: { filter: { type: "text", field: column, operator: "contains", value: "example" } },
     });
     expect(filtered.isError).toBeFalsy();
   });
