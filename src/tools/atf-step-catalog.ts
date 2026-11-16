@@ -128,7 +128,9 @@ function checkConditionFields(table: string, conditions: string): void {
     if (ordering ? rest !== "" : !conditionOperatorAllowed(rest)) {
       throw new FieldPolicyError("invalid_field_selection");
     }
-    resolveReadableFields(table, { fields: field });
+    // A condition filters, so a field refused as a filter is refused here: a
+    // password-typed field, and a value whose secrecy is per row.
+    resolveReadableFields(table, { fields: field, purpose: "query" });
     checkConditionValue(rest);
   }
 }

@@ -31,6 +31,7 @@ import {
   loadFieldTypes,
   rowValueHidden,
   rowValueRule,
+  runWithHiddenFieldScope,
   validateFieldTypesConfig,
   withoutFields,
 } from "../src/hidden-values.js";
@@ -41,6 +42,7 @@ import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy } from "../src/table-policy.js";
 import { createEncodedQueryAccessPolicy } from "../src/encoded-query-policy.js";
 import { createAtfExecutionPolicy } from "../src/atf-policy.js";
+import { prepareSteps } from "../src/tools/atf-step-catalog.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
 import type { ToolModuleLogger } from "../src/tools/tool-module.js";
 import { fieldTypeAnswer, type FieldTypeFixture } from "./fixtures/field-types.js";
@@ -667,5 +669,42 @@ describe("profile opt-out", () => {
     const optedOut = buildPolicyCard({ ...input, fieldTypes: { dictionary: "not_required" } });
     expect(optedOut.field_types).toEqual({ dictionary: "not_required" });
     expect(renderPolicyCard(optedOut)).toContain("WARNING: field types not required");
+  });
+});
+
+describe("ATF step conditions", () => {
+  // The dispatcher prepares sn_atf_author's plan again inside the call's
+  // hidden-field scope; this is that second preparation.
+  const scope = {
+    tables: new Map<string, ReadonlySet<string>>([
+      ["u_vault", new Set(MISSED)],
+      ["sys_properties", new Set<string>()],
+      ...["sys_atf_step", "sys_variable_value", "sys_element_mapping", "sys_atf_step_config", "sys_atf_test"].map(
+        (table) => [table, new Set<string>()] as [string, ReadonlySet<string>]
+      ),
+    ]),
+    unresolved: "names_only" as const,
+  };
+  const prepare = (type: string, inputs: Record<string, unknown>) =>
+    runWithHiddenFieldScope(scope, () =>
+      prepareSteps({ test_sys_id: "b".repeat(32), steps: [{ type, inputs }] }, false)
+    );
+
+  it("refuses a password-typed field, or sys_properties.value, as a condition or an assignment", () => {
+    expect(() => prepare("record_query", { table: "u_vault", field_values: "name=x" })).not.toThrow();
+    for (const conditions of ["key=abc", "nameSTARTSWITHa^ORDERBYotp", "answerISNOTEMPTY"]) {
+      expect(() => prepare("record_query", { table: "u_vault", field_values: conditions }), conditions).toThrow(
+        FieldPolicyError
+      );
+      expect(() => prepare("field_values_validation", { table: "u_vault", conditions }), conditions).toThrow(
+        FieldPolicyError
+      );
+    }
+    expect(() => prepare("record_query", { table: "sys_properties", field_values: "valueSTARTSWITHa" })).toThrow(
+      FieldPolicyError
+    );
+    expect(() => prepare("set_field_values", { table: "u_vault", field_values: "passphrase=x" })).toThrow(
+      FieldPolicyError
+    );
   });
 });
