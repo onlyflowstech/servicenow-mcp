@@ -34,9 +34,13 @@ export const isSysId = (value: unknown): value is string => typeof value === "st
 
 export type ScriptSide = "server" | "client";
 
-/** Script elements per table. Any other table: `script` is server code, `client_script` is client code. */
-const SCRIPT_FIELDS: Readonly<Record<string, { readonly server?: readonly string[]; readonly client?: readonly string[] }>> =
-  Object.freeze({
+/**
+ * Script elements per table. Any other table: `script` is server code,
+ * `client_script` is client code. A Map, because the key is instance text and
+ * a plain object would answer `constructor` from its prototype.
+ */
+const SCRIPT_FIELDS: ReadonlyMap<string, { readonly server?: readonly string[]; readonly client?: readonly string[] }> =
+  new Map(Object.entries({
     sys_script: { server: ["script", "condition"] },
     sys_script_include: { server: ["script"] },
     sys_script_client: { client: ["script"] },
@@ -56,12 +60,10 @@ const SCRIPT_FIELDS: Readonly<Record<string, { readonly server?: readonly string
     sys_transform_entry: { server: ["source_script"] },
     sys_script_email: { server: ["script"] },
     sysevent_email_action: { server: ["advanced_condition"] },
-  });
+  }));
 
 /** On a credential-table row, only these elements are kept: metadata, never values. */
-const CREDENTIAL_ROW_FIELDS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  sys_properties: ["name", "type"],
-});
+const CREDENTIAL_ROW_FIELDS: ReadonlyMap<string, readonly string[]> = new Map([["sys_properties", ["name", "type"]]]);
 
 export interface PreparedRecord {
   /** The element name, when it is a valid table name. */
@@ -128,11 +130,20 @@ function metadataTable(update: EvaluateUpdate): string | null {
   return match ? match[1] : null;
 }
 
-function readRecord(element: XmlElement, keep: readonly string[] | null): PreparedRecord {
+/**
+ * Reads a record's fields, or returns null when its shape is one the rules
+ * could not cover: a field name that repeats (which copy the platform applies
+ * is not the reader's call) or a field that holds elements (no rule reads
+ * nested content). The row is then not scanned, rather than half scanned.
+ */
+function readRecord(element: XmlElement, keep: readonly string[] | null): PreparedRecord | null {
   const fields = new Map<string, string>();
   const displayValues = new Map<string, string>();
+  const seen = new Set<string>();
   for (const child of childElements(element)) {
-    if (fields.has(child.name) || (keep !== null && !keep.includes(child.name))) continue;
+    if (seen.has(child.name) || child.children.some((node) => node.kind === "element")) return null;
+    seen.add(child.name);
+    if (keep !== null && !keep.includes(child.name)) continue;
     fields.set(child.name, textContent(child));
     const display = getAttribute(child, "display_value");
     if (display !== undefined) displayValues.set(child.name, display);
@@ -146,7 +157,7 @@ function readRecord(element: XmlElement, keep: readonly string[] | null): Prepar
 }
 
 function scriptFields(table: string | null, record: PreparedRecord): { field: string; side: ScriptSide }[] {
-  const known = table === null ? undefined : SCRIPT_FIELDS[table];
+  const known = table === null ? undefined : SCRIPT_FIELDS.get(table);
   const out: { field: string; side: ScriptSide }[] = [];
   if (known) {
     for (const field of known.server ?? []) out.push({ field, side: "server" });
@@ -171,7 +182,8 @@ export interface PrepareOptions {
 
 /**
  * Prepares a row. `finding` must come from `findingUpdate` for the same row.
- * Never throws on payload content.
+ * Never throws on payload content. `context` must already fail closed (the
+ * engine wraps the caller's checks).
  */
 export function prepareRow(
   update: EvaluateUpdate,
@@ -195,24 +207,44 @@ export function prepareRow(
       payload: credential ? "credential" : read.code === "too_large" ? "too_large" : "unreadable",
     };
   }
+  const unreadable = (table: string | null): PreparedRow => ({
+    ...base,
+    table,
+    payload: credential ? "credential" : "unreadable",
+    bytes: read.document.bytes,
+  });
 
+  // A payload is <record_update table="…"> around its records; any other root is not read.
   const root = read.document.root;
-  const elements = root.name === "record_update" ? childElements(root) : [root];
+  if (root.name !== "record_update") return unreadable(fallbackTable);
+  const elements = childElements(root);
   const rootTable = getAttribute(root, "table");
-  const table = isTableName(rootTable) ? rootTable : (isTableName(elements[0]?.name) ? elements[0].name : fallbackTable);
+  const first = elements[0]?.name;
+  // A root table that names another table than the record element would send
+  // the record to the wrong script fields.
+  if (rootTable !== undefined && first !== undefined && rootTable !== first) return unreadable(fallbackTable);
+  const table = isTableName(rootTable) ? rootTable : isTableName(first) ? first : fallbackTable;
 
-  if ((table !== null && context.isCredentialTable(table)) || credential) {
-    const keep = (table !== null ? CREDENTIAL_ROW_FIELDS[table] : undefined) ?? [];
+  // A credential row: the column, the root, or any record element is a credential table.
+  const isCredential =
+    credential ||
+    (table !== null && context.isCredentialTable(table)) ||
+    elements.some((element) => isTableName(element.name) && context.isCredentialTable(element.name));
+  if (isCredential) {
+    const keep = (table !== null ? CREDENTIAL_ROW_FIELDS.get(table) : undefined) ?? [];
+    const records = elements.map((element) => readRecord(element, keep));
     return {
       ...base,
       table,
       payload: "credential",
       bytes: read.document.bytes,
-      records: elements.map((element) => readRecord(element, keep)),
+      records: records.every((r) => r !== null) ? (records as PreparedRecord[]) : [],
     };
   }
 
-  const records = elements.map((element) => readRecord(element, null));
+  const parsed = elements.map((element) => readRecord(element, null));
+  if (!parsed.every((r) => r !== null)) return unreadable(table);
+  const records = parsed as PreparedRecord[];
   const scripts: PreparedScript[] = [];
   if (options.scripts) {
     records.forEach((record, index) => {

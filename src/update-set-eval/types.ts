@@ -1,6 +1,9 @@
 /**
  * Input and output shapes of the update-set evaluator.
  *
+ * A clean result is not an approval: the rules are heuristics over the
+ * scripts and fields they know, and `coverage` says what was not examined.
+ *
  * The engine reads nothing upstream. Its caller (the `evaluate` view) reads
  * the sets, their rows and the extra facts some rules need, inside its
  * declared access plan, and hands them over here. Instance text in the input
@@ -145,8 +148,10 @@ export interface Finding {
   readonly update?: FindingUpdate;
   /** The set, for a set finding. */
   readonly update_set?: FindingSet;
-  /** A fixed sentence; the only value it may hold is a validated table name. */
+  /** A fixed sentence. It holds no instance text. */
   readonly message: string;
+  /** SEC011: the data table, a validated table name chosen by the payload. Untrusted text for the caller to escape. */
+  readonly table?: string;
   /** The payload element that holds the script (a validated element name). Never set for SEC005 or SEC010. */
   readonly field?: string;
   /** 1-based line in that element's text. Never set for SEC005 or SEC010. */

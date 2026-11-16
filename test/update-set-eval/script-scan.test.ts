@@ -84,6 +84,10 @@ describe("linear time on hostile scripts", () => {
     "many regex-like slashes": fill("(/a/ / /b/ "),
     "many eval-like names": fill("x.eval(1); "),
     "many setMandatory calls with password": fill("g_form.setMandatory('password', 'true');\n"),
+    "many open braced unicode escapes": fill("\\u{"),
+    "many short unicode escapes": fill("\\u00"),
+    "one long escaped identifier": fill("\\u0061"),
+    "many bracketed eval strings": fill("gs['eval']"),
   };
 
   it.each(Object.entries(scripts))("%s", async (_name, script) => {

@@ -30,7 +30,10 @@ import {
   RULE_GROUPS,
   SEVERITIES,
   type EngineLimits,
+  type EvaluateContext,
   type EvaluateSet,
+  type EvaluateUpdate,
+  type PreviewProblem,
   type EvaluationInput,
   type EvaluationOptions,
   type EvaluationResult,
@@ -55,9 +58,7 @@ export interface EngineHooks {
   readonly yieldToLoop?: () => Promise<void>;
 }
 
-const SEVERITY_RANK: Readonly<Record<Severity, number>> = Object.freeze(
-  Object.fromEntries(SEVERITIES.map((s, i) => [s, i])) as Record<Severity, number>
-);
+const SEVERITY_RANK: ReadonlyMap<string, number> = new Map(SEVERITIES.map((s, i) => [s, i]));
 
 /** Rules whose findings never say where in the payload they are. */
 const NO_LOCATION: ReadonlySet<RuleId> = new Set(["SEC005", "SEC010"]);
@@ -78,7 +79,7 @@ function checkLimits(limits: EngineLimits): void {
 }
 
 function compare(a: Finding, b: Finding): number {
-  const bySeverity = SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity];
+  const bySeverity = (SEVERITY_RANK.get(b.severity) ?? 0) - (SEVERITY_RANK.get(a.severity) ?? 0);
   if (bySeverity !== 0) return bySeverity;
   if (a.rule_id !== b.rule_id) return a.rule_id < b.rule_id ? -1 : 1;
   const idA = a.update?.sys_id ?? a.update_set?.sys_id ?? "";
@@ -87,9 +88,195 @@ function compare(a: Finding, b: Finding): number {
   return (a.line ?? 0) - (b.line ?? 0);
 }
 
-/** Evaluates the rows and sets in `input`. Never throws on instance content. */
+const str = (value: unknown): string | null => (typeof value === "string" ? value : null);
+const flag = (value: unknown): boolean | undefined => (value === true ? true : value === false ? false : undefined);
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
+
+/**
+ * The caller's input, with every field reduced to the type the rules expect.
+ * Anything malformed is dropped or neutralised, and counted in
+ * `unavailable` when it means a check could not be made.
+ */
+function normalize(raw: EvaluationInput, notes: RuleNotes): { input: EvaluationInput; totalValid: boolean } {
+  // Copy the top-level fields once; a getter that throws reads as absent.
+  const value: Record<string, unknown> = {};
+  if (isObject(raw)) {
+    for (const key of [
+      "source", "sets", "batch_root", "updates", "updates_total", "payload_access", "problems",
+      "open_set_collisions", "baseline_versions", "context",
+    ]) {
+      try {
+        value[key] = raw[key];
+      } catch {
+        notes.unavailable++;
+      }
+    }
+  }
+  const updates: EvaluateUpdate[] = [];
+  if (Array.isArray(value.updates)) {
+    for (const u of value.updates as unknown[]) {
+      try {
+        if (!isObject(u)) throw new TypeError();
+        updates.push(normalizeUpdate(u));
+      } catch {
+        // Not a row the engine can read: it counts as not evaluated.
+        updates.push({ sys_id: "", name: "", update_set: "", payload: null });
+      }
+    }
+  } else {
+    notes.unavailable++;
+  }
+  const sets: EvaluateSet[] = [];
+  if (Array.isArray(value.sets)) {
+    for (const s of value.sets as unknown[]) {
+      try {
+        if (!isObject(s)) throw new TypeError();
+        sets.push(normalizeSet(s, notes));
+      } catch {
+        notes.unavailable++;
+      }
+    }
+  } else {
+    notes.unavailable++;
+  }
+  return finish(value, updates, sets, notes);
+}
+
+function normalizeUpdate(u: Record<string, unknown>): EvaluateUpdate {
+  return {
+    sys_id: str(u.sys_id) ?? "",
+    name: str(u.name) ?? "",
+    type: str(u.type),
+    target_name: str(u.target_name),
+    update_set: str(u.update_set) ?? "",
+    action: str(u.action),
+    table: str(u.table),
+    application: str(u.application),
+    replace_on_upgrade: u.replace_on_upgrade === true,
+    payload: str(u.payload),
+  };
+}
+
+function normalizeSet(s: Record<string, unknown>, notes: RuleNotes): EvaluateSet {
+  const count = s.update_count;
+  const validCount = typeof count === "number" && Number.isFinite(count) && count >= 0;
+  if (!validCount) notes.unavailable++;
+  return {
+    sys_id: str(s.sys_id) ?? "",
+    name: str(s.name) ?? "",
+    state: str(s.state),
+    is_default: flag(s.is_default),
+    has_description: flag(s.has_description),
+    application: str(s.application),
+    parent: str(s.parent),
+    update_count: validCount ? count : Number.NaN,
+  };
+}
+
+function finish(
+  value: Record<string, unknown>,
+  updates: EvaluateUpdate[],
+  sets: EvaluateSet[],
+  notes: RuleNotes
+): { input: EvaluationInput; totalValid: boolean } {
+  let problems: PreviewProblem[] | undefined;
+  let collisions: Map<string, number> | undefined;
+  let baseline: Map<string, "baseline" | "customer"> | undefined;
+  try {
+    if (Array.isArray(value.problems)) {
+      problems = (value.problems as unknown[]).filter(isObject).map((p) => ({
+        sys_id: str(p.sys_id) ?? "",
+        remote_update: str(p.remote_update),
+        // A status that is not a string blocks, like an empty one.
+        status: str(p.status),
+        type: str(p.type),
+      }));
+    } else if (value.problems !== undefined) {
+      notes.unavailable++;
+    }
+    if (value.open_set_collisions instanceof Map) {
+      collisions = new Map();
+      for (const [name, count] of value.open_set_collisions as Map<unknown, unknown>) {
+        // A count that is not a number reads as a collision: fail closed.
+        if (typeof name === "string") collisions.set(name, typeof count === "number" && Number.isFinite(count) ? count : 1);
+      }
+    } else if (value.open_set_collisions !== undefined) {
+      notes.unavailable++;
+    }
+    if (value.baseline_versions instanceof Map) {
+      baseline = new Map();
+      for (const [name, source] of value.baseline_versions as Map<unknown, unknown>) {
+        if (typeof name === "string" && (source === "baseline" || source === "customer")) baseline.set(name, source);
+      }
+    } else if (value.baseline_versions !== undefined) {
+      notes.unavailable++;
+    }
+  } catch {
+    // A problem list or map that cannot be read: the checks it feeds are unavailable.
+    notes.unavailable++;
+    problems = undefined;
+    collisions = undefined;
+    baseline = undefined;
+  }
+  const source = value.source === "remote" ? "remote" : "local";
+  if (value.source !== "remote" && value.source !== "local") notes.unavailable++;
+  const total = value.updates_total;
+  const totalValid = typeof total === "number" && Number.isFinite(total) && total >= 0;
+  return {
+    input: {
+      source,
+      sets,
+      batch_root: str(value.batch_root),
+      updates,
+      updates_total: totalValid ? total : updates.length,
+      payload_access: value.payload_access === "granted" ? "granted" : "denied",
+      ...(problems !== undefined ? { problems } : {}),
+      ...(collisions !== undefined ? { open_set_collisions: collisions } : {}),
+      ...(baseline !== undefined ? { baseline_versions: baseline } : {}),
+      context: safeContext(value.context, notes),
+    },
+    totalValid,
+  };
+}
+
+/**
+ * The caller's checks, failing closed: only the exact return types count. A
+ * credential check that throws or returns anything but a boolean answers
+ * "credential table" and is counted; a type or hierarchy check that does so
+ * answers its "unavailable" sentinel, which the rule counts. Thrown errors,
+ * and their text, never leave the engine.
+ */
+function safeContext(raw: unknown, notes: RuleNotes): EvaluateContext {
+  const context: Partial<Record<keyof EvaluateContext, unknown>> = isObject(raw) ? raw : {};
+  const call = (name: keyof EvaluateContext, table: string): unknown => {
+    try {
+      const check = context[name];
+      return typeof check === "function" ? (check as (t: string) => unknown).call(context, table) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  return {
+    isCredentialTable(table) {
+      const answer = call("isCredentialTable", table);
+      if (answer === true || answer === false) return answer;
+      notes.unavailable++;
+      return true;
+    },
+    hiddenFieldNames(table) {
+      const answer = call("hiddenFieldNames", table);
+      return answer instanceof Set ? (answer as ReadonlySet<string>) : "unavailable";
+    },
+    extendsMetadata(table) {
+      const answer = call("extendsMetadata", table);
+      return answer === true || answer === false ? answer : "unknown";
+    },
+  };
+}
+
+/** Evaluates the rows and sets in `input`. Never throws on instance content or on the caller's checks. */
 export async function evaluateUpdateSets(
-  input: EvaluationInput,
+  raw: EvaluationInput,
   options: EvaluationOptions = {},
   limits: EngineLimits = ENGINE_LIMITS,
   hooks: EngineHooks = {}
@@ -98,33 +285,40 @@ export async function evaluateUpdateSets(
   const now = hooks.now ?? (() => performance.now());
   const yieldToLoop = hooks.yieldToLoop ?? (() => new Promise<void>((resolve) => setImmediate(resolve)));
 
-  const groups = new Set<RuleGroup>(options.groups && options.groups.length > 0 ? options.groups : RULE_GROUPS);
-  const floor = SEVERITY_RANK[options.min_severity ?? "info"];
+  const requested = Array.isArray(options.groups) ? options.groups.filter((g) => RULE_GROUPS.includes(g)) : [];
+  const groups = new Set<RuleGroup>(requested.length > 0 ? requested : RULE_GROUPS);
+  const floor = SEVERITY_RANK.get(options.min_severity ?? "info") ?? 0;
   const enabled = (id: RuleId) => groups.has(ruleGroup(id));
 
   const findings: Finding[] = [];
   const notes: RuleNotes = { unavailable: 0 };
-  const keep = (finding: RuleFinding): boolean => SEVERITY_RANK[finding.severity] >= floor && enabled(finding.rule_id);
+  const { input, totalValid } = normalize(raw, notes);
+  const keep = (finding: RuleFinding): boolean => (SEVERITY_RANK.get(finding.severity) ?? 0) >= floor && enabled(finding.rule_id);
 
   // Set rules: cheap, and they need no payload.
   for (const rule of SET_RULES) {
     if (!enabled(rule.id)) continue;
-    rule.run(
-      input,
-      (set: EvaluateSet, finding) => {
-        if (!keep(finding) || !isSysId(set.sys_id)) return;
-        const name = typeof set.name === "string" ? set.name.slice(0, SET_NAME_MAX) : "";
-        findings.push({
-          rule_id: finding.rule_id,
-          group: ruleGroup(finding.rule_id),
-          severity: finding.severity,
-          confidence: finding.confidence,
-          update_set: { sys_id: set.sys_id, name },
-          message: finding.message,
-        });
-      },
-      notes
-    );
+    const pending: Finding[] = [];
+    try {
+      rule.run(
+        input,
+        (set: EvaluateSet, finding) => {
+          if (!keep(finding) || !isSysId(set.sys_id)) return;
+          pending.push({
+            rule_id: finding.rule_id,
+            group: ruleGroup(finding.rule_id),
+            severity: finding.severity,
+            confidence: finding.confidence,
+            update_set: { sys_id: set.sys_id, name: (set.name ?? "").slice(0, SET_NAME_MAX) },
+            message: finding.message,
+          });
+        },
+        notes
+      );
+      findings.push(...pending);
+    } catch {
+      notes.unavailable++;
+    }
   }
 
   const rowRules = ROW_RULES.filter((rule) => enabled(rule.id));
@@ -162,37 +356,48 @@ export async function evaluateUpdateSets(
     if (finding === null) continue; // not a valid row: counted as not evaluated
     evaluated++;
 
-    const row: PreparedRow = prepareRow(update, finding, payloadGranted, input.context, {
-      maxPayloadBytes: limits.maxPayloadBytes,
-      scripts: scriptRules,
-      secrets: secretRule,
-    });
+    // One row's findings are kept only when the whole row ran: a row that
+    // throws counts as not scanned and the call goes on.
+    const pending: Finding[] = [];
+    let row: PreparedRow;
+    try {
+      row = prepareRow(update, finding, payloadGranted, input.context, {
+        maxPayloadBytes: limits.maxPayloadBytes,
+        scripts: scriptRules,
+        secrets: secretRule,
+      });
+      const prepared = row;
+      const emit = (result: RuleFinding) => {
+        if (!keep(result)) return;
+        const located = NO_LOCATION.has(result.rule_id) ? {} : { field: result.field, line: result.line };
+        pending.push({
+          rule_id: result.rule_id,
+          group: ruleGroup(result.rule_id),
+          severity: result.severity,
+          confidence: result.confidence,
+          update: prepared.finding,
+          message: result.message,
+          ...(located.field !== undefined ? { field: located.field } : {}),
+          ...(located.line !== undefined ? { line: located.line } : {}),
+          ...(result.table !== undefined ? { table: result.table } : {}),
+        });
+      };
+      for (const rule of rowRules) {
+        if (rule.needs === "payload" && row.payload !== "read") continue;
+        rule.run(row, input, emit, notes);
+      }
+      if (duplicates.has(update.name)) {
+        emit({ rule_id: "BP008", severity: "medium", confidence: "high", message: RULE_MESSAGES.BP008 });
+      }
+    } catch {
+      skippedUnreadable++;
+      continue;
+    }
     totalBytes += row.bytes;
     if (row.payload === "read") scanned++;
     else if (row.payload === "credential") credentialRows++;
     else if (payloadGranted) skippedUnreadable++;
-
-    const emit = (result: RuleFinding) => {
-      if (!keep(result)) return;
-      const located = NO_LOCATION.has(result.rule_id) ? {} : { field: result.field, line: result.line };
-      findings.push({
-        rule_id: result.rule_id,
-        group: ruleGroup(result.rule_id),
-        severity: result.severity,
-        confidence: result.confidence,
-        update: row.finding,
-        message: result.message,
-        ...(located.field !== undefined ? { field: located.field } : {}),
-        ...(located.line !== undefined ? { line: located.line } : {}),
-      });
-    };
-    for (const rule of rowRules) {
-      if (rule.needs === "payload" && row.payload !== "read") continue;
-      rule.run(row, input, emit, notes);
-    }
-    if (duplicates.has(update.name)) {
-      emit({ rule_id: "BP008", severity: "medium", confidence: "high", message: RULE_MESSAGES.BP008 });
-    }
+    findings.push(...pending);
   }
 
   const total = Math.max(input.updates_total, input.updates.length, 0);
@@ -219,7 +424,8 @@ export async function evaluateUpdateSets(
       credential_rows: credentialRows,
       not_evaluated: notEvaluated,
       checks_unavailable: notes.unavailable,
-      partial: notEvaluated > 0 || skippedUnreadable > 0 || notes.unavailable > 0 || cpuBudgetHit || bytesCapHit,
+      partial:
+        !totalValid || notEvaluated > 0 || skippedUnreadable > 0 || notes.unavailable > 0 || cpuBudgetHit || bytesCapHit,
       cpu_budget_hit: cpuBudgetHit,
       bytes_cap_hit: bytesCapHit,
       metadata_only: !payloadGranted,

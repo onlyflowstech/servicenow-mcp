@@ -4,8 +4,31 @@
  * Row rules run once per prepared row, and set rules once per call. Every
  * rule reads the shared preparation (the parsed records, tokenized scripts
  * and secret matches) and never rescans payload text. Messages are fixed
- * sentences; the only value one may hold is a table name that has passed
- * `isTableName`. SEC005 and SEC010 findings carry no field and no line.
+ * sentences with no instance text; SEC011's table is a separate field.
+ * SEC005 and SEC010 findings carry no field and no line.
+ *
+ * The rules are heuristics, and a clean result is not an approval. Known limits:
+ * - Script rules read only the script elements listed for each table (see
+ *   `prepare.ts`). Script elsewhere is not examined: `g:evaluate` and other
+ *   Jelly in UI pages and macros, `javascript:` default values, reference
+ *   qualifiers and conditions, and Flow Designer inline scripts.
+ * - The tokenizer does not parse. Code inside a template literal's `${…}` is
+ *   part of the literal; a regular expression is told from a division by the
+ *   token before it, so `{} / eval(x) / 1` hides the call; PERF001 sees only
+ *   braced loop bodies; PERF002 treats a variable as script-wide.
+ * - SEC004 sees `eval(`, `gs.eval(`, `new Function(`, the evaluator classes,
+ *   unicode-escaped spellings of those names, and bracket access with a
+ *   constant name (`gs['eval']`). It does not see computed names
+ *   (`this['ev' + 'al']`) or aliases (`var e = eval; e(x)`).
+ * - SEC009 sees `setWorkflow` and `autoSysFields` called with `false`, `0`
+ *   or `!1`; not with a variable or another falsy expression.
+ * - SEC005 scans the decoded text of every element of every record that is
+ *   not on a credential table: script and non-script fields alike, comments
+ *   and `${…}` included. It finds what `secret-patterns.ts` matches: a
+ *   literal assigned to or passed with a credential-named key, credentials in
+ *   URLs, headers and connection strings, private keys and vendor token
+ *   shapes. It does not follow a secret through a variable, rebuild a
+ *   concatenation that does not start with a literal, or decode base64.
  */
 
 import {
@@ -34,7 +57,7 @@ export function ruleGroup(id: RuleId): RuleGroup {
   return id.startsWith("PERF") ? "perf" : id.startsWith("SEC") ? "sec" : "bp";
 }
 
-/** Fixed messages. `{table}` is replaced only with a name that passed `isTableName`. */
+/** Fixed messages. None holds instance text: SEC011's table goes in the finding's `table` field. */
 export const RULE_MESSAGES = Object.freeze({
   PERF001: "A query runs inside a loop over query results (N+1 queries).",
   PERF002: "A GlideRecord query runs with no filter or limit (full-table scan).",
@@ -63,8 +86,7 @@ export const RULE_MESSAGES = Object.freeze({
   SEC008: "An unauthenticated entry point is added or changed.",
   SEC009: "A script turns off business rules or system-field updates for its writes.",
   SEC010: "The update carries credentials to the target instance.",
-  SEC011: "The update writes a data record, which overwrites data on the target instance.",
-  SEC011_TABLE: "The update writes a data record on table {table}, which does not extend sys_metadata.",
+  SEC011: "The update writes a data record, on a table that does not extend sys_metadata, which overwrites data on the target instance.",
   BP001: "The set is the Default update set, which cannot be promoted.",
   BP002: "The set's updates belong to more than one application, or to another application than the set.",
   BP003: "The update deletes a record, which is hard to back out.",
@@ -87,6 +109,7 @@ export interface RuleFinding {
   readonly message: string;
   readonly field?: string;
   readonly line?: number;
+  readonly table?: string;
 }
 
 export type Emit = (finding: RuleFinding) => void;
@@ -188,6 +211,9 @@ export interface RowRule {
   readonly needs: "payload" | "metadata";
   readonly run: (row: PreparedRow, input: EvaluationInput, emit: Emit, notes: RuleNotes) => void;
 }
+
+/** Names that evaluate code when called through bracket access. */
+const DYNAMIC_CODE_NAMES = new Set(["eval", "GlideEvaluator", "GlideScopedEvaluator"]);
 
 const RESTRICTING_METHODS = new Set([
   "addQuery", "addEncodedQuery", "addActiveQuery", "addInactiveQuery", "addNullQuery", "addNotNullQuery",
@@ -511,13 +537,24 @@ export const ROW_RULES: readonly RowRule[] = Object.freeze([
         const { tokens } = scan;
         for (let k = 0; k < tokens.length; k++) {
           const t = tokens[k];
-          if (t.kind !== TokenKind.Identifier) continue;
+          if (t.kind !== TokenKind.Identifier && t.kind !== TokenKind.String) continue;
           const previous = tokens[k - 1]?.value;
           const hit =
-            (t.value === "eval" && tokens[k + 1]?.value === "(" && (previous !== "." || tokens[k - 2]?.value === "gs")) ||
+            t.kind === TokenKind.Identifier &&
+            ((t.value === "eval" && tokens[k + 1]?.value === "(" && (previous !== "." || tokens[k - 2]?.value === "gs")) ||
             t.value === "GlideEvaluator" ||
             t.value === "GlideScopedEvaluator" ||
-            (t.value === "Function" && previous === "new" && tokens[k + 1]?.value === "(");
+            (t.value === "Function" && previous === "new" && tokens[k + 1]?.value === "("));
+          // Bracket access with a constant name: gs['eval'](…), this["GlideEvaluator"].
+          const bracket =
+            t.kind === TokenKind.String &&
+            DYNAMIC_CODE_NAMES.has(t.value) &&
+            previous === "[" &&
+            tokens[k + 1]?.value === "]";
+          if (bracket) {
+            emit({ rule_id: "SEC004", severity: "high", confidence: "medium", message: RULE_MESSAGES.SEC004, ...at(script, k) });
+            return;
+          }
           if (hit) {
             emit({ rule_id: "SEC004", severity: "high", confidence: "high", message: RULE_MESSAGES.SEC004, ...at(script, k) });
             return;
@@ -623,7 +660,12 @@ export const ROW_RULES: readonly RowRule[] = Object.freeze([
         for (let k = 1; k < tokens.length; k++) {
           const name = tokens[k].value;
           if ((name !== "setWorkflow" && name !== "autoSysFields") || tokens[k - 1].value !== ".") continue;
-          if (tokensAre(script.scan, k + 1, ["(", "false", ")"])) {
+          // false, 0 and !1 all turn it off.
+          const off =
+            tokensAre(script.scan, k + 1, ["(", "false", ")"]) ||
+            tokensAre(script.scan, k + 1, ["(", "0", ")"]) ||
+            tokensAre(script.scan, k + 1, ["(", "!", "1", ")"]);
+          if (off) {
             emit({ rule_id: "SEC009", severity: "low", confidence: "high", message: RULE_MESSAGES.SEC009, ...at(script, k) });
             return;
           }
@@ -668,8 +710,13 @@ export const ROW_RULES: readonly RowRule[] = Object.freeze([
         return;
       }
       if (metadata) return;
-      const message = isTableName(table) ? RULE_MESSAGES.SEC011_TABLE.replace("{table}", table) : RULE_MESSAGES.SEC011;
-      emit({ rule_id: "SEC011", severity: "medium", confidence: "high", message });
+      emit({
+        rule_id: "SEC011",
+        severity: "medium",
+        confidence: "high",
+        message: RULE_MESSAGES.SEC011,
+        ...(isTableName(table) ? { table } : {}),
+      });
     },
   },
   {

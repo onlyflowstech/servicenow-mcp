@@ -49,6 +49,63 @@ const REGEX_AFTER_KEYWORD = new Set(["return", "typeof", "case", "do", "else", "
 /** Punctuators after which a `/` starts a regular expression. */
 const REGEX_AFTER_PUNCT = new Set(["(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*", "%", "<", ">", "~", "^", "==", "===", "!=", "!==", "&&", "||", "=>", "<=", ">="]);
 
+const isHex = (c: number) => isDigit(c) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102);
+
+/** Decodes a `\uXXXX` or `\u{X…}` escape at `at`; null when it is not a valid one. Reads at most 10 characters. */
+function unicodeEscape(text: string, at: number): { readonly char: string; readonly end: number } | null {
+  if (text.charCodeAt(at) !== 92 || text.charCodeAt(at + 1) !== 117) return null;
+  let digits: string;
+  let end: number;
+  if (text.charCodeAt(at + 2) === 123) {
+    // Bounded: the closing brace must come within six digits.
+    let close = -1;
+    for (let k = at + 3; k < Math.min(text.length, at + 10); k++) {
+      if (text.charCodeAt(k) === 125) {
+        close = k;
+        break;
+      }
+    }
+    if (close < 0 || close - (at + 3) < 1 || close - (at + 3) > 6) return null;
+    digits = text.slice(at + 3, close);
+    end = close + 1;
+  } else {
+    digits = text.slice(at + 2, at + 6);
+    end = at + 6;
+    if (digits.length !== 4) return null;
+  }
+  for (let k = 0; k < digits.length; k++) if (!isHex(digits.charCodeAt(k))) return null;
+  const code = Number.parseInt(digits, 16);
+  return code <= 0x10ffff ? { char: String.fromCodePoint(code), end } : null;
+}
+
+/**
+ * Reads an identifier at `at`, decoding `\u` escapes, so `\u0065val` reads as
+ * `eval`. Returns null when there is none.
+ */
+function readIdentifier(text: string, at: number): { readonly value: string; readonly end: number } | null {
+  let j = at;
+  let segment = at;
+  let value = "";
+  while (j < text.length) {
+    const c = text.charCodeAt(j);
+    if (j === at ? isIdentStart(c) : isIdentPart(c)) {
+      j++;
+      continue;
+    }
+    if (c === 92) {
+      const escape = unicodeEscape(text, j);
+      if (escape === null) break;
+      value += text.slice(segment, j) + escape.char;
+      j = escape.end;
+      segment = j;
+      continue;
+    }
+    break;
+  }
+  if (j === at) return null;
+  return { value: value + text.slice(segment, j), end: j };
+}
+
 function regexAllowed(previous: Token | undefined): boolean {
   if (previous === undefined) return true;
   if (previous.kind === TokenKind.Punct) return REGEX_AFTER_PUNCT.has(previous.value);
@@ -80,12 +137,13 @@ export function tokenize(text: string): ScriptTokens {
       i = end < 0 ? length : end + 2;
       continue;
     }
-    if (isIdentStart(c)) {
-      let j = i + 1;
-      while (j < length && isIdentPart(text.charCodeAt(j))) j++;
-      tokens.push({ kind: TokenKind.Identifier, value: text.slice(i, j), start: i });
-      i = j;
-      continue;
+    if (isIdentStart(c) || c === 92) {
+      const identifier = readIdentifier(text, i);
+      if (identifier !== null) {
+        tokens.push({ kind: TokenKind.Identifier, value: identifier.value, start: i });
+        i = identifier.end;
+        continue;
+      }
     }
     if (isDigit(c) || (c === 46 && isDigit(next))) {
       let j = i + 1;

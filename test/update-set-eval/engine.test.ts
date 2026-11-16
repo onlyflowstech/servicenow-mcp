@@ -151,10 +151,11 @@ describe("no payload text in any message or finding", () => {
     expect(JSON.stringify(result)).not.toContain(CANARY);
   });
 
-  it("names a data table in SEC011 only when it is a valid table name", async () => {
+  it("puts SEC011's table in its own field, never in the message", async () => {
     const row = update("incident", { number: "INC1" });
     const [finding] = (await evaluateUpdateSets(input([row]))).findings.filter((f) => f.rule_id === "SEC011");
-    expect(finding.message).toBe("The update writes a data record on table incident, which does not extend sys_metadata.");
+    expect(finding.table).toBe("incident");
+    expect(finding.message).not.toContain("incident");
   });
 
   it("caps row metadata it returns as data", async () => {
