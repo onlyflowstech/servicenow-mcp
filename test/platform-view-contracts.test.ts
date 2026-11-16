@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { escapeQueryValue } from "../src/utils.js";
 import {
@@ -20,9 +20,7 @@ import {
   type PlatformView,
 } from "../src/tools/platform-view-contracts.js";
 import { platformViewToolModule } from "../src/tools/platform-view-module.js";
-import { closeHarnesses, harness, recordingInstance, textOf } from "./platform-view-harness.js";
-
-afterEach(closeHarnesses);
+import { harness, recordingInstance, textOf } from "./platform-view-harness.js";
 
 const SYS_ID = "0123456789abcdef0123456789abcdef";
 const PROFILE = { profile: "p" };

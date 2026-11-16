@@ -1,5 +1,5 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type { ServiceNowOperations } from "../src/client.js";
 import { trustedToolErrorDescriptor } from "../src/tool-error.js";
@@ -27,8 +27,6 @@ import {
   tableOfCall,
   textOf,
 } from "./platform-view-harness.js";
-
-afterEach(closeHarnesses);
 
 const SYS_ID = "0123456789abcdef0123456789abcdef";
 const MINIMAL: Readonly<Record<PlatformView, Record<string, unknown>>> = {
@@ -302,6 +300,84 @@ describe("recording client: a handler reads only tables in its view's plan", () 
     // A declaration on another table or another field declares nothing here.
     const other = await runHandler((ops) => ops.get(table("sys_update_set"), { sysparm_fields: "application.name" }).then(() => undefined));
     expect(() => expectReadsWithin(other.instance, [...BATCH_PLAN, "sys_scope"], [{ from: "sys_update_xml", field: "application", target: "sys_scope" }])).toThrow(/not declared/u);
+  });
+
+  it("fails on every query that reads another table or runs script, and on a clause it cannot parse", async () => {
+    const queries: Record<string, string> = {
+      "a related-list query": "RLQUERYsys_journal_field.element_id,>=1^name=x^ENDRLQUERY",
+      "a subquery": "sys_idINSUBQUERYuser,sys_user_grmember^ENDSUBQUERY",
+      "script in a value": "sys_id=javascript:new GlideRecord('sys_audit').query()",
+      "script in a value, mixed case": "sys_id=JavaScript:gs.getUserID()",
+      "a dynamic filter": "sys_idDYNAMIC0123456789abcdef0123456789abcdef",
+      "a join": "sys_idJOINsys_update_xml::update_set",
+      "an uppercase field": "Application.name=x",
+      "an uppercase field with a prefix": "state=complete^ORApplication=x",
+      "NQ then OR": "state=complete^NQORapplication.name=x",
+      "an unknown operator": "state~complete",
+      "a clause with no operator": "state",
+      "an empty clause": "state=complete^",
+      "a leading empty clause": "^state=complete",
+      "a sort with no field": "ORDERBY",
+      "an uppercase sort field": "ORDERBYName",
+      "a dash in a field": "sys-id=x",
+    };
+    for (const [label, query] of Object.entries(queries)) {
+      const { instance } = await runHandler((ops) => ops.get(table("sys_update_set"), { sysparm_query: query }).then(() => undefined));
+      expect(() => expectReadsWithin(instance, [...BATCH_PLAN, "sys_scope"], [{ from: "sys_update_set", field: "application", target: "sys_scope" }]), label).toThrow(
+        /contains|unparseable|not declared/u
+      );
+    }
+  });
+
+  it("accepts the conditions the views build, with every allowed operator and the EQ terminator", async () => {
+    const query = [
+      "state=complete", "ORname=x", "NQstate!=ignore", "sys_updated_on>=2026-01-01 00:00:00", "sys_updated_on<=2026-12-31",
+      "countBETWEEN1@5", "nameLIKEx", "nameSTARTSWITHx", "nameENDSWITHx", "nameNOT LIKEx", "state>1", "state<9",
+      "sys_idIN0123,4567", "stateNOT INa,b", "descriptionISEMPTY", "descriptionISNOTEMPTY",
+      "ORDERBYDESCsys_updated_on", "ORDERBYname", "GROUPBYstate", "EQ",
+    ].join("^");
+    const { instance } = await runHandler((ops) => ops.get(table("sys_update_set"), { sysparm_query: query }).then(() => undefined));
+    expect(() => expectReadsWithin(instance, BATCH_PLAN)).not.toThrow();
+  });
+
+  it("refuses the parameters that widen a read, and a display_value other than true, false or all", async () => {
+    const params: Record<string, Record<string, string>> = {
+      sysparm_view: { sysparm_view: "mobile" },
+      sysparm_query_no_domain: { sysparm_query_no_domain: "true" },
+      sysparm_having: { sysparm_having: "count>1" },
+      "display_value 1": { sysparm_display_value: "1" },
+      "display_value empty": { sysparm_display_value: "" },
+      "display_value mixed case": { sysparm_display_value: "All" },
+      "a boolean parameter": { sysparm_count: "yes" },
+      "a limit that is not a number": { sysparm_limit: "all" },
+    };
+    for (const [label, query] of Object.entries(params)) {
+      const { instance } = await runHandler((ops) => ops.get(table("sys_update_set"), query).then(() => undefined));
+      expect(() => expectReadsWithin(instance, BATCH_PLAN), label).toThrow(/unclassified parameter|sysparm_display_value|sysparm_count|sysparm_limit/u);
+    }
+    for (const value of ["true", "false", "all"]) {
+      const { instance } = await runHandler((ops) => ops.get(table("sys_update_set"), { sysparm_display_value: value, sysparm_limit: "26", sysparm_count: "true" }).then(() => undefined));
+      expect(() => expectReadsWithin(instance, BATCH_PLAN), value).not.toThrow();
+    }
+  });
+
+  it("fails on a field list entry that is not a field, and on an uppercase one", async () => {
+    for (const value of ["Name", "sys_id,", "a b", "a.b.c", "a-b", "name;x"]) {
+      const { instance } = await runHandler((ops) => ops.get(table("sys_update_set"), { sysparm_fields: value }).then(() => undefined));
+      expect(() => expectReadsWithin(instance, BATCH_PLAN, [{ from: "sys_update_set", field: "a", target: "sys_update_set" }]), value).toThrow();
+    }
+  });
+
+  it("stubs fetch while a harness is open, so a handler cannot bypass the recorder", async () => {
+    const before = globalThis.fetch;
+    const { instance } = await runHandler(async () => {
+      await fetch("https://platform-view-test.service-now.com/api/now/table/sys_audit");
+    });
+    expect(instance.calls).toEqual([]);
+    expect(() => globalThis.fetch("https://example.com")).toThrow(/fetch is not allowed/u);
+    expectReadsWithin(instance, BATCH_PLAN);
+    await closeHarnesses();
+    expect(globalThis.fetch).toBe(before);
   });
 
   it("does not mistake a dot in a value for a dot-walk, and refuses an unclassified parameter", async () => {
