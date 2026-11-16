@@ -325,7 +325,7 @@ async function executeQuery(
       const orderField = args.orderby.startsWith("-")
         ? args.orderby.slice(1)
         : args.orderby;
-      resolveReadableFields(args.table, { fields: orderField });
+      resolveReadableFields(args.table, { fields: orderField, purpose: "query" });
     }
     const queryWithStableOrder = stableOrderQuery(
       structuredPlan?.encodedQuery ?? rawPlan?.query,

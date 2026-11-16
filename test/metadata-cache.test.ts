@@ -364,7 +364,8 @@ describe("metadata cache", () => {
       new URL("../src/tools/index.ts", import.meta.url),
       "utf8"
     );
-    const call = /createCachedServiceNowOperations\(([\s\S]*?)\n {10}\),/u.exec(dispatcher);
+    // The wrapper is built before the field-type step, at its own indent.
+    const call = /createCachedServiceNowOperations\(([\s\S]*?)\n {6,10}\)[,;]/u.exec(dispatcher);
 
     expect(call, "createCachedServiceNowOperations call not found").not.toBeNull();
     expect(call![1]).toContain("credentialFingerprint(config)");

@@ -65,6 +65,7 @@ import {
   type Profile,
 } from "./profile-manager.js";
 import { buildPolicyCard, renderPolicyCard } from "./policy-card.js";
+import { dictionaryNotRequired } from "./hidden-values.js";
 import { riskyGrantWarning } from "./risky-grants.js";
 import { trustedToolErrorDescriptor } from "./tool-error.js";
 import {
@@ -1843,6 +1844,7 @@ function runPolicy(
     },
     encodedQueryAccess,
     atf: manager.getAtfConfig(options.profile),
+    fieldTypes: { dictionary: dictionaryNotRequired(profile.fieldTypes) ? "not_required" : "required" },
   });
   out(
     options.json

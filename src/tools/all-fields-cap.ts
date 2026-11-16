@@ -19,7 +19,11 @@
  */
 
 import type { ServiceNowOperations } from "../client.js";
-import { isSensitiveFieldName } from "../field-policy.js";
+import {
+  isSensitiveFieldName,
+  readableSelectionForTable,
+  typeHiddenFieldNames,
+} from "../field-policy.js";
 import { FORCE_RECACHE_PARAM } from "../metadata-cache.js";
 import { escapeQueryValue } from "../utils.js";
 import { resolveTableHierarchy } from "./table-hierarchy.js";
@@ -57,17 +61,23 @@ export async function boundedAllFields(
   defaults: readonly string[],
   forceRecache = false
 ): Promise<BoundedAllFields> {
-  const fallback = Object.freeze({
-    fields: Object.freeze([...defaults]),
-    capped: true,
-  });
+  // Both projections are bound to the table, so the response filter applies
+  // its type and row rules (sys_properties.value needs its row's type).
+  let fallbackFields: readonly string[];
+  try {
+    fallbackFields = readableSelectionForTable(table, defaults);
+  } catch {
+    // Not a table name: there is no table to bind to, and no lookup follows.
+    fallbackFields = Object.freeze([...defaults]);
+  }
+  const fallback = Object.freeze({ fields: fallbackFields, capped: true });
   if (defaults.length === 0) return fallback;
   try {
     const columns = await dictionaryColumns(client, table, forceRecache);
     if (columns.length === 0) return fallback;
     const ordered = orderColumns(columns, defaults);
     return Object.freeze({
-      fields: Object.freeze(ordered.slice(0, MAX_ALL_FIELDS)),
+      fields: readableSelectionForTable(table, ordered.slice(0, MAX_ALL_FIELDS)),
       capped: ordered.length > MAX_ALL_FIELDS,
       total: ordered.length,
     });
@@ -111,6 +121,8 @@ async function dictionaryColumns(
     }
   );
   const rows = Array.isArray(response?.result) ? response.result : [];
+  // A hidden-typed field is never requested either, for the same reason.
+  const hidden = typeHiddenFieldNames(table);
   const columns = new Set<string>();
   for (const row of rows) {
     if (typeof row !== "object" || row === null) continue;
@@ -120,7 +132,11 @@ async function dictionaryColumns(
     // A sensitive name must never be *requested*. Under a wildcard selection
     // the value was scrubbed from the response after arriving; naming it in
     // sysparm_fields would pull it over the wire on purpose, which is worse.
-    if (ELEMENT_NAME.test(normalized) && !isSensitiveFieldName(normalized)) {
+    if (
+      ELEMENT_NAME.test(normalized) &&
+      !isSensitiveFieldName(normalized) &&
+      !hidden.has(normalized)
+    ) {
       columns.add(normalized);
     }
   }

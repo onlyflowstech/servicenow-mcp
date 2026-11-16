@@ -24,6 +24,7 @@ import { ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy, type TableAccessPolicyInput } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
+import { fieldTypeResponse } from "./fixtures/field-types.js";
 
 const WATERMARK_QUERY = "ORDERBYDESCsys_updated_on";
 
@@ -130,6 +131,9 @@ function stubInstances() {
     return current;
   };
   const fetchStub = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    // The dispatcher's field-type lookup, answered before the instance double.
+    const typed = fieldTypeResponse(input, init);
+    if (typed !== undefined) return typed;
     const url = new URL(input instanceof Request ? input.url : String(input));
     const method = (init?.method ?? "GET").toUpperCase();
     const headers = new Headers(init?.headers);

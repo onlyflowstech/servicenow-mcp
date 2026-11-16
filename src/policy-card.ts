@@ -46,6 +46,8 @@ export interface PolicyCardInput {
   readonly fieldPolicy?: FieldPolicyConfigurationInput;
   readonly encodedQueryAccess: EncodedQueryAccessPolicy;
   readonly atf: AtfExecutionPolicy;
+  /** Omitted: the field types are required (the default). */
+  readonly fieldTypes?: { readonly dictionary: "required" | "not_required" };
 }
 
 /** Either every field not blocked by name, or an explicit, capped list. */
@@ -110,6 +112,12 @@ export interface PolicyCard {
   risky_write_tables: string[];
   raw_encoded_reads: { allowed: boolean; rules: number };
   atf: { execute: boolean; script_steps: boolean };
+  /**
+   * Hiding by field type. "required": a call is refused while the instance's
+   * field types cannot be read. "not_required": the profile opted out, and
+   * such a call hides fields by name only.
+   */
+  field_types: { dictionary: "required" | "not_required" };
   batch: {
     dry_run_by_default: true;
     structured_filter_required: true;
@@ -275,6 +283,7 @@ export function buildPolicyCard(input: PolicyCardInput): PolicyCard {
       rules: input.encodedQueryAccess.rules.length,
     },
     atf: { execute: input.atf.execute, script_steps: input.atf.allowScriptSteps },
+    field_types: { dictionary: input.fieldTypes?.dictionary ?? "required" },
     batch: {
       dry_run_by_default: true,
       structured_filter_required: true,
@@ -376,6 +385,13 @@ export function renderPolicyCard(card: PolicyCard): string {
     "  a profile lists them by name; a writable wildcard never covers them. A listed one is",
     "  shown in [+...] after the writable fields."
   );
+  if (card.field_types.dictionary === "not_required") {
+    lines.push(
+      "",
+      "WARNING: field types not required: when the instance's field types cannot be read, " +
+        "password-type fields are hidden by name only"
+    );
+  }
   if (card.risky_write_tables.length > 0) {
     lines.push(
       "",
@@ -534,6 +550,7 @@ function contentKey(input: PolicyCardInput): string {
     input.encodedQueryAccess.rules.length,
     input.atf.execute,
     input.atf.allowScriptSteps,
+    input.fieldTypes?.dictionary ?? "required",
   ]);
 }
 

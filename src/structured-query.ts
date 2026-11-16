@@ -15,7 +15,7 @@ import { types as nodeUtilTypes } from "node:util";
 import { z } from "zod";
 
 import { boundedArray, withStructuralCheck } from "./bounded-input.js";
-import { isSensitiveFieldName } from "./field-policy.js";
+import { isSensitiveFieldName, queryDeniedForSelection } from "./field-policy.js";
 import { escapeQueryValue } from "./utils.js";
 
 export const MAX_STRUCTURED_QUERY_CONDITIONS = 32;
@@ -356,6 +356,8 @@ interface CompileState {
   conditionCount: number;
   readonly referencedFields: Set<string>;
   readonly readableFields?: ReadonlySet<string>;
+  /** Hidden-typed and row-rule fields of the table (see field-policy). */
+  readonly deniedFields: ReadonlySet<string>;
 }
 
 interface SnapshotState {
@@ -386,11 +388,14 @@ export function compileStructuredQuery(
   const parsed = structuredQuerySchema.safeParse(snapshot);
   if (!parsed.success) throw new StructuredQueryError("invalid_shape");
 
+  // Read before the snapshot copies the list: the original remembers its table.
+  const deniedFields = queryDeniedForSelection(readableFieldsCandidate);
   const readableFields = snapshotReadableFields(readableFieldsCandidate);
   const state: CompileState = {
     conditionCount: 0,
     referencedFields: new Set<string>(),
     readableFields,
+    deniedFields,
   };
 
   const clauses = parsed.data.filter
@@ -542,7 +547,9 @@ function authorizeField(field: string, state: CompileState): void {
   // the readable set says. Response filtering strips the value, but a query
   // that can filter on it still leaks it one comparison at a time through the
   // row count. This check is field-level and independent of table policy.
-  if (isSensitiveFieldName(field)) {
+  // A hidden-typed field, and a value whose secrecy is per row
+  // (sys_properties.value), are refused the same way, for the same reason.
+  if (isSensitiveFieldName(field) || state.deniedFields.has(field)) {
     throw new StructuredQueryError("unauthorized_field");
   }
   if (state.readableFields && !state.readableFields.has(field)) {

@@ -1078,6 +1078,13 @@ denies a table the profile grants. A profile with no field policy may read and
 write every field of a granted table, except that sensitive-looking names
 (`password`, `token`, `secret`, `api_key` and similar) are always denied, and
 the class and domain fields below must be listed before they can be written.
+Fields of type `password`, `password2`, `masked` or `encrypted_text` are denied
+the same way, whatever their name, and a `sys_properties` value shows only for
+a known non-secret `type`. The types come from a cached `sys_dictionary` read,
+so the integration user needs read access to `sys_dictionary` and
+`sys_db_object`; without it the tools refuse, unless the profile sets
+`"fieldTypes": { "dictionary": "not_required" }` to hide by name only (see
+[Production security](docs/PRODUCTION-SECURITY.md#password-type-fields)).
 
 State it on a profile in `~/.servicenow-mcp/config.json`, beside
 `tableAccess`, in one of two forms. A profile that states both fails to load.

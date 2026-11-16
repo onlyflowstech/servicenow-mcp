@@ -111,11 +111,11 @@ export async function handler(
     const aggregateField =
       args.field === undefined
         ? undefined
-        : resolveReadableFields(args.table, { fields: args.field })[0];
+        : resolveReadableFields(args.table, { fields: args.field, purpose: "query" })[0];
     const groupByField =
       args.group_by === undefined
         ? undefined
-        : resolveReadableFields(args.table, { fields: args.group_by })[0];
+        : resolveReadableFields(args.table, { fields: args.group_by, purpose: "query" })[0];
     if (aggregateField) selectedFields.push(aggregateField);
     if (groupByField && !selectedFields.includes(groupByField)) {
       selectedFields.push(groupByField);

@@ -17,6 +17,12 @@ import {
   type AtfExecutionPolicy,
   type AtfExecutionPolicyInput,
 } from "./atf-policy.js";
+import {
+  dictionaryNotRequired,
+  validateFieldTypesConfig,
+  type DictionaryRequirement,
+  type FieldTypesConfigInput,
+} from "./hidden-values.js";
 import type { FieldPolicyConfigurationInput } from "./field-policy.js";
 import {
   createEncodedQueryAccessPolicy,
@@ -79,6 +85,8 @@ export interface EffectivePolicyReference {
   readonly encodedQueryAccess?: EncodedQueryAccessPolicyInput;
   /** Omission denies ATF execution and script-step authoring. */
   readonly atf?: AtfExecutionPolicyInput;
+  /** Omission requires the field types (see hidden-values.ts). */
+  readonly fieldTypes?: FieldTypesConfigInput;
 }
 
 export interface ResolvedEffectivePolicyReference {
@@ -88,6 +96,7 @@ export interface ResolvedEffectivePolicyReference {
   readonly fieldPolicy?: FieldPolicyConfigurationInput;
   readonly encodedQueryAccess: EncodedQueryAccessPolicy;
   readonly atf: AtfExecutionPolicy;
+  readonly fieldTypes: { readonly dictionary: DictionaryRequirement };
 }
 
 /** Injectable policy-selection port; it does not itself authorize a tool. */
@@ -346,6 +355,15 @@ export async function createExecutionContext(
       selectedPolicy.encodedQueryAccess
     ),
     atf: createAtfExecutionPolicy(selectedPolicy.atf),
+    fieldTypes: Object.freeze({
+      dictionary: dictionaryNotRequired(
+        selectedPolicy.fieldTypes === undefined
+          ? undefined
+          : validateFieldTypesConfig(selectedPolicy.fieldTypes)
+      )
+        ? ("not_required" as const)
+        : ("required" as const),
+    }),
   });
 
   return Object.freeze({

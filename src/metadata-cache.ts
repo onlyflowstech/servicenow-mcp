@@ -108,10 +108,25 @@ interface CacheEntry {
   readonly headers: readonly [string, string][];
 }
 
+interface DerivedEntry {
+  readonly expiresAt: number;
+  readonly value: unknown;
+  readonly bytes: number;
+}
+
 interface ScopeState {
   readonly entries: Map<string, CacheEntry>;
   /** Table -> epoch ms until which its reads pass through without a watermark. */
   readonly uncacheable: Map<string, number>;
+  /**
+   * Values derived from metadata reads (the hidden-field type map), by key,
+   * in least-recently-used order. Bounded by MAX_DERIVED_ENTRIES_PER_SCOPE and
+   * MAX_DERIVED_BYTES_PER_SCOPE; see derivedMetadataMemo.
+   */
+  readonly derived: Map<string, DerivedEntry>;
+  derivedBytes: number;
+  /** Set once the scope is evicted, so a call still holding it stores nothing. */
+  detached: boolean;
 }
 
 const SCOPED_CACHES = new Map<string, ScopeState>();
@@ -131,6 +146,11 @@ export const MAX_METADATA_CACHE_ENTRIES_PER_SCOPE = 512;
  * longer than the cache TTL. */
 export const STRUCTURAL_UNCACHEABLE_MS = 15 * 60 * 1000;
 export const TRANSIENT_UNCACHEABLE_MS = 30 * 1000;
+/** Bounds on derived values per scope (see derivedMetadataMemo). */
+export const MAX_DERIVED_ENTRIES_PER_SCOPE = 512;
+export const MAX_DERIVED_BYTES_PER_SCOPE = 1024 * 1024;
+/** Fixed allowance per derived value for its record and map slot. */
+const ENTRY_OVERHEAD_BYTES = 512;
 
 interface MetadataCacheEnvironment {
   readonly SN_METADATA_CACHE_TTL_MS?: string;
@@ -163,6 +183,83 @@ export function createMetadataCacheConfig(
 
 /** The operations each cached wrapper reads through. */
 const UNCACHED_OPERATIONS = new WeakMap<ServiceNowOperations, ServiceNowOperations>();
+/** Each cached wrapper's scope and configuration, for derivedMetadataMemo. */
+const WRAPPER_SCOPES = new WeakMap<
+  ServiceNowOperations,
+  { readonly state: ScopeState; readonly config: MetadataCacheConfig }
+>();
+
+/**
+ * A per-credential memo of values derived from metadata reads, kept with the
+ * cache scope of a cached wrapper.
+ *
+ * A metadata-cache hit still costs a watermark round trip. A value a call
+ * needs before every read (the hidden-field type map) would then add one
+ * request to every call, so the value derived from the rows is memoized here
+ * instead: a hit costs no request at all. Each value lives at most `ttlMs`
+ * and never longer than the profile's cache TTL; when it expires the deriving
+ * read goes back through the cache, whose watermark decides whether the rows
+ * changed. The memo sits in the same scope as the rows (instance and
+ * credential identity), is bounded in entries and bytes, and is evicted with
+ * the scope.
+ *
+ * Undefined when `operations` is not a cached wrapper, or when the profile's
+ * cache table list does not include `table` (an operator who keeps a table out
+ * of the cache keeps values derived from it out too).
+ */
+export interface DerivedMetadataMemo {
+  get(key: string): unknown;
+  /** `value` must be immutable; `bytes` is its estimated size. */
+  set(key: string, value: unknown, bytes: number, ttlMs: number): void;
+}
+
+export function derivedMetadataMemo(
+  operations: ServiceNowOperations,
+  table: string
+): DerivedMetadataMemo | undefined {
+  const bound = WRAPPER_SCOPES.get(operations);
+  if (bound === undefined || !tableMatches(bound.config.tables, table)) return undefined;
+  const { state, config } = bound;
+  return Object.freeze({
+    get(key: string): unknown {
+      const entry = state.derived.get(key);
+      if (entry === undefined) return undefined;
+      if (entry.expiresAt <= Date.now()) {
+        removeDerived(state, key);
+        return undefined;
+      }
+      state.derived.delete(key);
+      state.derived.set(key, entry);
+      return entry.value;
+    },
+    set(key: string, value: unknown, bytes: number, ttlMs: number): void {
+      if (state.detached) return;
+      removeDerived(state, key);
+      const size = Math.max(0, Math.ceil(bytes)) + key.length + ENTRY_OVERHEAD_BYTES;
+      if (size > MAX_DERIVED_BYTES_PER_SCOPE) return;
+      state.derived.set(
+        key,
+        Object.freeze({ expiresAt: Date.now() + Math.min(ttlMs, config.ttlMs), value, bytes: size })
+      );
+      state.derivedBytes += size;
+      while (
+        state.derived.size > MAX_DERIVED_ENTRIES_PER_SCOPE ||
+        state.derivedBytes > MAX_DERIVED_BYTES_PER_SCOPE
+      ) {
+        const oldest = state.derived.keys().next();
+        if (oldest.done) break;
+        removeDerived(state, oldest.value);
+      }
+    },
+  });
+}
+
+function removeDerived(state: ScopeState, key: string): void {
+  const entry = state.derived.get(key);
+  if (entry === undefined) return;
+  state.derived.delete(key);
+  state.derivedBytes -= entry.bytes;
+}
 
 /**
  * The operations underneath a cached wrapper, or `operations` itself when it
@@ -178,6 +275,15 @@ const UNCACHED_OPERATIONS = new WeakMap<ServiceNowOperations, ServiceNowOperatio
  */
 export function uncachedOperations(operations: ServiceNowOperations): ServiceNowOperations {
   return UNCACHED_OPERATIONS.get(operations) ?? operations;
+}
+
+/**
+ * True when `operations` is a cached wrapper. Every production call gets one;
+ * only an unconfigured cache under NODE_ENV=test is a bare passthrough (see
+ * createCachedServiceNowOperations).
+ */
+export function isCachedOperations(operations: ServiceNowOperations): boolean {
+  return UNCACHED_OPERATIONS.has(operations);
 }
 
 /**
@@ -227,6 +333,7 @@ export function createCachedServiceNowOperations(
   });
   Object.freeze(cached);
   UNCACHED_OPERATIONS.set(cached, operations);
+  WRAPPER_SCOPES.set(cached, { state, config: cacheConfig });
   return cached;
 }
 
@@ -480,9 +587,24 @@ function stateForScope(scope: string): ScopeState {
     SCOPED_CACHES.set(scope, existing);
     return existing;
   }
-  const next: ScopeState = Object.freeze({ entries: new Map(), uncacheable: new Map() });
+  // Not frozen: the derived memo's byte total and the detached flag change.
+  const next: ScopeState = {
+    entries: new Map(),
+    uncacheable: new Map(),
+    derived: new Map(),
+    derivedBytes: 0,
+    detached: false,
+  };
   SCOPED_CACHES.set(scope, next);
-  evictOldest(SCOPED_CACHES, MAX_METADATA_CACHE_SCOPES);
+  while (SCOPED_CACHES.size > MAX_METADATA_CACHE_SCOPES) {
+    const oldest = SCOPED_CACHES.entries().next();
+    if (oldest.done) break;
+    const [oldScope, oldState] = oldest.value;
+    SCOPED_CACHES.delete(oldScope);
+    oldState.derived.clear();
+    oldState.derivedBytes = 0;
+    oldState.detached = true;
+  }
   return next;
 }
 

@@ -29,6 +29,7 @@ import { ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
+import { fieldTypeResponse } from "./fixtures/field-types.js";
 
 const TABLE = "sys_flow_context";
 const INSTANCE = "https://batch-cached-lookup.service-now.com";
@@ -56,6 +57,9 @@ function stubInstance() {
   const state = { matching: [A, B] as string[] };
   const wire: WireCall[] = [];
   const fetchStub = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    // The dispatcher's field-type lookup, answered before the instance double.
+    const typed = fieldTypeResponse(input, init);
+    if (typed !== undefined) return typed;
     const url = new URL(input instanceof Request ? input.url : String(input));
     const method = (init?.method ?? "GET").toUpperCase();
     const params = Object.fromEntries(url.searchParams);

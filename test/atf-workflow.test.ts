@@ -168,7 +168,7 @@ describe("ATF comparisons", () => {
 describe("ATF readiness", () => {
   it.each(["empty", "missing", "inactive"])("reports %s suite structure accurately", async scenario => {
     const h = harness([
-      rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true" }]),
+      rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true", type: "true|false" }]),
       rows([{ sys_id: id(1), active: "true" }]), rows([]), rows([{ test: { value: id(2) } }, { test: id(3) }]),
       rows([{ sys_id: id(2), active: "true" }, ...(scenario === "missing" ? [] : [{ sys_id: id(3), active: "false" }])]),
       rows(scenario === "empty" ? [] : [{ step_config: id(4) }]),
@@ -185,7 +185,7 @@ describe("ATF readiness", () => {
   });
   it("flags an empty active test in a child suite", async () => {
     const h = harness([
-      rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true" }]),
+      rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true", type: "true|false" }]),
       rows([{ sys_id: id(1), active: "true" }]), rows([{ sys_id: id(9) }]), rows([]), rows([]), rows([{ test: id(2) }]),
       rows([{ sys_id: id(2), active: "true" }]), rows([]), rows([{ sys_id: id(8) }]), rows({}),
     ]);
@@ -195,7 +195,7 @@ describe("ATF readiness", () => {
     h.fixture.assertConsumed();
   });
   it("checks cloud installation without probing a local browser and keeps provisioning unverified", async () => {
-    const h = harness([rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true" }]), rows([{ sys_id: id(8), scope: "sn_atf_tg" }]), rows({})]);
+    const h = harness([rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true", type: "true|false" }]), rows([{ sys_id: id(8), scope: "sn_atf_tg" }]), rows({})]);
     const result = data(await h.call(atfReadinessToolModule, {}));
     expect(result.verdict).toBe("unverified");
     expect(result.checks).toEqual(expect.arrayContaining([{ check: "Cloud Runner app", status: "pass", message: expect.any(String) }, { check: "Cloud Runner configuration", status: "warn", message: expect.any(String) }]));
@@ -203,11 +203,11 @@ describe("ATF readiness", () => {
     h.fixture.assertConsumed();
   });
   it("blocks a missing cloud app instead of recommending a local browser", async () => {
-    const h = harness([rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true" }]), rows([]), rows({})]);
+    const h = harness([rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true", type: "true|false" }]), rows([]), rows({})]);
     expect(data(await h.call(atfReadinessToolModule, {}))).toMatchObject({ verdict: "blocked", checks: expect.arrayContaining([{ check: "Cloud Runner app", status: "fail", message: expect.stringContaining("Local browser fallback is disabled") }]) });
   });
   it("recognizes the active plugin choice returned by the live Table API", async () => {
-    const h = harness([rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true" }]), rows([]), rows({})]);
+    const h = harness([rows([{ active: "active" }]), rows([{ active: "active" }]), rows([{ name: "sn_atf.runner.enabled", value: "true", type: "true|false" }]), rows([]), rows({})]);
     const result = data(await h.call(atfReadinessToolModule, {}));
     expect(result.checks).toEqual(expect.arrayContaining([
       { check: "ATF plugin", status: "pass", message: "Active" },
@@ -220,7 +220,7 @@ describe("ATF readiness", () => {
   });
   it("does not report authoring grants complete when mapping writes are missing", async () => {
     const tableAccess=createTableAccessPolicy({readTables:["*"],writeTables:["sys_atf_test","sys_atf_test_suite","sys_atf_test_suite_test","sys_atf_step","sys_variable_value"],targets:["sys_atf_test","sys_atf_test_suite","sys_atf_test_suite_test","sys_atf_step","sys_variable_value"].map(table=>({table,kind:"canonical" as const,tools:["sn_atf_author"],closureComplete:true,relatedTables:[table]}))});
-    const h=harness([rows([{active:"active"}]),rows([{active:"active"}]),rows([{name:"sn_atf.runner.enabled",value:"true"}]),rows([]),rows({})],{policy:{...policy,tableAccess}});
+    const h=harness([rows([{active:"active"}]),rows([{active:"active"}]),rows([{name:"sn_atf.runner.enabled",value:"true",type:"true|false"}]),rows([]),rows({})],{policy:{...policy,tableAccess}});
     expect(data(await h.call(atfReadinessToolModule,{})).checks).toEqual(expect.arrayContaining([{check:"Authoring grants (informational)",status:"pass",message:expect.stringContaining("not fully granted")}])) ;
   });
   it("denies a profile with no readable checks before I/O", () => {
