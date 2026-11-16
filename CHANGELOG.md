@@ -36,10 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **More tables are on the privilege-sensitive write list.** `ecc_queue` and
   its rotation shards (records written there can run commands on MID Server
-  hosts), and the server-side script tables `sysevent_script_action`,
+  hosts), and these tables that hold scripts run on the instance or on MID
+  Server hosts: `sysevent_script_action`,
   `sys_script_fix`, `sys_script_email`, `sys_ui_action`, `sys_ui_page`,
   `sys_ui_macro`, `sp_widget`, `sysevent_in_email_action`,
-  `sys_transform_map`, `sys_transform_script` and `ecc_agent_script_include`.
+  `sys_transform_map`, `sys_transform_script`, `ecc_agent_script_include`,
+  `sysevent_email_action`, `sys_dictionary`, `sa_pattern`, `sys_hub_flow` and
+  `sys_hub_action_type_definition`.
   A write grant that reaches them, including `"*"`, is still allowed; `grant`,
   the wizard and the policy card flag it.
 

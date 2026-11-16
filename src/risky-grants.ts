@@ -25,7 +25,9 @@ export const RISKY_WRITE_TABLES: readonly string[] = Object.freeze([
   "sysapproval_approver",
   "sysapproval_group",
   // Server-side code: a write to their script fields is code execution, on
-  // the instance (or, for ecc_agent_script_include, on MID Server hosts).
+  // the instance (or, for ecc_agent_script_include and sa_pattern, on MID
+  // Server hosts). Flows and flow actions can carry script steps, and
+  // dictionary entries can carry calculated-field scripts.
   "sys_script",
   "sys_script_include",
   "sysauto_script",
@@ -46,6 +48,11 @@ export const RISKY_WRITE_TABLES: readonly string[] = Object.freeze([
   "sys_transform_map",
   "sys_transform_script",
   "ecc_agent_script_include",
+  "sysevent_email_action",
+  "sys_dictionary",
+  "sa_pattern",
+  "sys_hub_flow",
+  "sys_hub_action_type_definition",
   // Configuration, identity and authentication.
   "sys_properties",
   "sys_user",

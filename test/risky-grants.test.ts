@@ -21,6 +21,11 @@ describe("server-side script tables in the risky-write list", () => {
     "sys_transform_map",
     "sys_transform_script",
     "ecc_agent_script_include",
+    "sysevent_email_action",
+    "sys_dictionary",
+    "sa_pattern",
+    "sys_hub_flow",
+    "sys_hub_action_type_definition",
   ])("flags %s when named, and under a write wildcard", (table) => {
     expect(riskyWriteTables([table, "incident"])).toEqual([table]);
     expect(riskyWriteTables(["*"])).toContain(table);
