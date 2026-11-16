@@ -18,7 +18,9 @@ import {
   EVALUATE_NOT_FOUND_HINT,
   EVALUATE_WARNINGS,
   candidateTables,
+  collectCandidateTables,
   createEvaluateHandler,
+  outsideCdataAndComments,
   isListableName,
   renderEvaluateText,
   type EvaluateHandlerOptions,
@@ -761,6 +763,54 @@ describe("evaluate: a table whose hierarchy is unknown is treated as a credentia
     // The decoy row only blinds itself; the other row is scanned.
     expect((data.results as Data[]).find((finding) => finding.rule_id === "SEC004")?.update.sys_id).toBe(evil.sys_id);
     expect(data.summary.coverage.scanned).toBeGreaterThanOrEqual(1);
+    expect(data.summary.coverage.partial).toBe(true);
+  });
+
+  it("strips comments and CDATA in linear time, whatever the mix", () => {
+    const row = 262_144;
+    const shapes = {
+      comments: "<!---->".repeat(Math.floor(row / 7)),
+      cdata: "<![CDATA[]]>".repeat(Math.floor(row / 12)),
+      mixed: "<!----><![CDATA[]]>".repeat(Math.floor(row / 19)),
+      openers: "<![CDATA[".repeat(Math.floor(row / 9)),
+    };
+    const median = (text: string): number => {
+      const runs = Array.from({ length: 5 }, () => {
+        const started = performance.now();
+        outsideCdataAndComments(text);
+        return performance.now() - started;
+      });
+      return runs.sort((a, b) => a - b)[2]!;
+    };
+    for (const [shape, text] of Object.entries(shapes)) {
+      const full = median(text);
+      const quarter = median(text.slice(0, text.length / 4));
+      // A quadratic pass took 600-1,000 ms on one such row and grows 16x per 4x.
+      expect(full, shape).toBeLessThan(100);
+      expect(full / Math.max(quarter, 0.25), shape).toBeLessThan(10);
+    }
+    expect(outsideCdataAndComments(`a<!-- x -->b<![CDATA[ <c action="x"> ]]>d<!-- open`)).toBe("a b d");
+  });
+
+  it("yields while finding nested tables, and leaves the rest unknown once its budget is spent", async () => {
+    const rows = Array.from({ length: 30 }, (_, i) => update("sys_script", { name: `R${i}` }));
+    let clock = 0;
+    let yields = 0;
+    const collected = await collectCandidateTables(rows, {
+      now: () => (clock += 10),
+      yieldToLoop: async () => {
+        yields += 1;
+      },
+    });
+    expect(collected.budgetHit).toBe(true);
+    expect(yields).toBeGreaterThan(0);
+    expect(collected.tables).toContain("sys_script");
+    // Through the handler: the budget hit is a check not made.
+    let handlerClock = 0;
+    const { data } = await run(model({ rows: rowsOf(...rows) }), { update_set: SET_ID }, {
+      handler: { hooks: { now: () => (handlerClock += 10), yieldToLoop: async () => {} }, limits: { cpuBudgetMs: 1_000_000 } },
+    });
+    expect(data.warnings).toContain(EVALUATE_WARNINGS.context_tables_budget);
     expect(data.summary.coverage.partial).toBe(true);
   });
 

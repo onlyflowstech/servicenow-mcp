@@ -82,7 +82,7 @@ import {
 import { uncachedOperations } from "../metadata-cache.js";
 import { createToolError } from "../tool-error.js";
 import { escapeQueryValue } from "../utils.js";
-import { ENGINE_LIMITS, evaluateUpdateSets, type EngineHooks } from "../update-set-eval/engine.js";
+import { ENGINE_LIMITS, YIELD_AFTER_MS, evaluateUpdateSets, type EngineHooks } from "../update-set-eval/engine.js";
 import type {
   EngineLimits,
   EvaluateContext,
@@ -150,6 +150,8 @@ export const EVALUATE_LIMITS = Object.freeze({
   MAX_CONTEXT_TABLES: 200,
   /** Distinct record-element tables taken from one row's payload. */
   MAX_RECORD_TABLES_PER_ROW: 16,
+  /** Work, in ms, spent finding record-element tables before the rest are left unknown. */
+  CANDIDATE_BUDGET_MS: 100,
   /** `sys_db_object` levels read to build those hierarchies. */
   MAX_CHAIN_LEVELS: 8,
   /** Update names per `nameIN` read. */
@@ -200,6 +202,7 @@ export const EVALUATE_WARNINGS = Object.freeze({
   baseline_unavailable: "Update versions could not be read in full; the baseline-record check is incomplete.",
   descriptions_unavailable: "Set descriptions could not be checked; the missing-description check was not made.",
   names_unlistable: "Some update names cannot be used in a query; their collision and baseline checks were not made.",
+  context_tables_budget: "Finding the tables nested in payloads ran out of time; rows with unknown nested tables were not scanned.",
 });
 
 export type EvaluateWarning = keyof typeof EVALUATE_WARNINGS;
@@ -301,6 +304,8 @@ interface Reader {
   readonly meta: ServiceNowOperations;
   readonly signal: AbortSignal | undefined;
   readonly scopes: FlowViewScopeBudget;
+  /** The clock and yield the engine uses; a test injects them. */
+  readonly hooks: EngineHooks;
 }
 
 /** Raised inside a step for a fixed `denied` or `unavailable` result. */
@@ -722,19 +727,27 @@ interface ContextRead {
   /** Tables whose facts could not be read (cap or failure), counted as unavailable checks by the engine. */
   readonly hierarchyComplete: boolean;
   readonly fieldTypes: "available" | "unavailable";
+  /** True when finding record-element tables ran out of its CPU budget. */
+  readonly collectionBudgetHit: boolean;
 }
 
 /**
  * The text of a payload with its CDATA sections and comments removed, so
- * markup-like text inside a script is never read as a record. One linear
- * pass; an unterminated section drops the rest of the text.
+ * markup-like text inside a script is never read as a record. An
+ * unterminated section drops the rest of the text.
+ *
+ * Linear: the next opener of each kind is searched for again only once the
+ * scan has passed the last one found, so a kind that does not occur is
+ * searched for once, and every character is read a bounded number of times.
  */
-function outsideCdataAndComments(text: string): string {
+export function outsideCdataAndComments(text: string): string {
   const parts: string[] = [];
   let at = 0;
+  let cdata = text.indexOf("<![CDATA[");
+  let comment = text.indexOf("<!--");
   while (at < text.length) {
-    const cdata = text.indexOf("<![CDATA[", at);
-    const comment = text.indexOf("<!--", at);
+    if (cdata >= 0 && cdata < at) cdata = text.indexOf("<![CDATA[", at);
+    if (comment >= 0 && comment < at) comment = text.indexOf("<!--", at);
     const next = cdata < 0 ? comment : comment < 0 ? cdata : Math.min(cdata, comment);
     if (next < 0) {
       parts.push(text.slice(at));
@@ -761,26 +774,80 @@ function outsideCdataAndComments(text: string): string {
  * unknown and its rows are not scanned: a miss fails closed, for those rows.
  */
 export function candidateTables(updates: readonly EvaluateUpdate[], maxPayloadChars: number = ENGINE_LIMITS.maxPayloadBytes): string[] {
-  const tables = new Set<string>();
+  const direct = new Set<string>();
   const nested: string[][] = [];
   for (const update of updates) {
-    if (typeof update.table === "string" && TABLE_NAME.test(update.table)) tables.add(update.table);
-    const named = UPDATE_NAME_TABLE.exec(update.name);
-    if (named !== null) tables.add(named[1]!);
-    if (update.payload === null) continue;
-    const declared = ROOT_TABLE.exec(update.payload.slice(0, ROOT_HEAD_CHARS));
-    if (declared !== null) tables.add(declared[1]!);
-    const own = new Set<string>();
-    for (const match of outsideCdataAndComments(update.payload.slice(0, maxPayloadChars)).matchAll(RECORD_ELEMENT)) {
-      own.add(match[1]!);
-      if (own.size >= L.MAX_RECORD_TABLES_PER_ROW) break;
-    }
-    nested.push([...own]);
+    directTables(update, direct);
+    nested.push(recordTables(update, maxPayloadChars));
   }
+  return mergeTables(direct, nested);
+}
+
+/** Priority 1 for one row: its `table` column, update-name prefix and payload root. Cheap. */
+function directTables(update: EvaluateUpdate, into: Set<string>): void {
+  if (typeof update.table === "string" && TABLE_NAME.test(update.table)) into.add(update.table);
+  const named = UPDATE_NAME_TABLE.exec(update.name);
+  if (named !== null) into.add(named[1]!);
+  if (update.payload === null) return;
+  const declared = ROOT_TABLE.exec(update.payload.slice(0, ROOT_HEAD_CHARS));
+  if (declared !== null) into.add(declared[1]!);
+}
+
+/** Priority 2 for one row: its record elements outside CDATA and comments, capped. Linear in the payload. */
+function recordTables(update: EvaluateUpdate, maxPayloadChars: number): string[] {
+  if (update.payload === null) return [];
+  const own = new Set<string>();
+  for (const match of outsideCdataAndComments(update.payload.slice(0, maxPayloadChars)).matchAll(RECORD_ELEMENT)) {
+    own.add(match[1]!);
+    if (own.size >= L.MAX_RECORD_TABLES_PER_ROW) break;
+  }
+  return [...own];
+}
+
+function mergeTables(direct: ReadonlySet<string>, nested: readonly (readonly string[])[]): string[] {
+  const tables = new Set(direct);
   for (let round = 0; round < L.MAX_RECORD_TABLES_PER_ROW; round += 1) {
     for (const own of nested) if (own[round] !== undefined) tables.add(own[round]!);
   }
   return [...tables];
+}
+
+/**
+ * {@link candidateTables} as the handler runs it: it yields to the event loop
+ * after {@link YIELD_AFTER_MS} of work, as the engine does, and stops reading
+ * record elements once {@link EVALUATE_LIMITS}.CANDIDATE_BUDGET_MS of work is
+ * spent. Rows left then keep only their direct tables; a nested record they
+ * hold is unknown, so those rows fail closed, and `budgetHit` says so.
+ */
+export async function collectCandidateTables(
+  updates: readonly EvaluateUpdate[],
+  hooks: EngineHooks = {},
+  maxPayloadChars: number = ENGINE_LIMITS.maxPayloadBytes
+): Promise<{ readonly tables: string[]; readonly budgetHit: boolean }> {
+  const now = hooks.now ?? (() => performance.now());
+  const yieldToLoop = hooks.yieldToLoop ?? (() => new Promise<void>((resolve) => setImmediate(resolve)));
+  const direct = new Set<string>();
+  const nested: string[][] = [];
+  let spent = 0;
+  let segmentStart = now();
+  let budgetHit = false;
+  for (const update of updates) {
+    directTables(update, direct);
+    if (budgetHit) continue;
+    let elapsed = now() - segmentStart;
+    if (elapsed >= YIELD_AFTER_MS) {
+      spent += elapsed;
+      await yieldToLoop();
+      segmentStart = now();
+      elapsed = 0;
+    }
+    if (spent + elapsed >= L.CANDIDATE_BUDGET_MS) {
+      budgetHit = true;
+      continue;
+    }
+    nested.push(recordTables(update, maxPayloadChars));
+  }
+  return { tables: mergeTables(direct, nested), budgetHit };
 }
 
 /** A table's chain, nearest first, and whether it reaches a table that extends nothing. */
@@ -820,7 +887,8 @@ async function readContext(
   warnings: Set<EvaluateWarning>,
   extra?: { readonly run: () => Promise<void>; readonly noScope: () => void }
 ): Promise<ContextRead> {
-  const all = candidateTables(updates);
+  const { tables: all, budgetHit } = await collectCandidateTables(updates, reader.hooks);
+  if (budgetHit) warnings.add("context_tables_budget");
   if (all.length > L.MAX_CONTEXT_TABLES) warnings.add("context_tables_capped");
   // The cap keeps the most certain tables; the reads list them sorted.
   const tables = all.slice(0, L.MAX_CONTEXT_TABLES).sort();
@@ -964,6 +1032,7 @@ async function readContext(
     context,
     hierarchyComplete: !warnings.has("hierarchy_unavailable"),
     fieldTypes: fieldTypes.state,
+    collectionBudgetHit: budgetHit,
   };
 }
 
@@ -1217,6 +1286,7 @@ export function createEvaluateHandler(defaults: EvaluateHandlerOptions = {}): Fi
       meta: services.serviceNow,
       signal: services.context?.signal,
       scopes: new FlowViewScopeBudget(maxScopes),
+      hooks: defaults.hooks ?? {},
     };
     const warnings = new Set<EvaluateWarning>();
     const groups = args.groups === undefined || args.groups.length === 0 ? undefined : args.groups;
@@ -1289,6 +1359,7 @@ export function createEvaluateHandler(defaults: EvaluateHandlerOptions = {}): Fi
         steps.push(readProblems(reader, access, scope, facts, warnings));
       }
       const [context] = (await Promise.all(steps)) as [ContextRead, ...unknown[]];
+      if (context.collectionBudgetHit) facts.unavailable += 1;
 
       const input: EvaluationInput = {
         source: scope.source,
