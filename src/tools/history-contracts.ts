@@ -363,6 +363,7 @@ export const HISTORY_SOURCE_STATUSES = Object.freeze([
   "denied",
   "unavailable",
   "done",
+  "too_large",
 ] as const);
 
 const sourceSummarySchema = z

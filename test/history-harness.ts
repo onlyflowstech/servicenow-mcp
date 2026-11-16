@@ -24,6 +24,7 @@ import { fieldTypesFromRows, type DictionaryRow, type FieldTypeLoader } from "..
 import type { Profile, ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy, type TableAccessPolicy } from "../src/table-policy.js";
+import { ServiceNowResponseTooLargeError } from "../src/response-too-large.js";
 import { createToolError } from "../src/tool-error.js";
 import { resolveHistoryAccess, historyToolModule } from "../src/tools/history-module.js";
 import { registerServiceNowToolModules } from "../src/tools/index.js";
@@ -63,6 +64,8 @@ export interface HistoryFixture {
   readonly ignoreRecordFilter?: readonly ("sys_audit" | "sys_journal_field" | "sys_flow_context")[];
   /** `NOT IN` clauses are ignored (a misbehaving instance). */
   readonly ignoreExclusions?: boolean;
+  /** A source read asking for more rows than this is too large for the client. */
+  readonly tooLargeAbove?: Partial<Record<"sys_audit" | "sys_journal_field" | "sys_flow_context", number>>;
 }
 
 export interface RecordedCall {
@@ -116,6 +119,10 @@ export function fakeInstance(fixture: HistoryFixture): FakeInstance {
       if (rows === "forbidden") throw createToolError("authorization", "retry_after_correction");
       if (rows === "missing") throw createToolError("upstream", "do_not_retry");
       const loose = fixture.ignoreRecordFilter?.includes(table as keyof typeof SOURCE_TABLES) ?? false;
+      const ceiling = fixture.tooLargeAbove?.[table as keyof typeof SOURCE_TABLES];
+      if (ceiling !== undefined && Number(params.sysparm_limit ?? "10000") > ceiling) {
+        throw new ServiceNowResponseTooLargeError("fake response exceeds the byte limit");
+      }
       return {
         result: project(evaluate(rows ?? [], query, Number(params.sysparm_limit ?? "10000"), loose, fixture.ignoreExclusions === true), params),
       };

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CHAIN_UNCONFIRMED_WARNING,
+  TOO_LARGE_WARNING,
   DICTIONARY_UNAVAILABLE_WARNING,
   MAX_HISTORY_DICTIONARY_ROWS,
   WRONG_CLASS_HINT,
@@ -606,4 +607,53 @@ describe("journal fields for a profile without the journal source", () => {
       expect(data.omitted).toEqual({ unreadable: 0, mismatch: 0 });
     });
   }
+});
+
+describe("a source page too large for the client", () => {
+  const journal = Array.from({ length: 10 }, (_, n) => journalRow(n + 1, `2026-07-01 10:00:${String(n * 2).padStart(2, "0")}`, "comments"));
+  const audit = Array.from({ length: 10 }, (_, n) => auditRow(n + 1, `2026-07-01 10:00:${String(n * 2 + 1).padStart(2, "0")}`, "priority"));
+  const flows = [flowRow(1, "2026-07-01 09:00:00")];
+  const key = (event: Event) => `${event.time}|${event.source}`;
+
+  it("is asked again for fewer rows, and the pages still hold every event once, in order", async () => {
+    const oracle = await run(incidentFixture({ audit, journal, flows }), { table: "incident", sys_id: ids.incident });
+    const expected = eventsOf(dataOf(oracle.result)).map(key);
+
+    const instance = fakeInstance(incidentFixture({ audit, journal, flows, tooLargeAbove: { sys_journal_field: 4 } }));
+    const { call } = await harness(instance.ops, { tableAccess: FULL });
+    const seen: string[] = [];
+    let cursor: unknown;
+    let pages = 0;
+    do {
+      const data = dataOf(await call({ table: "incident", sys_id: ids.incident, ...(cursor === undefined ? {} : { cursor }) }));
+      expect((data.sources as Record<string, { status: string }>).journal!.status).not.toBe("too_large");
+      seen.push(...eventsOf(data).map(key));
+      cursor = data.next_cursor;
+      pages += 1;
+    } while (cursor !== undefined && pages < 20);
+    expect(seen).toEqual(expected);
+    const journalAsks = instance.calls.filter((call) => tableOfCall(call) === "sys_journal_field").map((call) => call.params.sysparm_limit);
+    expect(journalAsks.slice(0, 5)).toEqual(["51", "25", "12", "6", "3"]);
+    expectReadsWithin(instance.calls, planFor({ table: "incident", sys_id: ids.incident }, FULL));
+  });
+
+  it("is reported on its own, with a cursor that starts it again, when even one row is too large", async () => {
+    const instance = fakeInstance(incidentFixture({ audit, journal, flows, tooLargeAbove: { sys_journal_field: 0 } }));
+    const { call } = await harness(instance.ops, { tableAccess: FULL });
+    const data = dataOf(await call({ table: "incident", sys_id: ids.incident }));
+    expect(data.sources).toEqual({
+      audit: { status: "ok", returned: 10, has_more: false },
+      journal: { status: "too_large", returned: 0, has_more: true },
+      flows: { status: "ok", returned: 1, has_more: false },
+    });
+    expect(data.warnings).toEqual([TOO_LARGE_WARNING("journal")]);
+    const next = data.next_cursor as Record<string, string>;
+    expect(Object.keys(next)).toEqual(["journal"]);
+    expect(decodeTailCursor(next.journal)!.timestamp).toBe("9999-12-31 23:59:59");
+    // The next page reads only the journal again, from the top.
+    instance.calls.length = 0;
+    const again = dataOf(await call({ table: "incident", sys_id: ids.incident, cursor: next }));
+    expect((again.sources as Record<string, { status: string }>).journal!.status).toBe("too_large");
+    expect(instance.calls.map(tableOfCall).filter((table) => table === "sys_audit" || table === "sys_flow_context")).toEqual([]);
+  });
 });

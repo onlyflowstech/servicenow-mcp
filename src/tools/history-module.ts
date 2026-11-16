@@ -26,7 +26,9 @@
  *    counts only when it reaches the table that defines `sys_id`;
  * 3. each planned source, newest first, `limit + 1` rows, uncached. The
  *    journal and flow reads run with step 2; the audit read follows it, so
- *    its query leaves out the chain's journal fields.
+ *    its query leaves out the chain's journal fields. A source whose page is
+ *    too large for the client is asked again for half the rows, down to one
+ *    row; past that it alone is `too_large` and the others still answer.
  *
  * Every source row must carry the record's class and sys_id in its key
  * columns, or it is dropped (`omitted.mismatch`). Then, in order:
@@ -60,7 +62,12 @@
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-import { isServiceNowRequestCancellation, runWithServiceNowRequestSignal, type ServiceNowOperations } from "../client.js";
+import {
+  isServiceNowRequestCancellation,
+  isServiceNowResponseTooLarge,
+  runWithServiceNowRequestSignal,
+  type ServiceNowOperations,
+} from "../client.js";
 import {
   EXPLICIT_READ_FIELD_NAMES,
   FieldPolicyError,
@@ -140,6 +147,10 @@ export const MAX_HISTORY_DICTIONARY_ROWS = 5_000;
 const ENVELOPE_RESERVE_BYTES = 2_000;
 /** The highest sys_id: a position at the end of one second, for a source this page did not reach. */
 const END_OF_SECOND = "f".repeat(32);
+/** A position before every row: where a source that returned nothing yet starts again. */
+const BEFORE_ALL: TailPosition = Object.freeze({ timestamp: "9999-12-31 23:59:59", sysId: END_OF_SECOND });
+/** The fewest rows a source read asks for after a response was too large: one row and the look-ahead. */
+export const MIN_SOURCE_READ_ROWS = 2;
 
 const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 
@@ -154,6 +165,9 @@ export const CHAIN_UNCONFIRMED_WARNING =
   "The table's extension chain could not be read in full, so no values are shown.";
 export const VALUES_NOT_READABLE_WARNING = (source: HistorySource) =>
   `Field policy hides the ${source} value columns, so no ${source} values are shown.`;
+export const TOO_LARGE_WARNING = (source: HistorySource) =>
+  `The newest ${source} entries were too large to return, so ${source} was skipped on this page. ` +
+  "Repeat the call with include_values: false or a narrower since/until to read them.";
 export const FITTED_WARNING =
   "Fewer events than limit fit max_response_bytes; the rest follow with next_cursor.";
 
@@ -522,8 +536,20 @@ export function sourceQuery(
 }
 
 type SourceRead =
-  | { readonly status: "ok"; readonly rows: readonly Record<string, unknown>[] }
-  | { readonly status: "denied" | "unavailable" | "done" | "not_granted" };
+  | {
+      readonly status: "ok";
+      readonly rows: readonly Record<string, unknown>[];
+      /** The rows asked for: `limit + 1`, or fewer after a response was too large. */
+      readonly asked: number;
+    }
+  | { readonly status: "denied" | "unavailable" | "done" | "not_granted" | "too_large" };
+
+/**
+ * One source's page. A response too large for the client is asked again for
+ * half the rows, down to one row and the look-ahead; if even that is too
+ * large, the source alone is `too_large` and the other sources still answer.
+ * Each attempt runs in its own response scope.
+ */
 
 async function readSource(
   ops: ServiceNowOperations,
@@ -537,22 +563,31 @@ async function readSource(
   const position = args.cursor?.[plan.source];
   // A follow-up page reads only the sources its cursor names: the others are finished.
   if (args.cursor !== undefined && position === undefined) return { status: "done" };
-  try {
-    const response = await inOwnScope(signal, () =>
-      ops.get(`${TABLE_PATH}${plan.spec.table}`, {
-        sysparm_query: sourceQuery(plan.spec, recordClass, args, position, exclude),
-        sysparm_fields: plan.fields.join(","),
-        sysparm_limit: String(args.limit + 1),
-        sysparm_display_value: "false",
-        sysparm_exclude_reference_link: "true",
-      })
-    );
-    return { status: "ok", rows: rowsOf(response) };
-  } catch (error) {
-    if (isServiceNowRequestCancellation(error) || signal?.aborted) throw error;
-    if (errorCategory(error) === "authorization") return { status: "denied" };
-    if (isMissingTable(error)) return { status: "unavailable" };
-    throw error;
+  const query = sourceQuery(plan.spec, recordClass, args, position, exclude);
+  let asked = args.limit + 1;
+  for (;;) {
+    try {
+      const response = await inOwnScope(signal, () =>
+        ops.get(`${TABLE_PATH}${plan.spec.table}`, {
+          sysparm_query: query,
+          sysparm_fields: plan.fields.join(","),
+          sysparm_limit: String(asked),
+          sysparm_display_value: "false",
+          sysparm_exclude_reference_link: "true",
+        })
+      );
+      return { status: "ok", rows: rowsOf(response), asked };
+    } catch (error) {
+      if (isServiceNowRequestCancellation(error) || signal?.aborted) throw error;
+      if (isServiceNowResponseTooLarge(error)) {
+        if (asked <= MIN_SOURCE_READ_ROWS) return { status: "too_large" };
+        asked = Math.max(MIN_SOURCE_READ_ROWS, Math.floor(asked / 2));
+        continue;
+      }
+      if (errorCategory(error) === "authorization") return { status: "denied" };
+      if (isMissingTable(error)) return { status: "unavailable" };
+      throw error;
+    }
   }
 }
 
@@ -636,7 +671,11 @@ function judgeRow(plan: HistorySourcePlan, row: Readonly<Record<string, unknown>
   };
 }
 
-/** A source's rows as candidates, newest first; the look-ahead row only says more exist. */
+/**
+ * A source's rows as candidates, newest first. Of `asked` rows, the last is
+ * the look-ahead: it only says more exist, so at most `asked - 1` (and at most
+ * `limit`) rows are candidates.
+ */
 function candidatesOf(
   plan: HistorySourcePlan,
   rows: readonly Record<string, unknown>[],
@@ -807,7 +846,7 @@ async function handleHistory(
   plan.sources.forEach((source, index) => {
     const result = reads[index]!;
     if (result.status !== "ok") return;
-    const page = candidatesOf(source, result.rows, args.limit, judge);
+    const page = candidatesOf(source, result.rows, Math.min(args.limit, result.asked - 1), judge);
     all.push(...page.candidates);
     if (page.full) full.add(source.source);
   });
@@ -819,6 +858,9 @@ async function handleHistory(
   for (const source of plan.sources) {
     if (source.granted && source.valuesHidden) warnings.push(VALUES_NOT_READABLE_WARNING(source.source));
   }
+  plan.sources.forEach((source, index) => {
+    if (reads[index]!.status === "too_large") warnings.push(TOO_LARGE_WARNING(source.source));
+  });
 
   const build = (emitLimit: number): HistoryData => {
     const walk = walkPage(all, emitLimit, full);
@@ -826,6 +868,15 @@ async function handleHistory(
     const nextCursor: Partial<Record<HistorySource, string>> = {};
     plan.sources.forEach((source, index) => {
       const result = reads[index]!;
+      const filter = historyCursorFilter(args, recordClass, source.source);
+      if (result.status === "too_large") {
+        // Nothing of it was read, so it starts again where it was: its own
+        // position, or before every row. Its rows may then follow newer rows
+        // of the other sources on later pages, but none is skipped.
+        sources[source.source] = { status: "too_large", returned: 0, has_more: true };
+        nextCursor[source.source] = encodeTailCursor({ ...(args.cursor?.[source.source] ?? BEFORE_ALL), filter });
+        return;
+      }
       if (result.status !== "ok") {
         sources[source.source] = { status: result.status, returned: 0, has_more: false };
         return;
@@ -840,7 +891,7 @@ async function handleHistory(
       const position: TailPosition | undefined =
         state.last ?? args.cursor?.[source.source] ?? (walk.cut === undefined ? undefined : { timestamp: walk.cut.timestamp, sysId: END_OF_SECOND });
       if (position === undefined) return;
-      const cursor: TailCursor = { ...position, filter: historyCursorFilter(args, recordClass, source.source) };
+      const cursor: TailCursor = { ...position, filter };
       nextCursor[source.source] = encodeTailCursor(cursor);
     });
     return {
