@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A write grant that reaches them, including `"*"`, is still allowed; `grant`,
   the wizard and the policy card flag it.
 
+## [2.3.0-rc.2] — 2026-11-16
+
+Release candidate for 2.3.0, published to the `next` dist-tag. It contains the
+changes listed under 2.3.0-dev.1 to 2.3.0-dev.5 below and nothing else.
+
 ## [2.3.0-dev.5] — 2026-11-16
 
 ### Added
