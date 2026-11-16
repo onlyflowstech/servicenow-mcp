@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { TokenKind, callArguments, findCall, findMethod, lineAt, tokenize } from "../../src/update-set-eval/script-scan.js";
+import { TokenKind, callArguments, findCall, findMethod, lineAt, scriptLine, tokenize } from "../../src/update-set-eval/script-scan.js";
 import { evaluateUpdateSets } from "../../src/update-set-eval/engine.js";
 import { input, update } from "../fixtures/update-set-eval/rule-cases.js";
 
@@ -48,6 +48,13 @@ describe("tokenize", () => {
   it("counts lines across LF, CRLF and CR", () => {
     expect(lineAt("a\nb\r\nc\rd", 7)).toBe(4);
     expect(lineAt("abc", 1)).toBe(1);
+  });
+
+  it("gives the same line from the precomputed line starts, for every offset", () => {
+    const text = "a\nb\r\nc\rd\n\n\r\re\r\n";
+    const scan = tokenize(text);
+    for (let offset = 0; offset <= text.length; offset++) expect(scriptLine(scan, offset), String(offset)).toBe(lineAt(text, offset));
+    expect(scriptLine(tokenize(""), 0)).toBe(1);
   });
 
   it("never throws on unbalanced or unterminated input", () => {

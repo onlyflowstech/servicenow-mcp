@@ -14,7 +14,7 @@ import {
   findCall,
   findIdentifier,
   findMethod,
-  lineAt,
+  scriptLine,
   tokensAre,
   type ScriptTokens,
 } from "./script-scan.js";
@@ -104,7 +104,7 @@ function at(script: PreparedScript, token: number): { field?: string; line?: num
   const t = script.scan.tokens[token];
   const out: { field?: string; line?: number } = {};
   if (isFieldName(script.field)) out.field = script.field;
-  if (t !== undefined) out.line = lineAt(script.scan.text, t.start);
+  if (t !== undefined) out.line = scriptLine(script.scan, t.start);
   return out;
 }
 

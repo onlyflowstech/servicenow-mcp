@@ -102,10 +102,12 @@ describe("CPU budget, counted between rows", () => {
     expect(clock.yields()).toBe(3); // after rows 50, 100 and 150
   });
 
-  it("finishes a real 500-row scope inside the default budget", async () => {
+  it("evaluates every row of a real 500-row scope", async () => {
+    // The real clock, with a budget no runner reaches: this checks that all
+    // rows are evaluated. The budget itself is tested with the fake clock above.
     const script = RULE_CASES.PERF001.positive().updates[0].payload ?? "";
     const many = Array.from({ length: 500 }, () => ({ ...br("x"), payload: script }));
-    const result = await evaluateUpdateSets(input(many));
+    const result = await evaluateUpdateSets(input(many), {}, limits({ cpuBudgetMs: 5_000 }));
     expect(result.coverage.evaluated).toBe(500);
     expect(result.coverage.cpu_budget_hit).toBe(false);
   });

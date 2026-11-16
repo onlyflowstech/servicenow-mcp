@@ -265,6 +265,39 @@ export function callArguments(scan: ScriptTokens, open: number): readonly number
   return starts;
 }
 
+/** Line starts per tokenized script, computed on the first finding that needs a line. */
+const LINE_STARTS = new WeakMap<ScriptTokens, Int32Array>();
+
+function lineStarts(text: string): Int32Array {
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 10 || (c === 13 && text.charCodeAt(i + 1) !== 10)) starts.push(i + 1);
+  }
+  return Int32Array.from(starts);
+}
+
+/**
+ * 1-based line of `offset` in the script, with the same line breaks as
+ * `lineAt`. The line starts are computed once per script, so each further
+ * lookup is a binary search.
+ */
+export function scriptLine(scan: ScriptTokens, offset: number): number {
+  let starts = LINE_STARTS.get(scan);
+  if (starts === undefined) {
+    starts = lineStarts(scan.text);
+    LINE_STARTS.set(scan, starts);
+  }
+  let low = 0;
+  let high = starts.length - 1;
+  while (low < high) {
+    const mid = (low + high + 1) >> 1;
+    if (starts[mid] <= offset) low = mid;
+    else high = mid - 1;
+  }
+  return low + 1;
+}
+
 /** 1-based line of `offset` in `text`, counting LF, CRLF and lone CR as one break each. */
 export function lineAt(text: string, offset: number): number {
   let line = 1;
