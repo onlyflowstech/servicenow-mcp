@@ -14,7 +14,10 @@
  *     (after an optional byte-order mark), which every payload has;
  *   - an XInclude namespace binding is rejected, although nothing here would
  *     act on it;
- *   - comments are skipped and kept out of the tree.
+ *   - comments are skipped and kept out of the tree;
+ *   - adjacent text and CDATA sections, including those a comment or a CDATA
+ *     boundary splits (`]]]]><![CDATA[>`), become one text node, so a value
+ *     a caller masks node by node cannot be split across nodes.
  * It never throws on input. A failure is a fixed code plus a fixed message;
  * neither carries any payload text.
  *
@@ -52,7 +55,7 @@ export interface XmlText {
   readonly kind: "text";
   /** Decoded text. */
   readonly value: string;
-  /** True when the text came from a CDATA section. */
+  /** True when any part of the text came from a CDATA section. */
   readonly cdata: boolean;
 }
 
@@ -142,7 +145,10 @@ export interface XmlReadFailure {
 
 export type XmlReadResult = { readonly ok: true; readonly document: XmlDocument } | XmlReadFailure;
 
-const XINCLUDE_NAMESPACE = "http://www.w3.org/2001/XInclude";
+const XINCLUDE_NAMESPACES: ReadonlySet<string> = new Set([
+  "http://www.w3.org/2001/XInclude",
+  "http://www.w3.org/2003/XInclude",
+]);
 const BOM = 0xfeff;
 
 interface Limits {
@@ -243,6 +249,18 @@ interface OpenElement {
   readonly name: string;
   readonly attributes: Map<string, string>;
   readonly children: XmlNode[];
+  /** Text read since the last child element, joined into one node when it ends. */
+  readonly text: string[];
+  cdata: boolean;
+}
+
+/** Ends the element's pending text run as one text node. */
+function flushText(open: OpenElement): void {
+  if (open.text.length === 0) return;
+  const value = open.text.length === 1 ? open.text[0] : open.text.join("");
+  open.children.push({ kind: "text", value, cdata: open.cdata });
+  open.text.length = 0;
+  open.cdata = false;
 }
 
 /** Reads the `<?xml …?>` declaration at `at`; returns it and the offset after `?>`. */
@@ -310,7 +328,20 @@ function parse(text: string, limits: Limits, bytes: number): XmlDocument {
       if (cdata || !/^[ \t\r\n]*$/u.test(value)) throw new Reject("content_outside_root");
       return;
     }
-    if (value.length > 0) parent.children.push({ kind: "text", value, cdata });
+    if (value.length === 0) return;
+    parent.text.push(value);
+    if (cdata) parent.cdata = true;
+  };
+
+  /** Attaches a finished element to its parent, or makes it the root. */
+  const attach = (element: XmlElement) => {
+    const parent = stack[stack.length - 1];
+    if (parent === undefined) {
+      root = element;
+      return;
+    }
+    flushText(parent);
+    parent.children.push(element);
   };
 
   while (i < length) {
@@ -361,10 +392,8 @@ function parse(text: string, limits: Limits, bytes: number): XmlDocument {
       if (text.charCodeAt(close) !== 62) throw new Reject("malformed_tag");
       const open = stack.pop();
       if (open === undefined || open.name !== name) throw new Reject("mismatched_tag");
-      const element: XmlElement = { kind: "element", name, attributes: open.attributes, children: open.children };
-      const parent = stack[stack.length - 1];
-      if (parent === undefined) root = element;
-      else parent.children.push(element);
+      flushText(open);
+      attach({ kind: "element", name, attributes: open.attributes, children: open.children });
       i = close + 1;
       continue;
     }
@@ -412,18 +441,15 @@ function parse(text: string, limits: Limits, bytes: number): XmlDocument {
         if (text.charCodeAt(v) === 60) throw new Reject("invalid_attribute");
       }
       const value = decode(text, k + 1, valueEnd, true);
-      if (value.trim() === XINCLUDE_NAMESPACE) throw new Reject("external_reference");
+      if (XINCLUDE_NAMESPACES.has(value.trim())) throw new Reject("external_reference");
       attributes.set(attrName, value);
       j = valueEnd + 1;
     }
 
     if (selfClosing) {
-      const element: XmlElement = { kind: "element", name, attributes, children: [] };
-      const parent = stack[stack.length - 1];
-      if (parent === undefined) root = element;
-      else parent.children.push(element);
+      attach({ kind: "element", name, attributes, children: [] });
     } else {
-      stack.push({ name, attributes, children: [] });
+      stack.push({ name, attributes, children: [], text: [], cdata: false });
     }
     i = j;
   }

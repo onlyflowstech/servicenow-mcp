@@ -19,6 +19,7 @@ import {
   type XmlReadErrorCode,
   type XmlReadResult,
 } from "../../src/update-set-eval/xml-reader.js";
+import { SECRET_MASK, maskSecrets } from "../../src/update-set-eval/secret-patterns.js";
 
 const fixture = (path: string): string =>
   readFileSync(new URL(`../fixtures/update-set-eval/${path}`, import.meta.url), "utf8");
@@ -139,8 +140,9 @@ describe("readXml: no DTD, no entities, no external references", () => {
     expect(code(fixture(path))).toBe(expected);
   });
 
-  it("rejects the XInclude namespace as a default namespace too", () => {
+  it("rejects the XInclude namespace as a default namespace, and the 2003 namespace", () => {
     expect(code('<r xmlns="http://www.w3.org/2001/XInclude"/>')).toBe("external_reference");
+    expect(code('<r xmlns:xi="http://www.w3.org/2003/XInclude"/>')).toBe("external_reference");
   });
 
   it("decodes only the five predefined entities and valid character references", () => {
@@ -314,6 +316,43 @@ describe("readXml: no payload text in any failure", () => {
     for (const c of XML_READ_ERROR_CODES) {
       expect(XML_READ_ERROR_MESSAGES[c]).toMatch(/^The payload(?:'s)? [^${}<>]+\.$/u);
     }
+  });
+});
+
+describe("readXml: one text node per run of text", () => {
+  it("joins text and CDATA that a comment or a CDATA boundary splits", () => {
+    const comment = ok(readXml("<script>var password = '<!-- -->x9-value';</script>"));
+    expect(comment.root.children).toEqual([{ kind: "text", value: "var password = 'x9-value';", cdata: false }]);
+    const cdata = ok(readXml("<script><![CDATA[var password = 'ab]]]]><![CDATA[>x9-value';]]></script>"));
+    expect(cdata.root.children).toEqual([{ kind: "text", value: "var password = 'ab]]>x9-value';", cdata: true }]);
+    const mixed = ok(readXml("<script>var password = <![CDATA['x9-]]>&#x76;alue';</script>"));
+    expect(mixed.root.children).toEqual([{ kind: "text", value: "var password = 'x9-value';", cdata: true }]);
+  });
+
+  it("masks a split value as one, through the text hook", () => {
+    const mask = (value: string) => {
+      const result = maskSecrets(value);
+      return result.status === "ok" ? result.text : "";
+    };
+    for (const xml of [
+      "<script>var password = '<!-- -->x9-value';</script>",
+      "<script><![CDATA[var password = 'ab]]]]><![CDATA[>x9-value';]]></script>",
+    ]) {
+      const out = serializeXml(ok(readXml(xml)).root, { text: mask });
+      expect(out).not.toContain("x9-value");
+      expect(out).toContain(SECRET_MASK);
+    }
+  });
+
+  it("keeps text on either side of a child element apart", () => {
+    const doc = ok(readXml("<r>a<!-- -->b<c/>d<![CDATA[e]]></r>"));
+    expect(doc.root.children.map((n) => (n.kind === "text" ? n.value : `<${n.name}>`))).toEqual(["ab", "<c>", "de"]);
+  });
+
+  it("bounds the text-node count by the element count", () => {
+    const doc = ok(readXml(`<r>${"x<!---->".repeat(10_000)}</r>`));
+    expect(doc.root.children).toHaveLength(1);
+    expect(textContent(doc.root)).toBe("x".repeat(10_000));
   });
 });
 
