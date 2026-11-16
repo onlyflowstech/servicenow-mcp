@@ -12,7 +12,7 @@
 import { Buffer } from "node:buffer";
 import { types as nodeUtilTypes } from "node:util";
 
-import { resolveReadableFields } from "./field-policy.js";
+import { queryDeniedFields, resolveReadableFields } from "./field-policy.js";
 import { normalizeTableName } from "./table-policy.js";
 
 export const MAX_ENCODED_QUERY_POLICY_RULES = 16;
@@ -196,10 +196,17 @@ export function authorizeRawEncodedRead(
     if (tool !== "sn_query") {
       throw new EncodedQueryPolicyError("read_not_approved");
     }
-    const rule = policy.rules.find(
+    let rule = policy.rules.find(
       (candidate) => candidate.tool === tool && candidate.table === table
     );
     if (!rule) throw new EncodedQueryPolicyError("read_not_approved");
+    // The rule's fields were checked by name when the policy was built. In a
+    // dispatched call a hidden-typed field (or sys_properties.value) is also
+    // taken out, so a rule cannot filter, order or return one.
+    const denied = queryDeniedFields(table);
+    if (denied.size > 0) {
+      rule = { ...rule, fields: rule.fields.filter((field) => !denied.has(field)) };
+    }
     enforceResultBounds(rule, request);
     validateOrderBy(rule, request.orderBy);
     const outputFields = validateOutputFields(rule, request.outputFields);

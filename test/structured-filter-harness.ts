@@ -16,6 +16,7 @@ import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy, type TableAccessPolicyInput } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
 import { withQueryFields } from "./fixtures/echo-fields.js";
+import { fieldTypeAnswer } from "./fixtures/field-types.js";
 
 const CONFIG: ServiceNowConfig = {
   instance: "https://structured-filter.service-now.com",
@@ -93,14 +94,16 @@ export async function harness(
     ...(options.metadataCache === undefined ? {} : { metadataCache: options.metadataCache }),
   };
   const getWithMeta = vi.fn(async (path: string, params?: Record<string, string>) =>
-    options.upstream
+    // The dispatcher's field-type lookup (only with the metadata cache on).
+    fieldTypeAnswer(path, params) ??
+    (options.upstream
       ? options.upstream(path, params)
       : {
           // A table that has the filter's columns returns them on its rows.
           data: { result: records.map((row) => withQueryFields(row, params)) },
           status: 200,
           headers: new Headers(),
-        }
+        })
   );
   const post = vi.fn(async () => ({ serviced_requests: [], unserviced_requests: [] }));
   const get = vi.fn(async () => ({ result: [] }));

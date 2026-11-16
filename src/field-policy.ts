@@ -15,6 +15,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { types as nodeUtilTypes } from "node:util";
 
+import {
+  currentHiddenFieldScope,
+  FIELD_TYPES_UNAVAILABLE_MESSAGE,
+  rowValueHidden,
+  rowValueRule,
+  withoutFields,
+  type RowValueRule,
+} from "./hidden-values.js";
 import { NAMED_ONLY_TABLES } from "./table-policy.js";
 
 export type ResponseFormat = "concise" | "detailed";
@@ -22,6 +30,12 @@ export type ResponseFormat = "concise" | "detailed";
 export interface ReadFieldSelectionInput {
   readonly fields?: unknown;
   readonly responseFormat?: unknown;
+  /**
+   * `"query"` when the fields are used to filter, order, group or aggregate
+   * rather than returned. A table's row-rule value field (`sys_properties.value`)
+   * is refused then: its secrecy is per row, unknown at query time.
+   */
+  readonly purpose?: unknown;
 }
 
 export type FieldSelection = readonly string[];
@@ -30,6 +44,8 @@ export interface PreparedFieldAccess {
   readonly entries: readonly {
     readonly table: string;
     readonly readableFields: FieldSelection;
+    /** The table's hidden-typed fields in this call, sorted; empty outside one. */
+    readonly hiddenFields: readonly string[];
   }[];
 }
 
@@ -43,7 +59,8 @@ export type FieldPolicyFailureReason =
   | "unsupported_field_path"
   | "explicit_field_required"
   | "traversal_limit_exceeded"
-  | "invalid_argument_shape";
+  | "invalid_argument_shape"
+  | "field_types_unavailable";
 
 type FieldPolicySet = readonly string[] | "*";
 
@@ -961,7 +978,11 @@ export function fieldPolicyDenialMessage(error: FieldPolicyError): string {
             `fieldPolicy.${table}, or a fieldPolicy."*" fallback, to allow it.`
         : "Access denied by policy: the requested table has no field policy entry.";
     case "sensitive_field":
+      // The same text for a name and a type denial: saying which would tell
+      // the caller a field's type, which is what the type rule keeps back.
       return "Access denied by policy: a requested field is denied by name as sensitive and cannot be granted by configuration.";
+    case "field_types_unavailable":
+      return FIELD_TYPES_UNAVAILABLE_MESSAGE;
     case "explicit_field_required":
       // Only the EXPLICIT_WRITE_FIELDS names reach this case; each is a fixed
       // name that passed FIELD_NAME.
@@ -1036,10 +1057,16 @@ export function resolveReadableFields(
   );
   const responseFormat = normalizeResponseFormat(canonicalInput.responseFormat);
   const requested = canonicalInput.fields;
+  const hidden = typeHiddenFields(policy.table);
+  const queryDenied =
+    canonicalInput.purpose === "query" ? rowValueRule(policy.table)?.queryDenied : undefined;
 
   if (requested === undefined) {
-    return requireNonEmptySelection(
-      responseFormat === "detailed" ? readableSelection(policy) : policy.defaults
+    return visibleSelection(
+      policy.table,
+      requireNonEmptySelection(
+        responseFormat === "detailed" ? readableSelection(policy) : policy.defaults
+      )
     );
   }
   if (typeof requested !== "string") {
@@ -1047,7 +1074,7 @@ export function resolveReadableFields(
   }
   const trimmed = requested.trim();
   if (trimmed.toLowerCase() === "all") {
-    return requireNonEmptySelection(readableSelection(policy));
+    return visibleSelection(policy.table, requireNonEmptySelection(readableSelection(policy)));
   }
   if (!trimmed) throw new FieldPolicyError("invalid_field_selection");
 
@@ -1056,7 +1083,10 @@ export function resolveReadableFields(
   for (const candidate of trimmed.split(",")) {
     const field = normalizeFieldName(candidate);
     if (seen.has(field)) throw new FieldPolicyError("invalid_field_selection");
-    if (isSensitiveFieldName(field)) {
+    // A hidden-typed field is refused exactly like a sensitive name, with the
+    // same message, before the readable check, so the refusal says nothing
+    // about the field's type or whether a configuration could grant it.
+    if (isSensitiveFieldName(field) || hidden.has(field) || queryDenied?.has(field)) {
       throw new FieldPolicyError("sensitive_field", { table: policy.table });
     }
     if (!fieldSetAllows(policy.readable, policy.allowAnyReadable, field)) {
@@ -1065,7 +1095,7 @@ export function resolveReadableFields(
     seen.add(field);
     selected.push(field);
   }
-  return Object.freeze(selected);
+  return boundSelection(policy.table, selected);
 }
 
 
@@ -1100,7 +1130,7 @@ export function validateWritableFields(
     if (Object.hasOwn(output, field)) {
       throw new FieldPolicyError("invalid_write_payload");
     }
-    if (isSensitiveFieldName(field)) {
+    if (isSensitiveFieldName(field) || typeHiddenFields(policy.table).has(field)) {
       throw new FieldPolicyError("sensitive_field", { table: policy.table });
     }
     // policy.writable holds only explicitly listed names; it is empty when
@@ -1243,7 +1273,8 @@ export function preparedReadableFields(
     const policy = requirePolicy(table);
     if (!Array.isArray(fields) || !Object.isFrozen(fields)) return undefined;
     if (isAllFieldSelection(fields)) {
-      return policy.allowAnyReadable ? ALL_FIELDS_SELECTION : undefined;
+      // The entry's own wildcard, which carries its table's hidden fields.
+      return policy.allowAnyReadable ? (fields as readonly string[]) : undefined;
     }
     if (
       fields.some(
@@ -1266,12 +1297,12 @@ export function filterReadableRecord(
   readableFields: FieldSelection
 ): unknown {
   if (nodeUtilTypes.isProxy(readableFields)) return null;
+  const context = selectionContext(readableFields);
   const state = responseTraversalState();
-  if (isAllFieldSelection(readableFields)) {
-    return sanitizeNestedValue(candidate, state, 0);
-  }
-  const approved = new Set(readableFields.map(normalizeFieldName));
-  return filterRecordNode(candidate, approved, state, 0);
+  const filtered = isAllFieldSelection(readableFields)
+    ? sanitizeNestedValue(candidate, state, 0)
+    : filterRecordNode(candidate, new Set(readableFields.map(normalizeFieldName)), state, 0);
+  return context === undefined ? filtered : applyHiddenRules(filtered, context);
 }
 
 /** Remove metadata entries for fields the caller is not permitted to discover. */
@@ -1339,11 +1370,15 @@ export function filterAggregateResult(
   readableFields: FieldSelection
 ): unknown {
   if (nodeUtilTypes.isProxy(readableFields)) return null;
+  const hidden = selectionContext(readableFields)?.hidden ?? EMPTY_FIELDS;
   const state = responseTraversalState();
   if (isAllFieldSelection(readableFields)) {
-    return sanitizeNestedValue(candidate, state, 0);
+    const sanitized = sanitizeNestedValue(candidate, state, 0);
+    return hidden.size === 0 ? sanitized : withoutAggregateFields(sanitized, hidden, 0);
   }
-  const approved = new Set(readableFields.map(normalizeFieldName));
+  const approved = new Set(
+    readableFields.map(normalizeFieldName).filter((field) => !hidden.has(field))
+  );
   return filterAggregateNode(candidate, approved, state, 0);
 }
 
@@ -1379,6 +1414,239 @@ export function isSensitiveFieldName(candidate: unknown): boolean {
     ) ||
     normalized === "social_security_number"
   );
+}
+
+const EMPTY_FIELDS: ReadonlySet<string> = Object.freeze(new Set<string>()) as ReadonlySet<string>;
+
+/**
+ * Type hiding. The dispatcher resolves each table's hidden-typed fields
+ * (`hidden-values.ts`) before a call's plan is prepared and runs the plan and
+ * the handler inside that scope. Every check above then treats a hidden-typed
+ * field like a sensitive name: refused when named (with the same message),
+ * dropped from a wildcard or configured projection, never written, and never
+ * used to filter, order or group. Outside a dispatched call there is no scope
+ * and only names are checked.
+ */
+function typeHiddenFields(table: string): ReadonlySet<string> {
+  const scope = currentHiddenFieldScope();
+  if (scope === undefined) return EMPTY_FIELDS;
+  const hidden = scope.tables.get(table);
+  if (hidden !== undefined) return hidden;
+  if (scope.unresolved === "names_only") return EMPTY_FIELDS;
+  // A table outside the call's resolved plan has unknown types: refuse.
+  throw new FieldPolicyError("field_types_unavailable", { table });
+}
+
+/** The hidden-typed fields of `table` in the running call; empty outside one. */
+export function typeHiddenFieldNames(tableCandidate: unknown): ReadonlySet<string> {
+  return typeHiddenFields(normalizeTableName(tableCandidate));
+}
+
+/**
+ * Fields of `table` that may never filter, order, group or aggregate a read:
+ * its hidden-typed fields and its row rule's value field. The sensitive-name
+ * check applies on top, wherever a caller checks names.
+ */
+export function queryDeniedFields(tableCandidate: unknown): ReadonlySet<string> {
+  const table = normalizeTableName(tableCandidate);
+  const hidden = typeHiddenFields(table);
+  const rule = rowValueRule(table);
+  return rule === undefined ? hidden : new Set([...hidden, ...rule.queryDenied]);
+}
+
+/** {@link queryDeniedFields} for the table a selection was resolved on. */
+export function queryDeniedForSelection(selection: unknown): ReadonlySet<string> {
+  const context = selectionContext(selection);
+  if (context === undefined) return EMPTY_FIELDS;
+  return context.rule === undefined
+    ? context.hidden
+    : new Set([...context.hidden, ...context.rule.queryDenied]);
+}
+
+/**
+ * Bind a projection the caller built itself (the bounded all-fields list) to
+ * its table, without its hidden-typed fields, so the response filter applies
+ * the table's rules to it.
+ */
+export function readableSelectionForTable(
+  tableCandidate: unknown,
+  fields: readonly string[],
+  /** A selection this one extends; fields it added to fetch a type stay removed. */
+  extending?: FieldSelection
+): FieldSelection {
+  const table = normalizeTableName(tableCandidate);
+  const inherited =
+    extending === undefined ? undefined : SELECTION_CONTEXTS.get(extending)?.companions;
+  return preparedSelection(table, fields, typeHiddenFields(table), inherited);
+}
+
+interface SelectionContext {
+  readonly hidden: ReadonlySet<string>;
+  readonly rule?: RowValueRule;
+  /** Fields added to fetch a row rule's type; removed from the output again. */
+  readonly companions: ReadonlySet<string>;
+}
+
+const SELECTION_CONTEXTS = new WeakMap<object, SelectionContext>();
+
+/** A frozen selection that remembers its table's hidden fields and row rule. */
+function boundSelection(
+  table: string,
+  fields: readonly string[],
+  hidden: ReadonlySet<string> = typeHiddenFields(table),
+  companions: ReadonlySet<string> = EMPTY_FIELDS
+): FieldSelection {
+  const selection = Object.freeze([...fields]);
+  const rule = rowValueRule(table);
+  SELECTION_CONTEXTS.set(
+    selection,
+    Object.freeze({ hidden, ...(rule === undefined ? {} : { rule }), companions })
+  );
+  return selection;
+}
+
+/**
+ * Bound copies of policy-chosen projections, per source list, table and
+ * hidden set, so repeated resolutions in one scope return the same frozen
+ * object (as they did before selections were bound).
+ */
+const VISIBLE_SELECTIONS = new WeakMap<
+  readonly string[],
+  Map<string, WeakMap<ReadonlySet<string>, FieldSelection>>
+>();
+
+/** A policy-chosen projection (defaults, or "all") without hidden-typed fields. */
+function visibleSelection(table: string, selection: FieldSelection): FieldSelection {
+  const hidden = typeHiddenFields(table);
+  let byTable = VISIBLE_SELECTIONS.get(selection);
+  if (!byTable) VISIBLE_SELECTIONS.set(selection, (byTable = new Map()));
+  let byHidden = byTable.get(table);
+  if (!byHidden) byTable.set(table, (byHidden = new WeakMap()));
+  const cached = byHidden.get(hidden);
+  if (cached) return cached;
+  const bound = isAllFieldSelection(selection)
+    ? boundSelection(table, ALL_FIELDS_SELECTION, hidden)
+    : boundSelection(
+        table,
+        requireNonEmptySelection(selection.filter((field) => !hidden.has(field))),
+        hidden
+      );
+  byHidden.set(hidden, bound);
+  return bound;
+}
+
+/**
+ * The projection a prepared marker carries: hidden-typed fields removed, and
+ * a row rule's type field added when its value field is selected, so each
+ * row's type comes back to decide the value (the type is dropped from the
+ * output again).
+ */
+function preparedSelection(
+  table: string,
+  readableFields: readonly string[],
+  hidden: ReadonlySet<string>,
+  inheritedCompanions: ReadonlySet<string> = EMPTY_FIELDS
+): FieldSelection {
+  if (isAllFieldSelection(readableFields)) {
+    return boundSelection(table, ALL_FIELDS_SELECTION, hidden);
+  }
+  let fields = readableFields.filter((field) => !hidden.has(field));
+  if (fields.length === 0) fields = [...WRITE_ONLY_RESPONSE_FIELDS];
+  const rule = rowValueRule(table);
+  if (
+    rule !== undefined &&
+    fields.includes(rule.valueField) &&
+    !fields.includes(rule.typeField) &&
+    !hidden.has(rule.typeField) &&
+    typeFieldReadable(table, rule.typeField)
+  ) {
+    return boundSelection(
+      table,
+      [...fields, rule.typeField],
+      hidden,
+      new Set([...inheritedCompanions, rule.typeField])
+    );
+  }
+  return boundSelection(table, fields, hidden, inheritedCompanions);
+}
+
+function typeFieldReadable(table: string, field: string): boolean {
+  try {
+    const policy = requirePolicy(table);
+    return (
+      !isSensitiveFieldName(field) &&
+      fieldSetAllows(policy.readable, policy.allowAnyReadable, field)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The rules for a selection: its own table's when it was resolved here, else,
+ * inside a dispatched call, the union over the call's tables (a projection
+ * built elsewhere is held to what any table of the call hides).
+ */
+function selectionContext(selection: unknown): SelectionContext | undefined {
+  if (typeof selection === "object" && selection !== null) {
+    const bound = SELECTION_CONTEXTS.get(selection);
+    if (bound !== undefined) return bound;
+  }
+  const scope = currentHiddenFieldScope();
+  if (scope === undefined) return undefined;
+  const hidden = new Set<string>();
+  let rule: RowValueRule | undefined;
+  for (const [table, fields] of scope.tables) {
+    for (const field of fields) hidden.add(field);
+    rule ??= rowValueRule(table);
+  }
+  return { hidden, ...(rule === undefined ? {} : { rule }), companions: EMPTY_FIELDS };
+}
+
+/** Drop hidden-typed fields, apply the row rule, drop companions: per record. */
+function applyHiddenRules(filtered: unknown, context: SelectionContext): unknown {
+  if (context.hidden.size === 0 && context.rule === undefined && context.companions.size === 0) {
+    return filtered;
+  }
+  return Array.isArray(filtered)
+    ? filtered.map((record) => hideInRecord(record, context))
+    : hideInRecord(filtered, context);
+}
+
+function hideInRecord(record: unknown, context: SelectionContext): unknown {
+  if (typeof record !== "object" || record === null || Array.isArray(record)) return record;
+  const output = withoutFields(record as Record<string, unknown>, context.hidden);
+  const rule = context.rule;
+  if (rule !== undefined && Object.hasOwn(output, rule.valueField) && rowValueHidden(rule, output)) {
+    Reflect.deleteProperty(output, rule.valueField);
+  }
+  for (const companion of context.companions) Reflect.deleteProperty(output, companion);
+  return output;
+}
+
+/** Remove hidden fields from already-sanitized aggregate data, at any depth. */
+function withoutAggregateFields(
+  candidate: unknown,
+  hidden: ReadonlySet<string>,
+  depth: number
+): unknown {
+  if (typeof candidate !== "object" || candidate === null || depth > MAX_FIELD_VALUE_DEPTH) {
+    return candidate;
+  }
+  if (Array.isArray(candidate)) {
+    return candidate
+      .filter((entry) => {
+        if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return true;
+        const field = (entry as Record<string, unknown>).field;
+        return typeof field !== "string" || !hidden.has(field.trim().toLowerCase());
+      })
+      .map((entry) => withoutAggregateFields(entry, hidden, depth + 1));
+  }
+  const output: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(withoutFields(candidate as Record<string, unknown>, hidden))) {
+    safeDefine(output, key, withoutAggregateFields(value, hidden, depth + 1));
+  }
+  return output;
 }
 
 /**
@@ -2266,12 +2534,11 @@ function issuePreparedAccess(
   const previous = issuedPreparedEntries(args).filter(
     (entry) => entry.table !== normalizedTable
   );
+  const hidden = typeHiddenFields(normalizedTable);
   const entry = Object.freeze({
     table: normalizedTable,
-    readableFields:
-      isAllFieldSelection(readableFields)
-        ? ALL_FIELDS_SELECTION
-        : Object.freeze([...readableFields]),
+    readableFields: preparedSelection(normalizedTable, readableFields, hidden),
+    hiddenFields: Object.freeze([...hidden].sort()),
   });
   const marker = Object.freeze({
     entries: Object.freeze([...previous, entry]),

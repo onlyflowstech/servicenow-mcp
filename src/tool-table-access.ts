@@ -577,11 +577,11 @@ function aggregateResolution(
   let field: string | undefined;
   let groupBy: string | undefined;
   if (args.field !== undefined) {
-    field = resolveReadableFields(table, { fields: args.field })[0];
+    field = resolveReadableFields(table, { fields: args.field, purpose: "query" })[0];
     selected.push(field);
   }
   if (args.group_by !== undefined) {
-    groupBy = resolveReadableFields(table, { fields: args.group_by })[0];
+    groupBy = resolveReadableFields(table, { fields: args.group_by, purpose: "query" })[0];
     if (!selected.includes(groupBy)) selected.push(groupBy);
   }
   if (selected.length === 0) selected.push("sys_id");
@@ -687,7 +687,7 @@ function canonicalLegacyReadOrderBy(
   const trimmed = candidate.trim();
   const descending = trimmed.startsWith("-");
   const requestedField = descending ? trimmed.slice(1) : trimmed;
-  const fields = resolveReadableFields(table, { fields: requestedField });
+  const fields = resolveReadableFields(table, { fields: requestedField, purpose: "query" });
   if (fields.length !== 1) {
     throw new FieldPolicyError("invalid_field_selection");
   }

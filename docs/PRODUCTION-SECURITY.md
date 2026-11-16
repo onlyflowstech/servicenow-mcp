@@ -467,6 +467,36 @@ client's ordinary retry on 502, 503, 504 and connection errors, so a gateway
 failure after the instance applied such a write can append the entry twice.
 Where a duplicate would matter, withhold such fields with field policy.
 
+## Password-type fields
+
+Read and write tools hide a field by its dictionary type as well as by its
+name. A field of internal type `password`, `password2`, `masked` or
+`encrypted_text` never leaves the server and is never asked for, whatever it
+is called (`ssh_passphrase`, `key`, `answer`): it is refused when named,
+dropped from `fields=all`, detailed, default and `"*"` reads and from write
+echoes, and refused as a filter, order, aggregate, group-by or write field.
+The whole field goes in every display shape, since a `password2` display value
+can be the decrypted text. A `sys_properties` row shows `value` only when its
+`type` is a known non-secret type, and `value` is never a filter, order or
+group field there.
+
+- **Grant the integration user read access to `sys_dictionary` and
+  `sys_db_object`** (and `sys_db_view_table` for database views). The types
+  come from one `sys_dictionary` read per credential, kept for an hour (or the
+  profile's metadata-cache TTL, if shorter, and read on every call by a profile
+  whose cache table list leaves `sys_dictionary` out); no table grant is
+  needed. While
+  ServiceNow refuses or fails that read, every field-policy tool refuses with a
+  message naming this access.
+- **`"fieldTypes": { "dictionary": "not_required" }`** on a profile (or
+  `SN_FIELD_TYPES_DICTIONARY=not_required` for the environment profile) lets
+  those calls run with name-only hiding instead. The server logs a warning each
+  time it falls back, and the policy card flags the profile. Approve it only
+  where the granted tables hold no password-type field.
+- Masked catalog variables (`sc_item_option`, `question_answer`) are not
+  covered: their secrecy is per row. Narrow `value` on those tables with field
+  policy where it matters.
+
 ## Flow views
 
 `sn_flow_view` is read-only. It reads 15 tables through the Table API and

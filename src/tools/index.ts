@@ -23,7 +23,16 @@ import {
 } from "../client.js";
 import type { ServiceNowConfig } from "../config.js";
 import { CallMetrics } from "../call-metrics.js";
-import { createCachedServiceNowOperations } from "../metadata-cache.js";
+import { createCachedServiceNowOperations, isCachedOperations } from "../metadata-cache.js";
+import {
+  FIELD_TYPES_UNAVAILABLE,
+  FIELD_TYPES_UNAVAILABLE_MESSAGE,
+  hiddenFieldScope as hiddenFieldScopeFor,
+  loadFieldTypes,
+  runWithHiddenFieldScope,
+  type FieldTypes,
+  type HiddenFieldScope,
+} from "../hidden-values.js";
 import {
   fieldPolicyDenialMessage,
   isFieldPolicyError,
@@ -515,19 +524,19 @@ function registerStandardTool(
       // credential-bearing client construction, or handler execution. The
       // resolver also canonicalizes caller-selected table identifiers so the
       // value evaluated by policy is the value used by the handler.
-      let authorizedArgs: Record<string, unknown>;
-      try {
-        const access = runWithFieldPolicyConfiguration(
+      const resolvePlan = () => {
+        const planned = runWithFieldPolicyConfiguration(
           context.effectivePolicy.fieldPolicy,
           () => tool.resolveAccess(args, context.effectivePolicy)
         );
         authorizeTableAccessPlan(
           context.effectivePolicy.tableAccess,
-          access.requests,
+          planned.requests,
           tool.definition.name
         );
-        authorizedArgs = access.args;
-      } catch (error) {
+        return planned;
+      };
+      const policyRejection = (error: unknown) => {
         const cancellation = cancellationResultIfIssued(
           contextDependencies,
           context.signal,
@@ -591,7 +600,14 @@ function registerStandardTool(
                       ? `${atfPolicyDenialMessage(error, tool.definition.name)} Correlation ID: ${context.correlationId}.`
                       : `${tableDenialMessage(error)} Correlation ID: ${context.correlationId}.`
         );
+      };
+      let access: ReturnType<typeof resolvePlan>;
+      try {
+        access = resolvePlan();
+      } catch (error) {
+        return policyRejection(error);
       }
+      let authorizedArgs: Record<string, unknown> = access.args;
 
       // Profile existence is established before these credential-bearing
       // paths. Initialization errors are sanitized at this trust boundary.
@@ -649,17 +665,92 @@ function registerStandardTool(
         );
       }
 
+      const serviceNow = createCachedServiceNowOperations(
+        createServiceNowOperations(client),
+        // Scoped by instance AND credential identity. ServiceNow applies
+        // per-user ACLs, and a cache hit bypasses the upstream read, so
+        // two identities on one instance must never share a partition.
+        `${context.profile.instance}|${credentialFingerprint(config)}`,
+        config.metadataCache
+      );
+
+      // Type hiding: resolve the hidden-typed fields of every table in the
+      // plan (memoized per credential; a warm call makes no request), then
+      // prepare the plan again inside that scope, so every field check in it
+      // and in the handler also refuses or drops those fields.
+      //
+      // Every production call has cached operations. Only an unconfigured
+      // cache under NODE_ENV=test is a bare passthrough (the same switch that
+      // turns the metadata cache off for tests); those calls keep name-only
+      // hiding, and a test opts in by configuring the metadata cache.
+      let hiddenFieldScope: HiddenFieldScope | undefined;
+      if (tool.requirements.fieldPolicies.length > 0 && isCachedOperations(serviceNow)) {
+        const tables = access.requests.map((entry) => entry.table);
+        let types: FieldTypes;
+        try {
+          types = await runWithServiceNowRequestSignal(
+            context.signal,
+            () =>
+              loadFieldTypes(serviceNow, tables, {
+                forceRecache: authorizedArgs.force_recache === true,
+              }),
+            // Its own metrics: the call's reported cache outcome and upstream
+            // time describe the reads the tool made, not this lookup (whose
+            // wall-clock time is still in the call's total).
+            new CallMetrics()
+          );
+        } catch {
+          const cancellation = cancellationResultIfIssued(
+            contextDependencies,
+            context.signal,
+            binding,
+            tool.definition.name,
+            request.metadata
+          );
+          if (cancellation) return cancellation;
+          types = FIELD_TYPES_UNAVAILABLE;
+        }
+        const resolved = hiddenFieldScopeFor(
+          types,
+          tables,
+          context.effectivePolicy.fieldTypes.dictionary === "not_required"
+        );
+        if (resolved.scope === undefined) {
+          auditInvocation(
+            contextDependencies,
+            // A field-access refusal: fixed by a grant to the integration user
+            // or the profile's fieldTypes opt-out, never by a table rule.
+            { outcome: "policy_rejected", reason: "field_access_denied", profile: binding },
+            tool.definition.name,
+            request.metadata
+          );
+          return err(`${FIELD_TYPES_UNAVAILABLE_MESSAGE} Correlation ID: ${context.correlationId}.`);
+        }
+        if (resolved.degraded) {
+          logger.write({
+            level: "warn",
+            event: "field_types.names_only",
+            correlationId: context.correlationId,
+            tool: tool.definition.name,
+          });
+        }
+        hiddenFieldScope = resolved.scope;
+        try {
+          access = runWithHiddenFieldScope(hiddenFieldScope, resolvePlan);
+        } catch (error) {
+          return policyRejection(error);
+        }
+        authorizedArgs = access.args;
+      }
+      const inHiddenFieldScope = <T>(callback: () => T): T =>
+        hiddenFieldScope === undefined
+          ? callback()
+          : runWithHiddenFieldScope(hiddenFieldScope, callback);
+
       let result: unknown;
       try {
         const services: ServiceNowToolHandlerServices = Object.freeze({
-          serviceNow: createCachedServiceNowOperations(
-            createServiceNowOperations(client),
-            // Scoped by instance AND credential identity. ServiceNow applies
-            // per-user ACLs, and a cache hit bypasses the upstream read, so
-            // two identities on one instance must never share a partition.
-            `${context.profile.instance}|${credentialFingerprint(config)}`,
-            config.metadataCache
-          ),
+          serviceNow,
           ...(tool.definition.name === "sn_atf_run" || tool.definition.name === "sn_atf_results" ? { atfResults: atfResultStore(binding.name, config, JSON.stringify(context.effectivePolicy)) } : {}),
           // Partitioned like the metadata cache, plus the profile and its
           // effective policy: the policy decides which fields a schema shows.
@@ -677,8 +768,10 @@ function registerStandardTool(
           logger,
         });
         result = await runWithServiceNowRequestSignal(context.signal, () =>
-          runWithFieldPolicyConfiguration(context.effectivePolicy.fieldPolicy, () =>
-            tool.invoke(authorizedArgs, services)
+          inHiddenFieldScope(() =>
+            runWithFieldPolicyConfiguration(context.effectivePolicy.fieldPolicy, () =>
+              tool.invoke(authorizedArgs, services)
+            )
           ),
           metrics
         );

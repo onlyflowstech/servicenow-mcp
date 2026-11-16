@@ -24,6 +24,7 @@ import {
   preparedReadableFields,
   resolveReadableFields,
 } from "../field-policy.js";
+import { HIDDEN_FIELD_TYPES } from "../hidden-values.js";
 import {
   FLOW_ELEMENT_SOURCES,
   FLOW_TABLE_FIELDS,
@@ -50,12 +51,12 @@ export interface FlowFieldPlan {
 }
 
 /**
- * Input types whose values are always redacted. `password2` is the
- * confirmed spelling (Brazil capture: `internal_type` and `parameter.type`);
- * the others are kept as a precaution.
+ * Input types whose values are always redacted: the shared hidden types
+ * (`hidden-values.ts`). `password2` is the confirmed spelling (Brazil capture:
+ * `internal_type` and `parameter.type`); the others are kept as a precaution.
  */
 export const FLOW_SENSITIVE_INPUT_TYPES: ReadonlySet<string> = Object.freeze(
-  new Set(["password", "password2", "masked", "encrypted_text"])
+  new Set(HIDDEN_FIELD_TYPES)
 ) as ReadonlySet<string>;
 
 const MAX_IDENTIFIER_SOURCE_CHARS = 512;

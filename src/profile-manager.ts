@@ -38,6 +38,12 @@ import {
 } from "./field-policy.js";
 import { tableAccessPolicyInputFromEnvironment, type TableAccessPolicyInput } from "./table-policy.js";
 import { metadataCacheConfigFromEnvironment, type MetadataCacheConfigInput } from "./metadata-cache.js";
+import {
+  fieldTypesConfigFromEnvironment,
+  FieldTypesConfigurationError,
+  validateFieldTypesConfig,
+  type FieldTypesConfigInput,
+} from "./hidden-values.js";
 import { ServiceNowClient } from "./client.js";
 import {
   EnvironmentProfileEncryptionKeyProvider,
@@ -105,6 +111,11 @@ export interface Profile {
    * `allowScriptSteps`) come only from the profile; see atf-config.ts.
    */
   atf?: AtfConfigInput;
+  /**
+   * Whether read tools require the instance's field types to hide
+   * password-type fields (default "required"); see hidden-values.ts.
+   */
+  fieldTypes?: FieldTypesConfigInput;
 }
 
 export interface ProfileConfig {
@@ -134,7 +145,7 @@ const PROFILE_KEYS = new Set([
   "vendor_code", "description", "authType", "clientId", "clientSecret",
   "grantType", "apiKey", "apiKeyHeader", "timeoutMs", "maxConcurrentRequests", "schemaCacheTtlMs",
   "tableAccess", "fieldPolicy", "readableTableFields", "writableTableFields", "metadataCache",
-  "atf",
+  "atf", "fieldTypes",
 ]);
 
 export interface ProfileManagerOptions {
@@ -482,6 +493,7 @@ export class ProfileManager {
       // and identifiers that passed validation, never a rejected value.
       const reason =
         err instanceof AtfConfigurationError ||
+        err instanceof FieldTypesConfigurationError ||
         err instanceof FieldPolicyConfigurationError
           ? `Profile configuration is invalid: ${err.message}`
           : err instanceof Error && err.message.includes("legacy plaintext")
@@ -611,6 +623,11 @@ export class ProfileManager {
     const atf = atfConfigFromEnvironment();
     if (Object.keys(atf).length > 0) {
       profile.atf = atf;
+    }
+
+    const fieldTypes = fieldTypesConfigFromEnvironment();
+    if (Object.keys(fieldTypes).length > 0) {
+      profile.fieldTypes = fieldTypes;
     }
 
     return {
@@ -804,6 +821,9 @@ function canonicalizeProfile(profile: Profile): Profile {
   if (canonical.atf !== undefined) {
     canonical.atf = validateAtfConfigInput(canonical.atf);
   }
+  if (canonical.fieldTypes !== undefined) {
+    canonical.fieldTypes = validateFieldTypesConfig(canonical.fieldTypes);
+  }
   for (const field of ["credential", "clientSecret", "apiKey"] as const) {
     const source = canonical[field];
     if (typeof source === "string") {
@@ -853,6 +873,9 @@ function immutableProfileSnapshot(profile: Profile): Profile {
   }
   if (snapshot.atf !== undefined) {
     snapshot.atf = deepFreezeJsonClone(snapshot.atf);
+  }
+  if (snapshot.fieldTypes !== undefined) {
+    snapshot.fieldTypes = deepFreezeJsonClone(snapshot.fieldTypes);
   }
   for (const field of ["credential", "clientSecret", "apiKey"] as const) {
     const source = snapshot[field];

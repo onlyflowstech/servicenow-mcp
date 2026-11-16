@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Read tools now hide `password`/`password2`-typed fields by dictionary type,
+  not only by name.** A field whose internal type is `password`, `password2`,
+  `masked` or `encrypted_text` is refused when named, left out of `fields=all`,
+  detailed and default reads, `"*"` responses and write echoes, refused as a
+  filter, order, aggregate or group-by field, and refused as a write key,
+  whatever it is called. A `sys_properties` row shows `value` only when its
+  `type` is a known non-secret type. The types come from one cached
+  `sys_dictionary` read per credential. While they cannot be read, field-policy
+  tools refuse with a message naming the access needed, unless the profile sets
+  `"fieldTypes": { "dictionary": "not_required" }`, which falls back to
+  name-only hiding and is flagged on the policy card. `tools/list` is unchanged.
+
 - **`sn_syslog` can tail the system log.** `tail: true` returns the newest
   entries, oldest first, with a `cursor`; each later call with `after_cursor`
   returns only the entries created after it, oldest first, with a new `cursor`,

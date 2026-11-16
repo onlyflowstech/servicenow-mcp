@@ -57,6 +57,7 @@ export async function handler(
     ...(policy.fieldPolicy === undefined ? {} : { fieldPolicy: policy.fieldPolicy }),
     encodedQueryAccess: policy.encodedQueryAccess,
     atf: policy.atf,
+    fieldTypes: policy.fieldTypes,
   });
   return ok({
     name: context.profile.name,

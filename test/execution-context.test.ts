@@ -273,6 +273,7 @@ describe("immutable execution context", () => {
         tableAccess: TEST_TABLE_ACCESS,
         encodedQueryAccess: { rules: [] },
         atf: { execute: false, allowScriptSteps: false },
+        fieldTypes: { dictionary: "required" },
       },
       signal: context.signal,
     });
@@ -675,6 +676,7 @@ describe("immutable execution context", () => {
       tableAccess: TEST_TABLE_ACCESS,
       encodedQueryAccess: { rules: [] },
       atf: { execute: false, allowScriptSteps: false },
+      fieldTypes: { dictionary: "required" },
     });
   });
 

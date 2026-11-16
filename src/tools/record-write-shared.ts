@@ -6,6 +6,7 @@ import {
   filterReadableRecord,
   isAllFieldSelection,
   preparedReadableFields,
+  readableSelectionForTable,
   resolveWriteResponseFields,
   type FieldSelection,
 } from "../field-policy.js";
@@ -37,7 +38,7 @@ export function filteredWriteRecord(
     resolveWriteResponseFields(args.table);
   const candidate = filterReadableRecord(
     resultProperty(response, retry),
-    withWrittenRecordHandle(readableFields)
+    withWrittenRecordHandle(args.table, readableFields)
   );
   if (
     typeof candidate !== "object" ||
@@ -49,11 +50,12 @@ export function filteredWriteRecord(
   return stripEmpty(candidate as Record<string, unknown>);
 }
 
-function withWrittenRecordHandle(readable: FieldSelection): FieldSelection {
+function withWrittenRecordHandle(table: unknown, readable: FieldSelection): FieldSelection {
   if (isAllFieldSelection(readable) || readable.includes(WRITTEN_RECORD_HANDLE_FIELD)) {
     return readable;
   }
-  return [...readable, WRITTEN_RECORD_HANDLE_FIELD];
+  // Bound to the table again, so its type and row rules still apply.
+  return readableSelectionForTable(table, [...readable, WRITTEN_RECORD_HANDLE_FIELD], readable);
 }
 
 export function requiredCreatedSysId(record: Record<string, unknown>): string {

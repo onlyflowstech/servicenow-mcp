@@ -111,6 +111,9 @@ function createRestrictedPolicyProvider(
         // Only the grants are read from this; cache settings reach handlers
         // through the resolved configuration instead.
         atf: profileManager.getAtfConfig(profile.name),
+        ...(configuredProfile.fieldTypes === undefined
+          ? {}
+          : { fieldTypes: configuredProfile.fieldTypes }),
       });
     },
   });

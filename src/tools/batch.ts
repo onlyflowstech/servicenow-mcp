@@ -17,7 +17,9 @@ import {
   filterReadableRecord,
   isAllFieldSelection,
   preparedReadableFields,
+  readableSelectionForTable,
   resolveReadableFields,
+  typeHiddenFieldNames,
 } from "../field-policy.js";
 import { ok, err } from "../utils.js";
 import {
@@ -259,10 +261,14 @@ async function dryRunSample(
   const ids = sysIds.slice(0, DRY_RUN_SAMPLE_SIZE);
   if (ids.length === 0) return [];
   const readableAll = isAllFieldSelection(readable);
-  const allows = (field: string): boolean => readableAll || readable.includes(field);
+  // A hidden-typed field is never the display field: it is not even asked for.
+  const hidden = typeHiddenFieldNames(table);
+  const allows = (field: string): boolean =>
+    !hidden.has(field) && (readableAll || readable.includes(field));
   if (!allows("sys_id")) return [];
   const displayField = DRY_RUN_DISPLAY_FIELDS.find(allows);
-  const selection = Object.freeze(
+  const selection = readableSelectionForTable(
+    table,
     displayField === undefined ? ["sys_id"] : ["sys_id", displayField]
   );
   let response: { result?: unknown } | null;
