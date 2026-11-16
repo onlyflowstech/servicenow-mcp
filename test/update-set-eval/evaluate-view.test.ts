@@ -44,6 +44,11 @@ import { RULE_CASES, SET_ID, input, sid, update } from "../fixtures/update-set-e
 import { expectReadsWithin, harness, readPolicy, textOf, type RecordedCall } from "../platform-view-harness.js";
 
 const PLAN = platformViewReadTables("evaluate", {});
+/**
+ * A profile whose own `sys_update_xml` entry names `payload`: record XML
+ * columns are read only then. The default profile runs metadata rules only.
+ */
+const PAYLOAD_PROFILE = { fieldPolicy: { sys_update_xml: { readable: [...EVALUATE_FIELD_PLAN.sys_update_xml!] } } };
 const REMOTE_ID = sid(0x7e3073);
 const REMOTE_CHILD = sid(0x7e3074);
 
@@ -626,7 +631,7 @@ describe("evaluate: recording client behind the real dispatcher", () => {
     ] as const) {
       const { instance, ops } = scripted(world);
       const plan = platformViewReadTables("evaluate", args);
-      const { call } = await harness(ops, { tableAccess: readPolicy(plan), modules: [platformViewToolModule] });
+      const { call } = await harness(ops, { tableAccess: readPolicy(plan), modules: [platformViewToolModule], fieldPolicy: PAYLOAD_PROFILE });
       const result = await call({ view: "evaluate", ...args, limit: 100 });
       const data = dataOf(result);
       expect(data.status).toBe("ok");
@@ -635,6 +640,8 @@ describe("evaluate: recording client behind the real dispatcher", () => {
       // Every kind of read the view makes was exercised and judged.
       const read = new Set(labels(instance.calls));
       expect(read.has("table:sys_update_xml")).toBe(true);
+      // The profile names payload, so the payload path is exercised and judged too.
+      expect(instance.calls.some((c) => (c.params.sysparm_fields ?? "").split(",").includes("payload"))).toBe(true);
       expect(read.has("table:sys_db_object")).toBe(true);
       expect(read.has("table:sys_dictionary")).toBe(true);
       expect(read.has("stats:sys_update_version")).toBe(true);
@@ -654,16 +661,33 @@ describe("evaluate: recording client behind the real dispatcher", () => {
     }
   });
 
-  it("keeps payload text out of the dispatcher's result", async () => {
+  it("keeps payload text out of the dispatcher's result, and reads payload only when the profile names it", async () => {
     const CANARY = "CANARY_d3_dispatcher";
     const rows = [xmlRow(br(`var gr = new GlideRecord('incident'); // ${CANARY}\nvar password = '${CANARY}';\ngr.query();`))];
-    const { instance, ops } = scripted(model({ rows }));
-    const { call } = await harness(ops, { tableAccess: readPolicy(PLAN), modules: [platformViewToolModule] });
-    const result = await call({ view: "evaluate", update_set: SET_ID });
+    const asksForPayload = (instance: { calls: readonly RecordedCall[] }) =>
+      instance.calls.some((call) => (call.params.sysparm_fields ?? "").split(",").includes("payload"));
+
+    // The profile's own sys_update_xml entry names payload: payload rules run.
+    const named = scripted(model({ rows }));
+    const withPayload = await harness(named.ops, { tableAccess: readPolicy(PLAN), modules: [platformViewToolModule], fieldPolicy: PAYLOAD_PROFILE });
+    const result = await withPayload.call({ view: "evaluate", update_set: SET_ID });
     expect(dataOf(result).status).toBe("ok");
+    expect(dataOf(result).summary.coverage).toMatchObject({ metadata_only: false, scanned: 1 });
     expect(ruleIds(dataOf(result))).toContain("SEC005");
     expect(JSON.stringify(result)).not.toContain(CANARY);
-    expectReadsWithin(instance, PLAN, EVALUATE_DOT_WALKS);
+    expect(asksForPayload(named.instance)).toBe(true);
+    expectReadsWithin(named.instance, PLAN, EVALUATE_DOT_WALKS);
+
+    // The default profile does not name it: metadata rules only, and payload is never asked for.
+    const plain = scripted(model({ rows }));
+    const defaults = await harness(plain.ops, { tableAccess: readPolicy(PLAN), modules: [platformViewToolModule] });
+    const metadata = dataOf(await defaults.call({ view: "evaluate", update_set: SET_ID }));
+    expect(metadata.status).toBe("ok");
+    expect(metadata.summary.coverage).toMatchObject({ metadata_only: true, scanned: 0 });
+    expect(metadata.warnings).toContain(EVALUATE_METADATA_ONLY);
+    expect(ruleIds(metadata)).not.toContain("SEC005");
+    expect(asksForPayload(plain.instance)).toBe(false);
+    expectReadsWithin(plain.instance, PLAN, EVALUATE_DOT_WALKS);
   });
 });
 
@@ -787,7 +811,9 @@ describe("evaluate: a table whose hierarchy is unknown is treated as a credentia
       const quarter = median(text.slice(0, text.length / 4));
       // A quadratic pass took 600-1,000 ms on one such row and grows 16x per 4x.
       expect(full, shape).toBeLessThan(100);
-      expect(full / Math.max(quarter, 0.25), shape).toBeLessThan(10);
+      // Linear grows about 4x per 4x; quadratic 16x. The 1 ms floor keeps
+      // sub-millisecond noise from deciding the ratio.
+      expect(full / Math.max(quarter, 1), shape).toBeLessThan(12);
     }
     expect(outsideCdataAndComments(`a<!-- x -->b<![CDATA[ <c action="x"> ]]>d<!-- open`)).toBe("a b d");
   });

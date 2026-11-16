@@ -14,6 +14,7 @@ import { afterEach, expect } from "vitest";
 import type { ServiceNowClient, ServiceNowOperations } from "../src/client.js";
 import type { ServiceNowConfig } from "../src/config.js";
 import type { ExecutionContextDependencies } from "../src/execution-context.js";
+import type { FieldPolicyConfigurationInput } from "../src/field-policy.js";
 import type { Profile, ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy, type TableAccessPolicy } from "../src/table-policy.js";
@@ -270,7 +271,12 @@ afterEach(closeHarnesses);
 
 export async function harness(
   ops: ServiceNowOperations,
-  options: { tableAccess?: TableAccessPolicy; modules?: readonly ToolModuleContract[] } = {}
+  options: {
+    tableAccess?: TableAccessPolicy;
+    modules?: readonly ToolModuleContract[];
+    /** The profile's field policy, as a profile file states it; the default profile has none. */
+    fieldPolicy?: FieldPolicyConfigurationInput;
+  } = {}
 ) {
   // A handler gets its reads from the call's services. A direct `fetch` would
   // bypass the recording client, so it throws for as long as a harness is open.
@@ -311,6 +317,7 @@ export async function harness(
         id: "platform-view-policy",
         revision: "v1",
         tableAccess: options.tableAccess ?? readPolicy([]),
+        ...(options.fieldPolicy === undefined ? {} : { fieldPolicy: options.fieldPolicy }),
       }),
     },
     auditSink: { write: () => {}, writePreContext: () => {} },
