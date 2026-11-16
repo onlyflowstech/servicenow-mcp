@@ -25,6 +25,7 @@ import {
 import { riskyWriteTables } from "./risky-grants.js";
 import {
   NAMED_ONLY_TABLES,
+  WRITE_NAMED_ONLY_TABLES,
   authorizeTableAccess,
   type TableAccessPolicy,
 } from "./table-policy.js";
@@ -149,7 +150,11 @@ function systemTableAccess(
   for (const table of [...BUILT_IN_TABLE_CLASSES.system].sort()) {
     const fields = describeFieldPolicy(table);
     if (read) (fields.readable === "*" ? out.fully_readable : out.read_narrowed).push(table);
-    if (write) (fields.writable === "*" ? out.fully_writable : out.write_narrowed).push(table);
+    // A "*" write grant does not reach these tables for the generic write tools,
+    // so the wildcard row says nothing about writing them.
+    if (write && !Object.hasOwn(WRITE_NAMED_ONLY_TABLES, table)) {
+      (fields.writable === "*" ? out.fully_writable : out.write_narrowed).push(table);
+    }
   }
   return out;
 }
@@ -366,6 +371,7 @@ export function renderPolicyCard(card: PolicyCard): string {
     `A "*" field-policy entry covers ITSM, named-only and custom tables, never the ${BUILT_IN_TABLE_CLASSES.system.length} system tables;`,
     "  a system table is narrowed only by naming it.",
     `A "*" table grant never covers ${NAMED_ONLY_TABLES.join(", ")}; they are granted by name only.`,
+    `A "*" write grant does not cover ${Object.keys(WRITE_NAMED_ONLY_TABLES).join(", ")} except for sn_atf_author; name them to write them.`,
     `Explicit-listing fields (${card.explicit_write_fields.join(", ")}): writable only where`,
     "  a profile lists them by name; a writable wildcard never covers them. A listed one is",
     "  shown in [+...] after the writable fields."

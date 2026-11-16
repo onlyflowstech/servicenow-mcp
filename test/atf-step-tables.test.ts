@@ -547,3 +547,115 @@ describe("a condition may use only operators that compare a field with a literal
     expect(passedPolicy(connected, result)).toBe(true);
   });
 });
+
+describe("a condition value may refer only to record-id or sys_id outputs", () => {
+  const ref = (output: string, id = "c".repeat(32)) => `{{step['${id}'].${output}}}`;
+  const BEARERS = [
+    ["record_query", "field_values"],
+    ["record_validation", "field_values"],
+    ["field_values_validation", "conditions"],
+  ] as const;
+  const inputsFor = (type: (typeof BEARERS)[number][0], key: string, conditions: string) =>
+    type === "record_validation" ? { table: "incident", record_id: SYS_ID, [key]: conditions } : { table: "incident", [key]: conditions };
+
+  it.each(["record_id", "first_record", "sys_id", "user"])("accepts the %s output", (output) => {
+    for (const [type, key] of BEARERS) {
+      expect(() =>
+        prepareSteps({ test_sys_id: TEST_ID, steps: [{ type, inputs: inputsFor(type, key, `caller_id=${ref(output)}^EQ`) }] }, false)
+      , `${type} ${output}`).not.toThrow();
+    }
+  });
+
+  it("accepts several pills, in a list and next to other terms", () => {
+    expect(() =>
+      prepareSteps({ test_sys_id: TEST_ID, steps: [step("record_query", "incident", {
+        field_values: `stateIN${ref("record_id")},${ref("first_record", "d".repeat(32))}^ORcaller_id=${ref("user")}`,
+      })] }, false)
+    ).not.toThrow();
+  });
+
+  it.each([
+    ["a table output", `number=${ref("table")}`],
+    ["a script output", `number=${ref("script_output")}`],
+    ["an output name that only starts with an allowed one", `number=${ref("record_id_list")}`],
+    ["a step id that is not a sys_id", `number=${ref("record_id", "c".repeat(31))}`],
+    ["a pill that is not a step output", "number={{gs.getUserID()}}"],
+    ["an unclosed pill", `number={{step['${"c".repeat(32)}'].record_id`],
+    ["a stray closing pair", "number=x}}"],
+    ["a good pill beside a bad one", `number=${ref("record_id")}^ORstate=${ref("table")}`],
+    ["a pill with a space inside", `number={{ step['${"c".repeat(32)}'].record_id }}`],
+  ])("refuses %s", (_name, conditions) => {
+    for (const [type, key] of BEARERS) {
+      expect(() =>
+        prepareSteps({ test_sys_id: TEST_ID, steps: [{ type, inputs: inputsFor(type, key, conditions) }] }, false)
+      , `${type}: ${conditions}`).toThrow();
+    }
+  });
+
+  it("refuses through the dispatcher with the field-policy message, before any write", async () => {
+    const connected = await connect(WILDCARD);
+    const result = await addSteps(connected, [step("record_query", "incident", { field_values: `number=${ref("table")}` })]);
+    expect(result.isError).toBe(true);
+    expect(text(result)).toBe(
+      "ERROR: Access denied by policy (invalid_field_selection). Correlation ID: named-only-" +
+        connected.records.at(-1)!.correlationId!.split("-").at(-1) + "."
+    );
+    expect(connected.getClient).not.toHaveBeenCalled();
+    expect(connected.records.at(-1)).toMatchObject({ outcome: "policy_rejected", reason: "field_access_denied" });
+  });
+});
+
+describe("set_field_values may set only fields the profile may write", () => {
+  const setStep = (table: string, values: string) => ({ type: "set_field_values", inputs: { table, field_values: values } });
+  const policy = { fieldPolicy: { incident: { writable: ["short_description", "state"] } } };
+
+  it("accepts writable fields, and a template with EQ", async () => {
+    const connected = await connect(WILDCARD, policy);
+    const result = await addSteps(connected, [setStep("incident", "short_description=Example^state=2^EQ")]);
+    expect(passedPolicy(connected, result)).toBe(true);
+  });
+
+  it.each([
+    ["a field the profile may not write", "assigned_to=abc"],
+    ["one such field among writable ones", "short_description=x^assigned_to=abc"],
+    ["a sensitive-name field", "user_password=x"],
+    ["a class field, which a wildcard never covers", "sys_class_name=incident"],
+    ["a domain field", "sys_domain=global"],
+    ["a dot-walked field", "caller_id.name=x"],
+    ["a term with no field", "=x"],
+    ["a term with no value separator", "short_description"],
+  ])("refuses %s", async (_name, values) => {
+    const connected = await connect(WILDCARD, policy);
+    const result = await addSteps(connected, [setStep("incident", values)]);
+    expect(result.isError).toBe(true);
+    expect(connected.getClient).not.toHaveBeenCalled();
+    expect(connected.records.at(-1)).toMatchObject({ outcome: "policy_rejected", reason: "field_access_denied" });
+  });
+
+  it("uses the table's own entry, so a field open on one table is refused on another", async () => {
+    const connected = await connect(WILDCARD, {
+      fieldPolicy: { incident: { writable: ["state"] }, problem: { writable: ["short_description"] } },
+    });
+    const refused = await addSteps(connected, [setStep("problem", "state=2")]);
+    expect(refused.isError).toBe(true);
+    const allowed = await addSteps(connected, [setStep("problem", "short_description=x")]);
+    expect(passedPolicy(connected, allowed)).toBe(true);
+  });
+
+  it("applies what sn_update applies to a named-only table once the profile names it", async () => {
+    const connected = await connect(
+      { readTables: ["*"], writeTables: ["*", "sys_audit"], targets: [target("sys_audit")] },
+      { fieldPolicy: { sys_audit: { writable: ["reason"] } } }
+    );
+    const refused = await addSteps(connected, [setStep("sys_audit", "newvalue=x")]);
+    expect(refused.isError).toBe(true);
+    const allowed = await addSteps(connected, [setStep("sys_audit", "reason=x")]);
+    expect(passedPolicy(connected, allowed)).toBe(true);
+  });
+
+  it("leaves other steps' inputs alone", () => {
+    expect(() =>
+      prepareSteps({ test_sys_id: TEST_ID, steps: [{ type: "open_new_form", inputs: { table: "incident" } }] }, false)
+    ).not.toThrow();
+  });
+});

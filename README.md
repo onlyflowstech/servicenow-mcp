@@ -1060,8 +1060,11 @@ named-only table must be named, for either). The conditions of the three steps
 that have them may use only the operators that compare a field with a literal
 (`=`, `!=`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`, `STARTSWITH`, `ENDSWITH`,
 `IN`, `NOT IN`, `ISEMPTY`, `ISNOTEMPTY`, `BETWEEN`), name plain fields the field
-policy lets the profile read (no dot-walks), and a refused term refuses the whole
-call. `record_query` and `record_validation` also refuse
+policy lets the profile read (no dot-walks), and may refer to an earlier step's
+output only by its record id or sys_id (`record_id`, `first_record`, `sys_id`
+or `user`); a refused term refuses the whole call. The fields a `set_field_values`
+step sets must be writable on its table under the profile's field policy, as for
+`sn_update`. `record_query` and `record_validation` also refuse
 `enforce_security: false`; leave it out and it stays `true`. The impersonated
 user's ACLs still apply on top of all this. Suites authored in the instance are
 not checked by the server's table grants, and `atf.execute` stays opt-in. See
@@ -1220,6 +1223,16 @@ for by name: `oldvalue` and `newvalue` for `sys_audit`; `value` for
 `sys_email`. `sn_attach` is unchanged: it uses the Attachment API, under the
 grants for `sys_attachment` and the record's table, and never reads
 `sys_attachment_doc`.
+
+**A `"*"` write grant does not cover two ATF tables.** `sys_atf_step` and
+`sys_variable_value` hold the step types and input values that `sn_atf_author`
+checks when it adds a step. Under a `"*"` write grant they are written by
+`sn_atf_author` only; `sn_create`, `sn_update`, `sn_delete`, `sn_batch` and
+attachment uploads reach them only when `tableAccess` names the table for write,
+with the usual table-access denial otherwise. Reads are
+unchanged. `sys_variable_value` also holds other variable values (catalog
+variables, for example), so a profile that writes those with the generic tools
+needs to name it.
 
 **Database views and extension tables are not covered by the name list.** The
 six tables are matched by table name. A database view built over one of them (a

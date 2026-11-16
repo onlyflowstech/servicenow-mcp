@@ -5,7 +5,7 @@ import { runWithServiceNowRequestSignal } from "../client.js";
 import definitions from "./atf-step-definitions.json";
 import { AtfPolicyError } from "../atf-policy.js";
 import { serviceNowSysIdSchema as id } from "../servicenow-identifiers.js";
-import { FieldPolicyError, prepareWriteFieldArguments, resolveReadableFields } from "../field-policy.js";
+import { FieldPolicyError, prepareWriteFieldArguments, resolveReadableFields, validateWritableFields } from "../field-policy.js";
 import { normalizeTableName, type TableAccessRequest } from "../table-policy.js";
 import { prepareWriteFieldValues } from "../write-value-policy.js";
 import { createToolError, trustedToolErrorDescriptor } from "../tool-error.js";
@@ -71,6 +71,8 @@ interface StepTableRule {
   readonly access: "read" | "write";
   readonly table: string;
   readonly conditions?: string;
+  /** An input of `field=value` terms to set; each field must be writable on the table. */
+  readonly assignments?: string;
   readonly aclSetting?: string;
 }
 const STEP_TABLE_RULES: Readonly<Record<string, StepTableRule>> = Object.freeze({
@@ -79,12 +81,25 @@ const STEP_TABLE_RULES: Readonly<Record<string, StepTableRule>> = Object.freeze(
   field_values_validation: { access: "read", table: "table", conditions: "conditions" },
   open_existing_record: { access: "read", table: "table" },
   open_new_form: { access: "write", table: "table" },
-  set_field_values: { access: "write", table: "table" },
+  set_field_values: { access: "write", table: "table", assignments: "field_values" },
 });
 /** Operators a condition may use, longest first so a prefix never shadows its longer form. */
 const CONDITION_OPERATORS = ["NOT LIKE", "NOT IN", "ISNOTEMPTY", "ISEMPTY", "STARTSWITH", "ENDSWITH", "BETWEEN", "LIKE", "IN", "!=", "<=", ">=", "=", "<", ">"] as const;
 const UNARY_CONDITION_OPERATORS: ReadonlySet<string> = new Set(["ISNOTEMPTY", "ISEMPTY"]);
 const CONDITION_TERM = /^(?<prefix>ORDERBYDESC|ORDERBY|GROUPBY|NQ|OR)?(?<field>[a-z][a-z0-9_.]*)(?<rest>.*)$/su;
+/**
+ * The only step outputs a condition value may refer to: a record id or a sys_id
+ * (record_id, first_record, sys_id, and user, the sys_id of the impersonated
+ * user). Another output (a table name, text) could carry a `^`, an operator or a
+ * field name into the condition, so any other pill is refused.
+ */
+const ALLOWED_CONDITION_PILL = /\{\{step\['[a-f0-9]{32}'\]\.(?:record_id|first_record|sys_id|user)\}\}/gu;
+/** Refuse a value that holds a pill other than an allowed one, or a stray brace pair. */
+function checkConditionValue(value: string): void {
+  if (/\{\{|\}\}/u.test(value.replace(ALLOWED_CONDITION_PILL, ""))) {
+    throw new FieldPolicyError("invalid_field_selection");
+  }
+}
 /**
  * Check every term of a condition string against the table's field policy.
  *
@@ -114,7 +129,23 @@ function checkConditionFields(table: string, conditions: string): void {
       throw new FieldPolicyError("invalid_field_selection");
     }
     resolveReadableFields(table, { fields: field });
+    checkConditionValue(rest);
   }
+}
+/**
+ * Check the fields a set_field_values step sets against the table's writable
+ * fields, the policy sn_update applies, so a step cannot set a field an update
+ * would refuse. The terms are `field=value`; any other shape is refused.
+ */
+function checkAssignedFields(table: string, assignments: string): void {
+  const fields: Record<string, string> = {};
+  for (const term of assignments.split("^")) {
+    if (term === "EQ") continue;
+    const field = /^(?<field>[a-z][a-z0-9_]*)=/su.exec(term)?.groups?.field;
+    if (field === undefined) throw new FieldPolicyError("invalid_field_selection");
+    fields[field] = "";
+  }
+  validateWritableFields(table, fields);
 }
 /** True when `rest` (an operator and its value) uses an allowed operator with a literal value. */
 function conditionOperatorAllowed(rest: string): boolean {
@@ -138,6 +169,7 @@ function checkStepTable(type: string, inputs: Record<string, string>): TableAcce
   if (rule.aclSetting !== undefined && inputs[rule.aclSetting] === "false") throw new AtfPolicyError("acl_enforcement_required");
   const table = normalizeTableName(inputs[rule.table]);
   if (rule.conditions !== undefined) checkConditionFields(table, inputs[rule.conditions] ?? "");
+  if (rule.assignments !== undefined) checkAssignedFields(table, inputs[rule.assignments] ?? "");
   return [{ operation: rule.access, table }];
 }
 export function prepareSteps(args: Record<string, unknown>, allowScripts: boolean) {

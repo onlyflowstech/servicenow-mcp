@@ -39,6 +39,7 @@ import { ServiceNowClient } from "../src/client.js";
 import { createMcpServer } from "../src/server.js";
 import {
   NAMED_ONLY_TABLES,
+  WRITE_NAMED_ONLY_TABLES,
   authorizeTableAccess,
   createTableAccessPolicy,
   type TableAccessPolicyInput,
@@ -949,7 +950,13 @@ describe("a wildcard profile states what the system tables keep", () => {
     expect(other.system_tables.fully_writable).toContain("sys_user");
     expect(
       other.system_tables.fully_writable.length + other.system_tables.write_narrowed.length
-    ).toBe(BUILT_IN_TABLE_CLASSES.system.length);
+    ).toBe(BUILT_IN_TABLE_CLASSES.system.length - Object.keys(WRITE_NAMED_ONLY_TABLES).length);
+    // A "*" write grant does not reach these for the generic write tools.
+    for (const table of Object.keys(WRITE_NAMED_ONLY_TABLES)) {
+      expect(other.system_tables.fully_writable, table).not.toContain(table);
+      expect(other.system_tables.write_narrowed, table).not.toContain(table);
+      expect(other.system_tables.fully_readable, table).toContain(table);
+    }
     // A "*" table grant does not reach the named-only tables, so the wildcard
     // row says nothing about them.
     for (const table of NAMED_ONLY_TABLES) {
@@ -1008,6 +1015,8 @@ describe("a wildcard profile states what the system tables keep", () => {
       const write = enforcedWritable(policy, table, "script");
       expect(system.fully_readable.includes(table), `${table} read`).toBe(read);
       expect(system.read_narrowed.includes(table), `${table} read narrowed`).toBe(!read);
+      // A "*" write grant does not reach the write-named tables, so the card lists them in neither.
+      if (Object.hasOwn(WRITE_NAMED_ONLY_TABLES, table)) continue;
       expect(system.fully_writable.includes(table), `${table} write`).toBe(write);
       expect(system.write_narrowed.includes(table), `${table} write narrowed`).toBe(!write);
     }

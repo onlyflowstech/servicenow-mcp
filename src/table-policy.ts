@@ -103,6 +103,25 @@ export const NAMED_ONLY_TABLES: readonly string[] = Object.freeze([
 
 const NAMED_ONLY_SET: ReadonlySet<string> = new Set(NAMED_ONLY_TABLES);
 
+/**
+ * Tables a "*" WRITE grant does not cover, each with the tools it still covers
+ * them for. Reads are unchanged: a "*" read grant reaches these tables as
+ * before. Under "*", a generic write tool (sn_create, sn_update, sn_delete,
+ * sn_batch, an attachment upload) reaches one of them only when the profile
+ * names the table for write.
+ *
+ * They are the tables that hold what sn_atf_author checks when it adds a step:
+ * the step itself (its type and test) and the input values (the table a step
+ * names, its conditions, its ACL setting). A generic write could change them
+ * after the check, so sn_atf_author alone keeps its planned writes under "*".
+ * sys_atf_test, sys_atf_test_suite and sys_atf_test_suite_test are not listed:
+ * sn_atf_author checks nothing stored in them. The list is deliberately short.
+ */
+export const WRITE_NAMED_ONLY_TABLES: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  sys_atf_step: Object.freeze(["sn_atf_author"]),
+  sys_variable_value: Object.freeze(["sn_atf_author"]),
+});
+
 const ISSUED_TABLE_POLICY_ERRORS = new WeakSet<object>();
 const ISSUED_TABLE_POLICIES = new WeakSet<object>();
 
@@ -205,7 +224,9 @@ export function authorizeTableAccess(
       operation === "read"
         ? policy.readTables
         : policy.writeTables;
-    if (!allowlistGrantsTable(allowlist, table)) throw new TablePolicyError();
+    if (!allowlistGrantsTable(allowlist, table, operation, authorizedTool)) {
+      throw new TablePolicyError();
+    }
     const target = policy.targets.find((entry) => entry.table === table);
     if (!target) {
       if (allowlistGrantsAllTables(allowlist)) return table;
@@ -213,7 +234,7 @@ export function authorizeTableAccess(
     }
     if (!target.tools.includes(authorizedTool)) throw new TablePolicyError();
     for (const relatedTable of target.relatedTables) {
-      if (!allowlistGrantsTable(allowlist, relatedTable)) {
+      if (!allowlistGrantsTable(allowlist, relatedTable, operation, authorizedTool)) {
         throw new TablePolicyError();
       }
     }
@@ -371,16 +392,19 @@ function validateRelatedPermissions(
   writeTables: readonly string[]
 ): void {
   for (const target of targets) {
-    for (const allowlist of [readTables, writeTables]) {
-      if (!allowlistGrantsTable(allowlist, target.table)) continue;
+    for (const operation of ["read", "write"] as const) {
+      const allowlist = operation === "read" ? readTables : writeTables;
+      // A closure has no single tool, so a table a "*" write grant covers only
+      // for some tools must be named.
+      if (!allowlistGrantsTable(allowlist, target.table, operation)) continue;
       const missing = target.relatedTables.find(
-        (related) => !allowlistGrantsTable(allowlist, related)
+        (related) => !allowlistGrantsTable(allowlist, related, operation)
       );
       if (missing !== undefined) {
         // The name comes from the operator's own configuration and has passed
         // normalizeTableName; the rest of the text is fixed.
         throw new TypeError(
-          NAMED_ONLY_SET.has(missing) && allowlistGrantsAllTables(allowlist)
+          wildcardExcludes(missing, operation) && allowlistGrantsAllTables(allowlist)
             ? `table access target backing tables require the same operation permission: ` +
               `"${missing}" must be granted by name, because a "*" grant does not cover it`
             : "table access target backing tables require the same operation permission"
@@ -395,12 +419,29 @@ function allowlistGrantsAllTables(allowlist: readonly string[]): boolean {
 }
 
 /**
- * Whether an allowlist reaches a table: by name, or through "*" for every
- * table except the named-only ones.
+ * Whether a "*" grant for `operation` never reaches `table` (for `tool`, when
+ * known): the named-only tables for either operation, and for writes the tables
+ * in WRITE_NAMED_ONLY_TABLES except for the tools listed with them.
  */
-function allowlistGrantsTable(allowlist: readonly string[], table: string): boolean {
+function wildcardExcludes(table: string, operation: TableAccessOperation, tool?: string): boolean {
+  if (NAMED_ONLY_SET.has(table)) return true;
+  if (operation !== "write") return false;
+  const tools = Object.hasOwn(WRITE_NAMED_ONLY_TABLES, table) ? WRITE_NAMED_ONLY_TABLES[table] : undefined;
+  return tools !== undefined && (tool === undefined || !tools.includes(tool));
+}
+
+/**
+ * Whether an allowlist reaches a table for an operation: by name, or through
+ * "*" for every table except the ones "*" never covers (wildcardExcludes).
+ */
+function allowlistGrantsTable(
+  allowlist: readonly string[],
+  table: string,
+  operation: TableAccessOperation,
+  tool?: string
+): boolean {
   if (allowlist.includes(table)) return true;
-  return allowlistGrantsAllTables(allowlist) && !NAMED_ONLY_SET.has(table);
+  return allowlistGrantsAllTables(allowlist) && !wildcardExcludes(table, operation, tool);
 }
 
 function normalizeTargetKind(candidate: unknown): TableAccessTargetKind {

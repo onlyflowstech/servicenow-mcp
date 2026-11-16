@@ -25,6 +25,7 @@ import { createMcpServer } from "../src/server.js";
 import {
   NAMED_ONLY_TABLES,
   TablePolicyError,
+  WRITE_NAMED_ONLY_TABLES,
   authorizeTableAccess,
   createTableAccessPolicy,
   type TableAccessPolicyInput,
@@ -213,6 +214,8 @@ describe("the named-only table list", () => {
     });
     for (const table of [...earlier, ...BUILT_IN_TABLE_CLASSES.itsm]) {
       for (const operation of ["read", "write"] as const) {
+        // Writes to the two ATF step tables are covered by "*" for sn_atf_author only.
+        if (operation === "write" && Object.hasOwn(WRITE_NAMED_ONLY_TABLES, table)) continue;
         expect(
           authorizeTableAccess(policy, { operation, table }, "sn_query"),
           `${operation} ${table}`
