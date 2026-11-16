@@ -9,20 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **ATF `record_query` and `record_validation` steps are checked when `sn_atf_author`
-  adds them.** Each step reads the table it names on the server, so
-  `add_steps` now needs a read grant on that table for the profile and tool,
-  with the same refusal as any table read (a named-only table such as `sys_audit`
-  must be named). The fields in the step's conditions are checked against the
+- **`sn_atf_author` checks the table, conditions and ACL setting of ATF steps
+  when it adds them.** A `record_query`, `record_validation`,
+  `field_values_validation` or `open_existing_record` step needs a read grant on
+  the table it names, and an `open_new_form` or `set_field_values` step a write
+  grant, with the same refusal as any table access (a named-only table such as
+  `sys_audit` must be named). The conditions of `record_query`,
+  `record_validation` and `field_values_validation` are checked against the
   table's field policy: a field the profile may not read, a dot-walk (`a.b`), a
-  condition that is only a pasted step output, or a term the check does not
-  recognise is refused, and `enforce_security: false` is refused with a fixed
-  message (leave it out, or pass `true`; it stays `true` by default). A refused
-  step refuses the whole call, before any write. Steps that run through the UI as
-  the impersonated user, and suites authored in the instance, are not governed
-  by the server's table grants, and `atf.execute` stays opt-in. The README and
-  `docs/PRODUCTION-SECURITY.md` now also say that a database view or extension
-  table over one of the six named-only tables is not covered by the name list.
+  condition that is only a pasted step output, and a term the check does not
+  recognise are refused, and only the operators that compare a field with a
+  literal are allowed (`=`, `!=`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`,
+  `STARTSWITH`, `ENDSWITH`, `IN`, `NOT IN`, `ISEMPTY`, `ISNOTEMPTY`, `BETWEEN`),
+  so an operator that takes a second field, such as `SAMEAS` or `GT_FIELD`, is
+  refused. `enforce_security: false` is refused on `record_query` and
+  `record_validation` with a fixed message (leave it out, or pass `true`; it
+  stays `true` by default). A refused step refuses the whole call, before any
+  write. The impersonated user's ACLs still apply on top; suites authored in the
+  instance are not checked by the server's table grants, and `atf.execute` stays
+  opt-in. The README and `docs/PRODUCTION-SECURITY.md` now also say that a
+  database view or extension table over one of the six named-only tables is not
+  covered by the name list.
 - **`sys_audit` and `sys_journal_field` are no longer covered by a `"*"` table
   grant; name them to read them.** A profile whose `readTables` (or
   `writeTables`) holds `"*"` used to reach both tables like any other. Their rows

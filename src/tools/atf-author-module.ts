@@ -89,7 +89,7 @@ export const atfAuthorToolModule = defineServiceNowToolModule({
   runtime: "servicenow",
   definition: {
     name: "sn_atf_author",
-    description: "Create ATF tests and suites, or add tests to a suite. Requires explicit table write grants. Rolls back confirmed inserts on failure; reports incomplete or uncertain writes. Supports a runtime-verified step catalog; script steps require atf.allowScriptSteps. record_query and record_validation steps need read access to their table, plain readable condition fields, and always enforce ACLs. Does not execute tests.",
+    description: "Create ATF tests and suites, or add tests to a suite. Requires explicit table write grants. Rolls back confirmed inserts on failure; reports incomplete or uncertain writes. Supports a runtime-verified step catalog; script steps require atf.allowScriptSteps. A step that names a table needs read (forms: write) access to it; conditions use plain readable fields with literal-comparison operators; record_query and record_validation always enforce ACLs. Does not execute tests.",
     annotations: { title: "Author ATF tests and suites", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
   inputSchema: atfAuthorInputSchema,

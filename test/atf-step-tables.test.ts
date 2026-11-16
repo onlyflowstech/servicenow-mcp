@@ -147,12 +147,13 @@ const WILDCARD: TableAccessPolicyInput = { readTables: ["*"], writeTables: ["*"]
 const WRITES = ["sys_atf_step", "sys_variable_value", "sys_element_mapping"];
 
 /** An explicit profile: the tables sn_atf_author needs, plus `extra` for reads. */
-function explicit(extra: readonly string[] = []): TableAccessPolicyInput {
+function explicit(extra: readonly string[] = [], extraWrites: readonly string[] = []): TableAccessPolicyInput {
   const reads = [...new Set([...STEP_READ_TABLES, ...extra])];
+  const writes = [...new Set([...WRITES, ...extraWrites])];
   return {
     readTables: reads,
-    writeTables: WRITES,
-    targets: [...new Set([...reads, ...WRITES])].map((table) => target(table)),
+    writeTables: writes,
+    targets: [...new Set([...reads, ...writes])].map((table) => target(table)),
   };
 }
 
@@ -251,15 +252,6 @@ describe("a record step's table is checked against the profile's read grants", (
     // A scoped look-alike is a different table, not the named-only one.
     const result = await addSteps(connected, [step("record_query", "x_acme_sys_audit")]);
     expect(passedPolicy(connected, result)).toBe(true);
-  });
-
-  it("does not govern the steps that run through the UI as the impersonated user", async () => {
-    const connected = await connect(explicit());
-    await addSteps(connected, [
-      { type: "open_existing_record", inputs: { table: "sys_audit", record_id: SYS_ID } },
-    ]);
-    // Documented scope: only the two server-side record steps are checked here.
-    expect(passedPolicy(connected)).toBe(true);
   });
 });
 
@@ -378,5 +370,180 @@ describe("the catalog listing is unchanged", () => {
     expect(result.isError).toBeUndefined();
     expect(text(result)).toContain("record_query");
     expect(text(result)).toContain("record_validation");
+  });
+});
+
+/** The four UI steps, with the access each needs and the inputs that make a valid step. */
+const UI_STEPS = [
+  { type: "field_values_validation", access: "read", inputs: (table: string) => ({ table, conditions: "active=true" }) },
+  { type: "open_existing_record", access: "read", inputs: (table: string) => ({ table, record_id: SYS_ID }) },
+  { type: "open_new_form", access: "write", inputs: (table: string) => ({ table }) },
+  { type: "set_field_values", access: "write", inputs: (table: string) => ({ table, field_values: "short_description=x" }) },
+] as const;
+
+describe("the UI steps that name a table are checked too", () => {
+  const cases = UI_STEPS.flatMap((ui) => NAMED_ONLY.map((table) => [ui.type, table] as const));
+  const byType = (type: string) => UI_STEPS.find((ui) => ui.type === type)!;
+
+  it.each(cases)("%s on %s is refused under a \"*\" grant, naming the table and the grant", async (type, table) => {
+    const ui = byType(type);
+    const connected = await connect(WILDCARD);
+    const result = await addSteps(connected, [{ type, inputs: ui.inputs(table) }]);
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("Table access was denied by policy");
+    expect(connected.getClient).not.toHaveBeenCalled();
+    expect(connected.serviceNowClient.post).not.toHaveBeenCalled();
+    expect(connected.records.at(-1)).toMatchObject({ outcome: "policy_rejected", reason: "table_access_denied" });
+  });
+
+  it.each(cases)("%s on %s is allowed once the profile names the table for that operation", async (type, table) => {
+    const ui = byType(type);
+    const connected = await connect({
+      readTables: ["*", table],
+      writeTables: ["*", table],
+      targets: [target(table)],
+    });
+    const result = await addSteps(connected, [{ type, inputs: ui.inputs(table) }]);
+    expect(passedPolicy(connected, result)).toBe(true);
+  });
+
+  it.each(UI_STEPS.filter((ui) => ui.access === "write"))("%s needs a write grant, not only a read grant", async (ui) => {
+    const readOnly = await connect(explicit(["sys_properties"]));
+    const refused = await addSteps(readOnly, [{ type: ui.type, inputs: ui.inputs("sys_properties") }]);
+    expect(refused.isError).toBe(true);
+    expect(readOnly.getClient).not.toHaveBeenCalled();
+
+    const granted = await connect(explicit(["sys_properties"], ["sys_properties"]));
+    const allowed = await addSteps(granted, [{ type: ui.type, inputs: ui.inputs("sys_properties") }]);
+    expect(passedPolicy(granted, allowed)).toBe(true);
+  });
+
+  it.each(UI_STEPS.filter((ui) => ui.access === "read"))("%s needs a read grant", async (ui) => {
+    const connected = await connect(explicit());
+    const refused = await addSteps(connected, [{ type: ui.type, inputs: ui.inputs("problem") }]);
+    expect(refused.isError).toBe(true);
+    const granted = await connect(explicit(["problem"]));
+    const allowed = await addSteps(granted, [{ type: ui.type, inputs: ui.inputs("problem") }]);
+    expect(passedPolicy(granted, allowed)).toBe(true);
+  });
+
+  it("puts the right operation in the plan for each step", () => {
+    for (const ui of UI_STEPS) {
+      const plan = prepareSteps({ test_sys_id: TEST_ID, steps: [{ type: ui.type, inputs: ui.inputs("problem") }] }, false);
+      expect(plan.requests, ui.type).toContainEqual({ operation: ui.access, table: "problem" });
+      const other = ui.access === "read" ? "write" : "read";
+      expect(plan.requests, ui.type).not.toContainEqual({ operation: other, table: "problem" });
+    }
+  });
+
+  it("checks the conditions of field_values_validation like those of a record step", async () => {
+    const policy = { fieldPolicy: { incident: { readable: ["sys_id", "number"] } } };
+    const connected = await connect(WILDCARD, policy);
+    const hidden = await addSteps(connected, [
+      { type: "field_values_validation", inputs: { table: "incident", conditions: "short_description=x" } },
+    ]);
+    expect(hidden.isError).toBe(true);
+    expect(connected.records.at(-1)).toMatchObject({ reason: "field_access_denied" });
+    const secondField = await addSteps(connected, [
+      { type: "field_values_validation", inputs: { table: "incident", conditions: "numberSAMEASshort_description" } },
+    ]);
+    expect(secondField.isError).toBe(true);
+    const shown = await addSteps(connected, [
+      { type: "field_values_validation", inputs: { table: "incident", conditions: "number=INC0010001" } },
+    ]);
+    expect(passedPolicy(connected, shown)).toBe(true);
+  });
+
+  it("leaves enforce_security alone: these steps have no such input", () => {
+    expect(() =>
+      prepareSteps({ test_sys_id: TEST_ID, steps: [{ type: "open_new_form", inputs: { table: "incident" } }] }, false)
+    ).not.toThrow();
+  });
+
+  it("still plans nothing for the steps that name no table", () => {
+    const plan = prepareSteps({ test_sys_id: TEST_ID, steps: [{ type: "submit_form", inputs: {} }] }, false);
+    const stepTables = plan.requests.filter((r) => !["sys_atf_test", "sys_atf_step", "sys_atf_step_config", "var_dictionary", "sys_variable_value", "sys_element_mapping"].includes(r.table));
+    expect(stepTables).toEqual([]);
+  });
+});
+
+describe("a condition may use only operators that compare a field with a literal", () => {
+  const readable = { fieldPolicy: { incident: { readable: ["sys_id", "number", "state", "sys_created_on"] } } };
+  const ALLOWED: ReadonlyArray<readonly [string, string]> = [
+    ["=", "number=INC0010001"],
+    ["!=", "state!=7"],
+    ["<", "state<3"],
+    ["<=", "state<=3"],
+    [">", "state>3"],
+    [">=", "state>=3"],
+    ["LIKE", "numberLIKE001"],
+    ["NOT LIKE", "numberNOT LIKE001"],
+    ["STARTSWITH", "numberSTARTSWITHINC"],
+    ["ENDSWITH", "numberENDSWITH01"],
+    ["IN", "stateIN1,2,3"],
+    ["NOT IN", "stateNOT IN6,7"],
+    ["ISEMPTY", "numberISEMPTY"],
+    ["ISNOTEMPTY", "numberISNOTEMPTY"],
+    ["BETWEEN", "sys_created_onBETWEEN2024-01-01@2024-12-31"],
+    ["OR prefix", "number=1^ORstate=2"],
+    ["NQ prefix", "number=1^NQstate=2"],
+    ["ORDERBY", "number=1^ORDERBYnumber"],
+    ["ORDERBYDESC", "number=1^ORDERBYDESCnumber"],
+    ["GROUPBY", "number=1^GROUPBYstate"],
+    ["EQ", "number=1^EQ"],
+  ];
+  // A hidden field (short_description) in the second-field position, one per operator form.
+  const REFUSED: ReadonlyArray<readonly [string, string]> = [
+    ["SAMEAS", "numberSAMEASshort_description"],
+    ["NSAMEAS", "numberNSAMEASshort_description"],
+    ["GT_FIELD", "stateGT_FIELDshort_description"],
+    ["LT_FIELD", "stateLT_FIELDshort_description"],
+    ["GT_OR_EQUALS_FIELD", "stateGT_OR_EQUALS_FIELDshort_description"],
+    ["LT_OR_EQUALS_FIELD", "stateLT_OR_EQUALS_FIELDshort_description"],
+    ["MORETHAN", "sys_created_onMORETHANshort_description@hour@after@1"],
+    ["LESSTHAN", "sys_created_onLESSTHANshort_description@hour@ago@1"],
+    ["DYNAMIC", "stateDYNAMIC" + "d".repeat(32)],
+    ["VALCHANGES", "stateVALCHANGES"],
+    ["CHANGESFROM", "stateCHANGESFROM1"],
+    ["CHANGESTO", "stateCHANGESTO2"],
+    ["ANYTHING", "stateANYTHING"],
+    ["INSTANCEOF", "numberINSTANCEOFtask"],
+    ["NOT INSTANCEOF", "numberNOT INSTANCEOFtask"],
+    ["RELATIVEGT", "sys_created_onRELATIVEGT@hour@ago@1"],
+    ["ON (date)", "sys_created_onONThis week@2024-01-01@2024-01-07"],
+    ["a lower-case operator", "numberlikeabc"],
+    ["no operator", "number"],
+    ["a unary operator with a value", "numberISEMPTYshort_description"],
+    ["ORDERBY with an operator", "number=1^ORDERBYnumber=short_description"],
+    ["RLQUERY", "RLQUERYsys_audit.documentkey,>0,m2m^ENDRLQUERY"],
+  ];
+
+  it.each(ALLOWED)("accepts %s", (_name, conditions) => {
+    for (const [type, key] of [["record_query", "field_values"], ["record_validation", "field_values"], ["field_values_validation", "conditions"]] as const) {
+      const inputs = type === "record_validation" ? { table: "incident", record_id: SYS_ID, [key]: conditions } : { table: "incident", [key]: conditions };
+      expect(() => prepareSteps({ test_sys_id: TEST_ID, steps: [{ type, inputs }] }, false), `${type}: ${conditions}`).not.toThrow();
+    }
+  });
+
+  it.each(REFUSED)("refuses %s", (_name, conditions) => {
+    for (const [type, key] of [["record_query", "field_values"], ["record_validation", "field_values"], ["field_values_validation", "conditions"]] as const) {
+      const inputs = type === "record_validation" ? { table: "incident", record_id: SYS_ID, [key]: conditions } : { table: "incident", [key]: conditions };
+      expect(() => prepareSteps({ test_sys_id: TEST_ID, steps: [{ type, inputs }] }, false), `${type}: ${conditions}`).toThrow();
+    }
+  });
+
+  it.each(REFUSED)("%s leaves the hidden field untested, through the dispatcher", async (_name, conditions) => {
+    const connected = await connect(WILDCARD, readable);
+    const result = await addSteps(connected, [step("record_query", "incident", { field_values: conditions })]);
+    expect(result.isError).toBe(true);
+    expect(connected.getClient).not.toHaveBeenCalled();
+    expect(connected.records.at(-1)).toMatchObject({ outcome: "policy_rejected", reason: "field_access_denied" });
+    expect(text(result)).not.toContain("short_description");
+  });
+
+  it.each(ALLOWED)("%s passes the dispatcher on readable fields", async (_name, conditions) => {
+    const connected = await connect(WILDCARD, readable);
+    const result = await addSteps(connected, [step("record_query", "incident", { field_values: conditions })]);
+    expect(passedPolicy(connected, result)).toBe(true);
   });
 });

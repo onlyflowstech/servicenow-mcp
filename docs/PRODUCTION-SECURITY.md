@@ -490,12 +490,15 @@ profile names it, bound to the tools that need it.
   those tables, for a named-only table by name.
 - A `"*"` field-policy entry narrows these six once the profile names them, as it
   does the ITSM tables; a value column is left out of a default read.
-- ATF `record_query` and `record_validation` steps read their table on the
-  server, so authoring one needs a read grant on that table, checks the fields of
-  its conditions against the field policy, and refuses `enforce_security: false`.
-  The server's table grants do not govern steps that run through the UI as the
-  impersonated user, nor suites authored in the instance. `atf.execute` stays
-  opt-in.
+- `sn_atf_author` checks each ATF step that names a table: `record_query`,
+  `record_validation`, `field_values_validation` and `open_existing_record` need a
+  read grant on it, `open_new_form` and `set_field_values` a write grant, and a
+  named-only table must be named for either. Step conditions may use only the
+  operators that compare a field with a literal, over fields the field policy
+  lets the profile read, and `record_query` and `record_validation` refuse
+  `enforce_security: false`. The impersonated user's ACLs still apply on top.
+  Suites authored in the instance are not checked by the server's table grants,
+  and `atf.execute` stays opt-in.
 
 ## Denied exposure patterns
 
