@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Read tools now hide `password`/`password2`-typed fields by dictionary type,
+  not only by name.** A field whose internal type is `password`, `password2`,
+  `masked` or `encrypted_text` is refused when named, left out of `fields=all`,
+  detailed and default reads, `"*"` responses and write echoes, refused as a
+  filter, order, aggregate, group-by or ATF step-condition field, and refused
+  as a write key, whatever it is called. A `sys_properties` row shows `value`
+  only when its `type` is a known non-secret type. The types come from one
+  cached `sys_dictionary` read per credential. While they cannot be read,
+  field-policy tools refuse with a message naming the access needed, unless the
+  profile sets `"fieldTypes": { "dictionary": "not_required" }`, which falls
+  back to name-only hiding and is flagged on the policy card. `tools/list` is
+  unchanged.
+
 - **`sn_atf_author` checks the table, conditions and ACL setting of ATF steps
   when it adds them.** A `record_query`, `record_validation`,
   `field_values_validation` or `open_existing_record` step needs a read grant on
