@@ -53,6 +53,7 @@ export function flowRow(n: number, time: string, extra: Partial<Row> = {}): Row 
 /** Dictionary rows: `task` defines the journal fields; `incident` adds its own. */
 export const DICTIONARY: Row[] = [
   { name: "task", element: "", internal_type: "collection", audit: "false" },
+  { name: "task", element: "sys_id", internal_type: "GUID", audit: "false" },
   { name: "task", element: "work_notes", internal_type: "journal_input", audit: "false" },
   { name: "task", element: "comments", internal_type: "journal_input", audit: "false" },
   { name: "task", element: "comments_and_work_notes", internal_type: "journal_list", audit: "false" },
@@ -64,10 +65,13 @@ export const DICTIONARY: Row[] = [
   { name: "incident", element: "u_vault_key", internal_type: "password2", audit: "false" },
   { name: "incident", element: "u_sealed", internal_type: "string", audit: "false" },
   { name: "u_fake_queue", element: "", internal_type: "collection", audit: "true" },
+  { name: "u_fake_queue", element: "sys_id", internal_type: "GUID", audit: "false" },
   { name: "u_fake_queue", element: "work_notes", internal_type: "string", audit: "false" },
   { name: "sys_properties", element: "", internal_type: "collection", audit: "true" },
+  { name: "sys_properties", element: "sys_id", internal_type: "GUID", audit: "false" },
   { name: "sys_properties", element: "value", internal_type: "string", audit: "false" },
   { name: "sys_update_xml", element: "", internal_type: "collection", audit: "true" },
+  { name: "sys_update_xml", element: "sys_id", internal_type: "GUID", audit: "false" },
   { name: "sys_update_xml", element: "payload", internal_type: "xml", audit: "false" },
   { name: "sys_update_xml", element: "name", internal_type: "string", audit: "false" },
 ];

@@ -61,6 +61,8 @@ export interface HistoryFixture {
   readonly flows?: readonly Row[] | Failure;
   /** Sources whose rows are returned whatever the record filter says (a misbehaving instance). */
   readonly ignoreRecordFilter?: readonly ("sys_audit" | "sys_journal_field" | "sys_flow_context")[];
+  /** `NOT IN` clauses are ignored (a misbehaving instance). */
+  readonly ignoreExclusions?: boolean;
 }
 
 export interface RecordedCall {
@@ -114,7 +116,9 @@ export function fakeInstance(fixture: HistoryFixture): FakeInstance {
       if (rows === "forbidden") throw createToolError("authorization", "retry_after_correction");
       if (rows === "missing") throw createToolError("upstream", "do_not_retry");
       const loose = fixture.ignoreRecordFilter?.includes(table as keyof typeof SOURCE_TABLES) ?? false;
-      return { result: project(evaluate(rows ?? [], query, Number(params.sysparm_limit ?? "10000"), loose), params) };
+      return {
+        result: project(evaluate(rows ?? [], query, Number(params.sysparm_limit ?? "10000"), loose, fixture.ignoreExclusions === true), params),
+      };
     }
     return { result: [] };
   };
@@ -152,7 +156,7 @@ function project(rows: readonly Row[], params: Record<string, string>): Row[] {
 const RECORD_KEYS = new Set(["tablename", "documentkey", "name", "element_id", "source_table", "source_record"]);
 
 /** The subset of encoded queries the tool sends. */
-function evaluate(rows: readonly Row[], query: string, limit: number, loose: boolean): Row[] {
+function evaluate(rows: readonly Row[], query: string, limit: number, loose: boolean, ignoreExclusions = false): Row[] {
   const clauses = query.split("^");
   const order = clauses.filter((clause) => clause.startsWith("ORDERBY"));
   const groups: string[][] = [];
@@ -163,7 +167,7 @@ function evaluate(rows: readonly Row[], query: string, limit: number, loose: boo
   const kept = rows.filter((row) =>
     groups.every((group) =>
       group.some((clause) => {
-        const match = /^([a-z_]+)(IN|<=|>=|<|>|=)(.*)$/u.exec(clause);
+        const match = /^([a-z_]+)(NOT IN|IN|<=|>=|<|>|=)(.*)$/u.exec(clause);
         if (match === null) throw new Error(`fake instance cannot read clause ${JSON.stringify(clause)}`);
         const [, field, operator, value] = match as unknown as [string, string, string, string];
         if (loose && RECORD_KEYS.has(field)) return true;
@@ -171,6 +175,8 @@ function evaluate(rows: readonly Row[], query: string, limit: number, loose: boo
         switch (operator) {
           case "IN":
             return value.split(",").includes(actual);
+          case "NOT IN":
+            return ignoreExclusions || !value.split(",").includes(actual);
           case "<=":
             return actual <= value;
           case ">=":

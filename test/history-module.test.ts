@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CHAIN_UNCONFIRMED_WARNING,
   DICTIONARY_UNAVAILABLE_WARNING,
   MAX_HISTORY_DICTIONARY_ROWS,
   WRONG_CLASS_HINT,
@@ -8,6 +9,7 @@ import {
 import { HISTORY_LIMITS } from "../src/tools/history-contracts.js";
 import { isTailCursor } from "../src/tools/syslog-cursor.js";
 import { auditRow, DICTIONARY, flowRow, incidentFixture, journalRow } from "./history-fixtures.js";
+import { decodeTailCursor } from "../src/tools/syslog-cursor.js";
 import {
   dataOf,
   expectReadsWithin,
@@ -442,6 +444,7 @@ describe("fields, since and until", () => {
     const audit = instance.calls.find((call) => tableOfCall(call) === "sys_audit")!;
     expect(audit.params.sysparm_query).toBe(
       `tablename=incident^documentkey=${ids.incident}^fieldnameINcomments,priority` +
+        "^fieldnameNOT INcomments,comments_and_work_notes,work_notes" +
         "^sys_created_on>=2026-01-01 00:00:00^sys_created_on<=2026-01-01 10:30:00" +
         "^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id"
     );
@@ -499,4 +502,108 @@ describe("max_response_bytes", () => {
     expect(eventsOf(data).every((event) => event.old === big && event.new === big)).toBe(true);
     expect(isTailCursor((data.next_cursor as Record<string, string>).audit)).toBe(true);
   });
+});
+
+describe("an extension chain that cannot be read in full", () => {
+  // A custom table extending a credential table. Its own field is a plain
+  // string, so only the credential-table rule withholds its value.
+  const dictionary = [
+    ...DICTIONARY,
+    { name: "oauth_entity", element: "", internal_type: "collection", audit: "false" },
+    { name: "oauth_entity", element: "sys_id", internal_type: "GUID", audit: "false" },
+    { name: "u_fake_client", element: "", internal_type: "collection", audit: "true" },
+    { name: "u_fake_client", element: "u_label", internal_type: "string", audit: "false" },
+  ];
+  const fixture = (parents: Record<string, string[]>): HistoryFixture => ({
+    records: { [`u_fake_client/${ids.property}`]: "u_fake_client" },
+    parents,
+    dictionary,
+    audit: [auditRow(1, "2026-03-01 08:00:00", "u_label", { tablename: "u_fake_client", documentkey: ids.property, newvalue: "fake-label-value" })],
+    journal: [],
+    flows: [],
+  });
+  const tableAccess = namedPolicy(["u_fake_client", "sys_db_object", "sys_dictionary", "sys_audit", "sys_journal_field", "sys_flow_context"]);
+  const args = { table: "u_fake_client", sys_id: ids.property };
+
+  it("withholds values when the chain reaches the credential table", async () => {
+    const { result } = await run(fixture({ u_fake_client: ["oauth_entity"] }), args, { tableAccess });
+    const data = dataOf(result);
+    expect(eventsOf(data)).toEqual([
+      { time: "2026-03-01 08:00:00", source: "audit", field: "u_label", user: "fake.user.one", value_hidden: true },
+    ]);
+    expect(data.warnings).toBeUndefined();
+  });
+
+  it("withholds values, with a warning, when the chain stops before the table that defines sys_id", async () => {
+    const { result } = await run(fixture({}), args, { tableAccess });
+    const data = dataOf(result);
+    expect(eventsOf(data)).toEqual([
+      { time: "2026-03-01 08:00:00", source: "audit", field: "u_label", user: "fake.user.one", value_hidden: true },
+    ]);
+    expect(data.warnings).toEqual([CHAIN_UNCONFIRMED_WARNING]);
+    expect(JSON.stringify(data)).not.toContain("fake-label-value");
+  });
+});
+
+describe("journal fields for a profile without the journal source", () => {
+  const audit = [
+    auditRow(1, "2026-01-01 10:00:00", "priority"),
+    auditRow(2, "2026-01-01 11:00:00", "work_notes"),
+    auditRow(3, "2026-01-01 12:00:00", "comments"),
+    auditRow(4, "2026-01-01 13:00:00", "comments_and_work_notes"),
+  ];
+  const journalTimes = new Set(audit.slice(1).map((row) => row.sys_created_on));
+  const tableAccess = namedPolicy(["incident", "sys_db_object", "sys_dictionary", "sys_audit", "sys_flow_context"]);
+
+  for (const [name, dictionary] of [
+    ["with field types", DICTIONARY],
+    ["without field types", "forbidden"],
+  ] as const) {
+    it(`pages straight to the other changes, ${name}`, async () => {
+      const instance = fakeInstance(incidentFixture({ audit, journal: [], flows: [], dictionary }));
+      const { call } = await harness(instance.ops, { tableAccess });
+      const pages: Record<string, unknown>[] = [];
+      let cursor: unknown;
+      do {
+        const data = dataOf(await call({ table: "incident", sys_id: ids.incident, limit: 1, ...(cursor === undefined ? {} : { cursor }) }));
+        pages.push(data);
+        cursor = data.next_cursor;
+      } while (cursor !== undefined && pages.length < 10);
+      expect(pages).toHaveLength(1);
+      expect(eventsOf(pages[0]!).map((event) => event.field)).toEqual(["priority"]);
+      expect((pages[0]!.sources as Record<string, unknown>).audit).toEqual({ status: "ok", returned: 1, has_more: false });
+      expect(pages[0]!.omitted).toEqual({ unreadable: 0, mismatch: 0 });
+      for (const page of pages) {
+        for (const token of Object.values((page.next_cursor ?? {}) as Record<string, string>)) {
+          expect(journalTimes.has(decodeTailCursor(token)!.timestamp)).toBe(false);
+        }
+      }
+      const auditRead = instance.calls.find((call) => tableOfCall(call) === "sys_audit")!;
+      expect(auditRead.params.sysparm_query).toContain("^fieldnameNOT INcomments,comments_and_work_notes,work_notes");
+    });
+  }
+
+  it("leaves no journal field out by name when the call reads the journal source and has no types", async () => {
+    const instance = fakeInstance(incidentFixture({ audit, dictionary: "forbidden" }));
+    const { call } = await harness(instance.ops, { tableAccess: FULL });
+    const data = dataOf(await call({ table: "incident", sys_id: ids.incident }));
+    expect(eventsOf(data).filter((event) => event.source === "audit").map((event) => event.field)).toEqual([
+      "comments_and_work_notes", "comments", "work_notes", "priority",
+    ]);
+    const auditRead = instance.calls.find((call) => tableOfCall(call) === "sys_audit")!;
+    expect(auditRead.params.sysparm_query).not.toContain("NOT IN");
+  });
+
+  for (const [name, dictionary] of [
+    ["with field types", DICTIONARY],
+    ["without field types", "forbidden"],
+  ] as const) {
+    it(`drops a journal row the instance returns despite the query, ${name}`, async () => {
+      const instance = fakeInstance(incidentFixture({ audit, journal: [], flows: [], dictionary, ignoreExclusions: true }));
+      const { call } = await harness(instance.ops, { tableAccess });
+      const data = dataOf(await call({ table: "incident", sys_id: ids.incident }));
+      expect(eventsOf(data).map((event) => event.field)).toEqual(["priority"]);
+      expect(data.omitted).toEqual({ unreadable: 0, mismatch: 0 });
+    });
+  }
 });

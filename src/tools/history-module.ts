@@ -22,15 +22,20 @@
  *    that is missing or that the instance refuses is `not_found`; a record
  *    whose class is not `table` is refused with the class to call with;
  * 2. the class's extension chain (`sys_db_object`) and every dictionary row
- *    of that chain (`sys_dictionary`), through the metadata cache;
- * 3. each planned source, newest first, `limit + 1` rows, uncached, together
- *    with step 2.
+ *    of that chain (`sys_dictionary`), through the metadata cache. The chain
+ *    counts only when it reaches the table that defines `sys_id`;
+ * 3. each planned source, newest first, `limit + 1` rows, uncached. The
+ *    journal and flow reads run with step 2; the audit read follows it, so
+ *    its query leaves out the chain's journal fields.
  *
  * Every source row must carry the record's class and sys_id in its key
  * columns, or it is dropped (`omitted.mismatch`). Then, in order:
  * (a) an audit row for a journal-typed field (by the dictionary type found
- *     walking up the class's chain, never by name) is dropped: journal text
- *     comes only through the journal source and its own grant;
+ *     walking up the class's chain, never by name) is left out of the audit
+ *     query, and dropped if it comes back anyway: journal text, and whether
+ *     there is any, comes only through the journal source and its own grant.
+ *     Without types, the platform's journal field names are left out the same
+ *     way unless the call reads the journal source;
  * (b) a row whose field the profile may not read on the class (field policy,
  *     a sensitive name, a type the call hides, or a column that carries other
  *     records' content) is dropped (`omitted.unreadable`), unnamed;
@@ -121,6 +126,12 @@ const L = HISTORY_LIMITS;
 
 /** Dictionary types whose values are journal text. */
 const JOURNAL_TYPES: ReadonlySet<string> = new Set(["journal", "journal_input", "journal_list"]);
+/**
+ * The platform's own journal fields, by name. Used only to leave rows out when
+ * the types cannot be read and the journal source is not in the call: a name
+ * never makes a row visible.
+ */
+export const JOURNAL_FIELD_NAMES: readonly string[] = Object.freeze(["comments", "comments_and_work_notes", "work_notes"]);
 /** Depth of the class chain walked for field types. */
 const MAX_HIERARCHY_DEPTH = 12;
 /** A dictionary read that returns this many rows may be cut short, so its types are unavailable. */
@@ -139,6 +150,8 @@ export const INVALID_CURSOR_HINT =
   "the same arguments, or leave cursor out to start from the newest entry.";
 export const DICTIONARY_UNAVAILABLE_WARNING =
   "Field types could not be read from sys_dictionary, so no values are shown.";
+export const CHAIN_UNCONFIRMED_WARNING =
+  "The table's extension chain could not be read in full, so no values are shown.";
 export const VALUES_NOT_READABLE_WARNING = (source: HistorySource) =>
   `Field policy hides the ${source} value columns, so no ${source} values are shown.`;
 export const FITTED_WARNING =
@@ -397,6 +410,8 @@ async function readRecordClass(
 interface ClassTypes {
   readonly types: FieldTypes;
   readonly auditEnabled: boolean | null;
+  /** The chain read could not be confirmed complete, so the types are unavailable. */
+  readonly unconfirmedChain?: true;
 }
 
 const NO_TYPES: ClassTypes = Object.freeze({ types: FIELD_TYPES_UNAVAILABLE, auditEnabled: null });
@@ -407,6 +422,12 @@ const NO_TYPES: ClassTypes = Object.freeze({ types: FIELD_TYPES_UNAVAILABLE, aud
  * defined on `task`). Through the metadata cache. A refusal, an error, no
  * field rows or a full page give the `unavailable` state; a cancellation
  * rethrows.
+ *
+ * The chain is only trusted when it reaches the table that defines `sys_id`:
+ * every chain ends at a base table, which owns it, while an extended table
+ * inherits it. A chain that stops short (an ancestor whose `sys_db_object`
+ * row did not come back) could hide that the class extends a credential
+ * table, so its types are `unavailable` too.
  */
 async function readClassTypes(
   meta: ServiceNowOperations,
@@ -445,7 +466,9 @@ async function readClassTypes(
       }
       dictionaryRows.push({ table, element, internal_type: type });
     }
-    if (dictionaryRows.length === 0) return { types: FIELD_TYPES_UNAVAILABLE, auditEnabled };
+    if (!dictionaryRows.some((row) => row.element === "sys_id")) {
+      return { types: FIELD_TYPES_UNAVAILABLE, auditEnabled, unconfirmedChain: true };
+    }
     return {
       types: fieldTypesFromRows(dictionaryRows, { [recordClass]: chain }, { complete: true }),
       auditEnabled,
@@ -456,12 +479,32 @@ async function readClassTypes(
   }
 }
 
+/**
+ * The audit fields the audit read leaves out, so journal rows never reach a
+ * page, its cursors, `has_more` or its counts: every journal-typed field of
+ * the class's chain when the types are known. Without types, the platform's
+ * journal field names, unless the call also reads the journal source (then
+ * those rows are shown without values, as every audit row is).
+ */
+export function auditExclusions(types: FieldTypes, recordClass: string, journalInCall: boolean): readonly string[] {
+  if (types.state === "available") {
+    const all = types.tables.get(recordClass)?.allTypes;
+    return [...(all ?? new Map<string, string>())]
+      .filter(([, type]) => JOURNAL_TYPES.has(type))
+      .map(([field]) => field)
+      .sort();
+  }
+  return journalInCall ? [] : JOURNAL_FIELD_NAMES;
+}
+
 /** The encoded query of one source's page: position first, then the record, then the filters. */
 export function sourceQuery(
   spec: HistorySourceSpec,
   recordClass: string,
   args: CanonicalHistoryArgs,
-  position: TailPosition | undefined
+  position: TailPosition | undefined,
+  /** Field names the source must not return (journal fields, for the audit log). */
+  exclude: readonly string[] = []
 ): string {
   const parts: string[] = [];
   if (position !== undefined) {
@@ -472,6 +515,7 @@ export function sourceQuery(
   }
   parts.push(`${spec.classColumn}=${recordClass}`, `${spec.idColumn}=${args.sys_id}`);
   if (args.fields !== undefined && spec.fieldColumn !== undefined) parts.push(`${spec.fieldColumn}IN${args.fields.join(",")}`);
+  if (exclude.length > 0 && spec.fieldColumn !== undefined) parts.push(`${spec.fieldColumn}NOT IN${exclude.join(",")}`);
   if (args.since !== undefined) parts.push(`sys_created_on>=${args.since}`);
   if (args.until !== undefined) parts.push(`sys_created_on<=${args.until}`);
   return `${parts.join("^")}^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`;
@@ -486,7 +530,8 @@ async function readSource(
   plan: HistorySourcePlan,
   recordClass: string,
   args: CanonicalHistoryArgs,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  exclude: readonly string[] = []
 ): Promise<SourceRead> {
   if (!plan.granted) return { status: "not_granted" };
   const position = args.cursor?.[plan.source];
@@ -495,7 +540,7 @@ async function readSource(
   try {
     const response = await inOwnScope(signal, () =>
       ops.get(`${TABLE_PATH}${plan.spec.table}`, {
-        sysparm_query: sourceQuery(plan.spec, recordClass, args, position),
+        sysparm_query: sourceQuery(plan.spec, recordClass, args, position, exclude),
         sysparm_fields: plan.fields.join(","),
         sysparm_limit: String(args.limit + 1),
         sysparm_display_value: "false",
@@ -528,6 +573,8 @@ interface RowJudge {
   readonly recordClass: string;
   readonly sysId: string;
   readonly types: FieldTypes;
+  /** Audit fields left out of the read; a row the instance returns anyway is dropped. */
+  readonly excluded: ReadonlySet<string>;
   /** Field readability on the class, memoized per call. */
   readonly readable: (field: string) => boolean;
 }
@@ -553,9 +600,12 @@ function judgeRow(plan: HistorySourcePlan, row: Readonly<Record<string, unknown>
   }
   const field = key(row[spec.fieldColumn!]);
   // (a) Journal text never comes through the audit log, by the field's type.
-  if (plan.source === "audit" && judge.types.state === "available") {
-    const type = judge.types.tables.get(judge.recordClass)?.allTypes?.get(field);
-    if (type !== undefined && JOURNAL_TYPES.has(type)) return null;
+  if (plan.source === "audit") {
+    if (judge.excluded.has(field)) return null;
+    if (judge.types.state === "available") {
+      const type = judge.types.tables.get(judge.recordClass)?.allTypes?.get(field);
+      if (type !== undefined && JOURNAL_TYPES.has(type)) return null;
+    }
   }
   // (b) The field must be one the profile may read on the class.
   if (!judge.readable(field)) return { omitted: "unreadable" };
@@ -718,17 +768,31 @@ async function handleHistory(
     return historyResult(args, { status: "wrong_class", record, hint: WRONG_CLASS_HINT(recordClass) });
   }
 
-  // 2 and 3 together: the class's field types, and every source's page.
+  // 2 and 3: the class's field types, and every source's page. The journal
+  // and flow reads start with the types; the audit read waits for them, to
+  // leave journal fields out of its query.
+  const journalInCall = plan.sources.some((source) => source.source === "journal" && source.granted);
+  const typesRead = readClassTypes(services.serviceNow, recordClass, plan, signal);
   const [classTypes, reads] = await Promise.all([
-    readClassTypes(services.serviceNow, recordClass, plan, signal),
-    Promise.all(plan.sources.map((source) => readSource(ops, source, recordClass, args, signal))),
+    typesRead,
+    Promise.all(
+      plan.sources.map((source) =>
+        source.source === "audit" && source.granted
+          ? typesRead.then((types) =>
+              readSource(ops, source, recordClass, args, signal, auditExclusions(types.types, recordClass, journalInCall))
+            )
+          : readSource(ops, source, recordClass, args, signal)
+      )
+    ),
   ]);
+  const excluded = new Set(auditExclusions(classTypes.types, recordClass, journalInCall));
 
   const readableMemo = new Map<string, boolean>();
   const judge: RowJudge = {
     recordClass,
     sysId: args.sys_id,
     types: classTypes.types,
+    excluded,
     readable: (field) => {
       let known = readableMemo.get(field);
       if (known === undefined) {
@@ -749,7 +813,9 @@ async function handleHistory(
   });
 
   const warnings: string[] = [];
-  if (args.include_values && classTypes.types.state !== "available") warnings.push(DICTIONARY_UNAVAILABLE_WARNING);
+  if (args.include_values && classTypes.types.state !== "available") {
+    warnings.push(classTypes.unconfirmedChain === true ? CHAIN_UNCONFIRMED_WARNING : DICTIONARY_UNAVAILABLE_WARNING);
+  }
   for (const source of plan.sources) {
     if (source.granted && source.valuesHidden) warnings.push(VALUES_NOT_READABLE_WARNING(source.source));
   }
