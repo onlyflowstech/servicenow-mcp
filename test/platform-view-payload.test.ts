@@ -57,10 +57,10 @@ describe("payload view: masking", () => {
     expect(out.note).toBe(PAYLOAD_NOTE);
   });
 
-  it("hides every attribute and nested value of a hidden field, including a display value", async () => {
+  it("hides every attribute of a hidden field, including a display value", async () => {
     const payload = payloadOf("u_vendor_child", {}, "").replace(
       "<u_vendor_child action=\"INSERT_OR_UPDATE\">",
-      `<u_vendor_child action="INSERT_OR_UPDATE"><u_api_key_value display_value="${FAKE_SECRET}"><inner>${FAKE_SECRET}</inner></u_api_key_value>`
+      `<u_vendor_child action="INSERT_OR_UPDATE"><u_api_key_value display_value="${FAKE_SECRET}">${FAKE_SECRET}</u_api_key_value>`
     );
     const out = shown((await prepare(payload, ["u_vendor_child"])).outcome);
     expect(out.text).not.toContain(FAKE_SECRET);
@@ -143,6 +143,63 @@ describe("payload view: masking", () => {
   it("finds the row's own tables from its table column and its update name", () => {
     expect(rowTables({ table: "sys_script", name: `sys_script_include_${"a".repeat(32)}` })).toEqual(["sys_script", "sys_script_include"]);
     expect(rowTables({ table: "Bad Table", name: "not an update name" })).toEqual([]);
+  });
+});
+
+describe("payload view: unexpected layouts", () => {
+  /** `u_vendor.u_vendor_code` is password2, under a name the sensitive-name check does not catch. */
+  const CODED = world({ dictionary: [...world().dictionary, { name: "u_vendor", element: "u_vendor_code", internal_type: "password2" }] });
+  const record = (open: string, body: string, close: string) =>
+    `<?xml version="1.0" encoding="UTF-8"?><record_update table="u_vendor">${open}${body}${close}</record_update>`;
+
+  it("withholds payloads whose record elements are not lower-case table names", async () => {
+    for (const payload of [
+      record('<U_VENDOR action="INSERT_OR_UPDATE">', `<u_vendor_code>${FAKE_SECRET}</u_vendor_code>`, "</U_VENDOR>"),
+      record('<SYS_PROPERTIES action="INSERT_OR_UPDATE">', `<value>${FAKE_SECRET}</value>`, "</SYS_PROPERTIES>"),
+      record('<u_vendor action="INSERT_OR_UPDATE">', `<Wrapper><u_vendor_code>${FAKE_SECRET}</u_vendor_code></Wrapper>`, "</u_vendor>"),
+    ]) {
+      const { outcome, instance } = await prepare(payload, ["u_vendor"], CODED);
+      expect(outcome).toEqual({ status: "withheld", reason: "unreadable", hint: PAYLOAD_HINTS.unreadable });
+      expect(JSON.stringify(outcome)).not.toContain(FAKE_SECRET);
+      expect(instance.calls).toEqual([]);
+    }
+  });
+
+  it("hides a record's attribute named like one of its hidden-typed fields", async () => {
+    const payload = record(`<u_vendor action="INSERT_OR_UPDATE" u_vendor_code="${FAKE_SECRET}">`, "<u_name>Acme</u_name>", "</u_vendor>");
+    const out = shown((await prepare(payload, ["u_vendor"], CODED)).outcome);
+    expect(out.text).toContain(`u_vendor_code="${HIDDEN_MARK}"`);
+    expect(out.text).toContain('action="INSERT_OR_UPDATE"');
+    expect(out.text).not.toContain(FAKE_SECRET);
+  });
+
+  it("checks an element that holds elements inside a record as a record of its own", async () => {
+    const nested = `<u_name>Acme</u_name><u_vendor_child><u_vendor_code>${FAKE_SECRET}</u_vendor_code></u_vendor_child>`;
+    const { outcome, loaded } = await prepare(record('<u_vendor action="INSERT_OR_UPDATE">', nested, "</u_vendor>"), ["u_vendor"], CODED);
+    const out = shown(outcome);
+    expect(new Set(loaded)).toEqual(new Set(["u_vendor", "u_vendor_child"]));
+    expect(out.text).toContain(`<u_vendor_code>${HIDDEN_MARK}</u_vendor_code>`);
+    expect(out.text).not.toContain(FAKE_SECRET);
+    // One whose name is not a known table withholds the payload.
+    const unknown = `<u_wrapper><u_vendor_code>${FAKE_SECRET}</u_vendor_code></u_wrapper>`;
+    const withheld = (await prepare(record('<u_vendor action="INSERT_OR_UPDATE">', unknown, "</u_vendor>"), ["u_vendor"], CODED)).outcome;
+    expect(withheld).toMatchObject({ status: "withheld", reason: "hierarchy_unknown" });
+  });
+
+  it("hides text that sits in a record or the root outside any field", async () => {
+    const payload = `<record_update table="u_vendor">${FAKE_SECRET}<u_vendor action="INSERT_OR_UPDATE">${FAKE_SECRET}<u_name>Acme</u_name></u_vendor></record_update>`;
+    const out = shown((await prepare(payload, ["u_vendor"], CODED)).outcome);
+    expect(out.text).not.toContain(FAKE_SECRET);
+    expect(out.text).toContain("<u_name>Acme</u_name>");
+  });
+
+  it("still hides a hidden-typed field that holds elements, and checks what it holds", async () => {
+    const payload = record('<u_vendor action="INSERT_OR_UPDATE">', `<u_vendor_code><u_vendor_child><u_name>${FAKE_SECRET}</u_name></u_vendor_child></u_vendor_code>`, "</u_vendor>");
+    const { outcome } = await prepare(payload, ["u_vendor"], world({ ...CODED, tables: { ...CODED.tables, u_vendor_code: null } }));
+    const out = shown(outcome);
+    expect(out.text).toContain(`<u_vendor_code><u_vendor_child><u_name>${HIDDEN_MARK}</u_name></u_vendor_child></u_vendor_code>`);
+    expect(out.hidden_by_type).toBe(1);
+    expect(out.text).not.toContain(FAKE_SECRET);
   });
 });
 

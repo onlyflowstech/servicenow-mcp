@@ -9,8 +9,10 @@
  *
  * 1. The tables the payload writes: the row's `table` column, its update
  *    name's table, the root's `table` attribute and every record element (an
- *    element with an `action` attribute, and every child of the root). A table on the credential list
- *    refuses the payload: the result carries the row's metadata only.
+ *    element with an `action` attribute, every child of the root, and every
+ *    element below the root that holds elements). A record whose name is not
+ *    a lower-case table name withholds the payload. A table on the credential
+ *    list refuses it: the result carries the row's metadata only.
  * 2. Their hierarchies and hidden-typed fields, through the plan-bounded
  *    loader (`loadFieldTypesInPlan`), so every read stays in the view's plan.
  *    A table that extends a credential table refuses the payload too. A table
@@ -20,7 +22,9 @@
  *    again. On the way out:
  *    - a field whose type on its record's table is hidden (`password`,
  *      `password2`, ...) is replaced with `[hidden]`, text and attributes;
- *    - a field or attribute with a sensitive name is replaced the same way;
+ *    - a field or attribute with a sensitive name is replaced the same way,
+ *      and so is a record's attribute named like one of its hidden-typed
+ *      fields, and text that sits in a record or the root outside any field;
  *    - every other text and attribute value has its credential literals
  *      masked (`[masked]`, the evaluator's SEC005 patterns), and the whole
  *      text is masked once more after it is written.
@@ -138,14 +142,16 @@ export function rowTables(row: { readonly table?: unknown; readonly name?: unkno
 }
 
 /**
- * True when an element is a record: a table-named element with an `action`
- * attribute, or any table-named child of the root (the record a payload is
- * for, even when a hostile payload leaves out its `action`). Its children are
- * that table's fields.
+ * True when an element stands where a record does: any child of the root,
+ * any element with an `action` attribute, and any element below the root that
+ * has element children (a field's value is text, so an element holding
+ * elements is read as a record of its own). Its children are that table's
+ * fields. The root itself is a record only when it carries `action`.
  */
-function isRecordElement(element: XmlElement, depth: number): boolean {
-  if (!TABLE_NAME.test(element.name)) return false;
-  return depth === 1 || getAttribute(element, "action") !== undefined;
+function isRecordPosition(element: XmlElement, depth: number): boolean {
+  if (getAttribute(element, "action") !== undefined) return true;
+  if (depth === 1) return true;
+  return depth >= 2 && element.children.some((child) => child.kind === "element");
 }
 
 /**
@@ -173,9 +179,20 @@ export async function preparePayload(
     if (!TABLE_NAME.test(rootTable)) return payloadRefusal("withheld", "hierarchy_unknown");
     written.add(rootTable);
   }
+  // A record's name is its table, so it must be a lower-case table name; any
+  // other layout is not one this view can check, and is withheld.
+  const records = new WeakSet<XmlElement>();
+  let unexpected = false;
   walkElements(document.root, (element, ancestors) => {
-    if (isRecordElement(element, ancestors.length)) written.add(element.name);
+    if (!isRecordPosition(element, ancestors.length)) return;
+    if (!TABLE_NAME.test(element.name)) {
+      unexpected = true;
+      return "skip";
+    }
+    records.add(element);
+    written.add(element.name);
   });
+  if (unexpected) return payloadRefusal("withheld", "unreadable");
   if ([...written].some((table) => isCredentialTable(table))) return payloadRefusal("refused", "credential_table");
   if (written.size > PAYLOAD_LIMITS.MAX_TABLES) return payloadRefusal("withheld", "too_many_tables");
 
@@ -206,13 +223,10 @@ export async function preparePayload(
       const inherited = verdictOf(chain.slice(0, -1));
       const parent = chain[chain.length - 2]!;
       if (inherited !== false) verdict = inherited;
-      else if (isRecordElement(element, chain.length - 1)) verdict = false;
-      else if (
-        isRecordElement(parent, chain.length - 2) &&
-        hidden.get(parent.name)?.has(element.name.toLowerCase()) === true
-      ) {
+      else if (records.has(parent) && hidden.get(parent.name)?.has(element.name.toLowerCase()) === true) {
         verdict = "type";
-      } else if (isSensitiveFieldName(element.name)) verdict = "name";
+      } else if (records.has(element)) verdict = false;
+      else if (isSensitiveFieldName(element.name)) verdict = "name";
     }
     verdicts.set(element, verdict);
     if (verdict !== false && (chain.length < 2 || verdicts.get(chain[chain.length - 2]!) === false)) {
@@ -229,10 +243,17 @@ export async function preparePayload(
   };
   const serialized = serializeXml(document.root, {
     declaration: document.declaration !== null,
-    text: (value, _parent, ancestors) => (verdictOf(ancestors) === false ? mask(value) : HIDDEN_MARK),
-    attribute: (name, value, _element, ancestors) => {
+    text: (value, parent, ancestors) => {
+      if (verdictOf(ancestors) !== false) return HIDDEN_MARK;
+      // Text that belongs to no field (directly in a record or the root) has no type to check.
+      if ((records.has(parent) || parent === document.root) && value.trim() !== "") return HIDDEN_MARK;
+      return mask(value);
+    },
+    attribute: (name, value, element, ancestors) => {
       if (verdictOf(ancestors) !== false) return HIDDEN_MARK;
       if (isSensitiveFieldName(name)) return HIDDEN_MARK;
+      // A record's attribute named like one of its hidden-typed fields is that field's value.
+      if (records.has(element) && hidden.get(element.name)?.has(name.toLowerCase()) === true) return HIDDEN_MARK;
       return mask(value);
     },
   });
