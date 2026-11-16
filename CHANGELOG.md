@@ -5,6 +5,12 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Read tools treat a table whose parent tables can't all be read from `sys_db_object` (a parent's row hidden from the integration user, or a chain deeper than 12 tables) the same as a table whose field types can't be read: the call is refused, or hides fields by name only when the profile sets `"fieldTypes": { "dictionary": "not_required" }`.
+
 ## [2.3.0] — 2026-11-17
 
 2.3.0 is the first stable release since 2.2.1. It contains everything published

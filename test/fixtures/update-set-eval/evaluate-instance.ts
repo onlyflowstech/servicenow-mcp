@@ -9,6 +9,7 @@ import { ServiceNowResponseTooLargeError } from "../../../src/client.js";
 import type { EvaluateUpdate } from "../../../src/update-set-eval/types.js";
 import { recordingInstance, type RecordedCall, type RecordingInstance } from "../../platform-view-harness.js";
 import { APP_GLOBAL, SET_ID, sid } from "./rule-cases.js";
+import { sysDbObjectRow } from "../field-types.js";
 
 export type Row = Record<string, unknown>;
 
@@ -27,6 +28,8 @@ export interface InstanceModel {
   otherOpen: Record<string, number>;
   /** Table -> parent table, or null when it extends nothing. A table not listed has no row. */
   tables: Record<string, string | null>;
+  /** Tables whose sys_db_object row this account cannot read (see `sysDbObjectRow`). */
+  hiddenRows?: string[];
   /** Hidden-typed dictionary rows. */
   dictionary: { name: string; element: string; internal_type: string }[];
 }
@@ -228,8 +231,14 @@ export function scripted(world: InstanceModel, options: ScriptOptions = {}): Scr
         const names = conditions(query).find((c) => c.field === "name")!.value.split(",");
         return rows(
           names
-            .filter((name) => name in world.tables)
-            .map((name) => ({ name, "super_class.name": world.tables[name] ?? "" }))
+            .filter((name) => name in world.tables && !(world.hiddenRows ?? []).includes(name))
+            .map((name) => {
+              const chain: string[] = [];
+              for (let parent = world.tables[name]; parent !== null && parent !== undefined && !chain.includes(parent); parent = world.tables[parent]) {
+                chain.push(parent);
+              }
+              return sysDbObjectRow(name, chain, params.sysparm_fields ?? "name", world.hiddenRows);
+            })
         );
       }
       case "sys_dictionary": {

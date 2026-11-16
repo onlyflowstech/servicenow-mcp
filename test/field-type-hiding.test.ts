@@ -535,6 +535,70 @@ describe("unavailable field types", () => {
   });
 });
 
+describe("a child table whose parent link cannot be read", () => {
+  // u_vault_child inherits every hidden-typed field of u_vault. Its own row is
+  // readable; what the account sees of the link to u_vault varies.
+  const levels = Array.from({ length: 11 }, (_, index) => `u_vault_level_${index + 1}`);
+  const cases: Record<string, FieldTypeFixture> = {
+    "no sys_db_object row": { ...FIXTURE, absent: [...FIXTURE.absent, "u_vault_child"] },
+    "an empty parent link": { ...FIXTURE, hiddenRows: ["u_vault"], withoutParentLinks: ["u_vault_child"] },
+    "a parent reference with no name": { ...FIXTURE, hiddenRows: ["u_vault"] },
+    "a parent name with no reference": { ...FIXTURE, withoutParentLinks: ["u_vault_child"] },
+    "a chain longer than 12 tables": { ...FIXTURE, parents: { u_vault_child: [...levels, "u_vault"] } },
+  };
+  const reads = [
+    ["sn_query", { table: "u_vault_child", fields: "name,key" }],
+    ["sn_query", { table: "u_vault_child", fields: "all" }],
+    ["sn_query", { table: "u_vault_child", response_format: "detailed" }],
+    ["sn_get", { table: "u_vault_child", sys_id: SYS_ID }],
+    ["sn_get", { table: "u_vault_child", sys_id: SYS_ID, fields: "all" }],
+  ] as const;
+
+  it("hides the inherited fields when the chain is complete, up to 12 tables", async () => {
+    for (const fixture of [FIXTURE, { ...FIXTURE, parents: { u_vault_child: [...levels.slice(0, 10), "u_vault"] } }]) {
+      const h = await harness({ fieldTypes: fixture });
+      const named = await h.call("sn_query", { table: "u_vault_child", fields: "name,key" });
+      expect(named.text).toContain(SENSITIVE_MESSAGE);
+      const all = await h.call("sn_get", { table: "u_vault_child", sys_id: SYS_ID });
+      expect(all.isError, all.text).toBe(false);
+      expectNoSecret(all.text);
+    }
+  });
+
+  for (const [label, fixture] of Object.entries(cases)) {
+    it(`refuses sn_query and sn_get on the child, reading no record, for ${label}`, async () => {
+      const h = await harness({ fieldTypes: fixture });
+      for (const [tool, args] of reads) {
+        const result = await h.call(tool, args);
+        expect(result.isError, `${tool} ${JSON.stringify(args)}`).toBe(true);
+        expect(result.text).toContain(FIELD_TYPES_UNAVAILABLE_MESSAGE);
+        expectNoSecret(result.text);
+      }
+      expect(tableReads(h, "u_vault_child")).toHaveLength(0);
+      // The parent, where its own row is readable, still resolves and is read as usual.
+      const parent = await h.call("sn_query", { table: "u_vault", fields: "name" });
+      expect(parent.isError, parent.text).toBe((fixture.hiddenRows ?? []).includes("u_vault"));
+    });
+  }
+
+  it("falls back to name-only hiding under the opt-out, and warns, as for unreadable types", async () => {
+    const h = await harness({ fieldTypes: cases["a parent reference with no name"]!, dictionary: "not_required" });
+    const result = await h.call("sn_query", { table: "u_vault_child", fields: "name,key" });
+    expect(result.isError, result.text).toBe(false);
+    expect(h.warnings).toContain("field_types.names_only");
+  });
+
+  it("keeps no incomplete chain in the memo: the next call reads it again", async () => {
+    const h = await harness({ fieldTypes: cases["a parent reference with no name"]! });
+    await h.call("sn_query", { table: "u_vault_child", fields: "name" });
+    await h.call("sn_query", { table: "u_vault_child", fields: "name" });
+    const chainReads = h.reads.filter(
+      (read) => read.path === "/api/now/table/sys_db_object" && read.params.sysparm_query === "nameINu_vault_child"
+    );
+    expect(chainReads).toHaveLength(2);
+  });
+});
+
 describe("no switch turns type hiding off", () => {
   it("still refuses and drops hidden-typed fields under NODE_ENV=test with no cache configured", async () => {
     expect(process.env.NODE_ENV).toBe("test");
@@ -726,7 +790,7 @@ describe("hidden-values helper contract", () => {
       { table: "task", element: "number", internal_type: "string" },
       { table: "incident", element: "otp", internal_type: "password" },
     ];
-    const types = fieldTypesFromRows(rows, { incident: ["incident", "task"] }, { complete: true });
+    const types = fieldTypesFromRows(rows, { incident: { tables: ["incident", "task"], complete: true } }, { complete: true });
     expect(classifyField(types, "incident", "otp")).toBe("type");
     expect(classifyField(types, "incident", "number")).toBe("visible");
     expect(classifyField(types, "incident", "mystery")).toBe("unknown_type");

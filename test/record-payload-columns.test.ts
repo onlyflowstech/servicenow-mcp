@@ -250,7 +250,7 @@ describe("with no field policy", () => {
   });
 
   it.each(TABLES)("%s: a projection built outside the policy is held to the call's tables", (table) => {
-    const { scope } = hiddenFieldScope(fieldTypesFromRows([], { [table]: [table] }), [table], false);
+    const { scope } = hiddenFieldScope(fieldTypesFromRows([], { [table]: { tables: [table], complete: true } }), [table], false);
     runWithHiddenFieldScope(scope!, () => {
       const filtered = filterReadableRecord(rowFor(table), ["*"]);
       expect(JSON.stringify(filtered)).not.toContain(MARKER);

@@ -485,7 +485,9 @@ type, and `value` is never a filter, order or group field there.
   profile's metadata-cache TTL, if shorter), and concurrent calls share one
   read; no table grant is needed. While
   ServiceNow refuses or fails that read, every field-policy tool refuses with a
-  message naming this access.
+  message naming this access. A table whose parent tables can't all be read
+  from `sys_db_object` (or that is more than 12 levels deep) is treated the
+  same way.
 - **`"fieldTypes": { "dictionary": "not_required" }`** on a profile (or
   `SN_FIELD_TYPES_DICTIONARY=not_required` for the environment profile) lets
   those calls run with name-only hiding instead. The server warns at startup

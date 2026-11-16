@@ -240,6 +240,48 @@ describe("payload view: refused and withheld", () => {
     );
   });
 
+  describe("a table whose parent link cannot be read", () => {
+    // A custom table extending a credential table, and one inheriting a
+    // password2 field: each is withheld unless its whole chain is known.
+    const children = [
+      { child: "u_fake_oauth", parent: "oauth_entity", fields: { u_label: FAKE_SECRET } },
+      { child: "u_vendor_child", parent: "u_vendor", fields: { u_api_key_value: FAKE_SECRET } },
+    ] as const;
+    const levels = Array.from({ length: 11 }, (_, index) => `u_fake_level_${index + 1}`);
+    const model = (change: (tables: Record<string, string | null>) => void = () => {}, extra: Partial<World> = {}): World => {
+      const base = world(extra);
+      const tables: Record<string, string | null> = { ...base.tables, oauth_entity: null, u_fake_oauth: "oauth_entity" };
+      change(tables);
+      return { ...base, tables };
+    };
+    const cases: Record<string, (child: string, parent: string) => World> = {
+      "no sys_db_object row": (child) => model((tables) => delete tables[child]),
+      "an empty parent link": (child, parent) => model(undefined, { hiddenRows: [parent], withoutParentLinks: [child] }),
+      "a parent reference with no name": (_child, parent) => model(undefined, { hiddenRows: [parent] }),
+      // The child, eleven levels, then the parent: 13 tables.
+      "a chain longer than 12 tables": (child, parent) =>
+        model((tables) => {
+          levels.forEach((table, index) => (tables[table] = levels[index + 1] ?? parent));
+          tables[child] = levels[0]!;
+        }),
+    };
+
+    it("refuses the credential child and hides the inherited field when the chain is complete", async () => {
+      refused((await prepare(payloadOf("u_fake_oauth", { u_label: FAKE_SECRET }), ["u_fake_oauth"], model())).outcome, "refused", "credential_table");
+      const out = shown((await prepare(payloadOf("u_vendor_child", { u_api_key_value: FAKE_SECRET }), ["u_vendor_child"], model())).outcome);
+      expect(out.text).not.toContain(FAKE_SECRET);
+    });
+
+    for (const [label, build] of Object.entries(cases)) {
+      it(`withholds the credential child and the typed child for ${label}`, async () => {
+        for (const { child, parent, fields } of children) {
+          const { outcome } = await prepare(payloadOf(child, fields), [child], build(child, parent));
+          refused(outcome, "withheld", "hierarchy_unknown");
+        }
+      });
+    }
+  });
+
   it("withholds XML it cannot read: a DOCTYPE, an entity, a processing instruction, malformed markup", async () => {
     for (const payload of [
       `<!DOCTYPE x [<!ENTITY e "${FAKE_SECRET}">]><record_update/>`,

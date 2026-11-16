@@ -742,6 +742,19 @@ describe("evaluate: a table whose hierarchy is unknown is treated as a credentia
     });
   }
 
+  it("does not scan a table whose parent reference came back without a name", async () => {
+    const tables = { ...model().tables, u_cred_child: "discovery_credentials" };
+    const known = await run(model({ rows: [xmlRow(credentialChild())], tables }), { update_set: SET_ID });
+    const hidden = await run(model({ rows: [xmlRow(credentialChild())], tables, hiddenRows: ["discovery_credentials"] }), { update_set: SET_ID });
+    for (const { data } of [known, hidden]) {
+      expect(data.summary.coverage).toMatchObject({ credential_rows: 1, scanned: 0 });
+      expect(ruleIds(data)).not.toContain("SEC004");
+    }
+    expect(known.data.summary.facts.hierarchy).toBe("complete");
+    expect(hidden.data.summary.facts.hierarchy).toBe("partial");
+    expect(hidden.data.summary.coverage.partial).toBe(true);
+  });
+
   it("does not scan a credential table pushed past the table cap", async () => {
     const decoys = Array.from({ length: 67 }, (_, i) => {
       const t = (n: number) => `a${String(i * 3 + n).padStart(3, "0")}`;

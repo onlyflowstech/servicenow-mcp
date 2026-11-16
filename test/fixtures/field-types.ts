@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { fieldTypesFromRows, type FieldTypeLoader } from "../../src/hidden-values.js";
 
 /**
@@ -19,6 +21,14 @@ export interface FieldTypeFixture {
   readonly absent: readonly string[];
   /** View -> joined tables with their prefixes. */
   readonly views: Readonly<Record<string, readonly { table: string; prefix: string }[]>>;
+  /**
+   * Tables whose own sys_db_object row this account cannot read: the row is
+   * not returned, and where a child's dot-walk reaches it, its name comes
+   * back empty beside a stored reference that is still set.
+   */
+  readonly hiddenRows?: readonly string[];
+  /** Tables whose rows come back without the stored `super_class` references (names only). */
+  readonly withoutParentLinks?: readonly string[];
 }
 
 /** One hidden-typed field on a table no ordinary test reads. */
@@ -53,12 +63,12 @@ export function fieldTypeAnswer(
     const names = query.slice("nameIN".length).split(",");
     return answer(
       names
-        .filter((name) => !fixture.absent.includes(name))
+        .filter((name) => !fixture.absent.includes(name) && !(fixture.hiddenRows ?? []).includes(name))
         .map((name) => {
-          const row: Record<string, string> = { name };
-          (fixture.parents[name] ?? []).forEach((parent, index) => {
-            row[`${"super_class.".repeat(index + 1)}name`] = parent;
-          });
+          const row = sysDbObjectRow(name, fixture.parents[name] ?? [], fields, fixture.hiddenRows);
+          if ((fixture.withoutParentLinks ?? []).includes(name)) {
+            for (const key of Object.keys(row)) if (key.endsWith("super_class")) delete row[key];
+          }
           return row;
         })
     );
@@ -76,6 +86,51 @@ export function fieldTypeAnswer(
     );
   }
   return undefined;
+}
+
+/** A stand-in sys_id for a table's sys_db_object row. */
+export function fakeTableSysId(table: string): string {
+  return createHash("md5").update(`fake-table:${table}`).digest("hex");
+}
+
+/**
+ * A `sys_db_object` row as the instance returns it with stored values: every
+ * requested field present, `<hops>super_class` the stored reference (a sys_id,
+ * or empty past the chain's end), `<hops>super_class.name` that parent's name.
+ * A parent in `hidden` keeps its reference but loses its name, and every
+ * field read through its row comes back empty.
+ */
+export function sysDbObjectRow(
+  name: string,
+  parents: readonly string[],
+  fields: string,
+  hidden: readonly string[] = []
+): Record<string, string> {
+  const row: Record<string, string> = {};
+  for (const field of fields.split(",")) {
+    if (field === "name") {
+      row.name = name;
+      continue;
+    }
+    const link = /^((?:super_class\.)*)super_class$/u.exec(field);
+    if (link !== null) {
+      const hops = link[1]!.length / "super_class.".length;
+      const parent = parents[hops];
+      // Read from the row of the table `hops` levels up: empty past a hidden one.
+      const blocked = parents.slice(0, hops).some((entry) => hidden.includes(entry));
+      row[field] = parent === undefined || blocked ? "" : fakeTableSysId(parent);
+      continue;
+    }
+    const parentName = /^((?:super_class\.)+)name$/u.exec(field);
+    if (parentName !== null) {
+      const parent = parents[parentName[1]!.length / "super_class.".length - 1];
+      // A dot-walk past a hidden row comes back empty.
+      const index = parent === undefined ? -1 : parents.indexOf(parent);
+      const blocked = parents.slice(0, index + 1).some((entry) => hidden.includes(entry));
+      row[field] = parent === undefined || blocked ? "" : parent;
+    }
+  }
+  return row;
 }
 
 function answer(result: unknown[]): Answer {
@@ -113,4 +168,4 @@ export function fieldTypeResponse(
  * profile, configuration or environment variable can reach.
  */
 export const noHiddenFieldTypes: FieldTypeLoader = async (_client, tables) =>
-  fieldTypesFromRows([], Object.fromEntries([...tables].map((table) => [table, [table]])));
+  fieldTypesFromRows([], Object.fromEntries([...tables].map((table) => [table, { tables: [table], complete: true }])));

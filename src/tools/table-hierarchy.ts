@@ -15,10 +15,17 @@
  * hop by hop, and the read is a single metadata-cache entry for the call's one
  * sys_db_object watermark.
  *
+ * {@link resolveTableHierarchy} gives the names for labels and caps.
+ * {@link resolveTableChain} also says whether the chain is complete, for a
+ * caller that hides values by what a table inherits: it reads each stored
+ * parent reference beside the parent's name, so a parent whose row could not
+ * be read is told apart from no parent at all.
+ *
  * @module tools/table-hierarchy
  */
 
 import type { ServiceNowOperations } from "../client.js";
+import { tableChainFields, tableChainFromRow, type TableChain } from "../hidden-values.js";
 import { FORCE_RECACHE_PARAM } from "../metadata-cache.js";
 import { escapeQueryValue } from "../utils.js";
 
@@ -74,6 +81,47 @@ export async function resolveTableHierarchy(
     hierarchy.push(ancestor);
   }
   return Object.freeze(hierarchy);
+}
+
+/**
+ * Resolve `table`'s chain, as {@link resolveTableHierarchy}, and whether it is
+ * complete ({@link TableChain}). No row, a parent reference whose name did not
+ * come back, a field absent from the row, a parent that is not a table name,
+ * a loop, or a chain longer than `maxDepth` tables is incomplete. A failed
+ * read throws; a `table` that is not a table name is rejected before any
+ * request.
+ */
+export async function resolveTableChain(
+  client: ServiceNowOperations,
+  table: string,
+  maxDepth: number,
+  forceRecache: boolean
+): Promise<TableChain> {
+  const root = normalizeTableName(table);
+  if (root === undefined) throw new TypeError("table hierarchy requires a valid table name");
+  if (maxDepth < 1) return Object.freeze({ tables: Object.freeze([root]), complete: false });
+  const response = await client.get<{ result?: unknown[] }>(
+    "/api/now/table/sys_db_object",
+    {
+      sysparm_query: `name=${escapeQueryValue(root)}`,
+      sysparm_fields: tableChainFields(maxDepth).join(","),
+      sysparm_limit: "1",
+      // Stored values: each reference as a sys_id, each name as stored.
+      sysparm_display_value: "false",
+      sysparm_exclude_reference_link: "true",
+      ...(forceRecache ? { [FORCE_RECACHE_PARAM]: "true" } : {}),
+    }
+  );
+  const row: unknown = Array.isArray(response?.result) ? response.result[0] : undefined;
+  if (
+    typeof row !== "object" ||
+    row === null ||
+    Array.isArray(row) ||
+    normalizeTableName((row as Record<string, unknown>).name) !== root
+  ) {
+    return Object.freeze({ tables: Object.freeze([root]), complete: false });
+  }
+  return tableChainFromRow(row as Record<string, unknown>, root, maxDepth);
 }
 
 function normalizeTableName(candidate: unknown): string | undefined {

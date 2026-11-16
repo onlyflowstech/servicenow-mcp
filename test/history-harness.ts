@@ -22,6 +22,7 @@ import type { ExecutionContextDependencies } from "../src/execution-context.js";
 import { runWithFieldPolicyConfiguration, type FieldPolicyConfigurationInput } from "../src/field-policy.js";
 import type { MetadataCacheConfigInput } from "../src/metadata-cache.js";
 import { fieldTypesFromRows, type DictionaryRow, type FieldTypeLoader } from "../src/hidden-values.js";
+import { sysDbObjectRow } from "./fixtures/field-types.js";
 import type { Profile, ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy, type TableAccessPolicy } from "../src/table-policy.js";
@@ -56,6 +57,10 @@ export interface HistoryFixture {
   readonly records: Readonly<Record<string, string | Failure>>;
   /** Class -> its parents, nearest first. */
   readonly parents?: Readonly<Record<string, readonly string[]>>;
+  /** Tables whose sys_db_object row this account cannot read (see `sysDbObjectRow`). */
+  readonly hiddenRows?: readonly string[];
+  /** Classes whose sys_db_object row comes back without the stored `super_class` references. */
+  readonly withoutParentLinks?: readonly string[];
   /** Dictionary rows: `{name, element, internal_type, audit?}`; an empty element is the collection row. */
   readonly dictionary?: readonly Row[] | Failure;
   readonly audit?: readonly Row[] | Failure;
@@ -102,11 +107,11 @@ export function fakeInstance(fixture: HistoryFixture): FakeInstance {
     const query = params.sysparm_query ?? "";
     if (table === "sys_db_object") {
       const root = /^name=([a-z0-9_]+)$/u.exec(query)?.[1];
-      if (root === undefined) return { result: [] };
-      const row: Row = { name: root };
-      (fixture.parents?.[root] ?? []).forEach((parent, index) => {
-        row[`${"super_class.".repeat(index + 1)}name`] = parent;
-      });
+      if (root === undefined || (fixture.hiddenRows ?? []).includes(root)) return { result: [] };
+      const row: Row = sysDbObjectRow(root, fixture.parents?.[root] ?? [], params.sysparm_fields ?? "name", fixture.hiddenRows);
+      if ((fixture.withoutParentLinks ?? []).includes(root)) {
+        for (const key of Object.keys(row)) if (key.endsWith("super_class")) delete row[key];
+      }
       return { result: [row] };
     }
     if (table === "sys_dictionary") {
@@ -250,7 +255,7 @@ export const FULL_TABLES = [
 
 /** A dispatcher type lookup that finds the given hidden-typed fields and nothing else. */
 export function hiddenTypes(rows: readonly DictionaryRow[] = []): FieldTypeLoader {
-  return async (_client, tables) => fieldTypesFromRows(rows, Object.fromEntries([...tables].map((table) => [table, [table]])));
+  return async (_client, tables) => fieldTypesFromRows(rows, Object.fromEntries([...tables].map((table) => [table, { tables: [table], complete: true }])));
 }
 
 // ---------------------------------------------------------------------------

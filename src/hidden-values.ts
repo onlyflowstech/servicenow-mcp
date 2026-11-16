@@ -23,7 +23,10 @@
  *
  * The loader never returns an empty map for "could not read": an unreadable
  * dictionary is the explicit `unavailable` state, and a table it could not
- * resolve has no entry (so every field on it is `unknown_type`).
+ * resolve has no entry (so every field on it is `unknown_type`). A table
+ * resolves only when its whole extension chain is known ({@link TableChain}):
+ * a chain that may stop short could hide that the table inherits a
+ * hidden-typed field.
  *
  * The scope at the bottom carries one call's resolved sets to field policy,
  * which enforces them; see `field-policy.ts`.
@@ -108,7 +111,9 @@ export type ReferenceResolver = (table: string, field: string) => string | undef
  * A dot-walked path (`caller_id.user_password`) is decided on the table it
  * ends at, for both the type and the credential-table check; each hop's
  * target comes from `referenceTarget`, and a hop it cannot resolve makes the
- * path `unknown_type`. Field policy rejects dot-walked names outright today;
+ * path `unknown_type`, as does a table that is not in `types` (a loader or
+ * {@link fieldTypesFromRows} leaves out every table whose chain is not
+ * complete). Field policy rejects dot-walked names outright today;
  * this is for tools that read paths from the instance (history, payloads).
  */
 export function classifyField(
@@ -161,13 +166,15 @@ export interface DictionaryRow {
 /**
  * Field types from dictionary rows the caller has already read, so the read
  * stays inside that caller's own declared plan. `hierarchies` maps each table
- * the caller will ask about to its chain (the table first). With
- * `complete: true` the rows are every field of those chains, so a field with
- * no row is `unknown_type`; otherwise only hidden-typed rows matter.
+ * the caller will ask about to its chain (the table first) and whether that
+ * chain is complete; a table whose chain is not complete is left unresolved,
+ * so every field on it is `unknown_type`. With `complete: true` the rows are
+ * every field of those chains, so a field with no row is `unknown_type`;
+ * otherwise only hidden-typed rows matter.
  */
 export function fieldTypesFromRows(
   rows: Iterable<DictionaryRow>,
-  hierarchies: Readonly<Record<string, readonly string[]>>,
+  hierarchies: Readonly<Record<string, TableChain>>,
   options: { readonly complete?: boolean } = {}
 ): FieldTypes {
   const byTable = new Map<string, Map<string, string>>();
@@ -183,8 +190,9 @@ export function fieldTypesFromRows(
   const tables = new Map<string, ResolvedTableTypes>();
   for (const [name, chain] of Object.entries(hierarchies)) {
     const table = normalizeName(name);
-    const hierarchy = chain.map(normalizeName);
-    if (table === undefined || hierarchy.length === 0 || hierarchy.some((entry) => entry === undefined)) {
+    if (table === undefined || chain?.complete !== true || !Array.isArray(chain.tables)) continue;
+    const hierarchy = chain.tables.map(normalizeName);
+    if (hierarchy.length === 0 || hierarchy.some((entry) => entry === undefined)) {
       continue;
     }
     const all = new Map<string, string>();
@@ -306,6 +314,108 @@ function typeText(candidate: unknown): string | undefined {
   return undefined;
 }
 
+// ── Extension chains ───────────────────────────────────────────────
+
+/**
+ * A table's extension chain as `sys_db_object` gave it, and whether it is
+ * known to end there.
+ */
+export interface TableChain {
+  /** The table first, then its ancestors, nearest first. */
+  readonly tables: readonly string[];
+  /**
+   * True only when the last table's parent link came back empty, both the
+   * stored reference and the parent's name: that table extends nothing.
+   * False when the row is missing, a link or name is absent from the row, a
+   * link has no name (the parent's row could not be read), a parent is not a
+   * table name, the chain loops, or it is longer than the read covers. An
+   * incomplete chain is unknown: the table may extend one that defines a
+   * hidden-typed field, or a credential table.
+   */
+  readonly complete: boolean;
+}
+
+/** The stored parent reference of the table `hops` levels up a `sys_db_object` row's chain. */
+function parentLinkField(hops: number): string {
+  return `${"super_class.".repeat(hops)}super_class`;
+}
+
+/** That parent's name, dot-walked. */
+function parentNameField(hops: number): string {
+  return `${"super_class.".repeat(hops)}super_class.name`;
+}
+
+/**
+ * The `sys_db_object` fields that give a chain of up to `maxTables` tables in
+ * one read of the table's own row: its name, then, for each table of the
+ * chain, its stored parent reference and that parent's name (dot-walked).
+ * The last table's reference is read without a name, to tell a chain that
+ * ends there from one that goes on past the read.
+ */
+export function tableChainFields(maxTables: number): string[] {
+  const fields = ["name"];
+  for (let hops = 0; hops < maxTables; hops += 1) {
+    fields.push(parentLinkField(hops));
+    if (hops < maxTables - 1) fields.push(parentNameField(hops));
+  }
+  return fields;
+}
+
+/**
+ * The chain of `table` from its `sys_db_object` row, read with
+ * {@link tableChainFields}`(maxTables)`. Only an empty reference with an
+ * empty name ends a chain; see {@link TableChain.complete}.
+ */
+export function tableChainFromRow(
+  row: Readonly<Record<string, unknown>>,
+  table: string,
+  maxTables: number
+): TableChain {
+  const tables = [table];
+  const chain = (complete: boolean): TableChain => Object.freeze({ tables: Object.freeze(tables), complete });
+  for (let hops = 0; hops < maxTables; hops += 1) {
+    if (hops === maxTables - 1) {
+      // The last table read: its reference alone says whether the chain ends
+      // there or goes on past the read.
+      const link = fieldText(row, parentLinkField(hops));
+      return chain(link !== undefined && link.trim() === "");
+    }
+    const parent = parentFromRow(row, parentLinkField(hops), parentNameField(hops));
+    if (parent === null) return chain(true);
+    // An unknown link, or a loop.
+    if (parent === undefined || tables.includes(parent)) return chain(false);
+    tables.push(parent);
+  }
+  return chain(false);
+}
+
+/**
+ * One parent link of a `sys_db_object` row: the parent's name, `null` when
+ * the table extends nothing, or `undefined` when the row does not say. Both
+ * fields must be present: an absent one is unknown, never empty.
+ */
+function parentFromRow(
+  row: Readonly<Record<string, unknown>>,
+  linkField: string,
+  nameField: string
+): string | null | undefined {
+  const link = fieldText(row, linkField);
+  const name = fieldText(row, nameField);
+  if (link === undefined || name === undefined) return undefined;
+  const linkEmpty = link.trim() === "";
+  const parent = name.trim().toLowerCase();
+  if (linkEmpty && parent === "") return null;
+  // A reference whose name did not come back (the parent's row is hidden from
+  // this account), or a name with no reference: either way, unknown.
+  if (linkEmpty || parent === "") return undefined;
+  return FIELD_NAME.test(parent) ? parent : undefined;
+}
+
+/** A field's stored text, or undefined when the row does not carry it as text. */
+function fieldText(row: Readonly<Record<string, unknown>>, field: string): string | undefined {
+  return Object.hasOwn(row, field) ? storedText(row[field]) : undefined;
+}
+
 // ── Loader ─────────────────────────────────────────────────────────
 
 /**
@@ -328,8 +438,17 @@ const TABLE_MEMO_PREFIX = "hidden-values:table:v1:";
 const CHAIN_FLIGHT_PREFIX = "hidden-values:chain-read:v1:";
 
 type DictionaryState = ReadonlyMap<string, ReadonlyMap<string, string>> | "unavailable";
-/** A table's chain, `null` when sys_db_object has no row for it. */
-type ChainState = readonly string[] | null;
+/** The row of a table did not show where its chain ends (see {@link TableChain}). */
+const INCOMPLETE_CHAIN = "incomplete";
+/**
+ * A table's complete chain, `null` when sys_db_object has no row for it, or
+ * {@link INCOMPLETE_CHAIN}.
+ */
+type ChainState = readonly string[] | null | typeof INCOMPLETE_CHAIN;
+
+function isKnownChain(chain: ChainState | undefined): chain is readonly string[] {
+  return chain !== undefined && chain !== null && chain !== INCOMPLETE_CHAIN;
+}
 
 export interface LoadFieldTypesOptions {
   /** Refresh the memo and the metadata cache behind it. */
@@ -360,7 +479,10 @@ export type FieldTypeLoader = (
  *
  * The dictionary read failing, returning no rows, or returning a full page
  * gives `unavailable`. A table whose chain or view cannot be resolved is left
- * out of `tables`, so its fields are `unknown_type`. A cancelled read rethrows.
+ * out of `tables`, so its fields are `unknown_type`: that includes a chain
+ * that is not complete ({@link TableChain}), such as a parent reference whose
+ * name did not come back, or a chain longer than 12 tables. Only complete
+ * chains are kept in the memo. A cancelled read rethrows.
  */
 export async function loadFieldTypes(
   client: ServiceNowOperations,
@@ -404,7 +526,7 @@ export async function loadFieldTypes(
   if (pending.length > 0) {
     for (const [table, chain] of read) {
       chains.set(table, chain);
-      if (chain !== null) remember(table, Object.freeze({ kind: "table", chain }));
+      if (isKnownChain(chain)) remember(table, Object.freeze({ kind: "table", chain }));
     }
     const absent = pending.filter((table) => read.get(table) === null);
     if (absent.length > 0) {
@@ -421,7 +543,7 @@ export async function loadFieldTypes(
   if (joined.length > 0) {
     for (const [table, chain] of await sharedChains(reader, memo, joined)) {
       chains.set(table, chain);
-      if (chain !== null) remember(table, Object.freeze({ kind: "table", chain }));
+      if (isKnownChain(chain)) remember(table, Object.freeze({ kind: "table", chain }));
     }
   }
 
@@ -459,7 +581,7 @@ function resolveTable(
   dictionary: ReadonlyMap<string, ReadonlyMap<string, string>>
 ): ResolvedTableTypes | undefined {
   const chain = chains.get(table);
-  if (chain === undefined) return undefined;
+  if (chain === undefined || chain === INCOMPLETE_CHAIN) return undefined;
   if (chain !== null) return resolvedTable(chain, inheritedHidden(chain, dictionary));
   // No sys_db_object row: only a database view resolves; a view column is
   // `<prefix>_<field>` of the table joined under that prefix.
@@ -469,7 +591,7 @@ function resolveTable(
   const hierarchy = [table];
   for (const source of sources) {
     const sourceChain = chains.get(source.table);
-    if (sourceChain === undefined || sourceChain === null) return undefined;
+    if (!isKnownChain(sourceChain)) return undefined;
     hierarchy.push(...sourceChain.filter((entry) => !hierarchy.includes(entry)));
     for (const [element, type] of inheritedHidden(sourceChain, dictionary)) {
       const column = `${source.prefix}_${element}`;
@@ -640,21 +762,21 @@ function parseDictionaryRows(rows: unknown): DictionaryState {
   return byTable;
 }
 
-/** Chains for `tables`, in one read. Unread tables are left out of the map. */
+/**
+ * Chains for `tables`, in one read of their own `sys_db_object` rows with the
+ * stored parent references and the parents' names up to 12 tables. Unread
+ * tables are left out of the map.
+ */
 async function tableChains(
   client: ServiceNowOperations,
   tables: readonly string[]
 ): Promise<Map<string, ChainState>> {
   const chains = new Map<string, ChainState>();
-  const ancestorFields = Array.from(
-    { length: MAX_HIERARCHY_DEPTH - 1 },
-    (_, index) => `${"super_class.".repeat(index + 1)}name`
-  );
   let rows: unknown;
   try {
     const response = await client.getWithMeta<{ result?: unknown }>("/api/now/table/sys_db_object", {
       sysparm_query: `nameIN${tables.join(",")}`,
-      sysparm_fields: ["name", ...ancestorFields].join(","),
+      sysparm_fields: tableChainFields(MAX_HIERARCHY_DEPTH).join(","),
       sysparm_limit: String(tables.length),
       sysparm_display_value: "false",
       sysparm_exclude_reference_link: "true",
@@ -670,13 +792,8 @@ async function tableChains(
     const record = row as Record<string, unknown>;
     const table = normalizeName(storedText(record.name));
     if (table === undefined || !tables.includes(table)) continue;
-    const chain = [table];
-    for (const field of ancestorFields) {
-      const ancestor = normalizeName(storedText(record[field]));
-      if (ancestor === undefined || chain.includes(ancestor)) break;
-      chain.push(ancestor);
-    }
-    chains.set(table, Object.freeze(chain));
+    const chain = tableChainFromRow(record, table, MAX_HIERARCHY_DEPTH);
+    chains.set(table, chain.complete ? chain.tables : INCOMPLETE_CHAIN);
   }
   // The read succeeded: a table it did not return has no sys_db_object row.
   for (const table of tables) if (!chains.has(table)) chains.set(table, null);
@@ -747,17 +864,13 @@ export const PLAN_FIELD_TYPE_DOT_WALKS = Object.freeze([
 export const PLAN_CHAIN_LEVELS = 8;
 /** Tables in one chain, at most; a longer chain is incomplete. */
 const PLAN_CHAIN_TABLES = 16;
+const PLAN_PARENT_LINK = "super_class";
 const PLAN_PARENT_NAME = "super_class.name";
 /** The base table of all metadata, which extends nothing: never read. */
 const PLAN_METADATA_ROOT = "sys_metadata";
 
 /** A table's chain as the plan-bounded loader read it. */
-export interface PlanTableChain {
-  /** The table first, then its ancestors, nearest first. */
-  readonly tables: readonly string[];
-  /** True when the chain reaches a table that extends nothing. */
-  readonly complete: boolean;
-}
+export type PlanTableChain = TableChain;
 
 /** What {@link loadFieldTypesInPlan} returns. */
 export interface PlanFieldTypes {
@@ -796,9 +909,12 @@ export interface LoadFieldTypesInPlanOptions {
 
 /**
  * Field types for `tables`, read only from tables a tool can declare in its
- * own plan: `sys_db_object` one level per read (the parent's name is a
- * one-hop dot-walk, {@link PLAN_FIELD_TYPE_DOT_WALKS}) and one instance-wide
- * `sys_dictionary` read of the hidden types. The two run in parallel.
+ * own plan: `sys_db_object` one level per read (the stored `super_class`
+ * reference, and the parent's name as a one-hop dot-walk,
+ * {@link PLAN_FIELD_TYPE_DOT_WALKS}) and one instance-wide `sys_dictionary`
+ * read of the hidden types. The two run in parallel. A chain ends only at a
+ * row whose reference and parent name are both empty; a reference whose name
+ * did not come back leaves the chain incomplete ({@link TableChain}).
  *
  * Unlike {@link loadFieldTypes} it never reads `sys_db_view_table` and keeps
  * nothing in the memo: a database view (no `sys_db_object` row) stays
@@ -841,7 +957,7 @@ export async function loadFieldTypesInPlan(
       }
       const response = await client.get("/api/now/table/sys_db_object", {
         sysparm_query: `nameIN${pending.join(",")}`,
-        sysparm_fields: ["name", PLAN_PARENT_NAME].join(","),
+        sysparm_fields: ["name", PLAN_PARENT_LINK, PLAN_PARENT_NAME].join(","),
         sysparm_limit: String(pending.length),
         sysparm_display_value: "false",
         sysparm_exclude_reference_link: "true",
@@ -850,15 +966,12 @@ export async function loadFieldTypesInPlan(
       for (const row of resultRows(response)) {
         const name = rawText(row.name)?.trim().toLowerCase();
         if (name === undefined || !pending.includes(name)) continue;
-        const parent = rawText(row[PLAN_PARENT_NAME])?.trim().toLowerCase() ?? "";
-        if (parent === "") parents.set(name, null);
-        else if (FIELD_NAME.test(parent)) {
-          parents.set(name, parent);
-          if (!parents.has(parent)) next.add(parent);
-        } else {
-          // A parent that is not a table name: the chain stops, unknown.
-          parents.set(name, undefined);
-        }
+        // Null when it extends nothing; undefined (the chain stops, unknown)
+        // for a reference whose name did not come back, an absent field, or a
+        // parent that is not a table name.
+        const parent = parentFromRow(row, PLAN_PARENT_LINK, PLAN_PARENT_NAME);
+        parents.set(name, parent);
+        if (typeof parent === "string" && !parents.has(parent)) next.add(parent);
       }
       pending = [...next].filter((table) => !parents.has(table));
     }
@@ -911,8 +1024,8 @@ export async function loadFieldTypesInPlan(
     const chain = planChainOf(table, parents);
     if (chain !== undefined) chains.set(table, chain);
   }
-  const hierarchies: Record<string, readonly string[]> = {};
-  for (const [table, chain] of chains) if (chain.complete) hierarchies[table] = chain.tables;
+  // Only complete chains resolve (fieldTypesFromRows leaves the rest out).
+  const hierarchies: Record<string, TableChain> = Object.fromEntries(chains);
   const types =
     dictionaryRows === undefined ? FIELD_TYPES_UNAVAILABLE : fieldTypesFromRows(dictionaryRows, hierarchies);
   return Object.freeze({ types, chains, hierarchyRead });

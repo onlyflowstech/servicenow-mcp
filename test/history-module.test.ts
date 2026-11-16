@@ -535,14 +535,39 @@ describe("an extension chain that cannot be read in full", () => {
     expect(data.warnings).toBeUndefined();
   });
 
-  it("withholds values, with a warning, when the chain stops before the table that defines sys_id", async () => {
-    const { result } = await run(fixture({}), args, { tableAccess });
+  // Every extended table also has its own sys_id dictionary row, as on an
+  // instance: the chain's completeness comes from sys_db_object alone.
+  const levels = Array.from({ length: 11 }, (_, index) => `u_fake_level_${index + 1}`);
+  const cases: Record<string, Partial<HistoryFixture>> = {
+    "no sys_db_object row": { parents: { u_fake_client: ["oauth_entity"] }, hiddenRows: ["u_fake_client"] },
+    "an empty parent link": {
+      parents: { u_fake_client: ["oauth_entity"] },
+      hiddenRows: ["oauth_entity"],
+      withoutParentLinks: ["u_fake_client"],
+    },
+    "a parent reference with no name": { parents: { u_fake_client: ["oauth_entity"] }, hiddenRows: ["oauth_entity"] },
+    "a chain longer than 12 tables": { parents: { u_fake_client: [...levels, "oauth_entity"] } },
+  };
+  for (const [label, chain] of Object.entries(cases)) {
+    it(`withholds values, with a warning, for ${label}`, async () => {
+      const ownSysId = { name: "u_fake_client", element: "sys_id", internal_type: "GUID", audit: "false" };
+      const { result } = await run({ ...fixture({}), ...chain, dictionary: [...dictionary, ownSysId] }, args, { tableAccess });
+      const data = dataOf(result);
+      expect(eventsOf(data)).toEqual([
+        { time: "2026-03-01 08:00:00", source: "audit", field: "u_label", user: "fake.user.one", value_hidden: true },
+      ]);
+      expect(data.warnings).toEqual([CHAIN_UNCONFIRMED_WARNING]);
+      expect(JSON.stringify(data)).not.toContain("fake-label-value");
+    });
+  }
+
+  it("shows the value of a table whose chain is known to end at a table that is not a credential table", async () => {
+    const { result } = await run({ ...fixture({}), parents: { u_fake_client: [...levels.slice(0, 10)] } }, args, { tableAccess });
     const data = dataOf(result);
     expect(eventsOf(data)).toEqual([
-      { time: "2026-03-01 08:00:00", source: "audit", field: "u_label", user: "fake.user.one", value_hidden: true },
+      { time: "2026-03-01 08:00:00", source: "audit", field: "u_label", user: "fake.user.one", old: "old 1", new: "fake-label-value" },
     ]);
-    expect(data.warnings).toEqual([CHAIN_UNCONFIRMED_WARNING]);
-    expect(JSON.stringify(data)).not.toContain("fake-label-value");
+    expect(data.warnings).toBeUndefined();
   });
 });
 

@@ -20,6 +20,7 @@ import {
   loadFieldTypes,
   loadFieldTypesInPlan,
 } from "../src/hidden-values.js";
+import { sysDbObjectRow } from "./fixtures/field-types.js";
 import { expectReadsWithin, recordingInstance, type RecordedCall, type RecordingInstance } from "./platform-view-harness.js";
 
 const PLAN = Object.keys(PLAN_FIELD_TYPE_FIELDS);
@@ -28,6 +29,19 @@ interface World {
   /** Table -> parent, or null when it extends nothing. A table not listed has no row. */
   tables: Record<string, string | null>;
   dictionary: { name: string; element: string; internal_type: string }[];
+  /** Tables whose sys_db_object row this account cannot read (see `sysDbObjectRow`). */
+  hiddenRows?: string[];
+  /** Tables whose row comes back without the stored `super_class` reference. */
+  withoutParentLinks?: string[];
+}
+
+/** `name`'s ancestors in `tables`, nearest first. */
+function chainOf(tables: Record<string, string | null>, name: string): string[] {
+  const chain: string[] = [];
+  for (let parent = tables[name]; parent !== null && parent !== undefined && !chain.includes(parent); parent = tables[parent]) {
+    chain.push(parent);
+  }
+  return chain;
 }
 
 const WORLD: World = {
@@ -56,8 +70,6 @@ interface FakeOptions {
   fail?: (call: RecordedCall) => Error | undefined;
   /** The dictionary read's HTTP status. */
   dictionaryStatus?: number;
-  /** Answer `sys_db_object` with every `super_class.…name` field a caller asks for (the instance-wide loader's shape). */
-  multiHop?: boolean;
 }
 
 /** A recording instance that answers the two metadata tables from `world`. */
@@ -70,17 +82,14 @@ function fake(world: World, options: FakeOptions = {}): { instance: RecordingIns
     const query = call.params.sysparm_query ?? "";
     if (table === "sys_db_object") {
       const names = /^nameIN([^^]*)/u.exec(query)![1]!.split(",");
-      const fields = (call.params.sysparm_fields ?? "").split(",");
+      // Every field the caller asks for, as the instance answers it.
       return {
         result: names
-          .filter((name) => name in world.tables)
+          .filter((name) => name in world.tables && !(world.hiddenRows ?? []).includes(name))
           .map((name) => {
-            const row: Record<string, string> = { name };
-            let current: string | null | undefined = world.tables[name];
-            for (const field of fields.filter((entry) => entry.startsWith("super_class."))) {
-              row[field] = current ?? "";
-              if (!options.multiHop) break;
-              current = current === null || current === undefined ? null : world.tables[current];
+            const row = sysDbObjectRow(name, chainOf(world.tables, name), call.params.sysparm_fields ?? "name", world.hiddenRows);
+            if ((world.withoutParentLinks ?? []).includes(name)) {
+              for (const key of Object.keys(row)) if (key.endsWith("super_class")) delete row[key];
             }
             return row;
           }),
@@ -121,7 +130,7 @@ describe("loadFieldTypesInPlan: reads stay in the plan", () => {
     expectReadsWithin(instance, PLAN, PLAN_FIELD_TYPE_DOT_WALKS);
     expect(new Set(tablesRead(instance))).toEqual(new Set(["sys_db_object", "sys_dictionary"]));
     for (const call of instance.calls.filter((c) => c.path.endsWith("/sys_db_object"))) {
-      expect(call.params.sysparm_fields).toBe("name,super_class.name");
+      expect(call.params.sysparm_fields).toBe("name,super_class,super_class.name");
     }
     // Levels: the three tables, then their parents, then the grandchild's root.
     expect(instance.calls.filter((c) => c.path.endsWith("/sys_db_object")).map((c) => c.params.sysparm_query)).toEqual([
@@ -157,7 +166,7 @@ describe("loadFieldTypesInPlan: reads stay in the plan", () => {
     const inPlan = fake(WORLD);
     const plan = await loadFieldTypesInPlan(inPlan.ops, tables);
     expectReadsWithin(inPlan.instance, PLAN, PLAN_FIELD_TYPE_DOT_WALKS);
-    const wide = fake(WORLD, { multiHop: true });
+    const wide = fake(WORLD);
     const instanceWide = await loadFieldTypes(wide.ops, tables);
     // The instance-wide loader's multi-hop reads are outside any view's plan; it is judged here only as the reference.
     wide.instance.judged = wide.instance.calls.length;

@@ -1377,7 +1377,9 @@ a known non-secret `type`. The types come from a cached `sys_dictionary` read,
 so the integration user needs read access to `sys_dictionary` and
 `sys_db_object`; without it the tools refuse, unless the profile sets
 `"fieldTypes": { "dictionary": "not_required" }` to hide by name only (see
-[Production security](docs/PRODUCTION-SECURITY.md#password-type-fields)).
+[Production security](docs/PRODUCTION-SECURITY.md#password-type-fields)). A
+table whose parent tables can't all be read from `sys_db_object` (or that is
+more than 12 levels deep) is treated the same way.
 
 State it on a profile in `~/.servicenow-mcp/config.json`, beside
 `tableAccess`, in one of two forms. A profile that states both fails to load.

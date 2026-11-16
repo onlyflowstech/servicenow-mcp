@@ -24,8 +24,8 @@
  * 2. the class's extension chain (`sys_db_object`) and every dictionary row
  *    of that chain (`sys_dictionary`), uncached and then kept for an hour in
  *    the per-credential memo, so a warm call skips both. Skipped as well when
- *    no source on the page needs types. The chain counts only when it
- *    reaches the table that defines `sys_id`;
+ *    no source on the page needs types. The chain counts only when it is
+ *    known to end at a table that extends nothing;
  * 3. each planned source, newest first, `limit + 1` rows, uncached. The
  *    journal and flow reads run with step 2; the audit read follows it, so
  *    its query leaves out the chain's journal fields. A source whose page is
@@ -124,7 +124,7 @@ import {
   withStructuredResultEnvelope,
 } from "./result-envelope.js";
 import { encodeTailCursor, isStoredTimestamp, isSysId, type TailCursor, type TailPosition } from "./syslog-cursor.js";
-import { resolveTableHierarchy } from "./table-hierarchy.js";
+import { resolveTableChain } from "./table-hierarchy.js";
 import {
   defineServiceNowToolModule,
   withRequiredProfile,
@@ -439,7 +439,7 @@ interface ClassTypesEntry {
   readonly chain: readonly string[];
   readonly rows: readonly DictionaryRow[];
   readonly auditEnabled: boolean | null;
-  /** Some table of the chain defines `sys_id`: the chain reached its base table. */
+  /** The chain is known to end at a table that extends nothing (see `TableChain`). */
   readonly complete: boolean;
   /** The dictionary read filled its page, so it may be cut short. */
   readonly full: boolean;
@@ -457,7 +457,7 @@ function typesOf(entry: ClassTypesEntry, recordClass: string): ClassTypes {
   if (entry.full) return NO_TYPES;
   if (!entry.complete) return { types: FIELD_TYPES_UNAVAILABLE, auditEnabled: entry.auditEnabled, unconfirmedChain: true };
   return {
-    types: fieldTypesFromRows(entry.rows, { [recordClass]: entry.chain }, { complete: true }),
+    types: fieldTypesFromRows(entry.rows, { [recordClass]: { tables: entry.chain, complete: true } }, { complete: true }),
     auditEnabled: entry.auditEnabled,
   };
 }
@@ -475,11 +475,11 @@ function typesOf(entry: ClassTypesEntry, recordClass: string): ClassTypes {
  * `unavailable` state; a full page or a chain that stops short is kept for
  * 30 seconds and gives it too. A cancellation rethrows.
  *
- * The chain is only trusted when it reaches the table that defines `sys_id`:
- * every chain ends at a base table, which owns it, while an extended table
- * inherits it. A chain that stops short (an ancestor whose `sys_db_object`
- * row did not come back) could hide that the class extends a credential
- * table, so its types are `unavailable` too.
+ * The chain is only trusted when the shared reader reports it complete: it
+ * ends at a table whose stored parent reference and parent name are both
+ * empty. A chain that may stop short (no row, a parent whose row did not come
+ * back, or one longer than the read) could hide that the class extends a
+ * credential table, so its types are `unavailable` too.
  */
 async function readClassTypes(
   services: ServiceNowOperations,
@@ -521,7 +521,9 @@ async function readClassTypesEntry(
   signal: AbortSignal | undefined
 ): Promise<ClassTypesEntry | undefined> {
   try {
-    const chain = await inOwnScope(signal, () => resolveTableHierarchy(reader, recordClass, MAX_HIERARCHY_DEPTH, false));
+    const { tables: chain, complete } = await inOwnScope(signal, () =>
+      resolveTableChain(reader, recordClass, MAX_HIERARCHY_DEPTH, false)
+    );
     const fields = [...HISTORY_DICTIONARY_FIELDS, ...(plan.auditFlag ? [HISTORY_DICTIONARY_AUDIT_FIELD] : [])];
     const response = await inOwnScope(signal, () =>
       reader.get(`${TABLE_PATH}sys_dictionary`, {
@@ -556,7 +558,7 @@ async function readClassTypesEntry(
       chain: Object.freeze([...chain]),
       rows: Object.freeze(dictionaryRows),
       auditEnabled,
-      complete: dictionaryRows.some((row) => row.element === "sys_id"),
+      complete,
       full: false,
     });
   } catch (error) {

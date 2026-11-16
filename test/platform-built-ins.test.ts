@@ -316,7 +316,7 @@ describe("type hiding applies on top", () => {
   it("refuses and drops a password-typed column on every platform table, with no field policy", () => {
     const types = fieldTypesFromRows(
       hiddenRows,
-      Object.fromEntries(PLATFORM.map((table) => [table, [table]]))
+      Object.fromEntries(PLATFORM.map((table) => [table, { tables: [table], complete: true }]))
     );
     const { scope } = hiddenFieldScope(types, PLATFORM, false);
     expect(scope).toBeDefined();
@@ -460,7 +460,7 @@ describe("sn_query under a \"*\" table grant", () => {
     const loader: FieldTypeLoader = async (_client, tables) =>
       fieldTypesFromRows(
         [{ table: "sys_update_xml", element: "u_signing_key", internal_type: "password2" }],
-        Object.fromEntries([...tables].map((table) => [table, [table]]))
+        Object.fromEntries([...tables].map((table) => [table, { tables: [table], complete: true }]))
       );
     const connected = await connect(undefined, loader);
     const named = await connected.client.callTool({

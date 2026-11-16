@@ -6,6 +6,7 @@
 
 import type { ServiceNowOperations } from "../../src/client.js";
 import { recordingInstance, type RecordedCall, type RecordingInstance } from "../platform-view-harness.js";
+import { sysDbObjectRow } from "./field-types.js";
 
 export type Row = Record<string, unknown>;
 
@@ -29,6 +30,10 @@ export interface World {
   /** Table -> parent, or null when it extends nothing. A table not listed has no row. */
   tables: Record<string, string | null>;
   dictionary: { name: string; element: string; internal_type: string }[];
+  /** Tables whose sys_db_object row this account cannot read (see `sysDbObjectRow`). */
+  hiddenRows?: string[];
+  /** Tables whose row comes back without the stored `super_class` reference. */
+  withoutParentLinks?: string[];
 }
 
 export const STANDARD_TABLES: Record<string, string | null> = {
@@ -262,7 +267,15 @@ export function fake(model: World, options: FakeOptions = {}): FakeInstance {
     if (table === "sys_db_object") {
       const names = /^nameIN([^^]*)/u.exec(query)![1]!.split(",");
       return {
-        result: names.filter((name) => name in model.tables).map((name) => ({ name, "super_class.name": model.tables[name] ?? "" })),
+        result: names
+          .filter((name) => name in model.tables && !(model.hiddenRows ?? []).includes(name))
+          .map((name) => {
+            const row = sysDbObjectRow(name, chainOf(model.tables, name), params.sysparm_fields ?? "name", model.hiddenRows);
+            if ((model.withoutParentLinks ?? []).includes(name)) {
+              for (const key of Object.keys(row)) if (key.endsWith("super_class")) delete row[key];
+            }
+            return row;
+          }),
       };
     }
     if (table === "sys_dictionary") {
@@ -287,4 +300,13 @@ export function fake(model: World, options: FakeOptions = {}): FakeInstance {
     },
   } as unknown as ServiceNowOperations;
   return { instance, ops };
+}
+
+/** `name`'s ancestors in a table -> parent model, nearest first. */
+function chainOf(tables: Record<string, string | null>, name: string): string[] {
+  const chain: string[] = [];
+  for (let parent = tables[name]; parent !== null && parent !== undefined && !chain.includes(parent); parent = tables[parent]) {
+    chain.push(parent);
+  }
+  return chain;
 }
