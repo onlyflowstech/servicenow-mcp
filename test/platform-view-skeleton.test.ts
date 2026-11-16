@@ -2,7 +2,6 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
 
 import type { ServiceNowOperations } from "../src/client.js";
-import { trustedToolErrorDescriptor } from "../src/tool-error.js";
 import { envelopeCompatibilityResult } from "../src/tools/result-envelope.js";
 import { ok } from "../src/utils.js";
 import {
@@ -15,7 +14,6 @@ import {
   type PlatformViewHandler,
 } from "../src/tools/platform-view-contracts.js";
 import { createPlatformViewToolModule, platformViewToolModule } from "../src/tools/platform-view-module.js";
-import { handleEvaluate } from "../src/tools/platform-view-evaluate.js";
 import {
   closeHarnesses,
   expectReadsWithin,
@@ -47,7 +45,7 @@ const WIDEST: Readonly<Record<PlatformView, Record<string, unknown>>> = {
 };
 
 /** Views whose handler is implemented; the others are still stubs. */
-const IMPLEMENTED: readonly PlatformView[] = ["upgrade_skipped", "scan_findings"];
+const IMPLEMENTED: readonly PlatformView[] = ["upgrade_skipped", "scan_findings", "evaluate"];
 const STUB_VIEWS = PLATFORM_VIEWS.filter((view) => !IMPLEMENTED.includes(view));
 
 function expectFixedInternalError(result: CallToolResult): void {
@@ -75,18 +73,6 @@ describe("sn_platform_view dispatcher", () => {
       expectFixedInternalError(await call({ view, ...MINIMAL[view] }));
     }
     expect(instance.calls).toEqual([]);
-  });
-
-  it("stub handlers throw the fixed internal error and name nothing", async () => {
-    const canonical = { view: "evaluate", limit: 25, offset: 0, max_response_bytes: 100_000 } as CanonicalPlatformViewArgs;
-    const services = {} as never;
-    for (const handler of [handleEvaluate]) {
-      const error = await handler(canonical, services).then(
-        () => undefined,
-        (caught: unknown) => caught
-      );
-      expect(trustedToolErrorDescriptor(error)).toMatchObject({ category: "internal", retry: "do_not_retry" });
-    }
   });
 
   it("refuses a selector the view does not take with a correctable error, before any handler runs", async () => {
