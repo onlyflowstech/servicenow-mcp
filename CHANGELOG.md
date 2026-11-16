@@ -5,7 +5,11 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.3.0-rc.3] — 2026-11-16
+
+Release candidate for 2.3.0, published to the `next` dist-tag. It contains the
+changes listed under 2.3.0-dev.1 to 2.3.0-dev.5 below, and the changes that
+follow.
 
 ### Changed
 
@@ -45,6 +49,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sys_hub_action_type_definition`.
   A write grant that reaches them, including `"*"`, is still allowed; `grant`,
   the wizard and the policy card flag it.
+
+- **`sys_update_xml`, `sys_upgrade_history_log`, `scan_finding`, `scan_result`
+  and `scan_check` have their own default projections.** A read that names no
+  `fields` returns the columns that identify the row (for `sys_update_xml`:
+  `sys_id`, `name`, `type`, `target_name`, `table`, `action`, `update_set`,
+  `application` and `sys_updated_on`) instead of `sys_id` alone. The projections
+  do not include `finding_details`, `scan_finding.task` and `.user`,
+  `scan_check.script`, `scan_result.message` or the payload columns above; apart
+  from the payload columns, those stay readable by name. A profile's `"*"` field
+  entry still narrows these tables, their defaults included. `tools/list` is
+  unchanged.
 
 ## [2.3.0-rc.2] — 2026-11-16
 
