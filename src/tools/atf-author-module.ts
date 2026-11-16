@@ -32,7 +32,12 @@ interface Write { table: string; fields: Record<string, unknown>; prepared: Reco
 export function resolveAtfAuthorAccess(candidate: unknown, policy?: ResolvedEffectivePolicyReference) {
   const args = atfAuthorInputSchema.parse(candidate) as z.infer<typeof schema> & { profile: string };
   if (args.action === "list_step_types") return { args: { ...args, step_types: stepTypes(policy?.atf.allowScriptSteps === true) }, requests: [] };
-  if (args.action === "add_steps") return prepareSteps(args, policy?.atf.allowScriptSteps === true);
+  if (args.action === "add_steps") {
+    // Keyed on the caller's own argument object, so the dispatcher's second
+    // preparation of this call reuses the parsed steps.
+    const reuseKey = typeof candidate === "object" && candidate !== null ? candidate : undefined;
+    return prepareSteps(args, policy?.atf.allowScriptSteps === true, reuseKey);
+  }
   if (args.steps !== undefined || args.test_sys_id !== undefined) throw new Error("Step fields require add_steps");
   let tableName: string;
   let rows: Record<string, unknown>[];

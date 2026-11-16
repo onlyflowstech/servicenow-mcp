@@ -1376,7 +1376,18 @@ export function runWithFieldPolicyConfiguration<T>(
   configuration: FieldPolicyConfigurationInput | undefined,
   callback: () => T
 ): T {
-  return FIELD_POLICY_CONFIGURATION_SCOPE.run(configuration ?? Object.freeze({}), callback);
+  return FIELD_POLICY_CONFIGURATION_SCOPE.run(configuration ?? NO_FIELD_POLICY_CONFIGURATION, callback);
+}
+
+const NO_FIELD_POLICY_CONFIGURATION: FieldPolicyConfigurationInput = Object.freeze({});
+
+/**
+ * The field-policy configuration in force, as an identity: two preparations
+ * that see the same object were checked against the same policy. Undefined
+ * outside a configuration scope.
+ */
+export function currentFieldPolicyConfiguration(): object | undefined {
+  return FIELD_POLICY_CONFIGURATION_SCOPE.getStore();
 }
 
 /** True when a field selection means ServiceNow should return all fields. */

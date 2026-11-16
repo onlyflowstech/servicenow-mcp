@@ -22,6 +22,7 @@ import {
   fieldPolicyDenialMessage,
   FieldPolicyError,
   isSensitiveFieldName,
+  runWithFieldPolicyConfiguration,
 } from "../src/field-policy.js";
 import {
   classifyField,
@@ -127,6 +128,8 @@ interface HarnessOptions {
   readonly writeResult?: Record<string, unknown>;
   readonly metadataCache?: NonNullable<ServiceNowConfig["metadataCache"]>;
   readonly instance?: string;
+  /** Holds every field-type lookup read open this long. */
+  readonly lookupDelayMs?: number;
 }
 
 interface Harness {
@@ -166,6 +169,9 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
       throw Object.assign(new Error("Forbidden"), { status: 403 });
     }
     const typed = fixture === "unavailable" ? undefined : fieldTypeAnswer(path, params, fixture);
+    if (typed && options.lookupDelayMs !== undefined) {
+      await new Promise((resolve) => setTimeout(resolve, options.lookupDelayMs));
+    }
     if (typed) return typed;
     const rows = (options.rows?.(path, params) ?? [vaultRow()]).map((row) =>
       echoFields(row as Record<string, unknown>, params)
@@ -553,6 +559,19 @@ describe("cost", () => {
     expect(lookups()).toHaveLength(5);
   });
 
+  it("20 concurrent cold calls share one dictionary read and one chain read", async () => {
+    const h = await harness({ lookupDelayMs: 20 });
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => h.call("sn_query", { table: "u_vault", fields: "name,key" }))
+    );
+    for (const result of results) expect(result.text).toContain(SENSITIVE_MESSAGE);
+    const lookups = h.reads.filter((read) => /sys_dictionary|sys_db_object/u.test(read.path));
+    expect(lookups.map((read) => read.path).sort()).toEqual([
+      "/api/now/table/sys_db_object",
+      "/api/now/table/sys_dictionary",
+    ]);
+  });
+
   it("keeps the lookup out of the call's reported cache outcome", async () => {
     const h = await harness();
     const result = await h.call("sn_query", { table: "u_vault", fields: "name" });
@@ -706,5 +725,34 @@ describe("ATF step conditions", () => {
     expect(() => prepare("set_field_values", { table: "u_vault", field_values: "passphrase=x" })).toThrow(
       FieldPolicyError
     );
+  });
+
+  it("reuses the first preparation's parsed steps and still checks them in the scoped pass", () => {
+    const candidate = {
+      test_sys_id: "b".repeat(32),
+      steps: [{ type: "record_query", inputs: { table: "u_vault", field_values: "key=abc" } }],
+    };
+    const first = runWithFieldPolicyConfiguration(undefined, () => prepareSteps(candidate, false, candidate));
+    const steps = (first.args as { preparedSteps: unknown[] }).preparedSteps;
+    // Outside a scope the condition passes the name check; inside it the type check refuses it.
+    expect(() =>
+      runWithFieldPolicyConfiguration(undefined, () =>
+        runWithHiddenFieldScope(scope, () => prepareSteps(candidate, false, candidate))
+      )
+    ).toThrow(FieldPolicyError);
+    const harmless = {
+      test_sys_id: "b".repeat(32),
+      steps: [{ type: "record_query", inputs: { table: "u_vault", field_values: "name=abc" } }],
+    };
+    const parsed = runWithFieldPolicyConfiguration(undefined, () => prepareSteps(harmless, false, harmless));
+    const second = runWithFieldPolicyConfiguration(undefined, () =>
+      runWithHiddenFieldScope(scope, () => prepareSteps(harmless, false, harmless))
+    );
+    expect(steps).toHaveLength(1);
+    // The same parsed steps, not a second parse.
+    expect((second.args as { preparedSteps: unknown }).preparedSteps).toBe(
+      (parsed.args as { preparedSteps: unknown }).preparedSteps
+    );
+    expect(second.requests).toEqual(expect.arrayContaining([{ operation: "read", table: "u_vault" }]));
   });
 });

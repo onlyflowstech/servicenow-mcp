@@ -322,6 +322,7 @@ const MAX_DOT_WALK_HOPS = 8;
 const FIELD_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 const DICTIONARY_MEMO_KEY = "hidden-values:dictionary:v1";
 const TABLE_MEMO_PREFIX = "hidden-values:table:v1:";
+const CHAIN_FLIGHT_PREFIX = "hidden-values:chain-read:v1:";
 
 type DictionaryState = ReadonlyMap<string, ReadonlyMap<string, string>> | "unavailable";
 /** A table's chain, `null` when sys_db_object has no row for it. */
@@ -343,7 +344,9 @@ export interface LoadFieldTypesOptions {
  * chains). Each result is kept in the metadata cache's per-credential memo
  * (`derivedMetadataMemo`), so a later call that finds everything there makes
  * no request at all; the reads skip the cache's watermark, since the memo is
- * their cache. `forceRecache` skips the memo.
+ * their cache. The dictionary and chain reads run in parallel, and concurrent
+ * calls in one scope share each read in flight (one per key). `forceRecache`
+ * skips the memo.
  *
  * The dictionary read failing, returning no rows, or returning a full page
  * gives `unavailable`. A table whose chain or view cannot be resolved is left
@@ -354,14 +357,12 @@ export async function loadFieldTypes(
   tablesCandidate: Iterable<string>,
   options: LoadFieldTypesOptions = {}
 ): Promise<FieldTypes> {
-  const memo = derivedMetadataMemo(client, "sys_dictionary");
+  const memo = derivedMetadataMemo(client);
   const force = options.forceRecache === true;
   // The memo is the cache for these reads. Through the metadata cache each
   // would also cost a watermark read, and a sys_dictionary watermark costs
   // more than the plain read (see SMALL_READ_BYTES), so they go straight up.
   const reader = uncachedOperations(client);
-  const dictionary = await hiddenDictionary(reader, memo, force);
-  if (dictionary === "unavailable") return FIELD_TYPES_UNAVAILABLE;
 
   const requested = [...new Set([...tablesCandidate].map(normalizeName))].filter(
     (name): name is string => name !== undefined
@@ -382,8 +383,15 @@ export async function loadFieldTypes(
   };
 
   const pending = requested.filter((table) => !recall(table));
+  // The dictionary and the chains do not depend on each other: one round trip.
+  const [dictionary, read] = await Promise.all([
+    hiddenDictionary(reader, memo, force),
+    pending.length === 0
+      ? Promise.resolve(new Map<string, ChainState>())
+      : sharedChains(reader, memo, pending),
+  ]);
+  if (dictionary === "unavailable") return FIELD_TYPES_UNAVAILABLE;
   if (pending.length > 0) {
-    const read = await tableChains(reader, pending);
     for (const [table, chain] of read) {
       chains.set(table, chain);
       if (chain !== null) remember(table, Object.freeze({ kind: "table", chain }));
@@ -401,7 +409,7 @@ export async function loadFieldTypes(
     (table) => !chains.has(table) && !recall(table)
   );
   if (joined.length > 0) {
-    for (const [table, chain] of await tableChains(reader, joined)) {
+    for (const [table, chain] of await sharedChains(reader, memo, joined)) {
       chains.set(table, chain);
       if (chain !== null) remember(table, Object.freeze({ kind: "table", chain }));
     }
@@ -494,11 +502,79 @@ function resolvedTable(
  */
 async function hiddenDictionary(
   client: ServiceNowOperations,
-  memo: ReturnType<typeof derivedMetadataMemo>,
+  memo: Memo,
   force: boolean
 ): Promise<DictionaryState> {
   const known = force ? undefined : memo?.get(DICTIONARY_MEMO_KEY);
   if (known === "unavailable" || known instanceof Map) return known as DictionaryState;
+  return singleFlight(memo, DICTIONARY_MEMO_KEY, () => readDictionary(client, memo));
+}
+
+type Memo = ReturnType<typeof derivedMetadataMemo>;
+
+/**
+ * Run `start` once for every concurrent caller in the credential scope: a
+ * caller that finds the same key in flight waits for that read instead of
+ * making its own. Neither read here rejects for an instance's answer (a
+ * refusal or an error is the `unavailable` state, which every waiter gets);
+ * only a cancelled read rejects, and then the cancellation was the reading
+ * call's own, so a waiter reads for itself instead of failing.
+ */
+async function singleFlight<T>(memo: Memo, key: string, start: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const pending = memo?.pending(key) as Promise<T> | undefined;
+    if (pending === undefined) break;
+    try {
+      return await pending;
+    } catch {
+      // The reading call was cancelled; look again, or read.
+    }
+  }
+  const promise = start();
+  return memo === undefined ? promise : memo.track(key, promise);
+}
+
+/**
+ * {@link tableChains} with one read in flight per table across concurrent
+ * calls: tables another call is reading are waited for, the rest are read
+ * together in one request.
+ */
+async function sharedChains(
+  client: ServiceNowOperations,
+  memo: Memo,
+  tables: readonly string[]
+): Promise<Map<string, ChainState>> {
+  const waiting: Array<[string, Promise<ChainState | undefined>]> = [];
+  const own: string[] = [];
+  for (const table of tables) {
+    const pending = memo?.pending(CHAIN_FLIGHT_PREFIX + table) as Promise<ChainState | undefined> | undefined;
+    if (pending === undefined) own.push(table);
+    else waiting.push([table, pending]);
+  }
+  const chains = new Map<string, ChainState>();
+  if (own.length > 0) {
+    const batch = tableChains(client, own);
+    for (const table of own) {
+      memo?.track(CHAIN_FLIGHT_PREFIX + table, batch.then((read) => read.get(table)));
+    }
+    for (const [table, chain] of await batch) chains.set(table, chain);
+  }
+  const retry: string[] = [];
+  for (const [table, pending] of waiting) {
+    try {
+      const chain = await pending;
+      if (chain !== undefined) chains.set(table, chain);
+    } catch {
+      retry.push(table);
+    }
+  }
+  if (retry.length > 0) {
+    for (const [table, chain] of await tableChains(client, retry)) chains.set(table, chain);
+  }
+  return chains;
+}
+
+async function readDictionary(client: ServiceNowOperations, memo: Memo): Promise<DictionaryState> {
   let rows: unknown;
   try {
     const response = await client.getWithMeta<{ result?: unknown }>("/api/now/table/sys_dictionary", {
