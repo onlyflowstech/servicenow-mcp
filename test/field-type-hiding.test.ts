@@ -7,8 +7,8 @@
  * `password2`, and every row the double returns carries a marker string in
  * those fields, in each display shape the Table API uses: a plain value,
  * `{value, display_value, link}`, and the `sysparm_display_value=all` pair.
- * A `password2` display value can be the decrypted text, so the whole field
- * must go, never just its `value`. Synthetic data only.
+ * A display value is treated as secret as the stored value, so the whole
+ * field must go, never just its `value`. Synthetic data only.
  */
 import fs from "node:fs";
 import os from "node:os";

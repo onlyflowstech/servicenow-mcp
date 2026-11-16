@@ -4,9 +4,9 @@
  * Field policy hides a value by name (`isSensitiveFieldName`), but a field of
  * internal type `password` (a one-way hash) or `password2` (two-way
  * encrypted) can be called anything: `ssh_passphrase`, `key`, `answer`,
- * `secure_value`, `temppassword`. ServiceNow does not mask either type in
- * Table API responses, and a `password2` display value can be the decrypted
- * text. This module is the one place that decides type-based hiding:
+ * `secure_value`, `temppassword`. Their stored values are never returned, in
+ * any display shape. This module is the one place that decides type-based
+ * hiding:
  *
  * - {@link HIDDEN_FIELD_TYPES}, the internal types whose values are hidden;
  * - {@link loadFieldTypes}, which builds a table's hidden-typed fields from
@@ -203,8 +203,8 @@ export function fieldTypesFromRows(
 /**
  * A copy of `record` without the named fields. The whole entry goes, whatever
  * its shape: a plain value, `{value, display_value, link}`, or the
- * `sysparm_display_value=all` pair. A display value is never kept on its own,
- * since a `password2` display value can be the decrypted text.
+ * `sysparm_display_value=all` pair. A display value is never kept on its own:
+ * it is treated as secret as the stored value.
  */
 export function withoutFields(
   record: Readonly<Record<string, unknown>>,

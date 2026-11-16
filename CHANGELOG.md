@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Read tools now hide `password`/`password2`-typed fields by dictionary type,
-  not only by name.** A field whose internal type is `password`, `password2`,
+- **Read tools hide `password`/`password2`-typed fields by dictionary type as
+  well as by name.** A field whose internal type is `password`, `password2`,
   `masked` or `encrypted_text` is refused when named, left out of `fields=all`,
   detailed and default reads, `"*"` responses and write echoes, refused as a
   filter, order, aggregate, group-by or ATF step-condition field, and refused
@@ -47,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opt-in. The README and `docs/PRODUCTION-SECURITY.md` now also say that a
   database view or extension table over one of the six named-only tables is not
   covered by the name list.
-- **A `"*"` write grant no longer covers `sys_atf_step`, `sys_variable_value`
+- **A `"*"` write grant does not cover `sys_atf_step`, `sys_variable_value`
   and `sys_element_mapping` for the generic write tools.** These tables hold the
   step types, input values and pill mappings that `sn_atf_author` checks when it
   adds a step. Under `"*"`,
@@ -60,11 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values and mappings (catalog variables, for example), so a profile that writes
   those with the generic tools must now name them. The policy card lists the
   three tables as outside the wildcard row's write access.
-- **`sys_audit` and `sys_journal_field` are no longer covered by a `"*"` table
-  grant; name them to read them.** A profile whose `readTables` (or
-  `writeTables`) holds `"*"` used to reach both tables like any other. Their rows
-  hold the old and new values of other tables' fields, comments and work notes,
-  so they are now granted by name only. With `"*"` alone, `sn_query`, `sn_get`,
+- **`sys_audit` and `sys_journal_field` are granted by name only: a `"*"` table
+  grant does not cover them.** Their rows hold the old and new values of other
+  tables' fields, comments and work notes. With `"*"` alone, `sn_query`, `sn_get`,
   `sn_aggregate`, `sn_schema`, `sn_batch` and the other tools refuse them with
   the usual table-access denial. To read one, name it:
   `servicenow-mcp-setup grant --profile <profile> --read sys_audit --tools
@@ -77,8 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy card and the setup wizard's wildcard note say the same.
 - **Four more tables are granted by name only, and a `"*"` field entry now
   narrows all six.** `sys_history_line`, `sys_audit_delete`, `sys_attachment_doc`
-  and `sys_email` join `sys_audit` and `sys_journal_field`: a `"*"` table grant no
-  longer covers them, for read or write, and a profile reaches one only when
+  and `sys_email` join `sys_audit` and `sys_journal_field`: a `"*"` table grant does
+  not cover them, for read or write, and a profile reaches one only when
   `tableAccess` names it. Their rows hold history built from audit, deleted
   records, attachment content and email bodies. A refusal is the usual
   table-access denial. A read that names no `fields` leaves out the value

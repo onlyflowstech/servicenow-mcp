@@ -455,8 +455,8 @@ name. A field of internal type `password`, `password2`, `masked` or
 is called (`ssh_passphrase`, `key`, `answer`): it is refused when named,
 dropped from `fields=all`, detailed, default and `"*"` reads and from write
 echoes, and refused as a filter, order, aggregate, group-by or write field.
-The whole field goes in every display shape, since a `password2` display value
-can be the decrypted text. A `sys_properties` row shows `value` only when its
+The whole field goes in every display shape, display values included. A
+`sys_properties` row shows `value` only when its
 `type` is a known non-secret type, and `value` is never a filter, order or
 group field there.
 
@@ -472,9 +472,9 @@ group field there.
   those calls run with name-only hiding instead. The server warns at startup
   and each time it falls back, and the policy card flags the profile. Approve it only
   where the granted tables hold no password-type field.
-- Masked catalog variables (`sc_item_option`, `question_answer`) are not
-  covered: their secrecy is per row. Narrow `value` on those tables with field
-  policy where it matters.
+- A value whose secrecy is set per record, rather than by the field's
+  dictionary type, is not recognised by type. Where a granted table holds such
+  values, narrow the field with field policy.
 
 ## Flow views
 
