@@ -928,7 +928,8 @@ async function askTableSelection(
       `\n  "*" grants every table for ${operation.toLowerCase()}. ServiceNow's own\n` +
         "  per-user ACLs are then the only remaining boundary, so the integration\n" +
         "  account's roles become the whole control. It also skips the per-tool\n" +
-        "  binding and the related-table closure check.\n"
+        "  binding and the related-table closure check. It does not cover\n" +
+        "  sys_audit or sys_journal_field; name them to allow them.\n"
     );
     return Object.freeze(["*"]);
   }

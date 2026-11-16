@@ -676,6 +676,22 @@ const POLICY_DEFINITIONS = {
     readable: ["sys_id", "name", "status", "browser_name", "browser_version", "os_name", "os_version", "sys_updated_on"],
     writable: [],
   },
+  // The audit and journal tables hold the old and new values of other tables'
+  // fields, and their comments and work notes. A "*" table grant never covers
+  // them (NAMED_ONLY_TABLES in table-policy.ts): a profile reaches them only
+  // by naming them in tableAccess. The default projection names the record and
+  // field a row is about and leaves the value columns (oldvalue and newvalue,
+  // value) to be asked for.
+  sys_audit: {
+    defaults: ["sys_id", "tablename", "documentkey", "fieldname", "user", "sys_created_on"],
+    readable: ["sys_id", "tablename", "documentkey", "fieldname", "oldvalue", "newvalue", "user", "reason", "sys_created_on"],
+    writable: [],
+  },
+  sys_journal_field: {
+    defaults: ["sys_id", "name", "element_id", "element", "sys_created_by", "sys_created_on"],
+    readable: ["sys_id", "name", "element_id", "element", "value", "sys_created_by", "sys_created_on"],
+    writable: [],
+  },
 } as const satisfies Record<string, TableFieldPolicyDefinition>;
 
 /**
@@ -774,6 +790,8 @@ const SYSTEM_TABLES: ReadonlySet<string> = new Set([
   "sys_atf_test_suite_result",
   "sys_atf_test_result_step",
   "sys_atf_agent",
+  "sys_audit",
+  "sys_journal_field",
 ]);
 
 /**

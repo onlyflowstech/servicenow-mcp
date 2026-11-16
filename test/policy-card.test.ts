@@ -38,6 +38,7 @@ import { ProfileManager as RealProfileManager, type ProfileManager } from "../sr
 import { ServiceNowClient } from "../src/client.js";
 import { createMcpServer } from "../src/server.js";
 import {
+  NAMED_ONLY_TABLES,
   authorizeTableAccess,
   createTableAccessPolicy,
   type TableAccessPolicyInput,
@@ -257,8 +258,8 @@ describe("policy card matches the enforced policy", () => {
     expect(byTable.get("sys_user")!.class).toBe("system");
     expect(byTable.get("sys_user")!.readable).toBe("*");
     expect(byTable.get("sys_user")!.writable).toBe("*");
-    expect(renderPolicyCard(result)).toContain("never the 23 system tables");
-    expect(BUILT_IN_TABLE_CLASSES.system).toHaveLength(23);
+    expect(renderPolicyCard(result)).toContain("never the 25 system tables");
+    expect(BUILT_IN_TABLE_CLASSES.system).toHaveLength(25);
   });
 
   it("reports class and domain fields only where the profile lists them", () => {
@@ -929,9 +930,20 @@ describe("a wildcard profile states what the system tables keep", () => {
     expect(other.system_tables.fully_writable).toContain("sys_user");
     expect(
       other.system_tables.fully_writable.length + other.system_tables.write_narrowed.length
-    ).toBe(BUILT_IN_TABLE_CLASSES.system.length);
+    ).toBe(BUILT_IN_TABLE_CLASSES.system.length - NAMED_ONLY_TABLES.length);
+    // A "*" table grant does not reach the named-only tables, so the wildcard
+    // row says nothing about them.
+    for (const table of NAMED_ONLY_TABLES) {
+      expect(other.system_tables.fully_readable, table).not.toContain(table);
+      expect(other.system_tables.read_narrowed, table).not.toContain(table);
+      expect(other.system_tables.fully_writable, table).not.toContain(table);
+      expect(other.system_tables.write_narrowed, table).not.toContain(table);
+    }
     const text = renderPolicyCard(result);
-    expect(text).toContain("does not apply to the 23 system tables");
+    expect(text).toContain("does not apply to the 25 system tables");
+    expect(text).toContain(
+      'A "*" table grant never covers sys_audit or sys_journal_field; they are granted by name only.'
+    );
     expect(text).toContain("stay fully writable (every field)");
   });
 
@@ -973,6 +985,7 @@ describe("a wildcard profile states what the system tables keep", () => {
   it.each(shapes)("sweep (%s): card system_tables equals enforcement, reads and writes apart", (_name, policy) => {
     const system = card(wildcard, policy).other_tables!.system_tables;
     for (const table of BUILT_IN_TABLE_CLASSES.system) {
+      if (NAMED_ONLY_TABLES.includes(table)) continue;
       const read = enforcedReadable(policy, table, "script");
       const write = enforcedWritable(policy, table, "script");
       expect(system.fully_readable.includes(table), `${table} read`).toBe(read);

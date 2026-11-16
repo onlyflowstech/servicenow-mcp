@@ -1194,6 +1194,8 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
     "v_plugin",
     "syslog",
     "sys_element_mapping",
+    "sys_audit",
+    "sys_journal_field",
   ] as const;
 
   function reason(action: () => unknown): string {
@@ -1217,8 +1219,8 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
     ])
   );
 
-  it("splits the 34 built-in tables into 11 ITSM and 23 system tables", () => {
-    expect(new Set([...ITSM_TABLES, ...SYSTEM_TABLES]).size).toBe(34);
+  it("splits the 36 built-in tables into 11 ITSM and 25 system tables", () => {
+    expect(new Set([...ITSM_TABLES, ...SYSTEM_TABLES]).size).toBe(36);
     for (const [table, resolved] of builtIn) {
       expect(resolved.all, table).toEqual(["*"]);
     }

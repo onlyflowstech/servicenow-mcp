@@ -78,6 +78,23 @@ const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 const TOOL_NAME = /^sn_[a-z0-9_]{1,61}$/u;
 const TABLE_ALLOWLIST_WILDCARD = "*";
 
+/**
+ * Tables a "*" grant never covers. An allowlist reaches one of these only
+ * when it names the table, for read and for write alike. Their rows hold the
+ * old and new values of other tables' fields, comments and work notes, so a
+ * blanket grant is not a deliberate choice to expose them.
+ *
+ * Every entry is also a built-in system table (SYSTEM_TABLES in
+ * field-policy.ts), which a test enforces. The list is deliberately short:
+ * it applies to these tables only, and no other table's reach changes.
+ */
+export const NAMED_ONLY_TABLES: readonly string[] = Object.freeze([
+  "sys_audit",
+  "sys_journal_field",
+]);
+
+const NAMED_ONLY_SET: ReadonlySet<string> = new Set(NAMED_ONLY_TABLES);
+
 const ISSUED_TABLE_POLICY_ERRORS = new WeakSet<object>();
 const ISSUED_TABLE_POLICIES = new WeakSet<object>();
 
@@ -361,8 +378,13 @@ function allowlistGrantsAllTables(allowlist: readonly string[]): boolean {
   return allowlist.includes(TABLE_ALLOWLIST_WILDCARD);
 }
 
+/**
+ * Whether an allowlist reaches a table: by name, or through "*" for every
+ * table except the named-only ones.
+ */
 function allowlistGrantsTable(allowlist: readonly string[], table: string): boolean {
-  return allowlistGrantsAllTables(allowlist) || allowlist.includes(table);
+  if (allowlist.includes(table)) return true;
+  return allowlistGrantsAllTables(allowlist) && !NAMED_ONLY_SET.has(table);
 }
 
 function normalizeTargetKind(candidate: unknown): TableAccessTargetKind {
