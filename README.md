@@ -245,7 +245,7 @@ servicenow-mcp-setup grant --profile dev --read incident,problem --write inciden
 `grant` and the wizard print a warning, and still grant, when write access
 lands on a privilege-sensitive table: role, group, approval, script,
 property, user or authentication tables such as `sys_user_has_role`,
-`sysapproval_approver` or `sys_script`, and the MID Server queue
+`sysapproval_approver`, `sys_script` or `sp_widget`, and the MID Server queue
 (`ecc_queue` and its rotation shards), whose records can run commands on MID
 Server hosts.
 
@@ -1587,8 +1587,8 @@ entry. They are `payload` and `payload_diff` on `sys_update_xml`,
 `clone_preserved_data`; `payload` on `ecc_queue`, `data_replication_queue`,
 `sys_rt_change_log`, `sys_hub_snapshot` and `sys_hub_flow_version`; `payload`
 and `payload_short` on `sys_replication_queue`; `payload` and
-`previous_payload` on `cdc_queue_ih`, `cdc_queue_par` and
-`cdc_queue_uxa_user_props`; `data` on `sys_hub_snapshot_chunk`; and
+`previous_payload` on every `cdc_queue_*` table except `cdc_queue_state_*`;
+`data` on `sys_hub_snapshot_chunk`; and
 `encoded_keystore` on `sn_disco_certmgmt_certificate_ca_credentials`. The
 numbered rotation shards of the queue tables (`ecc_queue0003`,
 `sys_replication_queue5`, ...) are covered too, each as its own table. Each

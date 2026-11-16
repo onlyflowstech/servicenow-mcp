@@ -19,9 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `payload` on `ecc_queue`, `data_replication_queue`, `sys_rt_change_log`,
     `sys_hub_snapshot` and `sys_hub_flow_version`; `payload` and
     `payload_short` on `sys_replication_queue`; `payload` and
-    `previous_payload` on `cdc_queue_ih`, `cdc_queue_par` and
-    `cdc_queue_uxa_user_props`; `data` on `sys_hub_snapshot_chunk`; and
-    `encoded_keystore` on `sn_disco_certmgmt_certificate_ca_credentials`.
+    `previous_payload` on every `cdc_queue_*` table (such as `cdc_queue_ih`,
+    `cdc_queue_par` and `cdc_queue_uxa_user_props`) except `cdc_queue_state_*`;
+    `data` on `sys_hub_snapshot_chunk`; and `encoded_keystore` on
+    `sn_disco_certmgmt_certificate_ca_credentials`.
 
   No wildcard covers them any more: not the open default of a profile with no
   field policy, a `"*"` field entry, or `"*"` on the table's own entry. Each is
@@ -33,10 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write echoes and aggregate groups. The refusal names the key to set.
   `tools/list` is unchanged.
 
-- **`ecc_queue` is on the privilege-sensitive write list.** A write grant that
-  reaches `ecc_queue` or one of its rotation shards, including `"*"`, is still
-  allowed, but `grant`, the wizard and the policy card now flag it: records
-  written to `ecc_queue` can run commands on MID Server hosts.
+- **More tables are on the privilege-sensitive write list.** `ecc_queue` and
+  its rotation shards (records written there can run commands on MID Server
+  hosts), and the server-side script tables `sysevent_script_action`,
+  `sys_script_fix`, `sys_script_email`, `sys_ui_action`, `sys_ui_page`,
+  `sys_ui_macro`, `sp_widget`, `sysevent_in_email_action`,
+  `sys_transform_map`, `sys_transform_script` and `ecc_agent_script_include`.
+  A write grant that reaches them, including `"*"`, is still allowed; `grant`,
+  the wizard and the policy card flag it.
 
 ## [2.3.0-dev.5] — 2026-11-16
 

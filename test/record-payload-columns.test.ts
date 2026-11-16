@@ -141,11 +141,35 @@ describe("rotation shards", () => {
     "sys_update_xml0001",
     "sys_hub_snapshot01",
     "cdc_queue0001",
-    "cdc_queue_state0001",
-  ])("%s is not a shard: its payload column follows the ordinary rules", (table) => {
+    "cdc_queue",
+    "cdc_queue_state_ih",
+    "cdc_queue_state_par0001",
+    "u_cdc_queue_example",
+  ])("%s is not covered: its payload column follows the ordinary rules", (table) => {
     expect(resolveReadableFields(table, { fields: "payload" })).toEqual(["payload"]);
     expect(validateWritableFields(table, { payload: "x" })).toEqual({ payload: "x" });
   });
+
+  it.each(["cdc_queue_example_consumer", "cdc_queue_example_consumer0001", "cdc_queue_x", "cdc_queue_statement"])(
+    "%s, a change-data-capture queue, has the CDC queue columns",
+    (table) => {
+      for (const column of ["payload", "previous_payload"]) {
+        expect(reason(() => resolveReadableFields(table, { fields: column })), `${table}.${column}`).toBe(
+          "explicit_read_required"
+        );
+        expect(reason(() => validateWritableFields(table, { [column]: "x" })), `${table}.${column}`).toBe(
+          "explicit_field_required"
+        );
+      }
+      expect(resolveReadableFields(table, { fields: "name" })).toEqual(["name"]);
+      withFieldPolicy({ fieldPolicy: { [table]: { readable: ["sys_id", "payload"] } } }, () => {
+        expect(resolveReadableFields(table, { fields: "payload" })).toEqual(["payload"]);
+        expect(reason(() => resolveReadableFields(table, { fields: "previous_payload" }))).toBe(
+          "explicit_read_required"
+        );
+      });
+    }
+  );
 
   it("naming the base table does not open a shard, and naming a shard opens only that shard", () => {
     withFieldPolicy({ fieldPolicy: { ecc_queue: { readable: ["sys_id", "payload"] } } }, () => {

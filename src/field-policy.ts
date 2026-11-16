@@ -238,25 +238,55 @@ const ROTATION_SHARD_BASES: ReadonlySet<string> = new Set([
   "cdc_queue_uxa_user_props",
 ]);
 
-const TRAILING_DIGITS = /\d+$/u;
+/**
+ * Change-data-capture queues are created per consumer (`cdc_queue_<consumer>`,
+ * with or without a shard suffix). Every table under this prefix carries the
+ * CDC payload columns, except the consumer-state tables (`cdc_queue_state_*`).
+ */
+const CDC_QUEUE_PREFIX = "cdc_queue_";
+const CDC_QUEUE_STATE_PREFIX = "cdc_queue_state_";
+const CDC_QUEUE_COLUMNS: ReadonlySet<string> = RECORD_PAYLOAD_COLUMNS.get("cdc_queue_ih")!;
 
 const NO_FIELDS: readonly string[] = Object.freeze([]);
 
 /**
+ * `table` without its trailing digits, or undefined when it has none or is
+ * all digits. A single backward scan, so it is linear in the name's length.
+ */
+function withoutShardSuffix(table: string): string | undefined {
+  let end = table.length;
+  while (end > 0) {
+    const code = table.charCodeAt(end - 1);
+    if (code < 48 || code > 57) break;
+    end -= 1;
+  }
+  return end === table.length || end === 0 ? undefined : table.slice(0, end);
+}
+
+/**
  * The record payload columns of `table` (a normalized name), or undefined.
- * A rotation shard takes its base table's columns. Lookups only: nothing is
- * stored per name, so arbitrary names never grow any state.
+ * A rotation shard takes its base table's columns, and a CDC queue takes the
+ * CDC columns. Lookups and fixed rules only: nothing is stored per name, so
+ * arbitrary names never grow any state.
  */
 function recordPayloadColumns(table: string): ReadonlySet<string> | undefined {
   const exact = RECORD_PAYLOAD_COLUMNS.get(table);
   if (exact !== undefined) return exact;
-  const base = table.replace(TRAILING_DIGITS, "");
-  return base !== table && ROTATION_SHARD_BASES.has(base) ? RECORD_PAYLOAD_COLUMNS.get(base) : undefined;
+  if (
+    table.length > CDC_QUEUE_PREFIX.length &&
+    table.startsWith(CDC_QUEUE_PREFIX) &&
+    !table.startsWith(CDC_QUEUE_STATE_PREFIX)
+  ) {
+    return CDC_QUEUE_COLUMNS;
+  }
+  const base = withoutShardSuffix(table);
+  return base !== undefined && ROTATION_SHARD_BASES.has(base) ? RECORD_PAYLOAD_COLUMNS.get(base) : undefined;
 }
 
 /**
  * Each base table and the columns its own entry must list. A rotation shard
- * (see ROTATION_SHARD_BASE_NAMES) has its base table's columns.
+ * (see ROTATION_SHARD_BASE_NAMES) has its base table's columns, and every
+ * `cdc_queue_*` table except `cdc_queue_state_*` has the CDC queue columns.
  */
 export const EXPLICIT_READ_FIELD_NAMES: Readonly<Record<string, readonly string[]>> = Object.freeze(
   Object.fromEntries(

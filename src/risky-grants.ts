@@ -24,7 +24,8 @@ export const RISKY_WRITE_TABLES: readonly string[] = Object.freeze([
   "sys_security_acl_role",
   "sysapproval_approver",
   "sysapproval_group",
-  // Server-side code: a `script` write on these is code execution.
+  // Server-side code: a write to their script fields is code execution, on
+  // the instance (or, for ecc_agent_script_include, on MID Server hosts).
   "sys_script",
   "sys_script_include",
   "sysauto_script",
@@ -34,6 +35,17 @@ export const RISKY_WRITE_TABLES: readonly string[] = Object.freeze([
   "sys_ws_operation",
   "sys_module",
   "sys_processor",
+  "sysevent_script_action",
+  "sys_script_fix",
+  "sys_script_email",
+  "sys_ui_action",
+  "sys_ui_page",
+  "sys_ui_macro",
+  "sp_widget",
+  "sysevent_in_email_action",
+  "sys_transform_map",
+  "sys_transform_script",
+  "ecc_agent_script_include",
   // Configuration, identity and authentication.
   "sys_properties",
   "sys_user",
@@ -53,15 +65,29 @@ const RISKY_SET: ReadonlySet<string> = new Set(RISKY_WRITE_TABLES);
 /** Risky tables the platform rotates into shards: the base name, then digits only. */
 const RISKY_SHARD_BASES: ReadonlySet<string> = new Set(["ecc_queue"]);
 
+/**
+ * `table` without its trailing digits, or undefined when it has none or is
+ * all digits. A single backward scan, so it is linear in the name's length.
+ */
+function withoutShardSuffix(table: string): string | undefined {
+  let end = table.length;
+  while (end > 0) {
+    const code = table.charCodeAt(end - 1);
+    if (code < 48 || code > 57) break;
+    end -= 1;
+  }
+  return end === table.length || end === 0 ? undefined : table.slice(0, end);
+}
+
 function isRiskyTable(table: string): boolean {
   if (RISKY_SET.has(table)) return true;
-  const base = table.replace(/\d+$/u, "");
-  return base !== table && RISKY_SHARD_BASES.has(base);
+  const base = withoutShardSuffix(table);
+  return base !== undefined && RISKY_SHARD_BASES.has(base);
 }
 
 /** True for `ecc_queue` and its numbered rotation shards. */
 export function isMidServerQueue(table: string): boolean {
-  return table.replace(/\d+$/u, "") === "ecc_queue";
+  return table === "ecc_queue" || withoutShardSuffix(table) === "ecc_queue";
 }
 
 /** The note shown wherever a risky write grant reaches the MID Server queue. */
