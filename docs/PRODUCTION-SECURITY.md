@@ -508,6 +508,10 @@ profile names it, bound to the tools that need it.
 - Declare a view as a `view` target with every table it reads in
   `relatedTables`. The profile then fails to load unless it also names each of
   those tables, for a named-only table by name.
+- A `"*"` write grant does not cover `sys_atf_step` or `sys_variable_value`,
+  which hold what `sn_atf_author` checks when it adds a step. Under `"*"` only
+  `sn_atf_author` writes them; the generic write tools need the table named for
+  write. Reads are unchanged.
 - A `"*"` field-policy entry narrows these six once the profile names them, as it
   does the ITSM tables; a value column is left out of a default read.
 - `sn_atf_author` checks each ATF step that names a table: `record_query`,
@@ -516,8 +520,10 @@ profile names it, bound to the tools that need it.
   named-only table must be named for either. Step conditions may use only the
   operators that compare a field with a literal, over fields the field policy
   lets the profile read, and `record_query` and `record_validation` refuse
-  `enforce_security: false`. The impersonated user's ACLs still apply on top.
-  Suites authored in the instance are not checked by the server's table grants,
+  `enforce_security: false`. A condition value may refer to an earlier step's
+  output only by record id or sys_id, and the fields a `set_field_values` step
+  sets must be writable on its table. The impersonated user's ACLs still apply
+  on top. Suites authored in the instance are not checked by the server's table grants,
   and `atf.execute` stays opt-in.
 
 ## Denied exposure patterns
