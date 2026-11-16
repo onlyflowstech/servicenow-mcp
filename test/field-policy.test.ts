@@ -1438,8 +1438,15 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
         for (const column of VALUE_COLUMNS[table]) {
           expect(defaults, `${table}.${column}`).not.toContain(column);
         }
-        // Asked for by name, or with fields=all, they are readable.
+        // Asked for by name, or with fields=all, they are readable, except a
+        // record XML column, which the table's own entry must list.
         for (const column of VALUE_COLUMNS[table]) {
+          if (table === "sys_audit_delete" && column === "payload") {
+            expect(reason(() => resolveReadableFields(table, { fields: column }))).toBe(
+              "explicit_read_required"
+            );
+            continue;
+          }
           expect(resolveReadableFields(table, { fields: column }), `${table}.${column}`).toEqual([
             column,
           ]);
@@ -1455,7 +1462,7 @@ describe('a profile "*" entry covers the ITSM tables, not the system tables (A3)
         for (const table of NAMED_ONLY_TABLES) {
           for (const column of VALUE_COLUMNS[table]) {
             expect(reason(() => resolveReadableFields(table, { fields: column })), `${table}.${column}`).toBe(
-              "unreadable_field"
+              table === "sys_audit_delete" && column === "payload" ? "explicit_read_required" : "unreadable_field"
             );
           }
           expect(resolveReadableFields(table, { fields: "sys_id" }), table).toEqual(["sys_id"]);

@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Record XML columns are readable only when a profile's field policy names
+  them.** `payload` and `payload_diff` on `sys_update_xml`, `sys_update_version`,
+  `sys_update_preview_xml`, `sys_update_diff`, `sys_sync_preview_remote`,
+  `sys_upgrade_history_log`, `sys_metadata_link`, `sys_metadata_delete`,
+  `sys_audit_delete`, `sys_archive_log` and `clone_preserved_data` hold whole
+  records as XML. No wildcard covers them any more: not the open default of a
+  profile with no field policy, a `"*"` field entry, or `"*"` on the table's own
+  entry. Each is read only where that table's own `readable` lists it, and
+  written only where its own `writable` lists it (`fieldPolicy.<table>`, or the
+  table's `readableTableFields`/`writableTableFields` entry). Until then it is
+  refused by name, as a filter, order, group-by, aggregate or write field, and
+  is left out of `fields=all`, detailed and default reads, write echoes and
+  aggregate groups. The refusal names the key to set. `tools/list` is
+  unchanged.
+
 ## [2.3.0-dev.5] — 2026-11-16
 
 ### Added

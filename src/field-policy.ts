@@ -58,6 +58,7 @@ export type FieldPolicyFailureReason =
   | "sensitive_field"
   | "unsupported_field_path"
   | "explicit_field_required"
+  | "explicit_read_required"
   | "traversal_limit_exceeded"
   | "invalid_argument_shape"
   | "field_types_unavailable";
@@ -68,6 +69,13 @@ interface TableFieldPolicyDefinition {
   readonly defaults?: FieldPolicySet;
   readonly readable?: FieldPolicySet;
   readonly writable?: FieldPolicySet;
+  /**
+   * The `readable` and `writable` lists of the profile's own entry for this
+   * table, as written (internal: set by the merge, never by configuration).
+   * Only they can open a RECORD_XML_COLUMNS column on a RECORD_XML_TABLES table.
+   */
+  readonly ownReadable?: FieldPolicySet;
+  readonly ownWritable?: FieldPolicySet;
 }
 
 interface MutableTableFieldPolicyDefinition {
@@ -102,6 +110,10 @@ interface TableFieldPolicy {
   readonly writable: readonly string[];
   readonly allowAnyReadable: boolean;
   readonly allowAnyWritable: boolean;
+  /** The record XML columns of this table its own entry lists in `readable`. */
+  readonly explicitReadable: readonly string[];
+  /** The record XML columns of this table its own entry lists in `writable`. */
+  readonly explicitWritable: readonly string[];
 }
 
 const FIELD_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
@@ -159,6 +171,57 @@ const EXPLICIT_WRITE_FIELDS: ReadonlySet<string> = new Set([
   "sys_domain",
   "sys_domain_path",
 ]);
+
+/**
+ * Columns that hold a whole record as XML, or a diff of one, on the tables in
+ * RECORD_XML_TABLES.
+ *
+ * On those tables a wildcard never covers these columns, for reads or writes:
+ * not the built-in default, a `"*"` table entry, a profile's `"*"` field entry,
+ * or `"*"` on the table's own entry. A column is read only where the profile's
+ * own entry for that exact table lists it in `readable`, and written only
+ * where that entry lists it in `writable`. Until listed, a column is refused by
+ * name (to return, filter, order, group, aggregate or write) and dropped from
+ * every wildcard, default, detailed, all-fields and write-response projection.
+ */
+const RECORD_XML_COLUMNS: ReadonlySet<string> = Object.freeze(
+  new Set(["payload", "payload_diff"])
+) as ReadonlySet<string>;
+
+/**
+ * Tables whose `payload` or `payload_diff` holds record XML: customer updates
+ * and their versions, previews and diffs, team-development previews,
+ * application metadata links and deletions, the upgrade log, and deleted,
+ * archived or clone-preserved records. Both columns are listed on every table,
+ * whether or not a given release has both.
+ */
+const RECORD_XML_TABLES: ReadonlySet<string> = new Set([
+  "sys_update_xml",
+  "sys_update_version",
+  "sys_update_preview_xml",
+  "sys_update_diff",
+  "sys_sync_preview_remote",
+  "sys_upgrade_history_log",
+  "sys_metadata_link",
+  "sys_metadata_delete",
+  "sys_audit_delete",
+  "sys_archive_log",
+  "clone_preserved_data",
+]);
+
+const NO_FIELDS: readonly string[] = Object.freeze([]);
+
+/** The record XML columns of `table`, or undefined when it has none. */
+function recordXmlColumns(table: string): ReadonlySet<string> | undefined {
+  return RECORD_XML_TABLES.has(table) ? RECORD_XML_COLUMNS : undefined;
+}
+
+/** Each RECORD_XML_TABLES table and the columns its own entry must list. */
+export const EXPLICIT_READ_FIELD_NAMES: Readonly<Record<string, readonly string[]>> = Object.freeze(
+  Object.fromEntries(
+    [...RECORD_XML_TABLES].map((table) => [table, Object.freeze([...RECORD_XML_COLUMNS])])
+  )
+);
 
 const INCIDENT_DEFAULTS = [
   "sys_id",
@@ -1071,13 +1134,27 @@ export function fieldPolicyDenialMessage(error: FieldPolicyError): string {
     case "field_types_unavailable":
       return FIELD_TYPES_UNAVAILABLE_MESSAGE;
     case "explicit_field_required":
-      // Only the EXPLICIT_WRITE_FIELDS names reach this case; each is a fixed
-      // name that passed FIELD_NAME.
+      // Only EXPLICIT_WRITE_FIELDS and RECORD_XML_COLUMNS names reach this
+      // case; each is a fixed name that passed FIELD_NAME.
+      if (table && field && !EXPLICIT_WRITE_FIELDS.has(field)) {
+        return (
+          `Write denied by policy: field "${field}" on "${table}" holds whole records as XML, ` +
+          "so a writable wildcard never covers it. List it explicitly in " +
+          `fieldPolicy.${table}.writable to allow this write.`
+        );
+      }
       return table && field
         ? `Write denied by policy: field "${field}" on "${table}" changes the record's ` +
             "class or domain, so a writable wildcard never covers it. List it explicitly " +
             `in fieldPolicy.${table}.writable to allow this write.`
-        : "Write denied by policy: a class or domain field must be listed explicitly in the writable set.";
+        : "Write denied by policy: a field that a writable wildcard never covers must be listed explicitly in the writable set.";
+    case "explicit_read_required":
+      // Only RECORD_XML_COLUMNS names reach this case, on a fixed table.
+      return table && field
+        ? `Read denied by policy: field "${field}" on "${table}" holds whole records as XML, ` +
+            "so a readable wildcard never covers it. List it explicitly in " +
+            `fieldPolicy.${table}.readable to allow this read.`
+        : "Read denied by policy: a whole-record XML field must be listed explicitly in its table's readable set.";
     case "unsupported_field_path":
       // The key itself is not echoed: as a whole it did not pass FIELD_NAME.
       return (
@@ -1144,7 +1221,8 @@ export function resolveReadableFields(
   );
   const responseFormat = normalizeResponseFormat(canonicalInput.responseFormat);
   const requested = canonicalInput.fields;
-  const hidden = typeHiddenFields(policy.table);
+  const hidden = readHiddenFields(policy.table);
+  const explicitDenied = explicitReadDeniedFields(policy.table);
   const queryDenied =
     canonicalInput.purpose === "query" ? rowValueRule(policy.table)?.queryDenied : undefined;
 
@@ -1170,6 +1248,12 @@ export function resolveReadableFields(
   for (const candidate of trimmed.split(",")) {
     const field = normalizeFieldName(candidate);
     if (seen.has(field)) throw new FieldPolicyError("invalid_field_selection");
+    // A whole-record XML column the profile's own entry for the table does
+    // not list. Checked first: unlike a hidden-typed field, configuration can
+    // open it, so the refusal says how.
+    if (explicitDenied.has(field)) {
+      throw new FieldPolicyError("explicit_read_required", { table: policy.table, field });
+    }
     // A hidden-typed field is refused exactly like a sensitive name, with the
     // same message, before the readable check, so the refusal says nothing
     // about the field's type or whether a configuration could grant it.
@@ -1223,6 +1307,10 @@ export function validateWritableFields(
     // policy.writable holds only explicitly listed names; it is empty when
     // the writable set is a wildcard.
     if (EXPLICIT_WRITE_FIELDS.has(field) && !policy.writable.includes(field)) {
+      throw new FieldPolicyError("explicit_field_required", { table: policy.table, field });
+    }
+    // A record XML column is written only where the table's own entry lists it.
+    if (recordXmlColumns(policy.table)?.has(field) && !policy.explicitWritable.includes(field)) {
       throw new FieldPolicyError("explicit_field_required", { table: policy.table, field });
     }
     if (!fieldSetAllows(policy.writable, policy.allowAnyWritable, field)) {
@@ -1540,14 +1628,74 @@ export function typeHiddenFieldNames(tableCandidate: unknown): ReadonlySet<strin
   return typeHiddenFields(normalizeTableName(tableCandidate));
 }
 
+/** Per policy map, each table's closed record XML columns. */
+const EXPLICIT_READ_DENIED = new WeakMap<TableFieldPolicyMap, Map<string, ReadonlySet<string>>>();
+
+/**
+ * The record XML columns of `table` that the current policy does not open:
+ * every one, unless the profile's own entry for the table lists it in
+ * `readable`. Cached per policy map and table, so the same set comes back on
+ * every call and projections built from it are reused.
+ */
+function explicitReadDeniedFields(table: string): ReadonlySet<string> {
+  const fields = recordXmlColumns(table);
+  if (fields === undefined) return EMPTY_FIELDS;
+  let policies: TableFieldPolicyMap;
+  try {
+    policies = currentTableFieldPolicies();
+  } catch {
+    return fields;
+  }
+  let byTable = EXPLICIT_READ_DENIED.get(policies);
+  if (!byTable) EXPLICIT_READ_DENIED.set(policies, (byTable = new Map()));
+  const cached = byTable.get(table);
+  if (cached !== undefined) return cached;
+  // A table with no entry of its own resolves through "*", which lists none.
+  const listed = policies.get(table)?.explicitReadable ?? [];
+  const denied =
+    listed.length === 0
+      ? fields
+      : (Object.freeze(
+          new Set([...fields].filter((field) => !listed.includes(field)))
+        ) as ReadonlySet<string>);
+  byTable.set(table, denied);
+  return denied;
+}
+
+const READ_HIDDEN_UNIONS = new WeakMap<
+  ReadonlySet<string>,
+  WeakMap<ReadonlySet<string>, ReadonlySet<string>>
+>();
+
+/**
+ * Every field a read of `table` treats as hidden: its hidden-typed fields and
+ * the record XML columns its policy leaves closed. Writes check types here
+ * and record XML columns in validateWritableFields.
+ */
+function readHiddenFields(table: string): ReadonlySet<string> {
+  const typed = typeHiddenFields(table);
+  const explicit = explicitReadDeniedFields(table);
+  if (explicit.size === 0) return typed;
+  if (typed.size === 0) return explicit;
+  let byExplicit = READ_HIDDEN_UNIONS.get(typed);
+  if (!byExplicit) READ_HIDDEN_UNIONS.set(typed, (byExplicit = new WeakMap()));
+  let union = byExplicit.get(explicit);
+  if (!union) {
+    union = Object.freeze(new Set([...typed, ...explicit])) as ReadonlySet<string>;
+    byExplicit.set(explicit, union);
+  }
+  return union;
+}
+
 /**
  * Fields of `table` that may never filter, order, group or aggregate a read:
- * its hidden-typed fields and its row rule's value field. The sensitive-name
- * check applies on top, wherever a caller checks names.
+ * its hidden-typed fields, the record XML columns its policy leaves closed,
+ * and its row rule's value field. The sensitive-name check applies on top,
+ * wherever a caller checks names.
  */
 export function queryDeniedFields(tableCandidate: unknown): ReadonlySet<string> {
   const table = normalizeTableName(tableCandidate);
-  const hidden = typeHiddenFields(table);
+  const hidden = readHiddenFields(table);
   const rule = rowValueRule(table);
   return rule === undefined ? hidden : new Set([...hidden, ...rule.queryDenied]);
 }
@@ -1575,7 +1723,7 @@ export function readableSelectionForTable(
   const table = normalizeTableName(tableCandidate);
   const inherited =
     extending === undefined ? undefined : SELECTION_CONTEXTS.get(extending)?.companions;
-  return preparedSelection(table, fields, typeHiddenFields(table), inherited);
+  return preparedSelection(table, fields, readHiddenFields(table), inherited);
 }
 
 interface SelectionContext {
@@ -1591,7 +1739,7 @@ const SELECTION_CONTEXTS = new WeakMap<object, SelectionContext>();
 function boundSelection(
   table: string,
   fields: readonly string[],
-  hidden: ReadonlySet<string> = typeHiddenFields(table),
+  hidden: ReadonlySet<string> = readHiddenFields(table),
   companions: ReadonlySet<string> = EMPTY_FIELDS
 ): FieldSelection {
   const selection = Object.freeze([...fields]);
@@ -1615,7 +1763,7 @@ const VISIBLE_SELECTIONS = new WeakMap<
 
 /** A policy-chosen projection (defaults, or "all") without hidden-typed fields. */
 function visibleSelection(table: string, selection: FieldSelection): FieldSelection {
-  const hidden = typeHiddenFields(table);
+  const hidden = readHiddenFields(table);
   let byTable = VISIBLE_SELECTIONS.get(selection);
   if (!byTable) VISIBLE_SELECTIONS.set(selection, (byTable = new Map()));
   let byHidden = byTable.get(table);
@@ -1696,6 +1844,7 @@ function selectionContext(selection: unknown): SelectionContext | undefined {
   let rule: RowValueRule | undefined;
   for (const [table, fields] of scope.tables) {
     for (const field of fields) hidden.add(field);
+    for (const field of explicitReadDeniedFields(table)) hidden.add(field);
     rule ??= rowValueRule(table);
   }
   return { hidden, ...(rule === undefined ? {} : { rule }), companions: EMPTY_FIELDS };
@@ -1937,6 +2086,10 @@ function mergeFieldPolicyDefinitions(
       // writes has not asked for a restriction, and tableAccess already
       // decided whether this table is reachable at all.
       writable: definition.writable ?? fallback?.writable ?? existing?.writable,
+      // Only the table's own entry can list a record XML column; the "*"
+      // entry and the base never do.
+      ...(definition.readable === undefined ? {} : { ownReadable: definition.readable }),
+      ...(definition.writable === undefined ? {} : { ownWritable: definition.writable }),
     };
   }
   return merged;
@@ -2033,6 +2186,7 @@ function buildFieldPolicyMap(
           }
         }
       }
+      const xmlColumns = recordXmlColumns(table);
       return [
         table,
         Object.freeze({
@@ -2042,10 +2196,40 @@ function buildFieldPolicyMap(
           writable: writableFields,
           allowAnyReadable: readable === FIELD_POLICY_WILDCARD,
           allowAnyWritable: writable === FIELD_POLICY_WILDCARD,
+          explicitReadable: listedRecordXmlColumns(
+            xmlColumns,
+            definition.ownReadable,
+            definition.readable,
+            readable
+          ),
+          explicitWritable: listedRecordXmlColumns(
+            xmlColumns,
+            definition.ownWritable,
+            definition.writable,
+            writable
+          ),
         }),
       ];
     })
   );
+}
+
+/**
+ * The record XML columns an own-entry list names. The merge passes the own
+ * list through as the resolved list, so its normalized form is reused rather
+ * than normalized twice. A wildcard own list names nothing.
+ */
+function listedRecordXmlColumns(
+  columns: ReadonlySet<string> | undefined,
+  own: FieldPolicySet | undefined,
+  resolvedSource: FieldPolicySet | undefined,
+  resolved: readonly string[] | "*"
+): readonly string[] {
+  if (columns === undefined || own === undefined) return NO_FIELDS;
+  const normalized = own === resolvedSource ? resolved : normalizePolicyFieldSet(own);
+  if (normalized === FIELD_POLICY_WILDCARD) return NO_FIELDS;
+  const listed = normalized.filter((field) => columns.has(field));
+  return listed.length === 0 ? NO_FIELDS : Object.freeze(listed);
 }
 
 /**
@@ -2631,7 +2815,7 @@ function issuePreparedAccess(
   const previous = issuedPreparedEntries(args).filter(
     (entry) => entry.table !== normalizedTable
   );
-  const hidden = typeHiddenFields(normalizedTable);
+  const hidden = readHiddenFields(normalizedTable);
   const entry = Object.freeze({
     table: normalizedTable,
     readableFields: preparedSelection(normalizedTable, readableFields, hidden),

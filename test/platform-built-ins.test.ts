@@ -63,6 +63,14 @@ const NEVER_DEFAULT: Readonly<Record<PlatformTable, readonly string[]>> = {
   scan_check: ["script"],
 };
 
+/** Whole-record XML columns: readable only where the table's own entry lists them. */
+const EXPLICIT_READ: Readonly<Partial<Record<PlatformTable, readonly string[]>>> = {
+  sys_update_xml: ["payload"],
+  sys_upgrade_history_log: ["payload", "payload_diff"],
+};
+const isExplicitRead = (table: PlatformTable, column: string): boolean =>
+  EXPLICIT_READ[table]?.includes(column) ?? false;
+
 /** The narrowing probe. It names none of the platform tables. */
 const NARROWING = { "*": { readable: ["sys_id", "name", "sys_created_on"] } } as const;
 
@@ -185,6 +193,13 @@ describe("the default projections", () => {
   it("are open otherwise: a never-default column is readable by name, and fields=all is \"*\"", () => {
     for (const table of PLATFORM) {
       for (const column of NEVER_DEFAULT[table]) {
+        // A whole-record XML column needs the table's own entry (below).
+        if (isExplicitRead(table, column)) {
+          expect(reason(() => resolveReadableFields(table, { fields: column })), `${table}.${column}`).toBe(
+            "explicit_read_required"
+          );
+          continue;
+        }
         expect(resolveReadableFields(table, { fields: column }), `${table}.${column}`).toEqual([column]);
       }
       expect(resolveReadableFields(table, { fields: "all" }), table).toEqual(["*"]);
@@ -213,7 +228,7 @@ describe('a narrowing "*" field entry the profile writes for no platform table',
       for (const table of PLATFORM) {
         for (const column of NEVER_DEFAULT[table]) {
           expect(reason(() => resolveReadableFields(table, { fields: column })), `${table}.${column}`).toBe(
-            "unreadable_field"
+            isExplicitRead(table, column) ? "explicit_read_required" : "unreadable_field"
           );
         }
       }
@@ -284,7 +299,7 @@ describe('a narrowing "*" field entry the profile writes for no platform table',
         expect(validateWritableFields("scan_check", { active: "false" })).toEqual({ active: "false" });
         // The tables it does not name stay narrowed.
         expect(reason(() => resolveReadableFields("sys_upgrade_history_log", { fields: "payload" }))).toBe(
-          "unreadable_field"
+          "explicit_read_required"
         );
       }
     );

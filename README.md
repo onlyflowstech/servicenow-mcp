@@ -1575,6 +1575,22 @@ Otherwise the write is denied with:
 Write denied by policy: field "sys_domain" on "incident" changes the record's class or domain, so a writable wildcard never covers it. List it explicitly in fieldPolicy.incident.writable to allow this write.
 ```
 
+**Record XML columns.** `payload` and `payload_diff` on `sys_update_xml`,
+`sys_update_version`, `sys_update_preview_xml`, `sys_update_diff`,
+`sys_sync_preview_remote`, `sys_upgrade_history_log`, `sys_metadata_link`,
+`sys_metadata_delete`, `sys_audit_delete`, `sys_archive_log` and
+`clone_preserved_data` hold whole records as XML, so no wildcard covers them:
+not the open default of a profile with no field policy, a `"*"` entry, or
+`"*"` on the table's own entry. Each is read only where it is named in that
+table's own `readable`, and written only where it is named in its own
+`writable`. Until then it is refused by name and as a filter, order, group-by,
+aggregate or write field, and is left out of `fields=all`, detailed and
+default reads and write echoes. A named read is denied with:
+
+```text
+Read denied by policy: field "payload" on "sys_update_xml" holds whole records as XML, so a readable wildcard never covers it. List it explicitly in fieldPolicy.sys_update_xml.readable to allow this read.
+```
+
 **`readable: []` and `writable: []`.** `readable: []` makes a table
 write-only: writes succeed and return only `sys_id`, reads are denied, and
 `sn_batch` cannot run there. `writable: []` blocks writes. To make a table
