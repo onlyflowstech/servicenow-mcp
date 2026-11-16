@@ -13,6 +13,9 @@
  *   ONE instance-wide `sys_dictionary` read (fields of those types only),
  *   projected over each table's extension chain, with database views
  *   resolved to the tables they join;
+ * - {@link loadFieldTypesInPlan}, the same answer from reads a tool declares
+ *   in its own plan (`sys_db_object` one level at a time, and
+ *   `sys_dictionary`), for tools whose type lookup must stay inside it;
  * - {@link classifyField}, the per-field verdict (including dot-walks) with a
  *   reason, for tools that show a value-hidden marker instead of dropping;
  * - {@link withoutFields}, whole-field removal for every response shape;
@@ -721,6 +724,236 @@ async function viewSources(
   }
   for (const view of broken) views.delete(view);
   return views;
+}
+
+// ── Plan-bounded loader ────────────────────────────────────────────
+
+/**
+ * The fields {@link loadFieldTypesInPlan} reads, by table. A tool that calls
+ * it declares both tables in its access plan with at least these fields.
+ */
+export const PLAN_FIELD_TYPE_FIELDS: Readonly<Record<"sys_db_object" | "sys_dictionary", readonly string[]>> =
+  Object.freeze({
+    sys_db_object: Object.freeze(["name", "super_class"]),
+    sys_dictionary: Object.freeze(["name", "element", "internal_type"]),
+  });
+
+/** The one dot-walk {@link loadFieldTypesInPlan} makes: a table's parent's name, one hop, into the same table. */
+export const PLAN_FIELD_TYPE_DOT_WALKS = Object.freeze([
+  Object.freeze({ from: "sys_db_object", field: "super_class", target: "sys_db_object" }),
+]);
+
+/** `sys_db_object` levels read per call, at most. */
+export const PLAN_CHAIN_LEVELS = 8;
+/** Tables in one chain, at most; a longer chain is incomplete. */
+const PLAN_CHAIN_TABLES = 16;
+const PLAN_PARENT_NAME = "super_class.name";
+/** The base table of all metadata, which extends nothing: never read. */
+const PLAN_METADATA_ROOT = "sys_metadata";
+
+/** A table's chain as the plan-bounded loader read it. */
+export interface PlanTableChain {
+  /** The table first, then its ancestors, nearest first. */
+  readonly tables: readonly string[];
+  /** True when the chain reaches a table that extends nothing. */
+  readonly complete: boolean;
+}
+
+/** What {@link loadFieldTypesInPlan} returns. */
+export interface PlanFieldTypes {
+  /**
+   * The hidden-typed fields of every requested table whose chain is complete.
+   * `unavailable` when the dictionary was not read, failed, returned no
+   * hidden-typed row or a full page; a requested table with an incomplete or
+   * unknown chain has no entry (every field on it is `unknown_type`).
+   */
+  readonly types: FieldTypes;
+  /**
+   * Each requested table that `sys_db_object` returned a row for, with its
+   * chain. A table missing here has no row, or was not read.
+   */
+  readonly chains: ReadonlyMap<string, PlanTableChain>;
+  /** False when a chain read was skipped, failed, or ran out of levels. */
+  readonly hierarchyRead: boolean;
+}
+
+export interface LoadFieldTypesInPlanOptions {
+  /** Read `sys_db_object` (default true). False when field policy hides its fields. */
+  readonly readChains?: boolean;
+  /** Read `sys_dictionary` (default true). False when field policy hides its fields. */
+  readonly readTypes?: boolean;
+  /** `sys_db_object` levels to read, at most {@link PLAN_CHAIN_LEVELS}. */
+  readonly maxLevels?: number;
+  /**
+   * Each dictionary row before it is read, for the caller's field policy (a
+   * field it drops reads as missing). Not applied to `sys_db_object` rows,
+   * whose parent column is a dot-walk.
+   */
+  readonly filterDictionaryRow?: (row: Readonly<Record<string, unknown>>) => Record<string, unknown>;
+  /** The call's signal: an error after it aborted is a cancellation, and rethrows. */
+  readonly signal?: AbortSignal;
+}
+
+/**
+ * Field types for `tables`, read only from tables a tool can declare in its
+ * own plan: `sys_db_object` one level per read (the parent's name is a
+ * one-hop dot-walk, {@link PLAN_FIELD_TYPE_DOT_WALKS}) and one instance-wide
+ * `sys_dictionary` read of the hidden types. The two run in parallel.
+ *
+ * Unlike {@link loadFieldTypes} it never reads `sys_db_view_table` and keeps
+ * nothing in the memo: a database view (no `sys_db_object` row) stays
+ * unresolved, so every field on it is `unknown_type`. Otherwise the answer
+ * has the same semantics:
+ * - only rows of a hidden type ({@link isHiddenFieldType}) count, so a child's
+ *   row of another type never un-hides an inherited hidden field;
+ * - a dictionary read that fails, is not 200, returns no hidden-typed row or
+ *   returns a full page gives `unavailable`;
+ * - a table whose chain is unknown or incomplete is left out of `types`.
+ *
+ * A chain read that fails keeps the levels read before it, and sets
+ * `hierarchyRead` false. A cancelled read rethrows.
+ */
+export async function loadFieldTypesInPlan(
+  client: ServiceNowOperations,
+  tablesCandidate: Iterable<string>,
+  options: LoadFieldTypesInPlanOptions = {}
+): Promise<PlanFieldTypes> {
+  const tables = [...new Set([...tablesCandidate].map(normalizeName))].filter(
+    (name): name is string => name !== undefined
+  );
+  const maxLevels = Math.max(0, Math.min(options.maxLevels ?? PLAN_CHAIN_LEVELS, PLAN_CHAIN_LEVELS));
+  const cancelled = (error: unknown) => options.signal?.aborted === true || isServiceNowRequestCancellation(error);
+  /** Table -> its parent, null when it extends nothing, undefined when the row named no usable parent. */
+  const parents = new Map<string, string | null | undefined>([[PLAN_METADATA_ROOT, null]]);
+  let hierarchyRead = true;
+  let dictionaryRows: DictionaryRow[] | undefined;
+
+  const readChains = async (): Promise<void> => {
+    if (options.readChains === false) {
+      hierarchyRead = false;
+      return;
+    }
+    let pending = tables.filter((table) => !parents.has(table));
+    for (let level = 0; pending.length > 0; level += 1) {
+      if (level >= maxLevels) {
+        hierarchyRead = false;
+        return;
+      }
+      const response = await client.get("/api/now/table/sys_db_object", {
+        sysparm_query: `nameIN${pending.join(",")}`,
+        sysparm_fields: ["name", PLAN_PARENT_NAME].join(","),
+        sysparm_limit: String(pending.length),
+        sysparm_display_value: "false",
+        sysparm_exclude_reference_link: "true",
+      });
+      const next = new Set<string>();
+      for (const row of resultRows(response)) {
+        const name = rawText(row.name)?.trim().toLowerCase();
+        if (name === undefined || !pending.includes(name)) continue;
+        const parent = rawText(row[PLAN_PARENT_NAME])?.trim().toLowerCase() ?? "";
+        if (parent === "") parents.set(name, null);
+        else if (FIELD_NAME.test(parent)) {
+          parents.set(name, parent);
+          if (!parents.has(parent)) next.add(parent);
+        } else {
+          // A parent that is not a table name: the chain stops, unknown.
+          parents.set(name, undefined);
+        }
+      }
+      pending = [...next].filter((table) => !parents.has(table));
+    }
+  };
+
+  const readTypes = async (): Promise<void> => {
+    if (options.readTypes === false) return;
+    const response = await client.getWithMeta<{ result?: unknown }>("/api/now/table/sys_dictionary", {
+      sysparm_query: `internal_typeIN${HIDDEN_FIELD_TYPES.join(",")}^ORDERBYname^ORDERBYelement`,
+      sysparm_fields: PLAN_FIELD_TYPE_FIELDS.sys_dictionary.join(","),
+      sysparm_limit: String(MAX_HIDDEN_DICTIONARY_ROWS),
+      sysparm_display_value: "false",
+      sysparm_exclude_reference_link: "true",
+    });
+    const rows = response.status === 200 ? resultRows(response.data) : [];
+    // No rows means they are hidden from this account (every instance has
+    // password-typed fields), and a full page may be cut short: both are
+    // unavailable, never "no hidden fields".
+    if (rows.length === 0 || rows.length >= MAX_HIDDEN_DICTIONARY_ROWS) return;
+    const kept: DictionaryRow[] = [];
+    for (const row of rows) {
+      const entry = options.filterDictionaryRow?.(row) ?? row;
+      const table = rawText(entry.name);
+      const element = rawText(entry.element);
+      const type = rawText(entry.internal_type);
+      // Hidden-typed rows only, as the instance-wide loader keeps: a row of any
+      // other type the server returned must not override an inherited one.
+      if (table === undefined || element === undefined || !isHiddenFieldType(type)) continue;
+      kept.push({ table, element, internal_type: type! });
+    }
+    // As the instance-wide loader: no hidden-typed row at all is unavailable.
+    if (kept.length > 0) dictionaryRows = kept;
+  };
+
+  if (tables.length > 0) {
+    await Promise.all([
+      readChains().catch((error: unknown) => {
+        if (cancelled(error)) throw error;
+        hierarchyRead = false;
+      }),
+      readTypes().catch((error: unknown) => {
+        if (cancelled(error)) throw error;
+        dictionaryRows = undefined;
+      }),
+    ]);
+  }
+
+  const chains = new Map<string, PlanTableChain>();
+  for (const table of tables) {
+    const chain = planChainOf(table, parents);
+    if (chain !== undefined) chains.set(table, chain);
+  }
+  const hierarchies: Record<string, readonly string[]> = {};
+  for (const [table, chain] of chains) if (chain.complete) hierarchies[table] = chain.tables;
+  const types =
+    dictionaryRows === undefined ? FIELD_TYPES_UNAVAILABLE : fieldTypesFromRows(dictionaryRows, hierarchies);
+  return Object.freeze({ types, chains, hierarchyRead });
+}
+
+function planChainOf(
+  table: string,
+  parents: ReadonlyMap<string, string | null | undefined>
+): PlanTableChain | undefined {
+  if (!parents.has(table)) return undefined;
+  const tables = [table];
+  let current = parents.get(table);
+  while (current !== null) {
+    if (current === undefined || tables.includes(current) || tables.length >= PLAN_CHAIN_TABLES) {
+      return Object.freeze({ tables: Object.freeze(tables), complete: false });
+    }
+    tables.push(current);
+    current = parents.has(current) ? parents.get(current) : undefined;
+  }
+  return Object.freeze({ tables: Object.freeze(tables), complete: true });
+}
+
+/** Rows of a Table API response, objects only. */
+function resultRows(response: unknown): Record<string, unknown>[] {
+  const result = (response as { result?: unknown } | null | undefined)?.result;
+  return Array.isArray(result)
+    ? result.filter(
+        (row): row is Record<string, unknown> => typeof row === "object" && row !== null && !Array.isArray(row)
+      )
+    : [];
+}
+
+/** A field value as text: a string, number or boolean, or the `value` of a pair. */
+function rawText(value: unknown, depth = 0): string | undefined {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return String(value);
+  if (depth < 2 && typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return rawText((value as { value?: unknown }).value, depth + 1);
+  }
+  return undefined;
 }
 
 function storedText(candidate: unknown): string | undefined {

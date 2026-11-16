@@ -70,15 +70,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import { isServiceNowRequestCancellation, isServiceNowResponseTooLarge, type ServiceNowOperations } from "../client.js";
 import { isCredentialTable, isCredentialTableHierarchy } from "../credential-tables.js";
-import {
-  FIELD_TYPES_UNAVAILABLE,
-  HIDDEN_FIELD_TYPES,
-  MAX_HIDDEN_DICTIONARY_ROWS,
-  isHiddenFieldType,
-  fieldTypesFromRows,
-  hiddenTypedFields,
-  type FieldTypes,
-} from "../hidden-values.js";
+import { PLAN_FIELD_TYPE_FIELDS, hiddenTypedFields, loadFieldTypesInPlan, type PlanFieldTypes } from "../hidden-values.js";
 import { uncachedOperations } from "../metadata-cache.js";
 import { createToolError } from "../tool-error.js";
 import { escapeQueryValue } from "../utils.js";
@@ -226,9 +218,7 @@ const ROW_FIELDS = Object.freeze([
   "sys_id", "name", "type", "target_name", "action", "table", "application", "replace_on_upgrade",
 ]);
 const PROBLEM_FIELDS = Object.freeze(["sys_id", "remote_update", "status", "type"]);
-const DICTIONARY_FIELDS = Object.freeze(["name", "element", "internal_type"]);
-/** The parent's name, a one-hop dot-walk from `sys_db_object` to itself. */
-const PARENT_NAME = "super_class.name";
+const DICTIONARY_FIELDS = PLAN_FIELD_TYPE_FIELDS.sys_dictionary;
 
 /**
  * Every field this view may request or filter on, by table, for the module's
@@ -850,35 +840,14 @@ export async function collectCandidateTables(
   return { tables: mergeTables(direct, nested), budgetHit };
 }
 
-/** A table's chain, nearest first, and whether it reaches a table that extends nothing. */
-interface Chain {
-  readonly tables: readonly string[];
-  readonly complete: boolean;
-}
-
-/**
- * `parents` maps a table to its parent's name, to null when it extends
- * nothing, or to undefined when its row named no usable parent. A table with
- * no entry had no `sys_db_object` row, or was not read.
- */
-function chainOf(table: string, parents: ReadonlyMap<string, string | null | undefined>): Chain | undefined {
-  if (!parents.has(table)) return undefined;
-  const tables = [table];
-  let current = parents.get(table);
-  while (current !== null) {
-    if (current === undefined || tables.includes(current) || tables.length >= 16) {
-      return { tables, complete: false };
-    }
-    tables.push(current);
-    current = parents.has(current) ? parents.get(current) : undefined;
-  }
-  return { tables, complete: true };
-}
-
 /**
  * The context reads, in one scope. `extra` (the update-version counts, small
  * like these) runs in the same scope, alongside them; it handles its own
  * failures and is told when no scope was left.
+ *
+ * Hierarchies and field types come from the shared plan-bounded loader
+ * (`loadFieldTypesInPlan`): `sys_db_object` one level per read, through a
+ * declared one-hop dot-walk, and one hidden-types `sys_dictionary` read.
  */
 async function readContext(
   reader: Reader,
@@ -892,115 +861,33 @@ async function readContext(
   if (all.length > L.MAX_CONTEXT_TABLES) warnings.add("context_tables_capped");
   // The cap keeps the most certain tables; the reads list them sorted.
   const tables = all.slice(0, L.MAX_CONTEXT_TABLES).sort();
-  /** See {@link chainOf}. `sys_metadata` extends nothing, so it is never read. */
-  const parents = new Map<string, string | null | undefined>([[METADATA_ROOT, null]]);
-  let dictionaryRows: { table: string; element: string; internal_type: string }[] | undefined;
-  let hierarchyRead = true;
 
-  const canChain = firstUnreadable(access, "sys_db_object", ["name", "super_class"]) === undefined;
-  const canType = firstUnreadable(access, "sys_dictionary", DICTIONARY_FIELDS) === undefined;
-
-  const readChains = async () => {
-    if (!canChain) {
-      hierarchyRead = false;
-      return;
-    }
-    let pending = tables.filter((table) => !parents.has(table));
-    for (let level = 0; pending.length > 0; level += 1) {
-      if (level >= L.MAX_CHAIN_LEVELS) {
-        hierarchyRead = false;
-        return;
-      }
-      const rows = rowsOf(
-        await reader.meta.get(`${TABLE_PATH}sys_db_object`, {
-          sysparm_query: `nameIN${pending.join(",")}`,
-          sysparm_fields: ["name", PARENT_NAME].join(","),
-          sysparm_limit: String(pending.length),
-          sysparm_display_value: "false",
-          sysparm_exclude_reference_link: "true",
-        })
-      );
-      const next = new Set<string>();
-      for (const row of rows) {
-        const name = scalar(row.name)?.trim().toLowerCase();
-        if (name === undefined || !pending.includes(name)) continue;
-        const parent = scalar(row[PARENT_NAME])?.trim().toLowerCase() ?? "";
-        if (parent === "") parents.set(name, null);
-        else if (TABLE_NAME.test(parent)) {
-          parents.set(name, parent);
-          if (!parents.has(parent)) next.add(parent);
-        } else {
-          // A parent that is not a table name: the chain stops, unknown.
-          parents.set(name, undefined);
-        }
-      }
-      pending = [...next].filter((table) => !parents.has(table));
-    }
+  const loaderOptions = {
+    readChains: firstUnreadable(access, "sys_db_object", ["name", "super_class"]) === undefined,
+    readTypes: firstUnreadable(access, "sys_dictionary", DICTIONARY_FIELDS) === undefined,
+    maxLevels: L.MAX_CHAIN_LEVELS,
+    filterDictionaryRow: (row: Readonly<Record<string, unknown>>) =>
+      readableRow(access, "sys_dictionary", row, DICTIONARY_FIELDS),
+    signal: reader.signal,
   };
-
-  const readTypes = async () => {
-    if (!canType) return;
-    const response = await reader.meta.getWithMeta<{ result?: unknown }>(`${TABLE_PATH}sys_dictionary`, {
-      sysparm_query: `internal_typeIN${HIDDEN_FIELD_TYPES.join(",")}^ORDERBYname^ORDERBYelement`,
-      sysparm_fields: DICTIONARY_FIELDS.join(","),
-      sysparm_limit: String(MAX_HIDDEN_DICTIONARY_ROWS),
-      sysparm_display_value: "false",
-      sysparm_exclude_reference_link: "true",
-    });
-    const rows = response.status === 200 ? rowsOf(response.data) : [];
-    // No rows means they are hidden from this account (every instance has
-    // password-typed fields), and a full page may be cut short: both are
-    // unavailable, never "no hidden fields".
-    if (rows.length === 0 || rows.length >= MAX_HIDDEN_DICTIONARY_ROWS) return;
-    dictionaryRows = rows.flatMap((row) => {
-      const entry = readableRow(access, "sys_dictionary", row, DICTIONARY_FIELDS);
-      const tableName = scalar(entry.name);
-      const element = scalar(entry.element);
-      const type = scalar(entry.internal_type);
-      // Hidden-typed rows only, as the shared loader keeps: a row of any other
-      // type the server returned must not override an inherited hidden field.
-      return tableName === undefined || element === undefined || !isHiddenFieldType(type)
-        ? []
-        : [{ table: tableName, element, internal_type: type! }];
-    });
-  };
-
+  let loaded: PlanFieldTypes | undefined;
+  let noScope = false;
   if (tables.length > 0 || extra !== undefined) {
     const read = await inScope(reader, async () => {
       // The reads do not depend on each other. A failure costs the facts it
       // would have given, never the call; a cancellation ends the call.
-      await Promise.all([
-        tables.length === 0
-          ? undefined
-          : readChains().catch((error: unknown) => {
-              if (isCancellation(error, reader.signal)) throw error;
-              hierarchyRead = false;
-            }),
-        tables.length === 0
-          ? undefined
-          : readTypes().catch((error: unknown) => {
-              if (isCancellation(error, reader.signal)) throw error;
-              dictionaryRows = undefined;
-            }),
-        extra?.run(),
-      ]);
+      const [types] = await Promise.all([loadFieldTypesInPlan(reader.meta, tables, loaderOptions), extra?.run()]);
+      return types;
     });
     if (read === undefined) {
-      hierarchyRead = false;
+      noScope = true;
       extra?.noScope();
-    }
+    } else loaded = read.value;
   }
-
-  const chains = new Map<string, Chain>();
-  for (const tableName of tables) {
-    const chain = chainOf(tableName, parents);
-    if (chain !== undefined) chains.set(tableName, chain);
-  }
-  const hierarchies: Record<string, readonly string[]> = {};
-  for (const [tableName, chain] of chains) if (chain.complete) hierarchies[tableName] = chain.tables;
-  const fieldTypes: FieldTypes =
-    dictionaryRows === undefined ? FIELD_TYPES_UNAVAILABLE : fieldTypesFromRows(dictionaryRows, hierarchies);
-  if (!hierarchyRead || tables.some((tableName) => chains.get(tableName)?.complete !== true)) {
+  // No scope was left, or nothing to read: the same shape, with nothing read.
+  loaded ??= await loadFieldTypesInPlan(reader.meta, tables, { ...loaderOptions, readChains: false, readTypes: false });
+  const { chains, types: fieldTypes } = loaded;
+  if (noScope || !loaded.hierarchyRead || tables.some((tableName) => chains.get(tableName)?.complete !== true)) {
     warnings.add("hierarchy_unavailable");
   }
   if (fieldTypes.state === "unavailable" && tables.length > 0) warnings.add("field_types_unavailable");
