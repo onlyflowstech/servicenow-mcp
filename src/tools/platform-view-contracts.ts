@@ -94,6 +94,8 @@ export const PLATFORM_VIEW_DESCRIPTION =
   "Read-only platform views, chosen by view: update sets, their changes, batches and remote sets with " +
   "preview problems; skipped upgrade files; instance scan findings; update set evaluation. " +
   "A view takes only its own selectors. " +
+  "state: in progress, complete, ignore (update_sets) or a remote set state. update_set: sys_id or name. " +
+  "upgrade, result: latest or sys_id. updated_since: YYYY-MM-DD[ hh:mm:ss]. groups: perf, sec, bp. " +
   PLATFORM_VIEW_UNTRUSTED_SENTENCE;
 
 // ---------------------------------------------------------------------------
@@ -104,7 +106,7 @@ const SYS_ID = /^[0-9a-f]{32}$/u;
 
 /**
  * Bounds are checks, not JSON Schema keywords. `tools/list` carries this schema
- * for every client, and the budget for the whole entry is 1,600 characters
+ * for every client, and the budget for the whole entry is 1,800 characters
  * (`test/platform-view-contracts.test.ts`): a bound such as `maxLength`, an
  * `enum` or a `pattern` costs more than the field it describes, and so would a
  * `.meta({ id })` definition. A shared definition is published once and
@@ -112,7 +114,7 @@ const SYS_ID = /^[0-9a-f]{32}$/u;
  * `{"type":"string"}`, 17; with 14 text selectors and 3 sys_ids that is about
  * 430 characters more than the bare types, and 30 field descriptions are about
  * 1,450 more. A check still rejects the call, and its message names the bound,
- * so the published schema is bare types. Only `view` keeps its enum.
+ * so the published schema is bare types, and the description names what the property names do not say. Only `view` keeps its enum.
  */
 const text = z
   .string()

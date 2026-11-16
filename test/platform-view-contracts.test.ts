@@ -270,6 +270,12 @@ describe("description", () => {
     expect(platformViewToolModule.definition.description).toBe(PLATFORM_VIEW_DESCRIPTION);
   });
 
+  it("says what the property names do not: state values, id forms, time format, groups", () => {
+    for (const phrase of ["in progress, complete, ignore", "remote set state", "update_set: sys_id or name", "upgrade, result: latest or sys_id", "YYYY-MM-DD[ hh:mm:ss]", "groups: perf, sec, bp"]) {
+      expect(PLATFORM_VIEW_DESCRIPTION, phrase).toContain(phrase);
+    }
+  });
+
   it("is published as the tool's description, read-only", async () => {
     const { client } = await harness(recordingInstance().ops);
     const tool = (await client.listTools()).tools.find((candidate) => candidate.name === "sn_platform_view")!;
@@ -288,14 +294,14 @@ describe("model-visible size", () => {
   // Measured as test/filter-examples.test.ts measures it: what a model reads
   // (name, description, input schema) as listed, with the shared profile
   // selector included, and without the output schema.
-  const BUDGET = 1_600;
+  const BUDGET = 1_800;
 
-  it("keeps the schema and description at or under 1,600 characters", async () => {
+  it("keeps the schema and description at or under 1,800 characters", async () => {
     const { client } = await harness(recordingInstance().ops);
     const tool = (await client.listTools()).tools[0]!;
     const size = JSON.stringify({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }).length;
     // Recorded, so a change here is made on purpose: the entry is paid for by every client on every session.
-    expect(size).toBe(1_593);
+    expect(size).toBe(1_791);
     expect(size).toBeLessThanOrEqual(BUDGET);
   });
 });
