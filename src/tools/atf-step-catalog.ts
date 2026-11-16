@@ -5,7 +5,8 @@ import { runWithServiceNowRequestSignal } from "../client.js";
 import definitions from "./atf-step-definitions.json";
 import { AtfPolicyError } from "../atf-policy.js";
 import { serviceNowSysIdSchema as id } from "../servicenow-identifiers.js";
-import { FieldPolicyError, prepareWriteFieldArguments, resolveReadableFields, validateWritableFields } from "../field-policy.js";
+import { currentFieldPolicyConfiguration, FieldPolicyError, prepareWriteFieldArguments, resolveReadableFields, typeHiddenFieldNames, validateWritableFields } from "../field-policy.js";
+import { currentHiddenFieldScope } from "../hidden-values.js";
 import { normalizeTableName, type TableAccessRequest } from "../table-policy.js";
 import { prepareWriteFieldValues } from "../write-value-policy.js";
 import { createToolError, trustedToolErrorDescriptor } from "../tool-error.js";
@@ -178,7 +179,44 @@ function checkStepTable(type: string, inputs: Record<string, string>): TableAcce
   if (rule.assignments !== undefined) checkAssignedFields(table, inputs[rule.assignments] ?? "");
   return [{ operation: rule.access, table }];
 }
-export function prepareSteps(args: Record<string, unknown>, allowScripts: boolean) {
+/** The fields each step write sets, whatever the step: fixed names. */
+const STEP_WRITE_FIELDS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  sys_atf_step: ["test", "sys_scope", "step_config", "order", "active", "description"],
+  sys_variable_value: ["document", "document_key", "variable", "order", "value"],
+  sys_element_mapping: ["id", "table", "field", "value"],
+});
+/** Steps parsed by a call's first preparation, by the call's own arguments. */
+const PARSED_STEP_RUNS = new WeakMap<
+  object,
+  { readonly allowScripts: boolean; readonly policy: object | undefined; readonly steps: PreparedStep[] }
+>();
+/**
+ * Prepare an add_steps call. `reuseKey` is the call's own argument object:
+ * the dispatcher prepares a plan twice, the second time inside the call's
+ * hidden-field scope, and the second preparation reuses the first one's parsed
+ * steps. Parsing and the value checks cannot change between the two; the
+ * checks that depend on field types (conditions, assignments and the step
+ * writes' own fields) run again. Reuse needs the same argument object, script
+ * grant and field-policy configuration, inside a hidden-field scope; anything
+ * else prepares from scratch.
+ */
+export function prepareSteps(args: Record<string, unknown>, allowScripts: boolean, reuseKey?: object) {
+  const policy = currentFieldPolicyConfiguration();
+  const reused = reuseKey === undefined ? undefined : PARSED_STEP_RUNS.get(reuseKey);
+  if (
+    reused !== undefined &&
+    reused.allowScripts === allowScripts &&
+    reused.policy === policy &&
+    currentHiddenFieldScope() !== undefined
+  ) {
+    const stepAccess: TableAccessRequest[] = [];
+    for (const step of reused.steps) stepAccess.push(...checkStepTable(step.type, step.inputs));
+    for (const [table, fields] of Object.entries(STEP_WRITE_FIELDS)) {
+      const hidden = typeHiddenFieldNames(table);
+      if (fields.some(field => hidden.has(field))) throw new FieldPolicyError("sensitive_field", { table });
+    }
+    return plannedSteps(args, reused.steps, stepAccess);
+  }
   const testId = id.parse(args.test_sys_id);
   const requests = boundedArray(stepRequestSchema, MAX_ATF_AUTHOR_STEPS, { min: 1 }).parse(args.steps);
   const stepAccess: TableAccessRequest[] = [];
@@ -206,6 +244,10 @@ export function prepareSteps(args: Record<string, unknown>, allowScripts: boolea
     }
     return { type: request.type, definition, inputs, order };
   });
+  if (reuseKey !== undefined) PARSED_STEP_RUNS.set(reuseKey, { allowScripts, policy, steps });
+  return plannedSteps(args, steps, stepAccess);
+}
+function plannedSteps(args: Record<string, unknown>, steps: PreparedStep[], stepAccess: readonly TableAccessRequest[]) {
   // Each table-taking step needs the table it names (read, or write for a form
   // that creates records), so the profile's grants (a named-only table included)
   // decide it before anything is written.

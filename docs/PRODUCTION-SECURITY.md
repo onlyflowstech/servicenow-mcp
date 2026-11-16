@@ -483,9 +483,8 @@ group field there.
 - **Grant the integration user read access to `sys_dictionary` and
   `sys_db_object`** (and `sys_db_view_table` for database views). The types
   come from one `sys_dictionary` read per credential, kept for an hour (or the
-  profile's metadata-cache TTL, if shorter, and read on every call by a profile
-  whose cache table list leaves `sys_dictionary` out); no table grant is
-  needed. While
+  profile's metadata-cache TTL, if shorter), and concurrent calls share one
+  read; no table grant is needed. While
   ServiceNow refuses or fails that read, every field-policy tool refuses with a
   message naming this access.
 - **`"fieldTypes": { "dictionary": "not_required" }`** on a profile (or

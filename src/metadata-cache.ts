@@ -182,6 +182,8 @@ interface ScopeState {
    */
   readonly derived: Map<string, DerivedEntry>;
   derivedBytes: number;
+  /** Derivations in flight, by key, so concurrent calls share one read. */
+  readonly inflight: Map<string, Promise<unknown>>;
   /** Sum of `bytes` over `entries`. */
   bytes: number;
   /** Set once the scope is evicted, so a call still holding it stores nothing. */
@@ -312,24 +314,48 @@ const WRAPPER_SCOPES = new WeakMap<
  * credential identity), is bounded in entries and bytes, and is evicted with
  * the scope.
  *
- * Undefined when `operations` is not a cached wrapper, or when the profile's
- * cache table list does not include `table` (an operator who keeps a table out
- * of the cache keeps values derived from it out too).
+ * It does not follow the profile's cache table list: what it holds is derived
+ * metadata (field names and types, table chains), never row values, and
+ * without it every call would repeat the deriving reads. An empty table list
+ * (rows cached for no table) leaves it on for the same reason; the profile's
+ * TTL still caps how long a value lives.
+ *
+ * Undefined when `operations` is not a cached wrapper.
  */
 export interface DerivedMetadataMemo {
   get(key: string): unknown;
   /** `value` must be immutable; `bytes` is its estimated size. */
   set(key: string, value: unknown, bytes: number, ttlMs: number): void;
+  /** The derivation of `key` another call has in flight, if any. */
+  pending(key: string): Promise<unknown> | undefined;
+  /**
+   * Record `promise` as the derivation of `key` in flight until it settles. A
+   * rejection is never kept: the entry is cleared, and the next call retries.
+   */
+  track<T>(key: string, promise: Promise<T>): Promise<T>;
 }
 
 export function derivedMetadataMemo(
-  operations: ServiceNowOperations,
-  table: string
+  operations: ServiceNowOperations
 ): DerivedMetadataMemo | undefined {
   const bound = WRAPPER_SCOPES.get(operations);
-  if (bound === undefined || !tableMatches(bound.config.tables, table)) return undefined;
+  if (bound === undefined) return undefined;
   const { state, config } = bound;
   return Object.freeze({
+    pending(key: string): Promise<unknown> | undefined {
+      return state.inflight.get(key);
+    },
+    track<T>(key: string, promise: Promise<T>): Promise<T> {
+      if (state.detached || state.inflight.size >= MAX_DERIVED_ENTRIES_PER_SCOPE) return promise;
+      state.inflight.set(key, promise);
+      // Registered before any waiter, so the entry is gone by the time a
+      // waiter sees the outcome.
+      const clear = (): void => {
+        if (state.inflight.get(key) === promise) state.inflight.delete(key);
+      };
+      promise.then(clear, clear);
+      return promise;
+    },
     get(key: string): unknown {
       const entry = state.derived.get(key);
       if (entry === undefined) return undefined;
@@ -862,6 +888,7 @@ function stateForScope(scope: string): ScopeState {
     small: new Map(),
     derived: new Map(),
     derivedBytes: 0,
+    inflight: new Map(),
     bytes: 0,
     detached: false,
   };
@@ -876,6 +903,7 @@ function stateForScope(scope: string): ScopeState {
     oldState.small.clear();
     oldState.derived.clear();
     oldState.derivedBytes = 0;
+    oldState.inflight.clear();
     oldState.bytes = 0;
     oldState.detached = true;
   }
