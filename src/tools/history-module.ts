@@ -1,0 +1,871 @@
+/**
+ * `sn_history`: one record's history, newest first: its audited field
+ * changes (`sys_audit`), its comments and work notes (`sys_journal_field`)
+ * and the flows that ran on it (`sys_flow_context`).
+ *
+ * Access plan (`historyAccessPlan`), decided before any read:
+ * - the record's table, with `sys_id` and `sys_class_name` readable under
+ *   field policy (otherwise the call is refused before it reads anything);
+ * - `sys_db_object` and `sys_dictionary`, for the class's field types, when
+ *   the profile may read them. Without them every value is withheld;
+ * - each source the profile may read, decided on its own as `sn_codesearch`
+ *   decides its code tables: a source whose table is not granted (including a
+ *   named-only table under `"*"`, or a target not bound to this tool), or
+ *   whose key columns field policy hides, is reported `not_granted` and left
+ *   out of the plan. The call fails only when a source the caller named
+ *   explicitly is refused, or when no source is left.
+ * The mirror tables (`sys_history_line`, `sys_audit_delete`,
+ * `sys_email`) are never read.
+ *
+ * Reads, at most six per page:
+ * 1. the record (`GET <table>/<sys_id>`, `sys_id,sys_class_name`). A record
+ *    that is missing or that the instance refuses is `not_found`; a record
+ *    whose class is not `table` is refused with the class to call with;
+ * 2. the class's extension chain (`sys_db_object`) and every dictionary row
+ *    of that chain (`sys_dictionary`), through the metadata cache;
+ * 3. each planned source, newest first, `limit + 1` rows, uncached, together
+ *    with step 2.
+ *
+ * Every source row must carry the record's class and sys_id in its key
+ * columns, or it is dropped (`omitted.mismatch`). Then, in order:
+ * (a) an audit row for a journal-typed field (by the dictionary type found
+ *     walking up the class's chain, never by name) is dropped: journal text
+ *     comes only through the journal source and its own grant;
+ * (b) a row whose field the profile may not read on the class (field policy,
+ *     a sensitive name, a type the call hides, or a column that carries other
+ *     records' content) is dropped (`omitted.unreadable`), unnamed;
+ * (c) a value whose field is hidden by type, sits on a credential table or
+ *     has an unknown type is withheld (`value_hidden`). This uses the shared
+ *     type helper over the dictionary rows of step 2, so an unreadable
+ *     dictionary withholds every value.
+ * Values are cut at 2,000 characters; references stay raw sys_ids. No row is
+ * cached.
+ *
+ * Paging: each source has its own position, `encodeTailCursor` bound to the
+ * record, the source and the filters (`historyCursorFilter`). The newest
+ * `limit` events of all sources are returned; a source's cursor stands at
+ * the last of its rows this page consumed, so a page never skips or repeats.
+ *
+ * The tool is not registered here: its `catalog.ts` entry and its
+ * result-envelope entry are added when it is. This file exports the module,
+ * and the contracts file exports `historyDataSchema`, for that.
+ *
+ * @module tools/history-module
+ */
+
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+
+import { isServiceNowRequestCancellation, runWithServiceNowRequestSignal, type ServiceNowOperations } from "../client.js";
+import {
+  EXPLICIT_READ_FIELD_NAMES,
+  FieldPolicyError,
+  ROTATION_SHARD_BASE_NAMES,
+  isFieldPolicyError,
+  resolveReadableFields,
+} from "../field-policy.js";
+import {
+  FIELD_TYPES_UNAVAILABLE,
+  classifyField,
+  fieldTypesFromRows,
+  type DictionaryRow,
+  type FieldTypes,
+} from "../hidden-values.js";
+import { uncachedOperations } from "../metadata-cache.js";
+import { serviceNowSysIdPathSegment } from "../servicenow-identifiers.js";
+import {
+  TablePolicyError,
+  authorizeTableAccess,
+  isTablePolicyError,
+  type TableAccessPolicy,
+  type TableAccessRequest,
+} from "../table-policy.js";
+import { createToolError, trustedToolErrorDescriptor } from "../tool-error.js";
+import { ok } from "../utils.js";
+import {
+  HISTORY_DESCRIPTION,
+  HISTORY_DICTIONARY_AUDIT_FIELD,
+  HISTORY_DICTIONARY_FIELDS,
+  HISTORY_FIXED_TABLES,
+  HISTORY_HIERARCHY_FIELDS,
+  HISTORY_LIMITS,
+  HISTORY_SOURCES,
+  HISTORY_SOURCE_SPECS,
+  HistoryArgumentError,
+  NOT_RECORDED,
+  canonicalHistoryArgs,
+  historyCursorFilter,
+  historyDataSchema,
+  historyInputSchema,
+  type CanonicalHistoryArgs,
+  type HistoryData,
+  type HistoryEvent,
+  type HistorySource,
+  type HistorySourceSpec,
+} from "./history-contracts.js";
+import {
+  DEFAULT_RESULT_BYTE_LIMIT,
+  envelopeCompatibilityResult,
+  withStructuredResultEnvelope,
+} from "./result-envelope.js";
+import { encodeTailCursor, isStoredTimestamp, isSysId, type TailCursor, type TailPosition } from "./syslog-cursor.js";
+import { resolveTableHierarchy } from "./table-hierarchy.js";
+import {
+  defineServiceNowToolModule,
+  withRequiredProfile,
+  type ServiceNowToolHandlerServices,
+} from "./tool-module.js";
+
+const TOOL = "sn_history";
+const TABLE_PATH = "/api/now/table/";
+const L = HISTORY_LIMITS;
+
+/** Dictionary types whose values are journal text. */
+const JOURNAL_TYPES: ReadonlySet<string> = new Set(["journal", "journal_input", "journal_list"]);
+/** Depth of the class chain walked for field types. */
+const MAX_HIERARCHY_DEPTH = 12;
+/** A dictionary read that returns this many rows may be cut short, so its types are unavailable. */
+export const MAX_HISTORY_DICTIONARY_ROWS = 5_000;
+/** Bytes kept back from `max_response_bytes` for the envelope around `data`. */
+const ENVELOPE_RESERVE_BYTES = 2_000;
+/** The highest sys_id: a position at the end of one second, for a source this page did not reach. */
+const END_OF_SECOND = "f".repeat(32);
+
+const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
+
+export const WRONG_CLASS_HINT = (recordClass: string) =>
+  `This record's class is ${recordClass}. Call again with table: ${recordClass}.`;
+export const INVALID_CURSOR_HINT =
+  "The cursor was returned for another record, source or filter. Repeat the call that returned it with " +
+  "the same arguments, or leave cursor out to start from the newest entry.";
+export const DICTIONARY_UNAVAILABLE_WARNING =
+  "Field types could not be read from sys_dictionary, so no values are shown.";
+export const VALUES_NOT_READABLE_WARNING = (source: HistorySource) =>
+  `Field policy hides the ${source} value columns, so no ${source} values are shown.`;
+export const FITTED_WARNING =
+  "Fewer events than limit fit max_response_bytes; the rest follow with next_cursor.";
+
+// ---------------------------------------------------------------------------
+// Access plan
+// ---------------------------------------------------------------------------
+
+export interface HistorySourcePlan {
+  readonly source: HistorySource;
+  readonly spec: HistorySourceSpec;
+  /** `not_granted`: refused by table or field policy, and left out of the plan. */
+  readonly granted: boolean;
+  /** `sysparm_fields` for the read. */
+  readonly fields: readonly string[];
+  readonly user: boolean;
+  /** The value columns are requested (`include_values` and readable). */
+  readonly values: boolean;
+  /** `include_values` was asked for but field policy hides the value columns. */
+  readonly valuesHidden: boolean;
+}
+
+export interface HistoryPlan {
+  readonly table: string;
+  /** `sys_db_object` and `sys_dictionary` are in the plan. */
+  readonly dictionary: boolean;
+  /** The dictionary's `audit` column is readable. */
+  readonly auditFlag: boolean;
+  /** The sources asked for (explicitly, or every one by default), in canonical order. */
+  readonly sources: readonly HistorySourcePlan[];
+  readonly requests: readonly TableAccessRequest[];
+}
+
+function read(table: string): TableAccessRequest {
+  return Object.freeze({ operation: "read" as const, table });
+}
+
+/** Whether every one of `fields` is readable on `table` under the call's field policy. */
+function canRead(table: string, fields: readonly string[]): boolean {
+  try {
+    resolveReadableFields(table, { fields: fields.join(",") });
+    return true;
+  } catch (error) {
+    if (isFieldPolicyError(error)) return false;
+    throw error;
+  }
+}
+
+/**
+ * True for a column that carries other records' content on `table` (a whole
+ * record as XML, a diff, a queue payload). History never shows such a column,
+ * even where a profile opened it for reading: its audit rows are dropped and
+ * it cannot be named in `fields`.
+ */
+export function isRecordContentColumn(table: string, field: string): boolean {
+  const columns = (name: string): readonly string[] | undefined =>
+    Object.hasOwn(EXPLICIT_READ_FIELD_NAMES, name) ? EXPLICIT_READ_FIELD_NAMES[name] : undefined;
+  if (columns(table)?.includes(field)) return true;
+  const base = table.replace(/\d+$/u, "");
+  if (base !== table && base !== "" && ROTATION_SHARD_BASE_NAMES.includes(base) && columns(base)?.includes(field)) {
+    return true;
+  }
+  return (
+    table.startsWith("cdc_queue_") && !table.startsWith("cdc_queue_state_") && (columns("cdc_queue_ih")?.includes(field) ?? false)
+  );
+}
+
+/**
+ * The call's access plan. It throws (and so refuses the call before any read)
+ * when the record cannot be identified under field policy, when `fields`
+ * names a field the profile may not read, when a source the caller named is
+ * refused, or when no source is left. Every other refusal narrows the plan.
+ *
+ * Pure apart from the policy it consults: the dispatcher runs it inside the
+ * call's field-policy and type scopes, and the handler runs it again there,
+ * so both see the same plan.
+ */
+export function historyAccessPlan(args: CanonicalHistoryArgs, tableAccess: TableAccessPolicy): HistoryPlan {
+  const table = args.table;
+  // The class is read before anything else; a profile that may not read
+  // it gets nothing, rather than a history keyed to a guessed class.
+  resolveReadableFields(table, { fields: "sys_id,sys_class_name" });
+  if (args.fields !== undefined) {
+    resolveReadableFields(table, { fields: args.fields.join(",") });
+    const content = args.fields.find((field) => isRecordContentColumn(table, field));
+    if (content !== undefined) throw new FieldPolicyError("unreadable_field", { table, field: content });
+  }
+
+  let dictionary = false;
+  try {
+    authorizeTableAccess(tableAccess, read("sys_db_object"), TOOL);
+    authorizeTableAccess(tableAccess, read("sys_dictionary"), TOOL);
+    dictionary = canRead("sys_db_object", HISTORY_HIERARCHY_FIELDS) && canRead("sys_dictionary", HISTORY_DICTIONARY_FIELDS);
+  } catch (error) {
+    if (!isTablePolicyError(error)) throw error;
+  }
+  const auditFlag = dictionary && canRead("sys_dictionary", [HISTORY_DICTIONARY_AUDIT_FIELD]);
+
+  const explicit = args.sources !== undefined;
+  const asked = args.sources ?? HISTORY_SOURCES;
+  const sources: HistorySourcePlan[] = [];
+  let firstDenial: unknown;
+  for (const source of asked) {
+    const spec = HISTORY_SOURCE_SPECS[source];
+    try {
+      authorizeTableAccess(tableAccess, read(spec.table), TOOL);
+      resolveReadableFields(spec.table, { fields: spec.keys.join(",") });
+    } catch (error) {
+      if (!isTablePolicyError(error) && !isFieldPolicyError(error)) throw error;
+      if (explicit) throw error;
+      firstDenial ??= error;
+      sources.push(Object.freeze({ source, spec, granted: false, fields: [], user: false, values: false, valuesHidden: false }));
+      continue;
+    }
+    const user = canRead(spec.table, [spec.user]);
+    const valuesReadable = spec.values.length > 0 && canRead(spec.table, spec.values);
+    const values = args.include_values && valuesReadable;
+    const extras = spec.extras.filter((field) => canRead(spec.table, [field]));
+    sources.push(
+      Object.freeze({
+        source,
+        spec,
+        granted: true,
+        fields: Object.freeze([...spec.keys, ...(user ? [spec.user] : []), ...(values ? spec.values : []), ...extras]),
+        user,
+        values,
+        valuesHidden: args.include_values && spec.values.length > 0 && !valuesReadable,
+      })
+    );
+  }
+  if (!sources.some((entry) => entry.granted)) {
+    if (isFieldPolicyError(firstDenial)) throw firstDenial;
+    throw new TablePolicyError({
+      reason: "none_granted",
+      operation: "read",
+      tool: TOOL,
+      tables: HISTORY_SOURCES.map((source) => HISTORY_SOURCE_SPECS[source].table),
+    });
+  }
+
+  const tables = [
+    table,
+    ...(dictionary ? ["sys_db_object", "sys_dictionary"] : []),
+    ...sources.filter((entry) => entry.granted).map((entry) => entry.spec.table),
+  ];
+  return Object.freeze({
+    table,
+    dictionary,
+    auditFlag,
+    sources: Object.freeze(sources),
+    requests: Object.freeze([...new Set(tables)].map(read)),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Reading
+// ---------------------------------------------------------------------------
+
+function inOwnScope<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T> {
+  return signal instanceof AbortSignal ? runWithServiceNowRequestSignal(signal, operation) : operation();
+}
+
+function rowsOf(response: unknown): Record<string, unknown>[] {
+  const result = (response as { result?: unknown } | null | undefined)?.result;
+  return Array.isArray(result)
+    ? result.filter((row): row is Record<string, unknown> => typeof row === "object" && row !== null && !Array.isArray(row))
+    : [];
+}
+
+/** A stored value as text: a string, or the `value` of a `{value, display_value}` pair. */
+function stored(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return String(value);
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    const inner = (value as { value?: unknown }).value;
+    if (typeof inner === "string") return inner;
+  }
+  return undefined;
+}
+
+function key(value: unknown): string {
+  return (stored(value) ?? "").trim().toLowerCase();
+}
+
+const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/gu;
+
+/** Cut at `max` code units without splitting a surrogate pair. */
+function cut(value: string, max: number): { readonly text: string; readonly cut: boolean } {
+  if (value.length <= max) return { text: value, cut: false };
+  let end = max;
+  const last = value.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return { text: value.slice(0, end), cut: true };
+}
+
+/** A short instance string on one line, or undefined when empty. */
+function shortText(value: unknown, max: number): string | undefined {
+  const raw = stored(value);
+  if (raw === undefined) return undefined;
+  const flat = raw.replace(CONTROL_CHARACTERS, " ").trim();
+  return flat === "" ? undefined : cut(flat, max).text;
+}
+
+function errorCategory(error: unknown): string | undefined {
+  return trustedToolErrorDescriptor(error)?.category;
+}
+
+/** The Table API's answer for a table that does not exist: an `upstream` error with no reason. */
+function isMissingTable(error: unknown): boolean {
+  const descriptor = trustedToolErrorDescriptor(error);
+  return descriptor?.category === "upstream" && descriptor.retry === "do_not_retry" && descriptor.reason === undefined;
+}
+
+/**
+ * The record's class. A missing record, one the instance refuses to show and
+ * a table the instance does not have are all `not_found`, so the answer says
+ * nothing about a record the caller cannot see. An empty class means the
+ * table is not extended: the class is the table.
+ */
+async function readRecordClass(
+  ops: ServiceNowOperations,
+  args: CanonicalHistoryArgs,
+  signal: AbortSignal | undefined
+): Promise<string> {
+  let response: unknown;
+  try {
+    response = await inOwnScope(signal, () =>
+      ops.get(`${TABLE_PATH}${args.table}/${serviceNowSysIdPathSegment(args.sys_id)}`, {
+        sysparm_fields: "sys_id,sys_class_name",
+        sysparm_display_value: "false",
+        sysparm_exclude_reference_link: "true",
+      })
+    );
+  } catch (error) {
+    if (isServiceNowRequestCancellation(error) || signal?.aborted) throw error;
+    const category = errorCategory(error);
+    if (category === "not_found" || category === "authorization" || isMissingTable(error)) {
+      throw createToolError("not_found", "do_not_retry");
+    }
+    throw error;
+  }
+  const result = (response as { result?: unknown } | null | undefined)?.result;
+  const row = Array.isArray(result) ? result[0] : result;
+  if (typeof row !== "object" || row === null || key((row as Record<string, unknown>).sys_id) !== args.sys_id) {
+    throw createToolError("not_found", "do_not_retry");
+  }
+  const recordClass = key((row as Record<string, unknown>).sys_class_name);
+  if (recordClass === "") return args.table;
+  // Only a valid table name is ever repeated or put in a query.
+  if (!TABLE_NAME.test(recordClass)) throw createToolError("upstream", "do_not_retry");
+  return recordClass;
+}
+
+interface ClassTypes {
+  readonly types: FieldTypes;
+  readonly auditEnabled: boolean | null;
+}
+
+const NO_TYPES: ClassTypes = Object.freeze({ types: FIELD_TYPES_UNAVAILABLE, auditEnabled: null });
+
+/**
+ * The class's field types: its chain, then every dictionary row of the chain,
+ * each field typed by its nearest definition (`incident.work_notes` is
+ * defined on `task`). Through the metadata cache. A refusal, an error, no
+ * field rows or a full page give the `unavailable` state; a cancellation
+ * rethrows.
+ */
+async function readClassTypes(
+  meta: ServiceNowOperations,
+  recordClass: string,
+  plan: HistoryPlan,
+  signal: AbortSignal | undefined
+): Promise<ClassTypes> {
+  if (!plan.dictionary) return NO_TYPES;
+  try {
+    const chain = await inOwnScope(signal, () => resolveTableHierarchy(meta, recordClass, MAX_HIERARCHY_DEPTH, false));
+    const fields = [...HISTORY_DICTIONARY_FIELDS, ...(plan.auditFlag ? [HISTORY_DICTIONARY_AUDIT_FIELD] : [])];
+    const response = await inOwnScope(signal, () =>
+      meta.get(`${TABLE_PATH}sys_dictionary`, {
+        sysparm_query: `nameIN${chain.join(",")}^ORDERBYname^ORDERBYelement`,
+        sysparm_fields: fields.join(","),
+        sysparm_limit: String(MAX_HISTORY_DICTIONARY_ROWS),
+        sysparm_display_value: "false",
+        sysparm_exclude_reference_link: "true",
+      })
+    );
+    const rows = rowsOf(response);
+    if (rows.length >= MAX_HISTORY_DICTIONARY_ROWS) return NO_TYPES;
+    const dictionaryRows: DictionaryRow[] = [];
+    let auditEnabled: boolean | null = null;
+    for (const row of rows) {
+      const table = key(row.name);
+      const element = key(row.element);
+      const type = key(row.internal_type);
+      if (!chain.includes(table) || type === "") continue;
+      if (element === "") {
+        if (table === recordClass && type === "collection" && plan.auditFlag) {
+          const flag = key(row[HISTORY_DICTIONARY_AUDIT_FIELD]);
+          auditEnabled = flag === "true" ? true : flag === "false" ? false : null;
+        }
+        continue;
+      }
+      dictionaryRows.push({ table, element, internal_type: type });
+    }
+    if (dictionaryRows.length === 0) return { types: FIELD_TYPES_UNAVAILABLE, auditEnabled };
+    return {
+      types: fieldTypesFromRows(dictionaryRows, { [recordClass]: chain }, { complete: true }),
+      auditEnabled,
+    };
+  } catch (error) {
+    if (isServiceNowRequestCancellation(error) || signal?.aborted) throw error;
+    return NO_TYPES;
+  }
+}
+
+/** The encoded query of one source's page: position first, then the record, then the filters. */
+export function sourceQuery(
+  spec: HistorySourceSpec,
+  recordClass: string,
+  args: CanonicalHistoryArgs,
+  position: TailPosition | undefined
+): string {
+  const parts: string[] = [];
+  if (position !== undefined) {
+    // Newest first, strictly before (T, I): `<=T` and (`<T` or `sys_id<I`).
+    // `^OR` binds to the clause before it, so the record filter that follows
+    // applies to both branches.
+    parts.push(`sys_created_on<=${position.timestamp}`, `sys_created_on<${position.timestamp}^ORsys_id<${position.sysId}`);
+  }
+  parts.push(`${spec.classColumn}=${recordClass}`, `${spec.idColumn}=${args.sys_id}`);
+  if (args.fields !== undefined && spec.fieldColumn !== undefined) parts.push(`${spec.fieldColumn}IN${args.fields.join(",")}`);
+  if (args.since !== undefined) parts.push(`sys_created_on>=${args.since}`);
+  if (args.until !== undefined) parts.push(`sys_created_on<=${args.until}`);
+  return `${parts.join("^")}^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`;
+}
+
+type SourceRead =
+  | { readonly status: "ok"; readonly rows: readonly Record<string, unknown>[] }
+  | { readonly status: "denied" | "unavailable" | "done" | "not_granted" };
+
+async function readSource(
+  ops: ServiceNowOperations,
+  plan: HistorySourcePlan,
+  recordClass: string,
+  args: CanonicalHistoryArgs,
+  signal: AbortSignal | undefined
+): Promise<SourceRead> {
+  if (!plan.granted) return { status: "not_granted" };
+  const position = args.cursor?.[plan.source];
+  // A follow-up page reads only the sources its cursor names: the others are finished.
+  if (args.cursor !== undefined && position === undefined) return { status: "done" };
+  try {
+    const response = await inOwnScope(signal, () =>
+      ops.get(`${TABLE_PATH}${plan.spec.table}`, {
+        sysparm_query: sourceQuery(plan.spec, recordClass, args, position),
+        sysparm_fields: plan.fields.join(","),
+        sysparm_limit: String(args.limit + 1),
+        sysparm_display_value: "false",
+        sysparm_exclude_reference_link: "true",
+      })
+    );
+    return { status: "ok", rows: rowsOf(response) };
+  } catch (error) {
+    if (isServiceNowRequestCancellation(error) || signal?.aborted) throw error;
+    if (errorCategory(error) === "authorization") return { status: "denied" };
+    if (isMissingTable(error)) return { status: "unavailable" };
+    throw error;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rows to events
+// ---------------------------------------------------------------------------
+
+/** One source row in page order: an event to show, or a row dropped and only counted. */
+interface Candidate {
+  readonly source: HistorySource;
+  readonly order: number;
+  readonly position: TailPosition;
+  readonly event?: HistoryEvent;
+  readonly omitted?: "unreadable" | "mismatch";
+}
+
+interface RowJudge {
+  readonly recordClass: string;
+  readonly sysId: string;
+  readonly types: FieldTypes;
+  /** Field readability on the class, memoized per call. */
+  readonly readable: (field: string) => boolean;
+}
+
+function judgeRow(plan: HistorySourcePlan, row: Readonly<Record<string, unknown>>, judge: RowJudge): Omit<Candidate, "source" | "order" | "position"> | null {
+  const spec = plan.spec;
+  // A row about another record is never shown, whatever the query said.
+  if (key(row[spec.classColumn]) !== judge.recordClass || key(row[spec.idColumn]) !== judge.sysId) {
+    return { omitted: "mismatch" };
+  }
+  const time = stored(row.sys_created_on)!;
+  const user = plan.user ? shortText(row[spec.user], L.MAX_USER_CHARS) : undefined;
+  if (plan.source === "flows") {
+    const name = shortText(row.name, L.MAX_FLOW_NAME_CHARS);
+    const state = shortText(row.state, L.MAX_FLOW_STATE_CHARS);
+    const test = key(row.is_test_run);
+    const flow = {
+      ...(name === undefined ? {} : { name }),
+      ...(state === undefined ? {} : { state }),
+      ...(test === "true" ? { test: true } : test === "false" ? { test: false } : {}),
+    };
+    return { event: { time, source: "flows", ...(user === undefined ? {} : { user }), flow } };
+  }
+  const field = key(row[spec.fieldColumn!]);
+  // (a) Journal text never comes through the audit log, by the field's type.
+  if (plan.source === "audit" && judge.types.state === "available") {
+    const type = judge.types.tables.get(judge.recordClass)?.allTypes?.get(field);
+    if (type !== undefined && JOURNAL_TYPES.has(type)) return null;
+  }
+  // (b) The field must be one the profile may read on the class.
+  if (!judge.readable(field)) return { omitted: "unreadable" };
+  const event: HistoryEvent = { time, source: plan.source, field, ...(user === undefined ? {} : { user }) };
+  if (plan.valuesHidden) return { event: { ...event, value_hidden: true } };
+  if (!plan.values) return { event };
+  // (c) Values by type and table, through the shared helper.
+  if (classifyField(judge.types, judge.recordClass, field) !== "visible") return { event: { ...event, value_hidden: true } };
+  let truncated = false;
+  const value = (column: string): string | undefined => {
+    const raw = stored(row[column]);
+    if (raw === undefined || raw === "") return undefined;
+    const shown = cut(raw, L.MAX_VALUE_CHARS);
+    truncated ||= shown.cut;
+    return shown.text;
+  };
+  const values =
+    plan.source === "audit"
+      ? { old: value("oldvalue"), new: value("newvalue") }
+      : { new: value("value") };
+  return {
+    event: {
+      ...event,
+      ...(values.old === undefined ? {} : { old: values.old }),
+      ...(values.new === undefined ? {} : { new: values.new }),
+      ...(truncated ? { value_truncated: true as const } : {}),
+    },
+  };
+}
+
+/** A source's rows as candidates, newest first; the look-ahead row only says more exist. */
+function candidatesOf(
+  plan: HistorySourcePlan,
+  rows: readonly Record<string, unknown>[],
+  limit: number,
+  judge: RowJudge
+): { readonly candidates: Candidate[]; readonly full: boolean } {
+  const order = HISTORY_SOURCES.indexOf(plan.source);
+  const positioned = rows.map((row) => {
+    const timestamp = stored(row.sys_created_on);
+    const sysId = key(row.sys_id);
+    // A row without a position cannot be paged past: fail closed, as the log tail does.
+    if (!isStoredTimestamp(timestamp) || !isSysId(sysId)) throw createToolError("upstream", "do_not_retry");
+    return { row, position: { timestamp, sysId } };
+  });
+  positioned.sort((a, b) => compareNewestFirst(a.position, b.position));
+  const candidates: Candidate[] = [];
+  for (const { row, position } of positioned.slice(0, limit)) {
+    const judged = judgeRow(plan, row, judge);
+    candidates.push({ source: plan.source, order, position, ...(judged ?? {}) });
+  }
+  return { candidates, full: rows.length > limit };
+}
+
+function compareNewestFirst(a: TailPosition, b: TailPosition): number {
+  if (a.timestamp !== b.timestamp) return a.timestamp > b.timestamp ? -1 : 1;
+  if (a.sysId !== b.sysId) return a.sysId > b.sysId ? -1 : 1;
+  return 0;
+}
+
+interface PageWalk {
+  readonly events: HistoryEvent[];
+  readonly omitted: { unreadable: number; mismatch: number };
+  readonly perSource: Map<HistorySource, { returned: number; consumed: number; last?: TailPosition }>;
+  readonly cut?: TailPosition;
+}
+
+/** Newest first across sources: time, then source order, then sys_id. */
+function compareMerged(a: Candidate, b: Candidate): number {
+  if (a.position.timestamp !== b.position.timestamp) return a.position.timestamp > b.position.timestamp ? -1 : 1;
+  return a.order - b.order || compareNewestFirst(a.position, b.position);
+}
+
+/**
+ * Walk all sources' candidates newest first and take at most `emitLimit`
+ * events. A dropped row is consumed as it is passed, so a page of dropped rows
+ * still moves the cursor on; the walk stops at the first event past the limit.
+ *
+ * A source that has rows past its candidates (`full`) bounds the walk: its
+ * next row is unknown and may be newer than anything after its last
+ * candidate, so the walk never passes that candidate. Each page therefore
+ * holds a prefix of the whole history in its one order, and consumes at least
+ * one row while any source has one.
+ */
+function walkPage(all: readonly Candidate[], emitLimit: number, full: ReadonlySet<HistorySource>): PageWalk {
+  const merged = [...all].sort(compareMerged);
+  let end = merged.length;
+  for (const source of full) {
+    let last = -1;
+    merged.forEach((candidate, index) => {
+      if (candidate.source === source) last = index;
+    });
+    if (last >= 0) end = Math.min(end, last + 1);
+  }
+  const events: HistoryEvent[] = [];
+  const omitted = { unreadable: 0, mismatch: 0 };
+  const perSource = new Map<HistorySource, { returned: number; consumed: number; last?: TailPosition }>();
+  for (const source of HISTORY_SOURCES) perSource.set(source, { returned: 0, consumed: 0 });
+  let cutAt: TailPosition | undefined;
+  for (const candidate of merged.slice(0, end)) {
+    const state = perSource.get(candidate.source)!;
+    if (candidate.event !== undefined) {
+      if (events.length >= emitLimit) break;
+      events.push(candidate.event);
+      state.returned += 1;
+    } else if (candidate.omitted !== undefined) {
+      omitted[candidate.omitted] += 1;
+    }
+    state.consumed += 1;
+    state.last = candidate.position;
+    cutAt = candidate.position;
+  }
+  return { events, omitted, perSource, ...(cutAt === undefined ? {} : { cut: cutAt }) };
+}
+
+// ---------------------------------------------------------------------------
+// Handler
+// ---------------------------------------------------------------------------
+
+function historyResult(args: CanonicalHistoryArgs, data: HistoryData): CallToolResult {
+  return envelopeCompatibilityResult(TOOL as never, args as unknown as Record<string, unknown>, ok(data));
+}
+
+function dataBytes(data: unknown): number {
+  return Buffer.byteLength(JSON.stringify(data), "utf8");
+}
+
+async function handleHistory(
+  rawArgs: Record<string, unknown>,
+  services: ServiceNowToolHandlerServices
+): Promise<CallToolResult> {
+  let args: CanonicalHistoryArgs;
+  try {
+    args = canonicalHistoryArgs(rawArgs);
+  } catch (error) {
+    if (error instanceof HistoryArgumentError) throw createToolError("conflict", "retry_after_correction");
+    throw error;
+  }
+  // A window that ends before it starts: the caller can correct it.
+  if (args.since !== undefined && args.until !== undefined && args.since > args.until) {
+    throw createToolError("conflict", "retry_after_correction");
+  }
+  const plan = historyAccessPlan(args, services.policy.tableAccess);
+  const record = { table: args.table, sys_id: args.sys_id };
+
+  // A cursor is checked before any read: it must have been issued for this
+  // record, this source and these filters.
+  for (const source of HISTORY_SOURCES) {
+    const position = args.cursor?.[source];
+    if (position !== undefined && position.filter !== historyCursorFilter(args, args.table, source)) {
+      return historyResult(args, { status: "invalid_cursor", record, hint: INVALID_CURSOR_HINT });
+    }
+  }
+
+  const signal = services.context?.signal;
+  const ops = uncachedOperations(services.serviceNow);
+  // 1. The record's class.
+  const recordClass = await readRecordClass(ops, args, signal);
+  if (recordClass !== args.table) {
+    return historyResult(args, { status: "wrong_class", record, hint: WRONG_CLASS_HINT(recordClass) });
+  }
+
+  // 2 and 3 together: the class's field types, and every source's page.
+  const [classTypes, reads] = await Promise.all([
+    readClassTypes(services.serviceNow, recordClass, plan, signal),
+    Promise.all(plan.sources.map((source) => readSource(ops, source, recordClass, args, signal))),
+  ]);
+
+  const readableMemo = new Map<string, boolean>();
+  const judge: RowJudge = {
+    recordClass,
+    sysId: args.sys_id,
+    types: classTypes.types,
+    readable: (field) => {
+      let known = readableMemo.get(field);
+      if (known === undefined) {
+        known = TABLE_NAME.test(field) && !isRecordContentColumn(recordClass, field) && canRead(recordClass, [field]);
+        readableMemo.set(field, known);
+      }
+      return known;
+    },
+  };
+  const all: Candidate[] = [];
+  const full = new Set<HistorySource>();
+  plan.sources.forEach((source, index) => {
+    const result = reads[index]!;
+    if (result.status !== "ok") return;
+    const page = candidatesOf(source, result.rows, args.limit, judge);
+    all.push(...page.candidates);
+    if (page.full) full.add(source.source);
+  });
+
+  const warnings: string[] = [];
+  if (args.include_values && classTypes.types.state !== "available") warnings.push(DICTIONARY_UNAVAILABLE_WARNING);
+  for (const source of plan.sources) {
+    if (source.granted && source.valuesHidden) warnings.push(VALUES_NOT_READABLE_WARNING(source.source));
+  }
+
+  const build = (emitLimit: number): HistoryData => {
+    const walk = walkPage(all, emitLimit, full);
+    const sources: Record<string, { status: string; returned: number; has_more: boolean }> = {};
+    const nextCursor: Partial<Record<HistorySource, string>> = {};
+    plan.sources.forEach((source, index) => {
+      const result = reads[index]!;
+      if (result.status !== "ok") {
+        sources[source.source] = { status: result.status, returned: 0, has_more: false };
+        return;
+      }
+      const state = walk.perSource.get(source.source)!;
+      const candidates = all.filter((candidate) => candidate.source === source.source).length;
+      const hasMore = state.consumed < candidates || full.has(source.source);
+      sources[source.source] = { status: "ok", returned: state.returned, has_more: hasMore };
+      if (!hasMore) return;
+      // The last row this page consumed; for a source it did not reach, the
+      // position it was given, or the end of the second the page stopped in.
+      const position: TailPosition | undefined =
+        state.last ?? args.cursor?.[source.source] ?? (walk.cut === undefined ? undefined : { timestamp: walk.cut.timestamp, sysId: END_OF_SECOND });
+      if (position === undefined) return;
+      const cursor: TailCursor = { ...position, filter: historyCursorFilter(args, recordClass, source.source) };
+      nextCursor[source.source] = encodeTailCursor(cursor);
+    });
+    return {
+      status: "ok",
+      record,
+      audit_enabled: classTypes.auditEnabled,
+      events: walk.events,
+      sources: sources as HistoryData["sources"],
+      omitted: walk.omitted,
+      not_recorded: [...NOT_RECORDED],
+      ...(Object.keys(nextCursor).length > 0 ? { next_cursor: nextCursor } : {}),
+      ...(warnings.length > 0 ? { warnings: [...warnings] } : {}),
+    };
+  };
+
+  // Fit `max_response_bytes`: keep the newest events that fit, and let the
+  // cursors carry the rest. One event is always kept, without its values if
+  // they alone are too large, so a page always moves on.
+  // Until the result envelope gives this tool a byte limit of its own, it
+  // holds the result to its default limit, so that is the most to fill.
+  const budget = Math.max(0, Math.min(args.max_response_bytes, DEFAULT_RESULT_BYTE_LIMIT) - ENVELOPE_RESERVE_BYTES);
+  let data = build(args.limit);
+  if (dataBytes(data) > budget && (data.events?.length ?? 0) > 0) {
+    const events = data.events!;
+    const base = dataBytes({ ...data, events: [], warnings: [...(data.warnings ?? []), FITTED_WARNING] });
+    let used = base;
+    let fit = 0;
+    for (const event of events) {
+      used += dataBytes(event) + 1;
+      if (used > budget) break;
+      fit += 1;
+    }
+    warnings.push(FITTED_WARNING);
+    data = build(Math.max(1, fit));
+    if (fit === 0) {
+      const first: HistoryEvent = { ...data.events![0]! };
+      if (first.old !== undefined || first.new !== undefined) {
+        delete first.old;
+        delete first.new;
+        first.value_truncated = true;
+      }
+      data = { ...data, events: [first] };
+    }
+  }
+  return historyResult(args, data);
+}
+
+// ---------------------------------------------------------------------------
+// Module
+// ---------------------------------------------------------------------------
+
+const schema = withRequiredProfile(historyInputSchema);
+
+/** The plan for one call, as the dispatcher authorizes it. */
+export function resolveHistoryAccess(candidate: unknown, tableAccess: TableAccessPolicy) {
+  const input = schema.parse(candidate);
+  const args = canonicalHistoryArgs(input);
+  const plan = historyAccessPlan(args, tableAccess);
+  return Object.freeze({
+    args: Object.freeze({ ...input }) as Record<string, unknown>,
+    requests: plan.requests,
+  });
+}
+
+export const historyToolModule = defineServiceNowToolModule({
+  runtime: "servicenow",
+  definition: {
+    name: TOOL,
+    description: HISTORY_DESCRIPTION,
+    annotations: {
+      title: "View record history",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  inputSchema: schema,
+  // The expression to register as `productionToolOutputSchemas.sn_history`.
+  outputSchema: withStructuredResultEnvelope(historyDataSchema),
+  requirements: {
+    permissions: ["read"],
+    tables: {
+      kind: "dynamic",
+      names: HISTORY_FIXED_TABLES,
+      description: "The record's own table (its class), plus the history sources the profile may read",
+    },
+    apis: ["table"],
+    fieldPolicies: ["read"],
+    capabilities: ["record:history"],
+  },
+  resolveAccess: (candidate, policy) => resolveHistoryAccess(candidate, policy.tableAccess),
+  handler: handleHistory,
+});
