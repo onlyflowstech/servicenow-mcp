@@ -148,6 +148,8 @@ export const EVALUATE_LIMITS = Object.freeze({
   MAX_DEPTH: 10,
   /** Distinct tables whose hierarchy and field types are read. */
   MAX_CONTEXT_TABLES: 200,
+  /** Distinct record-element tables taken from one row's payload. */
+  MAX_RECORD_TABLES_PER_ROW: 16,
   /** `sys_db_object` levels read to build those hierarchies. */
   MAX_CHAIN_LEVELS: 8,
   /** Update names per `nameIN` read. */
@@ -723,25 +725,62 @@ interface ContextRead {
 }
 
 /**
- * Tables a row may write to: its `table` column, its update name, its
- * payload's declared table, and every record element (a table-named element
- * with an `action` attribute) in the part of the payload the engine reads.
+ * The text of a payload with its CDATA sections and comments removed, so
+ * markup-like text inside a script is never read as a record. One linear
+ * pass; an unterminated section drops the rest of the text.
+ */
+function outsideCdataAndComments(text: string): string {
+  const parts: string[] = [];
+  let at = 0;
+  while (at < text.length) {
+    const cdata = text.indexOf("<![CDATA[", at);
+    const comment = text.indexOf("<!--", at);
+    const next = cdata < 0 ? comment : comment < 0 ? cdata : Math.min(cdata, comment);
+    if (next < 0) {
+      parts.push(text.slice(at));
+      break;
+    }
+    parts.push(text.slice(at, next));
+    const close = next === cdata ? text.indexOf("]]>", next + 9) : text.indexOf("-->", next + 4);
+    if (close < 0) break;
+    at = close + 3;
+    parts.push(" ");
+  }
+  return parts.join("");
+}
+
+/**
+ * Tables a row may write to, most certain first, so the table cap is filled
+ * by the tables every row names before any payload can add more:
+ * 1. each row's `table` column, update-name prefix and payload root table;
+ * 2. record elements (a table-named element with an `action` attribute)
+ *    found outside CDATA and comments, in the part of the payload the engine
+ *    reads, at most {@link EVALUATE_LIMITS}.MAX_RECORD_TABLES_PER_ROW per
+ *    row, taken one per row in turn, so one row cannot crowd out the rest.
  * A table missed here has no facts, so the credential check treats it as
- * unknown and the row is not scanned: a miss fails closed.
+ * unknown and its rows are not scanned: a miss fails closed, for those rows.
  */
 export function candidateTables(updates: readonly EvaluateUpdate[], maxPayloadChars: number = ENGINE_LIMITS.maxPayloadBytes): string[] {
   const tables = new Set<string>();
+  const nested: string[][] = [];
   for (const update of updates) {
     if (typeof update.table === "string" && TABLE_NAME.test(update.table)) tables.add(update.table);
     const named = UPDATE_NAME_TABLE.exec(update.name);
     if (named !== null) tables.add(named[1]!);
-    if (update.payload !== null) {
-      const declared = ROOT_TABLE.exec(update.payload.slice(0, ROOT_HEAD_CHARS));
-      if (declared !== null) tables.add(declared[1]!);
-      for (const match of update.payload.slice(0, maxPayloadChars).matchAll(RECORD_ELEMENT)) tables.add(match[1]!);
+    if (update.payload === null) continue;
+    const declared = ROOT_TABLE.exec(update.payload.slice(0, ROOT_HEAD_CHARS));
+    if (declared !== null) tables.add(declared[1]!);
+    const own = new Set<string>();
+    for (const match of outsideCdataAndComments(update.payload.slice(0, maxPayloadChars)).matchAll(RECORD_ELEMENT)) {
+      own.add(match[1]!);
+      if (own.size >= L.MAX_RECORD_TABLES_PER_ROW) break;
     }
+    nested.push([...own]);
   }
-  return [...tables].sort();
+  for (let round = 0; round < L.MAX_RECORD_TABLES_PER_ROW; round += 1) {
+    for (const own of nested) if (own[round] !== undefined) tables.add(own[round]!);
+  }
+  return [...tables];
 }
 
 /** A table's chain, nearest first, and whether it reaches a table that extends nothing. */
@@ -783,7 +822,8 @@ async function readContext(
 ): Promise<ContextRead> {
   const all = candidateTables(updates);
   if (all.length > L.MAX_CONTEXT_TABLES) warnings.add("context_tables_capped");
-  const tables = all.slice(0, L.MAX_CONTEXT_TABLES);
+  // The cap keeps the most certain tables; the reads list them sorted.
+  const tables = all.slice(0, L.MAX_CONTEXT_TABLES).sort();
   /** See {@link chainOf}. `sys_metadata` extends nothing, so it is never read. */
   const parents = new Map<string, string | null | undefined>([[METADATA_ROOT, null]]);
   let dictionaryRows: { table: string; element: string; internal_type: string }[] | undefined;

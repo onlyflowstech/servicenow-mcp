@@ -481,7 +481,8 @@ describe("evaluate: hidden-typed values and credential tables", () => {
 
   it("finds the tables a row writes to from its table column, its name and its payload's root", () => {
     const u = update("sys_script", { name: "x" }, { name: "custom_name", table: "u_column_table" });
-    expect(candidateTables([u])).toEqual(["sys_script", "u_column_table"]);
+    // The table column and the root come before any record element.
+    expect(candidateTables([u])).toEqual(["u_column_table", "sys_script"]);
     expect(candidateTables([{ ...u, payload: `<?xml version="1.0"?><record_update table="Bad Name">`, table: null, name: `incident_${sid(2)}` }])).toEqual(["incident"]);
   });
 });
@@ -733,6 +734,44 @@ describe("evaluate: a table whose hierarchy is unknown is treated as a credentia
     const acl = update("sys_security_acl", { name: "incident", operation: "read" });
     const nested = { ...acl, payload: acl.payload!.replace("</record_update>", `<sys_security_acl_role action="INSERT_OR_UPDATE"><sys_user_role>${sid(3)}</sys_user_role></sys_security_acl_role></record_update>`) };
     expect(candidateTables([nested])).toEqual(["sys_security_acl", "sys_security_acl_role"]);
+  });
+
+  it("does not let one row's markup-like text crowd every real table out of the cap", async () => {
+    // 200 record-like strings inside a script (CDATA) are text, not records.
+    const decoys = Array.from({ length: 200 }, (_, i) => `'<a${String(i).padStart(3, "0")} action="x">'`).join(";\n");
+    const decoyRow = update("sys_script", { name: "decoy", script: `var s = [${decoys}];` });
+    const evil = update("sys_script", { name: "evil", script: "eval(request);" });
+    const { data } = await run(model({ rows: [xmlRow(decoyRow), xmlRow(evil)] }), { update_set: SET_ID, limit: 50 });
+    expect(data.summary.coverage).toMatchObject({ scanned: 2, credential_rows: 0 });
+    expect((data.results as Data[]).find((finding) => finding.rule_id === "SEC004")?.update.sys_id).toBe(evil.sys_id);
+    expect(ruleIds(data)).not.toContain("SEC010");
+    expect(candidateTables([decoyRow, evil])).toEqual(["sys_script"]);
+  });
+
+  it("takes few record tables from any one row, and the rows' own tables first", async () => {
+    // Real markup this time: 200 nested record-like elements in one field.
+    const markup = Array.from({ length: 200 }, (_, i) => `<a${String(i).padStart(3, "0")} action="x"/>`).join("");
+    const decoy = update("sys_script", { name: "decoy" });
+    const decoyRow = { ...decoy, payload: decoy.payload!.replace("</record_update>", `<u_x>${markup}</u_x></record_update>`) };
+    const evil = update("sys_script_include", { name: "evil", script: "eval(request);" });
+    const tables = candidateTables([decoyRow, evil]);
+    expect(tables.slice(0, 2)).toEqual(["sys_script", "sys_script_include"]);
+    expect(tables.length).toBeLessThanOrEqual(2 + EVALUATE_LIMITS.MAX_RECORD_TABLES_PER_ROW);
+    const { data } = await run(model({ rows: [xmlRow(decoyRow), xmlRow(evil)] }), { update_set: SET_ID, limit: 50 });
+    // The decoy row only blinds itself; the other row is scanned.
+    expect((data.results as Data[]).find((finding) => finding.rule_id === "SEC004")?.update.sys_id).toBe(evil.sys_id);
+    expect(data.summary.coverage.scanned).toBeGreaterThanOrEqual(1);
+    expect(data.summary.coverage.partial).toBe(true);
+  });
+
+  it("ignores record-like text in comments, and stays linear on unterminated sections", () => {
+    const u = update("sys_script", { name: "x" });
+    const commented = { ...u, payload: u.payload!.replace("</record_update>", `<!-- <a001 action="x"> --></record_update>`) };
+    expect(candidateTables([commented])).toEqual(["sys_script"]);
+    const open = { ...u, payload: `${u.payload!}${"<![CDATA[".repeat(20_000)}<a002 action="x">` };
+    const started = performance.now();
+    expect(candidateTables([open])).toEqual(["sys_script"]);
+    expect(performance.now() - started).toBeLessThan(2_000);
   });
 });
 
