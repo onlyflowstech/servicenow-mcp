@@ -25,26 +25,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused. `enforce_security: false` is refused on `record_query` and
   `record_validation` with a fixed message (leave it out, or pass `true`; it
   stays `true` by default). A refused step refuses the whole call, before any
-  write. A condition value may refer to an earlier step's output only by record
-  id or sys_id (`record_id`, `first_record`, `sys_id`, `user`), and the fields a
+  write. A condition value, and a `set_field_values` value, may refer to an earlier
+  step's output only by record id or sys_id (`record_id`, `first_record`,
+  `sys_id`, `user`), and the fields a
   `set_field_values` step sets must be writable on its table, as for `sn_update`.
   The impersonated user's ACLs still apply on top; suites authored in the
   instance are not checked by the server's table grants, and `atf.execute` stays
   opt-in. The README and `docs/PRODUCTION-SECURITY.md` now also say that a
   database view or extension table over one of the six named-only tables is not
   covered by the name list.
-- **A `"*"` write grant no longer covers `sys_atf_step` and `sys_variable_value`
-  for the generic write tools.** These tables hold the step types and input
-  values that `sn_atf_author` checks when it adds a step. Under `"*"`,
+- **A `"*"` write grant no longer covers `sys_atf_step`, `sys_variable_value`
+  and `sys_element_mapping` for the generic write tools.** These tables hold the
+  step types, input values and pill mappings that `sn_atf_author` checks when it
+  adds a step. Under `"*"`,
   `sn_atf_author` still writes them, but `sn_create`, `sn_update`, `sn_delete`,
   `sn_batch` and attachment uploads reach them only when the profile names the
   table for write, for example `servicenow-mcp-setup grant --profile <profile>
   --write sys_atf_step --tools sn_update`; a refusal is the usual table-access
   denial. Reads are unchanged, and no other table's access changes.
-  `sys_variable_value` also holds other variable values (catalog variables, for
-  example), so a profile that writes those with the generic tools must now name
-  it. The policy card lists both tables as outside the wildcard row's write
-  access.
+  `sys_variable_value` and `sys_element_mapping` also hold other variables'
+  values and mappings (catalog variables, for example), so a profile that writes
+  those with the generic tools must now name them. The policy card lists the
+  three tables as outside the wildcard row's write access.
 - **`sys_audit` and `sys_journal_field` are no longer covered by a `"*"` table
   grant; name them to read them.** A profile whose `readTables` (or
   `writeTables`) holds `"*"` used to reach both tables like any other. Their rows

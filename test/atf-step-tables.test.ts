@@ -658,4 +658,38 @@ describe("set_field_values may set only fields the profile may write", () => {
       prepareSteps({ test_sys_id: TEST_ID, steps: [{ type: "open_new_form", inputs: { table: "incident" } }] }, false)
     ).not.toThrow();
   });
+
+  describe("a value may hold only the pills a condition value may", () => {
+    const ref = (output: string, id = "c".repeat(32)) => `{{step['${id}'].${output}}}`;
+    const plan = (values: string) =>
+      prepareSteps({ test_sys_id: TEST_ID, steps: [setStep("incident", values)] }, false);
+
+    it.each(["record_id", "first_record", "sys_id", "user"])("accepts the %s output", (output) => {
+      expect(() => plan(`caller_id=${ref(output)}^short_description=x^EQ`)).not.toThrow();
+    });
+
+    it("accepts several allowed pills", () => {
+      expect(() => plan(`caller_id=${ref("user")}^assigned_to=${ref("record_id", "d".repeat(32))}`)).not.toThrow();
+    });
+
+    it.each([
+      ["a table output", `short_description=${ref("table")}`],
+      ["a script output", `short_description=${ref("script_output")}`],
+      ["a pill that is not a step output", "short_description={{gs.getUserID()}}"],
+      ["an unclosed pill", `short_description={{step['${"c".repeat(32)}'].record_id`],
+      ["a stray closing pair", "short_description=x}}"],
+      ["a good pill beside a bad one", `caller_id=${ref("user")}^short_description=${ref("table")}`],
+    ])("refuses %s", (_name, values) => {
+      expect(() => plan(values)).toThrow();
+    });
+
+    it("refuses through the dispatcher before any write, with the field-policy message", async () => {
+      const connected = await connect(WILDCARD);
+      const result = await addSteps(connected, [setStep("incident", `short_description=${ref("table")}`)]);
+      expect(result.isError).toBe(true);
+      expect(text(result)).toContain("Access denied by policy (invalid_field_selection)");
+      expect(connected.getClient).not.toHaveBeenCalled();
+      expect(connected.records.at(-1)).toMatchObject({ outcome: "policy_rejected", reason: "field_access_denied" });
+    });
+  });
 });

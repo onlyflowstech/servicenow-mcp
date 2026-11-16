@@ -1,5 +1,5 @@
 /**
- * `sys_atf_step` and `sys_variable_value` hold what `sn_atf_author` checks when
+ * `sys_atf_step`, `sys_variable_value` and `sys_element_mapping` hold what `sn_atf_author` checks when
  * it adds a step, so a "*" write grant covers them for that tool only. The
  * generic write tools reach them when the profile names the table for write.
  * Reads are unchanged.
@@ -37,7 +37,7 @@ const CONFIG: ServiceNowConfig = {
 };
 
 
-const LISTED = ["sys_atf_step", "sys_variable_value"] as const;
+const LISTED = ["sys_atf_step", "sys_variable_value", "sys_element_mapping"] as const;
 const UNLISTED_ATF = ["sys_atf_test", "sys_atf_test_suite", "sys_atf_test_suite_test"] as const;
 
 function target(table: string, tools: readonly string[]) {
@@ -149,8 +149,8 @@ const cases = (Object.keys(WRITE_TOOLS) as WriteTool[]).flatMap((tool) => LISTED
 const WILD_WRITE: TableAccessPolicyInput = { readTables: ["*"], writeTables: ["*"], targets: [] };
 
 describe("the write-named tables under a \"*\" write grant", () => {
-  it("are exactly the two ATF step tables, each open to sn_atf_author alone", () => {
-    expect(Object.keys(WRITE_NAMED_ONLY_TABLES).sort()).toEqual([...LISTED]);
+  it("are exactly the three ATF step tables, each open to sn_atf_author alone", () => {
+    expect(Object.keys(WRITE_NAMED_ONLY_TABLES).sort()).toEqual([...LISTED].sort());
     for (const table of LISTED) expect(WRITE_NAMED_ONLY_TABLES[table]).toEqual(["sn_atf_author"]);
     expect(Object.isFrozen(WRITE_NAMED_ONLY_TABLES)).toBe(true);
   });
@@ -202,12 +202,15 @@ describe("the write-named tables under a \"*\" write grant", () => {
     expect(connected.getClient).not.toHaveBeenCalled();
   });
 
-  it.each(LISTED)("sn_atf_author keeps its planned writes to %s under \"*\"", () => {
+  it.each(LISTED)("sn_atf_author keeps its planned writes to %s under \"*\"", (table) => {
     const policy = createTableAccessPolicy(WILD_WRITE);
-    expect(authorizeTableAccess(policy, { operation: "write", table: LISTED[0] }, "sn_atf_author")).toBe("sys_atf_step");
-    expect(authorizeTableAccess(policy, { operation: "write", table: "sys_variable_value" }, "sn_atf_author")).toBe(
-      "sys_variable_value"
-    );
+    expect(authorizeTableAccess(policy, { operation: "write", table }, "sn_atf_author")).toBe(table);
+    // Any other tool name is refused, whatever it is called.
+    for (const tool of ["sn_update", "sn_atf_author_x", "sn_atf_run"]) {
+      expect(() => authorizeTableAccess(policy, { operation: "write", table }, tool), `${tool} ${table}`).toThrow(
+        TablePolicyError
+      );
+    }
   });
 
   it("sn_atf_author adds steps under a bare \"*\" write grant", async () => {
@@ -244,7 +247,7 @@ describe("the write-named tables under a \"*\" write grant", () => {
 
   it("leaves the other tables and the other write tools as they were under \"*\"", () => {
     const policy = createTableAccessPolicy(WILD_WRITE);
-    for (const table of ["incident", "sys_user", "sys_script_include", "sys_element_mapping", "x_acme_widget"]) {
+    for (const table of ["incident", "sys_user", "sys_script_include", "sys_atf_agent", "x_acme_widget"]) {
       expect(authorizeTableAccess(policy, { operation: "write", table }, "sn_update"), table).toBe(table);
     }
   });
