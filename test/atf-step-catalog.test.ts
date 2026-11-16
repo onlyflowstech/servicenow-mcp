@@ -36,6 +36,8 @@ describe("verified ATF step catalog", () => {
       if (input.mandatory && input.internal_type === "document_id" && typedInputs[input.element] === undefined) typedInputs[input.element] = id(99);
     }
     for (const [key,value] of Object.entries(typedInputs)) if (typeof value === "string" && value.startsWith("{{step[")) typedInputs[key]=id(99);
+    // The two record steps always enforce ACLs, so the fixture's `0` is not authorable.
+    if (type === "record_query" || type === "record_validation") typedInputs.enforce_security = true;
     const requested = { profile: "pdi", action: "add_steps", test_sys_id: id(1), steps: [{ type, inputs: typedInputs }] };
     const prepared = prepareSteps(requested, true).args;
     const step = prepared.preparedSteps[0];

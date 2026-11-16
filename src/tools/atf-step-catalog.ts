@@ -5,7 +5,8 @@ import { runWithServiceNowRequestSignal } from "../client.js";
 import definitions from "./atf-step-definitions.json";
 import { AtfPolicyError } from "../atf-policy.js";
 import { serviceNowSysIdSchema as id } from "../servicenow-identifiers.js";
-import { prepareWriteFieldArguments } from "../field-policy.js";
+import { FieldPolicyError, prepareWriteFieldArguments, resolveReadableFields } from "../field-policy.js";
+import { normalizeTableName } from "../table-policy.js";
 import { prepareWriteFieldValues } from "../write-value-policy.js";
 import { createToolError, trustedToolErrorDescriptor } from "../tool-error.js";
 import type { ServiceNowToolHandlerServices } from "./tool-module.js";
@@ -55,6 +56,33 @@ export function stepTypes(allowScripts: boolean) {
 export const stepRequestSchema = z.object({ type: z.string().min(1).max(80), inputs: z.record(z.string(), z.unknown()) }).strict();
 export interface PreparedStep { type: string; definition: Definition; inputs: Record<string, string>; order: number }
 export const STEP_READ_TABLES = ["sys_atf_test", "sys_atf_step", "sys_atf_step_config", "var_dictionary", "sys_variable_value", "sys_element_mapping"];
+/**
+ * Steps that read records of a table the author names, on the server, with no
+ * form or user session in between. Their `table` is checked against the
+ * profile's read grants, their conditions against its field policy, and their
+ * ACL enforcement cannot be turned off. The other table-taking steps run through
+ * the UI as the impersonated user, so the server's grants do not govern them.
+ */
+const RECORD_READ_STEPS: ReadonlySet<string> = new Set(["record_query", "record_validation"]);
+const CONDITION_TERM = /^(?:ORDERBYDESC|ORDERBY|GROUPBY|NQ|OR)?(?<field>[a-z][a-z0-9_.]*)(?:[A-Z=!<>].*)?$/su;
+/**
+ * Check the field of every condition against the table's readable set. A
+ * condition on a field the profile may not read would report that field's value
+ * as a pass or a fail, so it is refused like a read of it. A dot-walk, a pasted
+ * step output standing for the whole condition, or a term this check does not
+ * recognise is refused too: none can be checked against one table.
+ */
+function checkConditionFields(table: string, conditions: string): void {
+  if (conditions === "") return;
+  for (const term of conditions.split("^")) {
+    if (term === "EQ" || term === "NQ") continue;
+    const field = CONDITION_TERM.exec(term)?.groups?.field;
+    if (field === undefined || field.includes(".")) {
+      throw new FieldPolicyError("invalid_field_selection");
+    }
+    resolveReadableFields(table, { fields: field });
+  }
+}
 export function prepareSteps(args: Record<string, unknown>, allowScripts: boolean) {
   const testId = id.parse(args.test_sys_id);
   const requests = boundedArray(stepRequestSchema, MAX_ATF_AUTHOR_STEPS, { min: 1 }).parse(args.steps);
@@ -65,6 +93,12 @@ export function prepareSteps(args: Record<string, unknown>, allowScripts: boolea
     const values = z.object(Object.fromEntries(definition.inputs.map(input => [input.element, inputSchema(input)]))).strict().parse(request.inputs);
     const inputs = Object.fromEntries(definition.inputs.map(input => [input.element, values[input.element] === undefined ? "" : typeof values[input.element] === "object" ? JSON.stringify(values[input.element]) : String(values[input.element])]));
     if (definition.inputs.some(input => input.internal_type !== "script" && /javascript\s*:/iu.test(inputs[input.element]))) throw new Error("Script expressions are not allowed in ordinary step inputs");
+    if (RECORD_READ_STEPS.has(request.type)) {
+      // An explicit false is refused, not rewritten: the author learns why. Left
+      // out, the catalog default (true) applies.
+      if (inputs.enforce_security === "false") throw new AtfPolicyError("acl_enforcement_required");
+      checkConditionFields(normalizeTableName(inputs.table), inputs.field_values);
+    }
     if (request.type === "rest_send_request_inbound" && (!inputs.end_point.startsWith("/api/") || inputs.end_point.includes("\\") || inputs.end_point.includes("#"))) throw new Error("Inbound REST endpoints must be instance-relative /api/ paths");
     const order = Number(args.start_order ?? 100) + index;
     const fields = { test: testId, sys_scope: "global", step_config: definition.step_config, order, active: true, description: definition.name };
@@ -81,8 +115,11 @@ export function prepareSteps(args: Record<string, unknown>, allowScripts: boolea
     }
     return { type: request.type, definition, inputs, order };
   });
+  // Each record step reads the table it names, so the profile's read grants (a
+  // named-only table included) decide it before anything is written.
+  const stepTables = [...new Set(steps.filter(step => RECORD_READ_STEPS.has(step.type)).map(step => normalizeTableName(step.inputs.table)))];
   return { args: { ...prepareAtfReads(args, STEP_READ_TABLES), preparedSteps: steps }, requests: [
-    ...STEP_READ_TABLES.map(table => ({ operation: "read" as const, table })),
+    ...[...new Set([...STEP_READ_TABLES, ...stepTables])].map(table => ({ operation: "read" as const, table })),
     ...["sys_atf_step", "sys_variable_value", "sys_element_mapping"].map(table => ({ operation: "write" as const, table })),
   ] };
 }
