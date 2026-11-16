@@ -16,8 +16,6 @@ import {
 } from "../src/tools/platform-view-contracts.js";
 import { createPlatformViewToolModule, platformViewToolModule } from "../src/tools/platform-view-module.js";
 import { handleEvaluate } from "../src/tools/platform-view-evaluate.js";
-import { handleScanFindings } from "../src/tools/platform-view-scan.js";
-import { handleUpgradeSkipped } from "../src/tools/platform-view-upgrades.js";
 import {
   closeHarnesses,
   expectReadsWithin,
@@ -48,6 +46,10 @@ const WIDEST: Readonly<Record<PlatformView, Record<string, unknown>>> = {
   remote_update_sets: { problems: true },
 };
 
+/** Views whose handler is implemented; the others are still stubs. */
+const IMPLEMENTED: readonly PlatformView[] = ["upgrade_skipped", "scan_findings"];
+const STUB_VIEWS = PLATFORM_VIEWS.filter((view) => !IMPLEMENTED.includes(view));
+
 function expectFixedInternalError(result: CallToolResult): void {
   expect(result.isError).toBe(true);
   const text = textOf(result);
@@ -69,7 +71,7 @@ describe("sn_platform_view dispatcher", () => {
   it("answers every view with the fixed not-implemented error, and reads nothing", async () => {
     const instance = recordingInstance();
     const { call } = await harness(instance.ops, { tableAccess: readPolicy(PLATFORM_VIEW_ALL_TABLES) });
-    for (const view of PLATFORM_VIEWS) {
+    for (const view of STUB_VIEWS) {
       expectFixedInternalError(await call({ view, ...MINIMAL[view] }));
     }
     expect(instance.calls).toEqual([]);
@@ -78,7 +80,7 @@ describe("sn_platform_view dispatcher", () => {
   it("stub handlers throw the fixed internal error and name nothing", async () => {
     const canonical = { view: "evaluate", limit: 25, offset: 0, max_response_bytes: 100_000 } as CanonicalPlatformViewArgs;
     const services = {} as never;
-    for (const handler of [handleUpgradeSkipped, handleScanFindings, handleEvaluate]) {
+    for (const handler of [handleEvaluate]) {
       const error = await handler(canonical, services).then(
         () => undefined,
         (caught: unknown) => caught
@@ -142,8 +144,15 @@ describe("the access plan is authorized before any handler runs", () => {
   it("lets a profile that reads exactly a view's closure reach the view, and denies it one table short", async () => {
     for (const view of PLATFORM_VIEWS) {
       const plan = platformViewReadTables(view, WIDEST[view]);
-      const granted = await harness(recordingInstance().ops, { tableAccess: readPolicy(plan) });
-      expectFixedInternalError(await granted.call({ view, ...WIDEST[view] }));
+      const instance = recordingInstance();
+      const granted = await harness(instance.ops, { tableAccess: readPolicy(plan) });
+      const reached = await granted.call({ view, ...WIDEST[view] });
+      if (IMPLEMENTED.includes(view)) {
+        expect(reached.isError, view).not.toBe(true);
+        expectReadsWithin(instance, plan);
+      } else {
+        expectFixedInternalError(reached);
+      }
       await closeHarnesses();
       for (const missing of plan) {
         const short = await harness(recordingInstance().ops, {
@@ -216,12 +225,12 @@ describe("recording client: a handler reads only tables in its view's plan", () 
   const BATCH_PLAN = platformViewReadTables("batch", MINIMAL.batch);
   const table = (name: string) => `/api/now/table/${name}`;
 
-  it("holds the shipped handlers to their plans (they read nothing yet)", async () => {
+  it("holds the shipped handlers to their plans (the stubs read nothing)", async () => {
     for (const view of PLATFORM_VIEWS) {
       const instance = recordingInstance();
       const { call } = await harness(instance.ops, { tableAccess: readPolicy(PLATFORM_VIEW_ALL_TABLES) });
       await call({ view, ...WIDEST[view] });
-      expect(instance.calls, view).toEqual([]);
+      if (!IMPLEMENTED.includes(view)) expect(instance.calls, view).toEqual([]);
       expectReadsWithin(instance, platformViewReadTables(view, WIDEST[view]));
       await closeHarnesses();
     }
