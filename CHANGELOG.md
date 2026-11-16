@@ -5,6 +5,121 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] — 2026-11-17
+
+2.3.0 is the first stable release since 2.2.1. It contains everything published
+as 2.3.0-dev.1 through 2.3.0-dev.5 and 2.3.0-rc.1 through 2.3.0-rc.3, listed
+under those versions below, including every change in 2.2.1, and nothing else.
+The lists below name the main changes; the section for each version gives the
+details.
+
+> **Read this before upgrading.** Some calls that worked before are refused
+> until the profile, or the integration user, is set up for them:
+>
+> - Field-policy tools read field types from one cached `sys_dictionary` read
+>   per credential. While the types cannot be read, they refuse with a message
+>   naming the access needed, unless the profile sets
+>   `"fieldTypes": { "dictionary": "not_required" }`.
+> - `sys_audit`, `sys_journal_field`, `sys_history_line`, `sys_audit_delete`,
+>   `sys_attachment_doc` and `sys_email` are granted by name only: a `"*"` table
+>   grant does not cover them, and a profile reaches one only when `tableAccess`
+>   names it.
+> - `sn_create`, `sn_update`, `sn_delete`, `sn_batch` and attachment uploads
+>   reach `sys_atf_step`, `sys_variable_value` and `sys_element_mapping` only
+>   when the profile names the table for write.
+> - Record payload columns are readable only when a profile's field policy names
+>   them. The refusal names the key to set.
+> - `has_more` and `next_offset` count rows dropped for size. Contract change
+>   for truncated pages.
+
+### Security
+
+- **HTTP server dependencies.** `@hono/node-server` moves from 2.1.3 to 2.1.7
+  and `hono` (transitive, through the MCP SDK) from 4.13.13 to 4.13.18, clearing
+  the advisories that `npm audit --omit=dev` reported. (2.3.0-dev.1; also in
+  2.2.1)
+- **HTTP transport rejects a backslash in the request path.** (2.3.0-dev.2)
+- **Container base image.** The runtime base,
+  `gcr.io/distroless/nodejs22-debian13:nonroot`, moves to a newer digest.
+  (2.3.0-dev.1)
+
+### Added
+
+- **Read tools hide `password`/`password2`-typed fields by dictionary type as
+  well as by name.** (2.3.0-dev.5; also in 2.2.1)
+- **`sn_syslog` can tail the system log.** (2.3.0-dev.5)
+- **`sn_codesearch` searches ES modules.** (2.3.0-dev.3)
+- **`sn_codesearch` searches ATF step scripts.** (2.3.0-dev.3)
+- **`sn_query` reads `structured_query.filter` given as a list as an implicit
+  AND.** (2.3.0-dev.2)
+- **`structured_query.filter` shows a working example in `tools/list`.**
+  (2.3.0-dev.2)
+- **Responses say whether the metadata cache was used and where the time went.**
+  (2.3.0-dev.2)
+- **Release candidates publish to `next`.** (2.3.0-dev.1)
+
+### Changed
+
+- **Record payload columns are readable only when a profile's field policy names
+  them.** (2.3.0-rc.3)
+- **More tables are on the privilege-sensitive write list.** (2.3.0-rc.3)
+- **`sys_update_xml`, `sys_upgrade_history_log`, `scan_finding`, `scan_result`
+  and `scan_check` have their own default projections.** (2.3.0-rc.3)
+- **`sn_atf_author` checks the table, conditions and ACL setting of ATF steps
+  when it adds them.** (2.3.0-dev.5; also in 2.2.1)
+- **A `"*"` write grant does not cover `sys_atf_step`, `sys_variable_value` and
+  `sys_element_mapping` for the generic write tools.** (2.3.0-dev.5; also in
+  2.2.1)
+- **`sys_audit` and `sys_journal_field` are granted by name only: a `"*"` table
+  grant does not cover them.** (2.3.0-dev.5; also in 2.2.1)
+- **Four more tables are granted by name only, and a `"*"` field entry now
+  narrows all six.** (2.3.0-dev.5; also in 2.2.1)
+- **The setup wizard defaults to OAuth client credentials.** (2.3.0-dev.4)
+- **`sys_module` is now a built-in system table, so a `"*"` field entry no
+  longer narrows it.** (2.3.0-dev.3)
+- **A default read of a code table no longer returns the script.** (2.3.0-dev.3)
+- **A repeated read of a small cached-table response is one request, not a
+  watermark and a read.** (2.3.0-dev.2)
+- **`has_more` and `next_offset` count rows dropped for size. Contract change
+  for truncated pages.** (2.3.0-dev.2)
+- **Code tables are in the default metadata cache.** (2.3.0-dev.2)
+
+### Fixed
+
+- **`sn_batch` and `sn_query` refuse a `structured_query` filter or order on a
+  field the table does not have.** (2.3.0-dev.3; also in 2.2.1)
+- **`sn_atf_results` with action `get` no longer fails with an internal error on
+  a completed suite result whose rows have empty references.** (2.3.0-dev.5)
+- **A client that reads only `structuredContent` no longer loses what the text
+  carried.** (2.3.0-dev.5)
+- **A code search with no `table` searches the code tables the profile may
+  read.** (2.3.0-dev.3)
+- **A large code search returns results instead of failing.** (2.3.0-dev.3)
+- **The script reads of one code search are bounded.** (2.3.0-dev.3)
+- **A code search with no `table` no longer fills page 1 with one table.**
+  (2.3.0-dev.3)
+- **A code search snippet shows the text around the match.** (2.3.0-dev.3)
+- **`sn_codesearch` accepts `field: "name"` and `field: "sys_id"`.**
+  (2.3.0-dev.3)
+- **`sn_codesearch` pages in a stable order.** (2.3.0-dev.3)
+- **A response that passes the byte cap is reported as too large, with the
+  remedy, by every tool.** (2.3.0-dev.3)
+- **A table-policy denial names the table, the tool and the grant that lifts
+  it.** (2.3.0-dev.3)
+- **A page with more results no longer reports truncation.** (2.3.0-dev.3)
+- **A 401 on a basic-auth profile now explains the Basic Auth restriction.**
+  (2.3.0-dev.3)
+- **A truncation hint says which `max_response_bytes` is for the next row and
+  which for the whole page.** (2.3.0-dev.2)
+- **The `sn_query` truncation hint gives values to use.** (2.3.0-dev.2)
+- **A truncation hint on `sn_query` no longer disagrees with `dropped_records`,
+  and suggests fields the table has.** (2.3.0-dev.2)
+- **A rejected `structured_query.filter` names the mistake.** (2.3.0-dev.2)
+- **A rejected `structured_query.filter` now says what is accepted.**
+  (2.3.0-dev.2)
+- **`sn_query` no longer stops paging after page 2.** (2.3.0-dev.2)
+- **A read grant now allows code search.** (2.3.0-dev.2)
+
 ## [2.3.0-rc.3] — 2026-11-16
 
 Release candidate for 2.3.0, published to the `next` dist-tag. It contains the
