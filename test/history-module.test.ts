@@ -5,6 +5,7 @@ import {
   TOO_LARGE_WARNING,
   DICTIONARY_UNAVAILABLE_WARNING,
   MAX_HISTORY_DICTIONARY_ROWS,
+  STUCK_PAGE_HINT,
   WRONG_CLASS_HINT,
 } from "../src/tools/history-module.js";
 import { HISTORY_LIMITS } from "../src/tools/history-contracts.js";
@@ -488,20 +489,41 @@ describe("max_response_bytes", () => {
     expect(seen).toEqual(rows.map((row) => row.sys_created_on).reverse());
   });
 
-  it("holds a large request to the envelope's limit, with cursors intact", async () => {
+  it("fills a large max_response_bytes, and reports the page as a collection paged by cursor", async () => {
     const big = "z".repeat(1_900);
     const rows = Array.from({ length: 200 }, (_, n) =>
       auditRow(n + 1, `2026-01-03 10:${String(Math.floor(n / 60)).padStart(2, "0")}:${String(n % 60).padStart(2, "0")}`, "short_description", { oldvalue: big, newvalue: big })
     );
-    const { result } = await run(incidentFixture({ audit: rows, journal: [], flows: [] }), {
-      table: "incident", sys_id: ids.incident, sources: ["audit"], limit: 200, max_response_bytes: 1_000_000,
+    const fixture = () => incidentFixture({ audit: rows, journal: [], flows: [] });
+    const args = { table: "incident", sys_id: ids.incident, sources: ["audit"], limit: 200 };
+
+    const whole = await run(fixture(), { ...args, max_response_bytes: 1_000_000 });
+    const all = dataOf(whole.result);
+    expect(JSON.stringify(whole.result.structuredContent).length).toBeGreaterThan(700_000);
+    expect(eventsOf(all)).toHaveLength(200);
+    expect(all.next_cursor).toBeUndefined();
+    const metadata = (whole.result.structuredContent as { metadata: Record<string, unknown> }).metadata;
+    expect(metadata).toMatchObject({
+      kind: "collection",
+      record_count: 200,
+      limits: { max_bytes: 1_000_000 },
+      pagination: { mode: "none" },
+      truncation: { truncated: false },
     });
-    const data = dataOf(result);
-    expect(JSON.stringify(result.structuredContent).length).toBeLessThan(100_000);
+
+    const part = await run(fixture(), { ...args, max_response_bytes: 200_000 });
+    const data = dataOf(part.result);
+    expect(JSON.stringify(part.result).length).toBeLessThanOrEqual(200_000);
+    expect(JSON.stringify(part.result.structuredContent).length).toBeGreaterThan(150_000);
     expect(eventsOf(data).length).toBeGreaterThan(10);
     expect(eventsOf(data).length).toBeLessThan(200);
     expect(eventsOf(data).every((event) => event.old === big && event.new === big)).toBe(true);
     expect(isTailCursor((data.next_cursor as Record<string, string>).audit)).toBe(true);
+    expect((part.result.structuredContent as { metadata: Record<string, unknown> }).metadata).toMatchObject({
+      kind: "collection",
+      record_count: eventsOf(data).length,
+      limits: { max_bytes: 200_000 },
+    });
   });
 });
 
@@ -680,5 +702,34 @@ describe("a source page too large for the client", () => {
     const again = dataOf(await call({ table: "incident", sys_id: ids.incident, cursor: next }));
     expect((again.sources as Record<string, { status: string }>).journal!.status).toBe("too_large");
     expect(instance.calls.map(tableOfCall).filter((table) => table === "sys_audit" || table === "sys_flow_context")).toEqual([]);
+  });
+
+  it("says when paging on would not progress: every source left is too large", async () => {
+    const instance = fakeInstance(incidentFixture({ audit, journal, flows, tooLargeAbove: { sys_journal_field: 0 } }));
+    const { call } = await harness(instance.ops, { tableAccess: FULL });
+    const first = dataOf(await call({ table: "incident", sys_id: ids.incident }));
+    // The other sources finished on this page, so only the journal is left.
+    expect(first.hint).toBe(STUCK_PAGE_HINT(["journal"]));
+    expect(first.hint).toContain("include_values: false");
+    expect(first.hint).toContain("out of sources");
+    const again = dataOf(await call({ table: "incident", sys_id: ids.incident, cursor: first.next_cursor }));
+    expect(again.status).toBe("ok");
+    expect(again.hint).toBe(STUCK_PAGE_HINT(["journal"]));
+    // The cursor is unchanged: the hint is the only new signal.
+    expect(again.next_cursor).toEqual(first.next_cursor);
+
+    const both = fakeInstance(incidentFixture({ audit, journal, flows, tooLargeAbove: { sys_journal_field: 0, sys_audit: 0 } }));
+    const bothCall = (await harness(both.ops, { tableAccess: FULL })).call;
+    const stuck = dataOf(await bothCall({ table: "incident", sys_id: ids.incident, sources: ["audit", "journal"] }));
+    expect(stuck.hint).toBe(STUCK_PAGE_HINT(["audit", "journal"]));
+    expect(String(stuck.hint).length).toBeLessThanOrEqual(300);
+  });
+
+  it("gives no such hint while another source still has entries to page through", async () => {
+    const instance = fakeInstance(incidentFixture({ audit, journal, flows, tooLargeAbove: { sys_journal_field: 0 } }));
+    const { call } = await harness(instance.ops, { tableAccess: FULL });
+    const data = dataOf(await call({ table: "incident", sys_id: ids.incident, limit: 3 }));
+    expect((data.sources as Record<string, { status: string; has_more: boolean }>).audit).toMatchObject({ status: "ok", has_more: true });
+    expect(data.hint).toBeUndefined();
   });
 });

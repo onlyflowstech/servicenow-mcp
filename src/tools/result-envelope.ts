@@ -1,5 +1,7 @@
 import { atfExecutionResultSchema, atfResultsSchema, atfReadinessSchema } from "./atf-contracts.js";
 import { FLOW_DIAGRAM_OMITTED_NOTE as DIAGRAM_OMITTED_NOTE, FLOW_VIEW_LIMITS, flowGraphSchema } from "./flow-view-contracts.js";
+import { HISTORY_LIMITS, historyDataSchema } from "./history-contracts.js";
+import { PLATFORM_VIEW_LIMITS, platformViewDataSchema } from "./platform-view-contracts.js";
 /** Shared SNSDK-33 structured-result contracts and compatibility adapter. */
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -332,6 +334,8 @@ const productionDataSchemas = Object.freeze({
   sn_atf_author: atfAuthorResultSchema,
   sn_flow_view: flowGraphSchema,
   sn_nl: naturalLanguageResultSchema,
+  sn_history: historyDataSchema,
+  sn_platform_view: platformViewDataSchema,
   sn_profile: profileResultSchema,
 });
 
@@ -368,6 +372,8 @@ export const productionToolOutputSchemas = Object.freeze({
   sn_flow_view: withStructuredResultEnvelope(productionDataSchemas.sn_flow_view),
   sn_nl: withStructuredResultEnvelope(productionDataSchemas.sn_nl),
   sn_profile: withStructuredResultEnvelope(productionDataSchemas.sn_profile),
+  sn_history: withStructuredResultEnvelope(productionDataSchemas.sn_history),
+  sn_platform_view: withStructuredResultEnvelope(productionDataSchemas.sn_platform_view),
 });
 
 export function isProductionToolName(name: string): name is ProductionToolName {
@@ -539,6 +545,19 @@ function normalizeToolData(
   }
 }
 
+/**
+ * The rows of a result, for the tools whose rows sit under a key of their
+ * own. `sn_history`'s rows are its `events`; a refusal has none, so it is an
+ * empty collection, never one record.
+ */
+function collectionFor(tool: string | undefined, data: unknown): unknown[] | undefined {
+  if (tool === "sn_history") {
+    const events = typeof data === "object" && data !== null ? Reflect.get(data, "events") : undefined;
+    return Array.isArray(events) ? events : [];
+  }
+  return collectionArray(data);
+}
+
 function collectionArray(data: unknown): unknown[] | undefined {
   if (Array.isArray(data)) return data;
   if (typeof data !== "object" || data === null) return undefined;
@@ -658,6 +677,15 @@ function byteLimit(
         )
       : FLOW_VIEW_LIMITS.DEFAULT_MAX_RESPONSE_BYTES;
   }
+  if (name === "sn_history" || name === "sn_platform_view") {
+    // Both fill their `data` to the caller's `max_response_bytes`, which
+    // their canonical arguments always carry; the clamp is defense in depth.
+    const limits = name === "sn_history" ? HISTORY_LIMITS : PLATFORM_VIEW_LIMITS;
+    const requested = args.max_response_bytes;
+    return typeof requested === "number" && Number.isSafeInteger(requested)
+      ? Math.min(Math.max(requested, limits.MIN_MAX_RESPONSE_BYTES), limits.MAX_MAX_RESPONSE_BYTES)
+      : limits.DEFAULT_MAX_RESPONSE_BYTES;
+  }
   return DEFAULT_RESULT_BYTE_LIMIT;
 }
 
@@ -665,7 +693,7 @@ function resultKind(
   name: ProductionToolName,
   data: unknown
 ): MutableMetadata["kind"] {
-  if (collectionArray(data)) return "collection";
+  if (collectionFor(name, data)) return "collection";
   if (
     [
       "sn_create",
@@ -931,13 +959,15 @@ const LOOK_AHEAD_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * A tail read of the system log pages by cursor, not by offset: it has no
- * offset to continue at, and its `has_more` and `cursor` are the tool's own.
+ * A tail read of the system log, and every `sn_history` page, pages by cursor,
+ * not by offset: it has no offset to continue at, and its `has_more` and
+ * cursors are the tool's own.
  */
 function isTailRead(
   name: ProductionToolName,
   args: Readonly<Record<string, unknown>>
 ): boolean {
+  if (name === "sn_history") return true;
   return name === "sn_syslog" && (args.tail === true || args.after_cursor !== undefined);
 }
 
@@ -948,7 +978,7 @@ export function envelopeCompatibilityResult(
 ): CallToolResult {
   if (result.isError) return result;
   const data = normalizeToolData(name, args, parseHandlerJson(result));
-  const records = collectionArray(data);
+  const records = collectionFor(name, data);
   const maximumRecords = DEFAULT_RESULT_RECORD_LIMIT;
   const limit = requestedLimit(args, maximumRecords, data);
   const originalCount = records?.length ?? 1;
@@ -1278,6 +1308,8 @@ const OFFSET_PAGED_TOOLS: ReadonlySet<string> = new Set([
   "sn_discover",
   "sn_attach",
   "sn_atf",
+  // Every view's `results` page starts at `offset`.
+  "sn_platform_view",
 ]);
 
 /**
@@ -1323,7 +1355,7 @@ function finalizeSummaryResult(
     if (resultBytes(restatedCandidate) <= maximum) return restatedCandidate;
   }
 
-  const sourceRecords = collectionArray(sourceEnvelope.data);
+  const sourceRecords = collectionFor(tool, sourceEnvelope.data);
   let envelope = sourceEnvelope;
   if (sourceRecords) {
     const originalRecordCount = sourceRecords.length;
@@ -1339,7 +1371,7 @@ function finalizeSummaryResult(
       widestHint?: boolean
     ): MutableEnvelope => {
       const probe = JSON.parse(JSON.stringify(sourceEnvelope)) as MutableEnvelope;
-      const probeRecords = collectionArray(probe.data);
+      const probeRecords = collectionFor(tool, probe.data);
       if (!probeRecords) throw new TypeError("collection envelope lost its records");
       probeRecords.splice(count);
       probe.metadata.record_count = count;
@@ -1427,6 +1459,10 @@ function finalizeSummaryResult(
     // while next_offset (when present) remains the separately authoritative
     // post-window resume point.
     const kept = Math.max(best, 0);
+    // A history page's cursors continue after its last event, so an event cut
+    // here would be skipped by the next page. The handler fits its own page;
+    // one that still does not fit fails rather than lose events.
+    if (tool === "sn_history" && kept < originalRecordCount) return undefined;
     envelope = envelopeForCount(kept, widest, form.all, form.withoutAdvice, true);
     candidate = candidateResult(result, envelope);
     if (resultBytes(candidate) > maximum) return undefined;

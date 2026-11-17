@@ -55,9 +55,11 @@
  * `limit` events of all sources are returned; a source's cursor stands at
  * the last of its rows this page consumed, so a page never skips or repeats.
  *
- * The tool is not registered here: its `catalog.ts` entry and its
- * result-envelope entry are added when it is. This file exports the module,
- * and the contracts file exports `historyDataSchema`, for that.
+ * A page where every source that still has entries is `too_large` carries a
+ * `hint` (`STUCK_PAGE_HINT`): repeating the call unchanged would not move on.
+ *
+ * Registered in `catalog.ts`; its output schema and byte limit are its
+ * result-envelope entries.
  *
  * @module tools/history-module
  */
@@ -110,7 +112,6 @@ import {
   NOT_RECORDED,
   canonicalHistoryArgs,
   historyCursorFilter,
-  historyDataSchema,
   historyInputSchema,
   type CanonicalHistoryArgs,
   type HistoryData,
@@ -118,11 +119,7 @@ import {
   type HistorySource,
   type HistorySourceSpec,
 } from "./history-contracts.js";
-import {
-  DEFAULT_RESULT_BYTE_LIMIT,
-  envelopeCompatibilityResult,
-  withStructuredResultEnvelope,
-} from "./result-envelope.js";
+import { envelopeCompatibilityResult, productionToolOutputSchemas } from "./result-envelope.js";
 import { encodeTailCursor, isStoredTimestamp, isSysId, type TailCursor, type TailPosition } from "./syslog-cursor.js";
 import { resolveTableChain } from "./table-hierarchy.js";
 import {
@@ -172,6 +169,16 @@ export const VALUES_NOT_READABLE_WARNING = (source: HistorySource) =>
 export const TOO_LARGE_WARNING = (source: HistorySource) =>
   `The newest ${source} entries were too large to return, so ${source} was skipped on this page. ` +
   "Repeat the call with include_values: false or a narrower since/until to read them.";
+/**
+ * Every source with entries left was too large to read on this page, so
+ * repeating the call with the same arguments returns the same page. The
+ * limit is the client's per-response cap, which `max_response_bytes` does
+ * not change.
+ */
+export const STUCK_PAGE_HINT = (sources: readonly HistorySource[]) =>
+  `Paging on with the same arguments will not progress: ${sources.join(", ")} ` +
+  `${sources.length === 1 ? "is" : "are"} too large to read. Use include_values: false, a narrower ` +
+  `since/until, or leave ${sources.length === 1 ? "that source" : "them"} out of sources.`;
 export const FITTED_WARNING =
   "Fewer events than limit fit max_response_bytes; the rest follow with next_cursor.";
 
@@ -839,7 +846,7 @@ function walkPage(all: readonly Candidate[], emitLimit: number, full: ReadonlySe
 // ---------------------------------------------------------------------------
 
 function historyResult(args: CanonicalHistoryArgs, data: HistoryData): CallToolResult {
-  return envelopeCompatibilityResult(TOOL as never, args as unknown as Record<string, unknown>, ok(data));
+  return envelopeCompatibilityResult(TOOL, args as unknown as Record<string, unknown>, ok(data));
 }
 
 function dataBytes(data: unknown): number {
@@ -974,6 +981,10 @@ async function handleHistory(
       const cursor: TailCursor = { ...position, filter };
       nextCursor[source.source] = encodeTailCursor(cursor);
     });
+    // The sources with entries left; if every one is too large, the next
+    // page would read the same thing and fail the same way.
+    const pending = HISTORY_SOURCES.filter((source) => sources[source]?.has_more === true);
+    const stuck = pending.length > 0 && pending.every((source) => sources[source]!.status === "too_large");
     return {
       status: "ok",
       record,
@@ -983,6 +994,7 @@ async function handleHistory(
       omitted: walk.omitted,
       not_recorded: [...NOT_RECORDED],
       ...(Object.keys(nextCursor).length > 0 ? { next_cursor: nextCursor } : {}),
+      ...(stuck ? { hint: STUCK_PAGE_HINT(pending) } : {}),
       ...(warnings.length > 0 ? { warnings: [...warnings] } : {}),
     };
   };
@@ -990,9 +1002,8 @@ async function handleHistory(
   // Fit `max_response_bytes`: keep the newest events that fit, and let the
   // cursors carry the rest. One event is always kept, without its values if
   // they alone are too large, so a page always moves on.
-  // Until the result envelope gives this tool a byte limit of its own, it
-  // holds the result to its default limit, so that is the most to fill.
-  const budget = Math.max(0, Math.min(args.max_response_bytes, DEFAULT_RESULT_BYTE_LIMIT) - ENVELOPE_RESERVE_BYTES);
+  // The result envelope holds the result to the same `max_response_bytes`.
+  const budget = Math.max(0, args.max_response_bytes - ENVELOPE_RESERVE_BYTES);
   let data = build(args.limit);
   if (dataBytes(data) > budget && (data.events?.length ?? 0) > 0) {
     const events = data.events!;
@@ -1050,8 +1061,7 @@ export const historyToolModule = defineServiceNowToolModule({
     },
   },
   inputSchema: schema,
-  // The expression to register as `productionToolOutputSchemas.sn_history`.
-  outputSchema: withStructuredResultEnvelope(historyDataSchema),
+  outputSchema: productionToolOutputSchemas.sn_history,
   requirements: {
     permissions: ["read"],
     tables: {
