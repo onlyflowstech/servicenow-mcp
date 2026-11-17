@@ -522,6 +522,52 @@ flow read creates a Workflow Studio history record. Approve it on these terms:
 [docs/FLOW-VIEW.md](FLOW-VIEW.md) lists every table, required field and
 field-policy switch.
 
+## Record history
+
+`sn_history` reads one record's audit rows, journal entries and flow runs.
+Approve it on these terms:
+
+- `sys_audit` and `sys_journal_field` are granted by name only. Bind them, and
+  `sys_db_object` and `sys_dictionary`, to `sn_history` alone
+  (`servicenow-mcp-setup grant --read ... --tools sn_history`), so `sn_query`
+  and `sn_get` cannot read every record's history. Values are shown only when
+  the profile may read `sys_db_object` and `sys_dictionary`; a `"*"` grant
+  covers both.
+- Instance field ACLs on a record do not apply to its `sys_audit` rows: a
+  field the integration user cannot read on the record can still appear, with
+  its old and new values, in the audit history. The server's own field policy
+  does apply. Narrow such fields there, or leave `sys_audit` out.
+- Audit entries for journal fields are always left out, so comments and work
+  notes come only through `sys_journal_field` and its grant. A field is a
+  journal field by its dictionary type only; a custom field that holds notes
+  under another type is treated as an ordinary field.
+- Values follow the field's dictionary type and the credential-table list, and
+  are withheld when the types cannot be read. The
+  `"fieldTypes": { "dictionary": "not_required" }` setting does not show them.
+
+[docs/HISTORY.md](HISTORY.md) has the details.
+
+## Platform views
+
+`sn_platform_view` reads update sets, upgrade logs and Instance Scan results,
+and evaluates update sets. Approve it on these terms:
+
+- Each view reads a fixed set of tables, all or nothing. `sys_update_xml`,
+  `sys_upgrade_history_log`, `scan_finding`, `scan_result` and `scan_check` are
+  platform tables: a `"*"` field-policy entry narrows them, and their default
+  reads leave out the XML, script and matched-code columns.
+- An update set's XML is read only where the profile's own `sys_update_xml`
+  entry names `payload`. It is then shown masked: password-typed and
+  sensitive-named elements are hidden, credential-like values are masked, and
+  changes to credential tables are refused. Masking can miss a secret written
+  in another form; grant `payload` only where that is acceptable.
+- The payload view and `evaluate` need the field types. The
+  `"fieldTypes": { "dictionary": "not_required" }` setting does not apply to
+  them: without the types a payload is withheld and not scanned.
+- The evaluator's result is a heuristic, not an approval.
+
+[docs/PLATFORM-VIEW.md](PLATFORM-VIEW.md) has the details.
+
 ## Tables a `"*"` grant does not cover
 
 `sys_audit`, `sys_journal_field`, `sys_history_line`, `sys_audit_delete`,
