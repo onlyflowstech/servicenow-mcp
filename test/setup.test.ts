@@ -868,6 +868,21 @@ describe("setup grant", () => {
       ).toThrow(/denied by policy/u);
     });
 
+    it("binds the record history tables to sn_history alone with the grant the help shows", async () => {
+      await expect(grant(["--help"])).rejects.toMatchObject({
+        help: expect.stringContaining("sys_db_object,sys_dictionary --tools sn_history"),
+      });
+      const tables = ["incident", "sys_audit", "sys_journal_field", "sys_flow_context", "sys_db_object", "sys_dictionary"];
+      await grant(["--read", tables.join(","), "--tools", "sn_history"]);
+      const policy = persistedPolicy();
+      for (const table of tables) {
+        expect(toolsOn(table), table).toEqual(["sn_history"]);
+        expect(authorizeTableAccess(policy, { operation: "read", table }, "sn_history")).toBe(table);
+      }
+      expectDenied("read", "sys_audit", ["sn_query", "sn_get", "sn_aggregate"]);
+      expectDenied("read", "sys_journal_field", ["sn_query", "sn_get", "sn_aggregate"]);
+    });
+
     it("lists code search in the grant help", async () => {
       await expect(grant(["--help"])).rejects.toMatchObject({
         help: expect.stringContaining("sn_codesearch"),
