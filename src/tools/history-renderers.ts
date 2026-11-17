@@ -7,18 +7,27 @@
  * server produced: validated table names and sys_ids, fixed statuses and
  * counts.
  *
- * The renderer is not registered here: it is registered with the tool's
- * result-envelope entry. `historyTextRenderer` is the function to register.
+ * `historyTextRenderer` is registered in `catalog.ts`. The text repeats the
+ * page's events beside the structured result, so on a large page it shows
+ * the newest events that fit `max_response_bytes`, or none, with a note.
  *
  * @module tools/history-renderers
  */
 
 import { HISTORY_SOURCES } from "./history-contracts.js";
 import { bulletList, headline, renderMarkdown, table, text, untrustedBlock, type MarkdownFragment } from "./markdown.js";
+import { envelopeTextFits } from "./envelope-text-fit.js";
 import type { EnvelopeTextRenderer } from "./result-envelope.js";
 
 /** Room for a full page of events in the fenced block; markdown.ts cuts beyond it. */
 const MAX_EVENTS_TEXT = 60_000;
+/** The shortest events block tried before the text leaves the events out. */
+const MIN_EVENTS_TEXT = 1_000;
+
+export interface HistoryTextOptions {
+  /** Characters of event lines to show (default MAX_EVENTS_TEXT), whole lines, newest first; 0 shows none. */
+  readonly eventChars?: number;
+}
 const SYS_ID = /^[0-9a-f]{32}$/u;
 const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
 
@@ -55,7 +64,7 @@ function eventLine(event: Record<string, unknown>): string {
  * The text of a `sn_history` result, or undefined for anything else (the
  * dispatcher then keeps its one-line summary).
  */
-export function renderHistoryText(data: unknown): string | undefined {
+export function renderHistoryText(data: unknown, options: HistoryTextOptions = {}): string | undefined {
   const record = asRecord(data);
   const target = asRecord(record.record);
   const tableName = str(target.table);
@@ -86,14 +95,32 @@ export function renderHistoryText(data: unknown): string | undefined {
     rows.push([source, entry.status, String(entry.returned ?? 0), entry.has_more === true ? "yes" : "no"]);
   }
   if (rows.length > 0) blocks.push(table(["Source", "Status", "Returned", "More"], rows));
-  if (events.length > 0) {
-    blocks.push(untrustedBlock("Events (time | source | field | by | change)", events.map(eventLine).join("\n"), MAX_EVENTS_TEXT));
-  }
   const notes: string[] = [];
+  if (events.length > 0) {
+    const lines = events.map(eventLine);
+    // The newest whole lines that fit the room; a line is never cut.
+    const room = options.eventChars ?? MAX_EVENTS_TEXT;
+    let shown = 0;
+    let used = 0;
+    while (shown < lines.length && used + lines[shown]!.length + 1 <= room) {
+      used += lines[shown]!.length + 1;
+      shown += 1;
+    }
+    if (shown > 0) {
+      blocks.push(untrustedBlock("Events (time | source | field | by | change)", lines.slice(0, shown).join("\n"), MAX_EVENTS_TEXT));
+    }
+    if (shown < lines.length) {
+      notes.push(
+        `This text shows ${shown === 0 ? "none" : `the newest ${shown}`} of the ${lines.length} events to fit ` +
+          "max_response_bytes; the structured result has them all. A lower limit shows every event here."
+      );
+    }
+  }
   const unreadable = typeof omitted.unreadable === "number" ? omitted.unreadable : 0;
   const mismatch = typeof omitted.mismatch === "number" ? omitted.mismatch : 0;
   if (unreadable > 0) notes.push(`${unreadable} entr${unreadable === 1 ? "y" : "ies"} omitted: field not readable under policy.`);
   if (mismatch > 0) notes.push(`${mismatch} entr${mismatch === 1 ? "y" : "ies"} omitted: not about this record.`);
+  if (typeof record.hint === "string") notes.push(record.hint);
   if (record.audit_enabled === false) notes.push("Auditing is off for this class, so field changes may be missing.");
   for (const warning of Array.isArray(record.warnings) ? record.warnings : []) {
     if (typeof warning === "string") notes.push(warning);
@@ -104,6 +131,20 @@ export function renderHistoryText(data: unknown): string | undefined {
   return renderMarkdown(...blocks);
 }
 
-/** The envelope renderer to register for `sn_history`. */
-export const historyTextRenderer: EnvelopeTextRenderer = (envelope, context) =>
-  renderHistoryText(envelope.data) ?? context.summary;
+/**
+ * The envelope renderer to register for `sn_history`. The full text when it
+ * fits beside the result; otherwise the newest events that fit, halving the
+ * room each time; otherwise the text without events; otherwise the summary.
+ */
+export const historyTextRenderer: EnvelopeTextRenderer = (envelope, context) => {
+  const full = renderHistoryText(envelope.data);
+  if (full === undefined) return context.summary;
+  const fits = envelopeTextFits(envelope);
+  if (fits(full)) return full;
+  for (let chars = MAX_EVENTS_TEXT / 2; chars >= MIN_EVENTS_TEXT; chars = Math.floor(chars / 2)) {
+    const cut = renderHistoryText(envelope.data, { eventChars: chars });
+    if (cut !== undefined && fits(cut)) return cut;
+  }
+  const bare = renderHistoryText(envelope.data, { eventChars: 0 });
+  return bare !== undefined && fits(bare) ? bare : context.summary;
+};

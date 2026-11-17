@@ -12,9 +12,8 @@
  * `test/platform-view-skeleton.test.ts` runs the dispatcher against a recording
  * client and asserts that every table it reads is in the call's plan.
  *
- * The tool is not registered here: its `catalog.ts` entry and its
- * result-envelope entry are added when it is. This file exports the module,
- * and the contracts file exports `platformViewDataSchema`, for that.
+ * Registered in `catalog.ts`; its output schema and byte limit are its
+ * result-envelope entries, and `platformViewTextRenderer` is its text.
  *
  * @module tools/platform-view-module
  */
@@ -27,18 +26,18 @@ import {
   PLATFORM_VIEW_DESCRIPTION,
   PlatformViewArgumentError,
   canonicalPlatformViewArgs,
-  platformViewDataSchema,
   platformViewInputSchema,
   platformViewReadTables,
   type CanonicalPlatformViewArgs,
   type PlatformView,
   type PlatformViewHandler,
 } from "./platform-view-contracts.js";
-import { handleEvaluate } from "./platform-view-evaluate.js";
-import { handleScanFindings } from "./platform-view-scan.js";
-import { handleUpdateSetViews } from "./platform-view-update-sets.js";
-import { handleUpgradeSkipped } from "./platform-view-upgrades.js";
-import { withStructuredResultEnvelope } from "./result-envelope.js";
+import { envelopeTextFits } from "./envelope-text-fit.js";
+import { handleEvaluate, renderEvaluateText } from "./platform-view-evaluate.js";
+import { handleScanFindings, renderScanFindingsText } from "./platform-view-scan.js";
+import { handleUpdateSetViews, renderUpdateSetViewText } from "./platform-view-update-sets.js";
+import { handleUpgradeSkipped, renderUpgradeSkippedText } from "./platform-view-upgrades.js";
+import { productionToolOutputSchemas, type EnvelopeTextRenderer } from "./result-envelope.js";
 import {
   defineServiceNowToolModule,
   withRequiredProfile,
@@ -46,6 +45,21 @@ import {
 } from "./tool-module.js";
 
 const schema = withRequiredProfile(platformViewInputSchema);
+
+/**
+ * One text renderer per group of views; each returns undefined for a view
+ * that is not its own. Every one fences instance text in an `untrustedBlock`.
+ */
+const VIEW_RENDERERS: Readonly<Record<PlatformView, (data: unknown) => string | undefined>> = Object.freeze({
+  update_sets: renderUpdateSetViewText,
+  update_set: renderUpdateSetViewText,
+  changes: renderUpdateSetViewText,
+  batch: renderUpdateSetViewText,
+  remote_update_sets: renderUpdateSetViewText,
+  upgrade_skipped: renderUpgradeSkippedText,
+  scan_findings: renderScanFindingsText,
+  evaluate: renderEvaluateText,
+});
 
 /** One handler per view. Implementing a view replaces its entry. */
 const VIEW_HANDLERS: Readonly<Record<PlatformView, PlatformViewHandler>> = Object.freeze({
@@ -99,9 +113,7 @@ export function createPlatformViewToolModule(
       },
     },
     inputSchema: schema,
-    // The expression to register as
-    // `productionToolOutputSchemas.sn_platform_view`.
-    outputSchema: withStructuredResultEnvelope(platformViewDataSchema),
+    outputSchema: productionToolOutputSchemas.sn_platform_view,
     requirements: {
       permissions: ["read"],
       tables: { kind: "static", names: PLATFORM_VIEW_ALL_TABLES },
@@ -123,3 +135,36 @@ export function createPlatformViewToolModule(
 }
 
 export const platformViewToolModule = createPlatformViewToolModule();
+
+/** Said in place of a payload the text leaves out; fixed text, not instance data. */
+export const PAYLOAD_LEFT_OUT_HINT =
+  "it is in the structured result (summary.payload.text) and is not repeated here, to fit max_response_bytes.";
+
+/** The result's data with a shown payload replaced by a note, or undefined when no payload is shown. */
+function withoutPayloadText(data: unknown): unknown {
+  if (typeof data !== "object" || data === null) return undefined;
+  const summary = (data as { summary?: unknown }).summary;
+  if (typeof summary !== "object" || summary === null) return undefined;
+  const payload = (summary as { payload?: { status?: unknown } }).payload;
+  if (payload?.status !== "shown") return undefined;
+  return { ...data, summary: { ...summary, payload: { status: "left out", hint: PAYLOAD_LEFT_OUT_HINT } } };
+}
+
+/**
+ * The text of a result, by its view. It is kept only when it fits beside the
+ * structured result within `max_response_bytes`; a shown payload is left out
+ * of the text when that alone makes it fit. Otherwise, or for data that is no
+ * view's, the text is the dispatcher's one-line summary.
+ */
+export const platformViewTextRenderer: EnvelopeTextRenderer = (envelope, context) => {
+  const view = (envelope.data as { view?: unknown } | null)?.view;
+  if (typeof view !== "string" || !(PLATFORM_VIEWS as readonly string[]).includes(view)) return context.summary;
+  const render = VIEW_RENDERERS[view as PlatformView];
+  const full = render(envelope.data);
+  if (full === undefined) return context.summary;
+  const fits = envelopeTextFits(envelope);
+  if (fits(full)) return full;
+  const shorter = withoutPayloadText(envelope.data);
+  const text = shorter === undefined ? undefined : render(shorter);
+  return text !== undefined && fits(text) ? text : context.summary;
+};
