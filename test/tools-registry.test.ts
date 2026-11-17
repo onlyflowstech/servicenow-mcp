@@ -201,9 +201,11 @@ describe("high-level tool discovery", () => {
     sn_flow_view: ["depth", "flow", "format", "include_inputs", "max_nodes", "max_response_bytes", "profile"],
     sn_get: ["display_value", "fields", "force_recache", "identifier", "max_response_bytes", "profile", "response_format", "sys_id", "table"],
     sn_health: ["check", "profile"],
+    sn_history: ["cursor", "fields", "include_values", "limit", "max_response_bytes", "profile", "since", "sources", "sys_id", "table", "until"],
     sn_incident_add_comment: ["content", "profile", "sys_id"],
     sn_incident_add_work_note: ["content", "profile", "sys_id"],
     sn_nl: ["confirm", "execute", "force", "profile", "text"],
+    sn_platform_view: ["action", "application", "batch_root", "category", "change", "check", "disposition", "groups", "include_children", "include_muted", "kind", "limit", "max_response_bytes", "max_updates", "min_severity", "name_contains", "offset", "payload", "priority", "problems", "profile", "remote_update_set", "result", "source_table", "state", "type", "update_set", "updated_since", "upgrade", "view"],
     sn_profile: ["profile"],
     sn_query: ["display_value", "fields", "force_recache", "limit", "max_response_bytes", "offset", "orderby", "profile", "query", "response_format", "structured_query", "table"],
     sn_relationships: ["ci_name", "class", "depth", "direction", "impact", "limit", "offset", "profile", "sys_id", "type"],
@@ -237,9 +239,11 @@ describe("high-level tool discovery", () => {
     sn_flow_view: { title: "View Flow Designer flow", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_get: { title: "Get record", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_health: { title: "Check instance health", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    sn_history: { title: "View record history", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_incident_add_comment: { title: "Add incident comment", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     sn_incident_add_work_note: { title: "Add incident work note", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     sn_nl: { title: "Natural language interface", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    sn_platform_view: { title: "View platform data", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_profile: { title: "Inspect instance profile", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     sn_query: { title: "Query records", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     sn_relationships: { title: "Traverse CI relationships", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -248,7 +252,12 @@ describe("high-level tool discovery", () => {
     sn_update: { title: "Update record", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   };
 
-  it("publishes 24 unique sn_* tools from Zod with required profile", async () => {
+  // These two publish bare property types to stay inside their model-visible
+  // budgets: what each selector takes is said once, in the tool description.
+  // Every other property of every tool keeps its own description.
+  const BARE_PROPERTY_TOOLS: ReadonlySet<string> = new Set(["sn_history", "sn_platform_view"]);
+
+  it("publishes 26 unique sn_* tools from Zod with required profile", async () => {
     const fake = createProfileManager();
     const { client } = await harness(fake);
     const discovered = (await client.listTools()).tools;
@@ -268,7 +277,12 @@ describe("high-level tool discovery", () => {
       expect(Object.keys(tool.inputSchema.properties ?? {}).sort(), tool.name).toEqual(
         expectedInputs[tool.name]
       );
-      for (const property of Object.values(tool.inputSchema.properties ?? {})) {
+      for (const [name, property] of Object.entries(tool.inputSchema.properties ?? {})) {
+        if (BARE_PROPERTY_TOOLS.has(tool.name) && name !== "profile") {
+          // Deliberate: adding one is a budget change, made on purpose.
+          expect(property, `${tool.name}.${name}`).not.toHaveProperty("description");
+          continue;
+        }
         expect(property, tool.name).toHaveProperty("description");
         expect(Reflect.get(property, "description"), tool.name).toBeTypeOf("string");
       }
@@ -398,6 +412,69 @@ describe("high-level tool discovery", () => {
       await clientTransport.close();
       if (server.isConnected()) await server.close();
     }
+  });
+});
+
+describe("tools/list budget for the history and platform view tools", () => {
+  // Model-visible: what a model reads (name, description and input schema as
+  // listed, the shared profile selector included), measured as
+  // test/filter-examples.test.ts measures it.
+  const MODEL_VISIBLE_TOTAL_CAP = 45_000;
+  const MODEL_VISIBLE_BUDGETS: Readonly<Record<string, number>> = {
+    sn_history: 1_500,
+    // 1,800 for the schema and its one description sentence, plus 300 for
+    // the update set views' description lines.
+    sn_platform_view: 2_100,
+  };
+  // Each new entry, output schema included, apart from the shared result
+  // envelope (`metadata` and `profile`), which every tool carries.
+  const ENTRY_CAP_WITHOUT_ENVELOPE = 5_000;
+  const size = (value: unknown) => JSON.stringify(value).length;
+
+  async function listed() {
+    const { client } = await harness(createProfileManager());
+    return (await client.listTools()).tools;
+  }
+
+  it("keeps each new entry and the model-visible total inside their budgets", async () => {
+    const tools = await listed();
+    let total = 0;
+    for (const tool of tools) {
+      total += size({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema });
+    }
+    expect(total).toBeLessThanOrEqual(MODEL_VISIBLE_TOTAL_CAP);
+    for (const [name, budget] of Object.entries(MODEL_VISIBLE_BUDGETS)) {
+      const tool = tools.find((candidate) => candidate.name === name);
+      expect(tool, name).toBeDefined();
+      const modelVisible = size({ name: tool!.name, description: tool!.description, inputSchema: tool!.inputSchema });
+      expect(modelVisible, name).toBeLessThanOrEqual(budget);
+      const properties = (tool!.outputSchema?.properties ?? {}) as Record<string, unknown>;
+      expect(properties, name).toHaveProperty("metadata");
+      expect(properties, name).toHaveProperty("profile");
+      const envelope = size(properties.metadata) + size(properties.profile);
+      expect(size(tool) - envelope, name).toBeLessThanOrEqual(ENTRY_CAP_WITHOUT_ENVELOPE);
+    }
+  });
+
+  it("gives every tool the same shared result envelope", async () => {
+    // The per-entry cap leaves the envelope out; this holds it to one shape.
+    const tools = await listed();
+    const envelopes = new Set(
+      tools.map((tool) => JSON.stringify((tool.outputSchema?.properties as Record<string, unknown>).metadata))
+    );
+    expect(envelopes.size).toBe(1);
+  });
+
+  it("keeps sn_history's cursor one position per source, not one opaque token", async () => {
+    const tools = await listed();
+    const history = tools.find((tool) => tool.name === "sn_history")!;
+    const cursor = (history.inputSchema.properties as Record<string, Record<string, unknown>>).cursor;
+    expect(cursor?.type).toBe("object");
+    expect(Object.keys((cursor?.properties ?? {}) as object).sort()).toEqual(["audit", "flows", "journal"]);
+    const output = (history.outputSchema?.properties as Record<string, Record<string, unknown>>).data;
+    const next = (output?.properties as Record<string, Record<string, unknown>>).next_cursor;
+    expect(next?.type).toBe("object");
+    expect([...((next?.propertyNames as { enum?: string[] })?.enum ?? [])].sort()).toEqual(["audit", "flows", "journal"]);
   });
 });
 

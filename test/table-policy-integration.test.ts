@@ -255,6 +255,8 @@ describe("SNSDK-29 registry enforcement", () => {
       sn_atf_readiness: {},
       sn_atf: { action: "list" },
       sn_nl: { text: "show me open incidents" },
+      sn_history: { table: "incident", sys_id: SYS_ID },
+      sn_platform_view: { view: "update_sets" },
     };
 
     const connected = await harness({ readTables: [], writeTables: [], targets: [] });

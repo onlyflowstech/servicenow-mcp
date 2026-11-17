@@ -21,11 +21,14 @@ import * as discover from "./discover.js";
 import { flowViewToolModule } from "./flow-view-module.js";
 import { getToolModule } from "./get-module.js";
 import * as health from "./health.js";
+import { historyToolModule } from "./history-module.js";
+import { historyTextRenderer } from "./history-renderers.js";
 import {
   incidentCommentToolModule,
   incidentWorkNoteToolModule,
 } from "./incident-journal-module.js";
 import * as nl from "./nl.js";
+import { platformViewTextRenderer, platformViewToolModule } from "./platform-view-module.js";
 import * as profile from "./profile.js";
 import { queryToolModule } from "./query-module.js";
 import * as relationships from "./relationships.js";
@@ -36,6 +39,7 @@ import {
   envelopeCompatibilityResult,
   isProductionToolName,
   productionToolOutputSchemas,
+  registerEnvelopeTextRenderer,
 } from "./result-envelope.js";
 import {
   defineContextOnlyToolModule,
@@ -221,7 +225,12 @@ export const serviceNowToolModules = Object.freeze([
     fieldPolicies: ["read", "write"],
     capabilities: ["natural-language:compose"],
   }),
+  historyToolModule,
+  platformViewToolModule,
 ] as const);
+
+registerEnvelopeTextRenderer("sn_history", historyTextRenderer);
+registerEnvelopeTextRenderer("sn_platform_view", platformViewTextRenderer);
 
 const profileInputSchema = withRequiredProfile(profile.schema);
 const EMPTY_REQUESTS = Object.freeze([]);

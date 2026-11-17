@@ -11,7 +11,7 @@ Built by [OnlyFlows](https://onlyflows.tech) · Published by [@onlyflowstech](ht
 
 ## Governed and safe for production
 
-The server exposes 24 tools over stdio. Every call runs inside controls that
+The server exposes 26 tools over stdio. Every call runs inside controls that
 you configure and that no tool of this server can change:
 
 - **Per-profile table and field policy.** Each profile (a named ServiceNow
@@ -617,7 +617,7 @@ ServiceNow upstream can return HTTP 429 with an empty body, while this server's 
 
 ## What the tools cover
 
-The registered catalog has 24 tools (see [Tools Reference](#tools-reference)):
+The registered catalog has 26 tools (see [Tools Reference](#tools-reference)):
 
 | Area | Tools |
 |------|-------|
@@ -627,6 +627,7 @@ The registered catalog has 24 tools (see [Tools Reference](#tools-reference)):
 | CMDB and operations | `sn_relationships`, `sn_attach`, `sn_syslog`, `sn_codesearch`, `sn_discover` |
 | ATF | `sn_atf_author`, `sn_atf_run`, `sn_atf_results`, `sn_atf_readiness`, `sn_atf` |
 | Flow Designer (read-only) | `sn_flow_view` |
+| Record history and platform views (read-only) | `sn_history`, `sn_platform_view` |
 | Profiles | `sn_profile` |
 | Natural language | `sn_nl` (currently policy-denied pending a typed access plan) |
 
@@ -814,6 +815,13 @@ stub and is **not published in 2.0** — it does not appear in `tools/list`. Use
 | Tool | Description |
 |------|-------------|
 | `sn_flow_view` | Show a flow or subflow as a Mermaid diagram, an outline and a structured graph: trigger, steps, branches, loops, error handling, input values under field policy, and called subflows to depth 3. Read-only through the Table API; never calls Flow Designer's internal API. See [docs/FLOW-VIEW.md](docs/FLOW-VIEW.md) |
+
+### Record history and platform views
+
+| Tool | Description |
+|------|-------------|
+| `sn_history` | One record's history, newest first: audited field changes with old and new values, comments and work notes, and the flows that ran on it. Pages by a cursor per source. Values follow field policy and the field's dictionary type. `sys_audit` and `sys_journal_field` must be granted by name; see [docs/HISTORY.md](docs/HISTORY.md) |
+| `sn_platform_view` | Read-only platform views chosen by `view`: `update_sets`, `update_set`, `changes` (with one change's XML, masked, when the profile names `payload`), `batch`, `remote_update_sets` (with preview problems), `upgrade_skipped`, `scan_findings` and `evaluate` (heuristic rules over an update set's changes). See [docs/PLATFORM-VIEW.md](docs/PLATFORM-VIEW.md) |
 
 ### Profile Management
 
@@ -1468,7 +1476,7 @@ The same policy in the list form:
 }
 ```
 
-**Which tables a `"*"` entry reaches.** Tables fall into four groups:
+**Which tables a `"*"` entry reaches.** Tables fall into five groups:
 
 - **ITSM tables:** `incident`, `change_request`, `problem`, `sc_request`,
   `sc_req_item`, `sc_task`, `task`, `cmdb_ci`, `cmdb_ci_server`,
@@ -1485,13 +1493,20 @@ The same policy in the list form:
 - **The 6 named-only tables:** `sys_audit`, `sys_journal_field`,
   `sys_history_line`, `sys_audit_delete`, `sys_attachment_doc`, `sys_email`. A
   `"*"` entry reaches them once the profile names them in `tableAccess` (below).
+- **The 5 platform tables:** `sys_update_xml`, `sys_upgrade_history_log`,
+  `scan_finding`, `scan_result`, `scan_check`. A `"*"` entry reaches them,
+  named in the field policy or not. Their default reads leave out the XML,
+  script and matched-code columns. The policy card shows them as class
+  `platform`.
 
-On an ITSM table or a table without a built-in entry, named in the policy or
-not, `readable` and `writable` each resolve from the table's own entry, then
-the `"*"` entry, then every field. To keep one key open on such a table under
-a narrowing `"*"` entry, state it on the table, such as
-`"u_x": { "writable": "*" }`. The ITSM tables keep their built-in default
-projections, trimmed to the effective `readable` set.
+On an ITSM table, a platform table or a table without a built-in entry, named
+in the policy or not, `readable` and `writable` each resolve from the table's
+own entry, then the `"*"` entry, then every field. To keep one key open on such
+a table under a narrowing `"*"` entry, state it on the table, such as
+`"u_x": { "writable": "*" }`. The ITSM and platform tables keep their built-in
+default projections, trimmed to the effective `readable` set. Naming a table
+narrows that table only, not the tables that extend it (the subclasses of
+`scan_check`, for example): narrow those with the `"*"` entry, or name each.
 
 A `"*"` entry never reaches a system table, named or not: each key comes from
 the table's own entry, or else covers every field. The system tables include

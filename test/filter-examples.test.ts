@@ -128,16 +128,18 @@ describe("tools/list size ledger", () => {
         "sn_flow_view": 15886,
         "sn_get": 4745,
         "sn_health": 3127,
+        "sn_history": 5309,
         "sn_incident_add_comment": 3280,
         "sn_incident_add_work_note": 3278,
         "sn_nl": 3588,
+        "sn_platform_view": 5327,
         "sn_profile": 3299,
         "sn_query": 10244,
         "sn_relationships": 4292,
         "sn_schema": 3586,
         "sn_syslog": 4582,
         "sn_update": 3661,
-        "total": 130547,
+        "total": 141183,
       }
     `);
   });
@@ -156,8 +158,8 @@ describe("tools/list size ledger", () => {
     const outputSchemas = tools.reduce((sum, tool) => sum + size(tool.outputSchema ?? {}), 0);
     expect({ modelVisible, outputSchemas }).toMatchInlineSnapshot(`
       {
-        "modelVisible": 40649,
-        "outputSchemas": 85336,
+        "modelVisible": 43976,
+        "outputSchemas": 92268,
       }
     `);
   });

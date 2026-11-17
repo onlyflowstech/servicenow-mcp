@@ -6720,6 +6720,436 @@
       "additionalProperties": false
     }
   },
+  "sn_history": {
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "table": {
+          "type": "string"
+        },
+        "sys_id": {
+          "type": "string"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "since": {
+          "type": "string"
+        },
+        "until": {
+          "type": "string"
+        },
+        "include_values": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "number"
+        },
+        "cursor": {
+          "type": "object",
+          "properties": {
+            "audit": {
+              "type": "string"
+            },
+            "journal": {
+              "type": "string"
+            },
+            "flows": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "max_response_bytes": {
+          "type": "number"
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Configured ServiceNow profile name (required; no default fallback)."
+        }
+      },
+      "required": [
+        "table",
+        "sys_id",
+        "profile"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "ok",
+                "wrong_class",
+                "invalid_cursor"
+              ]
+            },
+            "record": {
+              "type": "object",
+              "properties": {
+                "table": {
+                  "type": "string"
+                },
+                "sys_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "table",
+                "sys_id"
+              ],
+              "additionalProperties": false
+            },
+            "audit_enabled": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "events": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "time": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "audit",
+                      "journal",
+                      "flows"
+                    ]
+                  },
+                  "field": {
+                    "type": "string"
+                  },
+                  "old": {
+                    "type": "string"
+                  },
+                  "new": {
+                    "type": "string"
+                  },
+                  "value_hidden": {
+                    "type": "boolean"
+                  },
+                  "value_truncated": {
+                    "type": "boolean"
+                  },
+                  "user": {
+                    "type": "string"
+                  },
+                  "flow": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "state": {
+                        "type": "string"
+                      },
+                      "test": {
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "time",
+                  "source"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "sources": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "enum": [
+                  "audit",
+                  "journal",
+                  "flows"
+                ]
+              },
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string"
+                  },
+                  "returned": {
+                    "type": "number"
+                  },
+                  "has_more": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "status",
+                  "returned",
+                  "has_more"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "omitted": {
+              "type": "object",
+              "properties": {
+                "unreadable": {
+                  "type": "number"
+                },
+                "mismatch": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "unreadable",
+                "mismatch"
+              ],
+              "additionalProperties": false
+            },
+            "not_recorded": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "next_cursor": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "enum": [
+                  "audit",
+                  "journal",
+                  "flows"
+                ]
+              },
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "hint": {
+              "type": "string"
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "status",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "single",
+                "collection",
+                "operation"
+              ]
+            },
+            "record_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "max_records": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "max_bytes": {
+                  "type": "integer",
+                  "minimum": 1000,
+                  "maximum": 14680064
+                }
+              },
+              "required": [
+                "max_records",
+                "max_bytes"
+              ],
+              "additionalProperties": false
+            },
+            "pagination": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "const": "none"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "const": "offset"
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "returned": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "has_more": {
+                      "type": "boolean"
+                    },
+                    "next_offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "recovery": {
+                      "type": "string",
+                      "const": "adjust_request_and_retry_same_offset"
+                    },
+                    "order_by": {
+                      "minItems": 1,
+                      "maxItems": 8,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "limit",
+                    "offset",
+                    "returned",
+                    "has_more",
+                    "order_by"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "truncation": {
+              "type": "object",
+              "properties": {
+                "truncated": {
+                  "type": "boolean"
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "record_limit",
+                    "byte_limit"
+                  ]
+                },
+                "dropped_records": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "truncated"
+              ],
+              "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "kind",
+            "record_count",
+            "limits",
+            "pagination",
+            "truncation"
+          ],
+          "additionalProperties": false
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Configured ServiceNow profile name (required; no default fallback)."
+        }
+      },
+      "required": [
+        "data",
+        "metadata",
+        "profile"
+      ],
+      "additionalProperties": false
+    }
+  },
   "sn_incident_add_comment": {
     "inputSchema": {
       "type": "object",
@@ -7262,6 +7692,396 @@
           },
           "required": [
             "request"
+          ],
+          "additionalProperties": false
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "single",
+                "collection",
+                "operation"
+              ]
+            },
+            "record_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "max_records": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "max_bytes": {
+                  "type": "integer",
+                  "minimum": 1000,
+                  "maximum": 14680064
+                }
+              },
+              "required": [
+                "max_records",
+                "max_bytes"
+              ],
+              "additionalProperties": false
+            },
+            "pagination": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "const": "none"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "const": "offset"
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "returned": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "has_more": {
+                      "type": "boolean"
+                    },
+                    "next_offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "recovery": {
+                      "type": "string",
+                      "const": "adjust_request_and_retry_same_offset"
+                    },
+                    "order_by": {
+                      "minItems": 1,
+                      "maxItems": 8,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "limit",
+                    "offset",
+                    "returned",
+                    "has_more",
+                    "order_by"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "truncation": {
+              "type": "object",
+              "properties": {
+                "truncated": {
+                  "type": "boolean"
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "record_limit",
+                    "byte_limit"
+                  ]
+                },
+                "dropped_records": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "truncated"
+              ],
+              "additionalProperties": false
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "hit",
+                "miss",
+                "bypass",
+                "mixed"
+              ]
+            },
+            "timing": {
+              "type": "object",
+              "properties": {
+                "total_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "upstream_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "watermark_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "total_ms",
+                "upstream_ms",
+                "watermark_ms"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "kind",
+            "record_count",
+            "limits",
+            "pagination",
+            "truncation"
+          ],
+          "additionalProperties": false
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Configured ServiceNow profile name (required; no default fallback)."
+        }
+      },
+      "required": [
+        "data",
+        "metadata",
+        "profile"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "sn_platform_view": {
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "type": "string",
+          "enum": [
+            "update_sets",
+            "update_set",
+            "changes",
+            "batch",
+            "remote_update_sets",
+            "upgrade_skipped",
+            "scan_findings",
+            "evaluate"
+          ]
+        },
+        "limit": {
+          "type": "number"
+        },
+        "offset": {
+          "type": "number"
+        },
+        "max_response_bytes": {
+          "type": "number"
+        },
+        "state": {
+          "type": "string"
+        },
+        "name_contains": {
+          "type": "string"
+        },
+        "application": {
+          "type": "string"
+        },
+        "updated_since": {
+          "type": "string"
+        },
+        "batch_root": {
+          "type": "string"
+        },
+        "update_set": {
+          "type": "string"
+        },
+        "remote_update_set": {
+          "type": "string"
+        },
+        "include_children": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string"
+        },
+        "change": {
+          "type": "string"
+        },
+        "payload": {
+          "type": "boolean"
+        },
+        "problems": {
+          "type": "boolean"
+        },
+        "upgrade": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "disposition": {
+          "type": "number"
+        },
+        "result": {
+          "type": "string"
+        },
+        "check": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "string"
+        },
+        "source_table": {
+          "type": "string"
+        },
+        "include_muted": {
+          "type": "boolean"
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "min_severity": {
+          "type": "string"
+        },
+        "max_updates": {
+          "type": "number"
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Configured ServiceNow profile name (required; no default fallback)."
+        }
+      },
+      "required": [
+        "view",
+        "profile"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "view": {
+              "type": "string",
+              "enum": [
+                "update_sets",
+                "update_set",
+                "changes",
+                "batch",
+                "remote_update_sets",
+                "upgrade_skipped",
+                "scan_findings",
+                "evaluate"
+              ]
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "ok",
+                "unavailable",
+                "denied"
+              ]
+            },
+            "results": {
+              "maxItems": 200,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "summary": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "record_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000
+            },
+            "has_more": {
+              "type": "boolean"
+            },
+            "next_offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "dropped_records": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000
+            },
+            "hint": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "warnings": {
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 300
+              }
+            }
+          },
+          "required": [
+            "view",
+            "status"
           ],
           "additionalProperties": false
         },

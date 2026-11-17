@@ -81,9 +81,11 @@ const expectedInputs: Record<string, readonly string[]> = {
   sn_flow_view: ["depth", "flow", "format", "include_inputs", "max_nodes", "max_response_bytes", "profile"],
   sn_get: ["display_value", "fields", "force_recache", "identifier", "max_response_bytes", "profile", "response_format", "sys_id", "table"],
   sn_health: ["check", "profile"],
+  sn_history: ["cursor", "fields", "include_values", "limit", "max_response_bytes", "profile", "since", "sources", "sys_id", "table", "until"],
   sn_incident_add_comment: ["content", "profile", "sys_id"],
   sn_incident_add_work_note: ["content", "profile", "sys_id"],
   sn_nl: ["confirm", "execute", "force", "profile", "text"],
+  sn_platform_view: ["action", "application", "batch_root", "category", "change", "check", "disposition", "groups", "include_children", "include_muted", "kind", "limit", "max_response_bytes", "max_updates", "min_severity", "name_contains", "offset", "payload", "priority", "problems", "profile", "remote_update_set", "result", "source_table", "state", "type", "update_set", "updated_since", "upgrade", "view"],
   sn_profile: ["profile"],
   sn_query: ["display_value", "fields", "force_recache", "limit", "max_response_bytes", "offset", "orderby", "profile", "query", "response_format", "structured_query", "table"],
   sn_relationships: ["ci_name", "class", "depth", "direction", "impact", "limit", "offset", "profile", "sys_id", "type"],
@@ -108,9 +110,11 @@ const expectedRequired: Record<string, readonly string[]> = {
   sn_flow_view: ["flow", "profile"],
   sn_get: ["profile", "table"],
   sn_health: ["profile"],
+  sn_history: ["profile", "sys_id", "table"],
   sn_incident_add_comment: ["content", "profile", "sys_id"],
   sn_incident_add_work_note: ["content", "profile", "sys_id"],
   sn_nl: ["profile", "text"],
+  sn_platform_view: ["profile", "view"],
   sn_profile: ["profile"],
   sn_query: ["profile", "table"],
   sn_relationships: ["profile"],
@@ -150,6 +154,7 @@ const validProfileBoundaryArguments: Readonly<
     sys_id: "11111111111111111111111111111111",
   },
   sn_health: {},
+  sn_history: { table: "incident", sys_id: "11111111111111111111111111111111" },
   sn_incident_add_comment: {
     sys_id: "11111111111111111111111111111111",
     content: "contract comment",
@@ -159,6 +164,7 @@ const validProfileBoundaryArguments: Readonly<
     content: "contract work note",
   },
   sn_nl: { text: "show active incidents" },
+  sn_platform_view: { view: "update_sets" },
   sn_profile: {},
   sn_query: { table: "incident" },
   sn_relationships: {},
@@ -189,9 +195,11 @@ const expectedAnnotations: Record<string, CompleteAnnotations> = {
   sn_flow_view: { title: "View Flow Designer flow", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_get: { title: "Get record", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_health: { title: "Check instance health", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  sn_history: { title: "View record history", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_incident_add_comment: { title: "Add incident comment", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   sn_incident_add_work_note: { title: "Add incident work note", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   sn_nl: { title: "Natural language interface", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  sn_platform_view: { title: "View platform data", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_profile: { title: "Inspect instance profile", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   sn_query: { title: "Query records", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   sn_relationships: { title: "Traverse CI relationships", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -743,7 +751,7 @@ const leakProbeModule = defineServiceNowToolModule({
 });
 
 describe.each(clientFactories)("SNSDK-27 %s contract", (_label, createClient) => {
-  it("initializes and discovers the exact 24-tool schema and annotation contract", async () => {
+  it("initializes and discovers the exact 26-tool schema and annotation contract", async () => {
     const harness = await createHarness();
     const client = createClient(harness.url);
     try {
