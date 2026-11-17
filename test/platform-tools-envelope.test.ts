@@ -104,8 +104,8 @@ describe("an update set payload above the default limit", () => {
   const PLAN = platformViewReadTables("changes", ARGS);
   const PROFILE = { fieldPolicy: { sys_update_xml: { readable: [...UPDATE_SET_VIEWS_FIELD_PLAN.sys_update_xml!] } } };
 
-  async function call(maxBytes?: number) {
-    const target = change(9, { payload: payloadOf("sys_script_include", { name: "Big", script: SCRIPT }) });
+  async function call(maxBytes?: number, script = SCRIPT) {
+    const target = change(9, { payload: payloadOf("sys_script_include", { name: "Big", script }) });
     const { instance, ops } = fake(world({ changes: [target] }));
     const connected = await harness(ops, { tableAccess: readPolicy(PLAN), modules: [platformViewToolModule], fieldPolicy: PROFILE });
     const result = await connected.call({ ...ARGS, ...(maxBytes === undefined ? {} : { max_response_bytes: maxBytes }) });
@@ -142,14 +142,34 @@ describe("an update set payload above the default limit", () => {
 
   it("keeps the payload in the structured result and leaves it out of the text when both do not fit", async () => {
     const { result, payload, bytes, maxBytes } = await call(250_000);
-    // Half the budget, under the 200 KiB ceiling.
-    expect(payload.text.length).toBe(125_000);
+    // Half the budget, as the text's JSON bytes, under the 200 KiB ceiling.
+    expect(jsonBytes(payload.text)).toBeLessThanOrEqual(125_000);
+    expect(jsonBytes(payload.text)).toBeGreaterThan(124_000);
+    expect(payload.truncated).toBe(true);
     expect(bytes).toBeLessThanOrEqual(maxBytes);
     const text = textOf(result);
     expect(text).toContain("Update set changes");
     expect(text).toContain(`Payload left out: ${PAYLOAD_LEFT_OUT_HINT}`);
     expect(text).not.toContain("gs.info");
   });
+
+  // Multi-byte text: about 2.5 UTF-8 bytes per character.
+  const CJK = Array.from({ length: 5_000 }, (_, n) => `// 更新セットの説明文です。更新セットの説明文です。更新セットの説明文です ${String(n).padStart(5, "0")}`).join("\n");
+
+  for (const limit of [250_000, 409_600]) {
+    it(`cuts a multi-byte payload by its bytes, so the result fits ${limit} bytes`, async () => {
+      expect(Buffer.byteLength(CJK, "utf8") / CJK.length).toBeGreaterThan(2);
+      const { result, payload, bytes, maxBytes } = await call(limit, CJK);
+      expect(maxBytes).toBe(limit);
+      expect(payload.status).toBe("shown");
+      expect(payload.truncated).toBe(true);
+      expect(jsonBytes(payload.text)).toBeLessThanOrEqual(limit / 2);
+      expect(jsonBytes(payload.text)).toBeGreaterThan(limit / 2 - 100);
+      expect(payload.text.length).toBeLessThan(limit / 4);
+      expect(bytes).toBeLessThanOrEqual(maxBytes);
+      expect(textOf(result)).toContain("Update set changes");
+    });
+  }
 
   it("stops at the 200 KiB ceiling for the largest max_response_bytes", async () => {
     const big = Array.from({ length: 20_000 }, (_, n) => `gs.info('line ${String(n).padStart(5, "0")}');`).join("\n");
@@ -163,6 +183,11 @@ describe("an update set payload above the default limit", () => {
     expect(payload.truncated).toBe(true);
   });
 });
+
+/** UTF-8 bytes of `text` as a JSON string, as the result carries it. */
+function jsonBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text), "utf8");
+}
 
 /** The text outside every fenced block of `text`. */
 function outsideFences(text: string): string {

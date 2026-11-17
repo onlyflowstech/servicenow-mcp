@@ -120,6 +120,21 @@ export function payloadCharsFor(maxResponseBytes: number): number {
   return Math.max(1, Math.min(half, ceiling));
 }
 
+/**
+ * Bytes the shown text may take in the result: half the call's byte budget,
+ * measured as the UTF-8 JSON string the result carries. A character can take
+ * up to six bytes there (a multi-byte character, an escaped quote or control
+ * character), so the character cap alone does not bound the result.
+ */
+export function payloadBytesFor(maxResponseBytes: number): number {
+  return Math.max(1, Math.floor(Math.max(0, maxResponseBytes) / 2));
+}
+
+/** UTF-8 bytes of `text` as a JSON string, quotes included. */
+function jsonBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text), "utf8");
+}
+
 export function payloadRefusal(
   status: "refused" | "withheld" | "not_readable",
   reason: PayloadReason
@@ -163,7 +178,8 @@ export async function preparePayload(
   raw: unknown,
   tables: readonly string[],
   load: (tables: readonly string[]) => Promise<PlanFieldTypes>,
-  maxChars: number
+  maxChars: number,
+  maxJsonBytes: number = Number.POSITIVE_INFINITY
 ): Promise<PayloadOutcome> {
   const text = typeof raw === "string" ? raw : "";
   if (text.trim() === "") return { status: "empty" };
@@ -262,11 +278,12 @@ export async function preparePayload(
   if (whole.status !== "ok") return payloadRefusal("withheld", "too_large");
   masked += whole.masked;
 
-  // 4. The cap, after masking.
-  const truncated = whole.text.length > maxChars;
+  // 4. The cap, after masking: characters, then the bytes the text takes in the result.
+  const shownText = fitted(whole.text, maxChars, maxJsonBytes);
+  const truncated = shownText.length < whole.text.length;
   return Object.freeze({
     status: "shown",
-    text: truncated ? cut(whole.text, maxChars) : whole.text,
+    text: shownText,
     chars: whole.text.length,
     truncated,
     hidden_by_type: hiddenElements.type.size,
@@ -274,6 +291,24 @@ export async function preparePayload(
     masked,
     note: PAYLOAD_NOTE,
   });
+}
+
+/**
+ * The longest prefix of `text` of at most `maxChars` characters whose JSON
+ * string takes at most `maxJsonBytes` UTF-8 bytes. The byte size only grows
+ * with the prefix, so the cut point is found by binary search.
+ */
+function fitted(text: string, maxChars: number, maxJsonBytes: number): string {
+  const capped = text.length > maxChars ? cut(text, maxChars) : text;
+  if (jsonBytes(capped) <= maxJsonBytes) return capped;
+  let low = 0;
+  let high = capped.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (jsonBytes(capped.slice(0, middle)) <= maxJsonBytes) low = middle;
+    else high = middle - 1;
+  }
+  return cut(capped, low);
 }
 
 /** `text` cut to at most `max` characters without splitting a surrogate pair. */

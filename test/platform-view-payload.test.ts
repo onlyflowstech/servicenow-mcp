@@ -12,6 +12,7 @@ import {
   PAYLOAD_HINTS,
   PAYLOAD_LIMITS,
   PAYLOAD_NOTE,
+  payloadBytesFor,
   payloadCharsFor,
   preparePayload,
   rowTables,
@@ -24,7 +25,13 @@ import { expectReadsWithin } from "./platform-view-harness.js";
 const META_PLAN = ["sys_db_object", "sys_dictionary"];
 const DEFAULT_CHARS = payloadCharsFor(100_000);
 
-async function prepare(payload: string, tables: string[], model: World = world(), maxChars = DEFAULT_CHARS) {
+async function prepare(
+  payload: string,
+  tables: string[],
+  model: World = world(),
+  maxChars = DEFAULT_CHARS,
+  maxJsonBytes = Number.POSITIVE_INFINITY
+) {
   const { instance, ops } = fake(model);
   let loaded: string[] | undefined;
   const outcome = await preparePayload(
@@ -34,7 +41,8 @@ async function prepare(payload: string, tables: string[], model: World = world()
       loaded = [...written];
       return loadFieldTypesInPlan(ops, written);
     },
-    maxChars
+    maxChars,
+    maxJsonBytes
   );
   expectReadsWithin(instance, META_PLAN, PLAN_FIELD_TYPE_DOT_WALKS);
   return { outcome, instance, loaded };
@@ -138,6 +146,32 @@ describe("payload view: masking", () => {
     expect(payloadCharsFor(1_000_000)).toBe(PAYLOAD_LIMITS.MAX_CHARS);
     expect(payloadCharsFor(10_000)).toBe(5_000);
     expect(payloadCharsFor(1_000)).toBe(500);
+  });
+
+  it("holds the text to half the byte budget, measured as the JSON bytes it takes", async () => {
+    expect(payloadBytesFor(100_000)).toBe(50_000);
+    expect(payloadBytesFor(409_600)).toBe(204_800);
+    expect(payloadBytesFor(1_000)).toBe(500);
+    // Three bytes a character, and quotes and newlines that JSON escapes.
+    const script = Array.from({ length: 400 }, (_, n) => `// 更新セットの説明文です ${n}`).join("\n");
+    const out = shown((await prepare(payloadOf("sys_script_include", { script }), ["sys_script_include"], world(), 1_000_000, 2_000)).outcome);
+    const bytes = Buffer.byteLength(JSON.stringify(out.text), "utf8");
+    expect(out.truncated).toBe(true);
+    expect(bytes).toBeLessThanOrEqual(2_000);
+    expect(bytes).toBeGreaterThan(1_990);
+    expect(out.text.length).toBeLessThan(1_000);
+    // ASCII text under the byte budget is held by the character cap alone.
+    const ascii = shown((await prepare(payloadOf("sys_script_include", { script: "x".repeat(5_000) }), ["sys_script_include"], world(), 260, 1_000_000)).outcome);
+    expect(ascii.text.length).toBe(260);
+  });
+
+  it("never splits a surrogate pair when it cuts by bytes", async () => {
+    const script = "😀".repeat(2_000);
+    for (const budget of [1_001, 1_002, 1_003, 1_004]) {
+      const out = shown((await prepare(payloadOf("sys_script_include", { script }), ["sys_script_include"], world(), 1_000_000, budget)).outcome);
+      expect(out.text).toBe(out.text.toWellFormed());
+      expect(Buffer.byteLength(JSON.stringify(out.text), "utf8")).toBeLessThanOrEqual(budget);
+    }
   });
 
   it("finds the row's own tables from its table column and its update name", () => {

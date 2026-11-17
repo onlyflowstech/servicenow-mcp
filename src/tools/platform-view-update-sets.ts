@@ -54,6 +54,7 @@ import { bulletList, headline, renderMarkdown, text, untrustedBlock, type Markdo
 import type { CanonicalPlatformViewArgs, PlatformView } from "./platform-view-contracts.js";
 import {
   PAYLOAD_HINTS,
+  payloadBytesFor,
   payloadCharsFor,
   payloadRefusal,
   preparePayload,
@@ -832,7 +833,8 @@ async function readPayload(
     scalar(raw),
     tables,
     (written) => scoped(ctx, () => loadFieldTypesInPlan(ctx.ops, written, loaderOptions)),
-    payloadCharsFor(ctx.args.max_response_bytes)
+    payloadCharsFor(ctx.args.max_response_bytes),
+    payloadBytesFor(ctx.args.max_response_bytes)
   );
 }
 
