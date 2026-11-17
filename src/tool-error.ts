@@ -41,7 +41,8 @@ export type ToolErrorReason =
   | "basic_auth_restricted"
   | "unknown_filter_field"
   | "filter_fields_too_large"
-  | "invalid_cursor";
+  | "invalid_cursor"
+  | "max_response_bytes_too_small";
 
 export interface ToolErrorDescriptor {
   readonly category: ToolErrorCategory;
@@ -222,6 +223,21 @@ export function createFilterFieldsTooLargeError(): Error {
     message:
       "The response was too large once the fields used by the filter were " +
       "included. Lower limit and try again.",
+    retry: "retry_after_correction",
+  });
+}
+
+/**
+ * Issue the trusted error for a result that cannot be fitted to the caller's
+ * `max_response_bytes` at all, for a tool whose limit the caller sets.
+ */
+export function createResponseBytesTooSmallError(): Error {
+  return issue({
+    category: "too_large",
+    reason: "max_response_bytes_too_small",
+    message:
+      "The result does not fit max_response_bytes. Raise max_response_bytes, " +
+      "or lower limit, and try again.",
     retry: "retry_after_correction",
   });
 }

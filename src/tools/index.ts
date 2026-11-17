@@ -83,7 +83,7 @@ import {
   tablePolicyDenialMessage,
 } from "../table-policy.js";
 import { StructuredQueryError } from "../structured-query.js";
-import { createToolError, formatToolError } from "../tool-error.js";
+import { createResponseBytesTooSmallError, createToolError, formatToolError } from "../tool-error.js";
 import { err } from "../utils.js";
 
 import { allToolModules } from "./catalog.js";
@@ -108,6 +108,7 @@ import * as syslog from "./syslog.js";
 import * as update from "./update.js";
 import {
   finalizeEnvelopeResult,
+  isCallerSizedTool,
   withCallMetadata,
   withoutCallMetadata,
 } from "./result-envelope.js";
@@ -1347,13 +1348,14 @@ function finalizeHandlerInvocation(
       profile.instance,
       maxResponseBytesCap
     );
-    if (!enriched) {
+    if (enriched === RESULT_DOES_NOT_FIT || !enriched) {
       return handlerResultFailure(
         dependencies,
         profile,
         tool,
         request,
-        correlationId
+        correlationId,
+        enriched === RESULT_DOES_NOT_FIT ? createResponseBytesTooSmallError() : undefined
       );
     }
     auditInvocation(
@@ -1379,9 +1381,9 @@ function handlerResultFailure(
   profile: ExecutionContext["profile"],
   tool: string,
   request: RequestMetadata,
-  correlationId: string
+  correlationId: string,
+  error: Error = createToolError("internal", "do_not_retry")
 ): CallToolResult {
-  const error = createToolError("internal", "do_not_retry");
   auditInvocation(
     dependencies,
     {
@@ -1444,6 +1446,12 @@ export function enrichSuccessfulResult(
   };
 }
 
+/**
+ * A valid result that cannot be fitted to the caller's `max_response_bytes`,
+ * for a tool whose whole result follows that argument.
+ */
+const RESULT_DOES_NOT_FIT: unique symbol = Symbol("result does not fit");
+
 /** Validate the exact canonical envelope before either MCP client can see it. */
 function validateSuccessfulModuleResult(
   outputSchema: ReturnType<typeof toolRegistrationConfig>["outputSchema"],
@@ -1453,7 +1461,7 @@ function validateSuccessfulModuleResult(
   tool: string,
   instanceOrigin: string,
   maxResponseBytesCap?: number
-): CallToolResult | undefined {
+): CallToolResult | typeof RESULT_DOES_NOT_FIT | undefined {
   try {
     // Cache status and timing are the dispatcher's to report: whatever a
     // handler put there is discarded before anything reads it.
@@ -1469,7 +1477,7 @@ function validateSuccessfulModuleResult(
       instanceOrigin,
       ...(maxResponseBytesCap === undefined ? {} : { maxResponseBytesCap }),
     });
-    if (!finalized) return undefined;
+    if (!finalized) return isCallerSizedTool(tool) ? RESULT_DOES_NOT_FIT : undefined;
     const finalParsed = outputSchema.safeParse(finalized.structuredContent);
     if (!finalParsed.success) return undefined;
     const block = finalized.content[0];

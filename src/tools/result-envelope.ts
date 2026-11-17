@@ -376,6 +376,17 @@ export const productionToolOutputSchemas = Object.freeze({
   sn_platform_view: withStructuredResultEnvelope(productionDataSchemas.sn_platform_view),
 });
 
+/**
+ * The tools for which a result that cannot be fitted to its byte limit is
+ * reported as too large for the caller's `max_response_bytes`, which the caller
+ * can raise: their whole result is sized to that argument.
+ */
+const CALLER_SIZED_TOOLS: ReadonlySet<string> = new Set(["sn_history", "sn_platform_view"]);
+
+export function isCallerSizedTool(name: string): boolean {
+  return CALLER_SIZED_TOOLS.has(name);
+}
+
 export function isProductionToolName(name: string): name is ProductionToolName {
   return Object.hasOwn(productionToolOutputSchemas, name);
 }

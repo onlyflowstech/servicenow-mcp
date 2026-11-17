@@ -527,6 +527,34 @@ describe("max_response_bytes", () => {
   });
 });
 
+describe("a max_response_bytes too small for any page", () => {
+  it("is refused as too large, saying to raise max_response_bytes", async () => {
+    for (const fixture of [incidentFixture(), incidentFixture({ tooLargeAbove: { sys_journal_field: 0 } })]) {
+      const { result } = await run(fixture, { table: "incident", sys_id: ids.incident, max_response_bytes: 1_000 });
+      expect(result.isError).toBe(true);
+      const text = textOf(result);
+      expect(text).toContain("The result does not fit max_response_bytes. Raise max_response_bytes");
+      expect(text).toContain("Error category: too_large.");
+      expect(text).not.toContain("internal");
+      expect(result.structuredContent).toBeUndefined();
+    }
+  });
+
+  it("returns a page from about 1,400 bytes, with the cursors to go on", async () => {
+    // A page that also carries a too-large source's warning and hint needs a little more.
+    for (const [fixture, limit] of [
+      [incidentFixture(), 1_400],
+      [incidentFixture({ tooLargeAbove: { sys_journal_field: 0 } }), 1_600],
+    ] as const) {
+      const { result } = await run(fixture, { table: "incident", sys_id: ids.incident, max_response_bytes: limit });
+      expect(result.isError, textOf(result)).not.toBe(true);
+      const data = dataOf(result);
+      expect(eventsOf(data).length).toBeGreaterThanOrEqual(1);
+      expect(data.next_cursor).toBeDefined();
+    }
+  });
+});
+
 describe("an extension chain that cannot be read in full", () => {
   // A custom table extending a credential table. Its own field is a plain
   // string, so only the credential-table rule withholds its value.
