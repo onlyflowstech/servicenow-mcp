@@ -284,6 +284,26 @@ describe("policy card matches the enforced policy", () => {
     expect(NAMED_ONLY_TABLES).toContain("sys_audit");
   });
 
+  it('reports the platform tables as their own class, narrowed by the "*" field entry', () => {
+    const platform = ["sys_update_xml", "sys_upgrade_history_log", "scan_finding", "scan_result", "scan_check"];
+    expect([...BUILT_IN_TABLE_CLASSES.platform].sort()).toEqual([...platform].sort());
+    const access: TableAccessPolicyInput = {
+      readTables: [...platform, "incident", "sys_user", "sys_audit"],
+      targets: [...platform, "incident", "sys_user", "sys_audit"].map((table) => target(table, ["sn_platform_view", "sn_query"])),
+    };
+    const result = card(access, { fieldPolicy: { "*": { readable: ["sys_id", "name"] } } });
+    const byTable = new Map(result.tables.map((row) => [row.table, row]));
+    for (const table of platform) {
+      expect(byTable.get(table)!.class, table).toBe("platform");
+      expect(byTable.get(table)!.readable, table).toEqual({ fields: ["name", "sys_id"], more: 0 });
+    }
+    // Every built-in table has exactly one class.
+    expect(byTable.get("incident")!.class).toBe("itsm");
+    expect(byTable.get("sys_user")!.class).toBe("system");
+    expect(byTable.get("sys_audit")!.class).toBe("named_only");
+    expect(renderPolicyCard(result)).toContain('A "*" field-policy entry covers ITSM, named-only, platform and custom tables');
+  });
+
   it("reports class and domain fields only where the profile lists them", () => {
     const access: TableAccessPolicyInput = {
       readTables: ["incident", "problem"],

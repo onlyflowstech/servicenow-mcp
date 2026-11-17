@@ -55,7 +55,7 @@ export type CardFieldSet = "*" | { fields: string[]; more: number };
 
 export interface CardTableRow {
   table: string;
-  class: "itsm" | "system" | "named_only" | "other";
+  class: "itsm" | "system" | "named_only" | "platform" | "other";
   read: boolean;
   write: boolean;
   /** Tools the table's target permits; "any" when only a "*" grant reaches it. */
@@ -171,6 +171,7 @@ function classOf(table: string): CardTableRow["class"] {
   if (BUILT_IN_TABLE_CLASSES.system.includes(table)) return "system";
   if (BUILT_IN_TABLE_CLASSES.itsm.includes(table)) return "itsm";
   if (BUILT_IN_TABLE_CLASSES.namedOnly.includes(table)) return "named_only";
+  if (BUILT_IN_TABLE_CLASSES.platform.includes(table)) return "platform";
   return "other";
 }
 
@@ -377,7 +378,7 @@ export function renderPolicyCard(card: PolicyCard): string {
     "",
     "Fields: all* = every field except sensitive-name fields (password, token, secret,",
     "  key, ...), which are never readable or writable.",
-    `A "*" field-policy entry covers ITSM, named-only and custom tables, never the ${BUILT_IN_TABLE_CLASSES.system.length} system tables;`,
+    `A "*" field-policy entry covers ITSM, named-only, platform and custom tables, never the ${BUILT_IN_TABLE_CLASSES.system.length} system tables;`,
     "  a system table is narrowed only by naming it.",
     `A "*" table grant never covers ${NAMED_ONLY_TABLES.join(", ")}; they are granted by name only.`,
     `A "*" write grant does not cover ${Object.keys(WRITE_NAMED_ONLY_TABLES).join(", ")} except for sn_atf_author; name them to write them.`,
