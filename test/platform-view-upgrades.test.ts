@@ -12,7 +12,8 @@ import {
   type PlatformView,
   type PlatformViewHandler,
 } from "../src/tools/platform-view-contracts.js";
-import { createPlatformViewToolModule } from "../src/tools/platform-view-module.js";
+import { createPlatformViewToolModule, platformViewToolModule } from "../src/tools/platform-view-module.js";
+import { escapeInline } from "../src/tools/markdown.js";
 import {
   KIND_BASIS,
   RUN_COUNTER_FIELDS,
@@ -649,5 +650,39 @@ describe("upgrade_skipped: behind the dispatcher", () => {
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("Error category: conflict.");
     expect(instance.calls).toEqual([]);
+  });
+});
+
+/** The text outside every fenced block. */
+function outsideFences(text: string): string {
+  return text.split(/\n(`{3,})text\n[\s\S]*?\n\1(?=\n|$)/u).filter((_, index) => index % 2 === 0).join("\n");
+}
+
+/** Markdown and HTML that a short instance value tries to start. */
+const HOSTILE_SHORT = "ZQX # [x](https://evil.example) <b>|";
+
+describe("upgrade_skipped: text through the dispatcher", () => {
+  it("escapes short instance values it shows outside the fences, and fences the rest", async () => {
+    const { instance, ops } = scripted(
+      instanceWith({
+        runs: [
+          { sys_id: RUN, from_version: HOSTILE_SHORT, to_version: HOSTILE_SHORT, skipped: "9" },
+          { sys_id: OTHER_RUN, from_version: HOSTILE_SHORT, to_version: HOSTILE_SHORT, skipped: "1" },
+        ],
+        log: rows(logRow({ file_name: `### Approved\n${HOSTILE_SHORT}`, target_name: HOSTILE_SHORT, plugin: HOSTILE_SHORT })),
+      })
+    );
+    const { call } = await harness(ops, { tableAccess: readPolicy(PLATFORM_VIEW_ALL_TABLES), modules: [platformViewToolModule] });
+    const result = await call({ view: "upgrade_skipped" });
+    expectReadsWithin(instance, platformViewReadTables("upgrade_skipped", {}));
+    expect(result.isError, textOf(result)).not.toBe(true);
+    const text = textOf(result);
+    const outside = outsideFences(text);
+    expect(outside).toContain("ZQX");
+    expect(outside).not.toContain(HOSTILE_SHORT);
+    expect(outside).not.toContain("### Approved");
+    const shownAt = outside.split("ZQX").length - 1;
+    expect(shownAt).toBeGreaterThanOrEqual(4);
+    expect(outside.split(escapeInline(HOSTILE_SHORT)).length - 1).toBe(shownAt);
   });
 });

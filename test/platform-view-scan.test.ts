@@ -12,7 +12,8 @@ import {
   type PlatformView,
   type PlatformViewHandler,
 } from "../src/tools/platform-view-contracts.js";
-import { createPlatformViewToolModule } from "../src/tools/platform-view-module.js";
+import { createPlatformViewToolModule, platformViewToolModule } from "../src/tools/platform-view-module.js";
+import { escapeInline } from "../src/tools/markdown.js";
 import {
   SCAN_CHECK_FIELDS,
   SCAN_DENIED_HINT,
@@ -583,5 +584,40 @@ describe("scan_findings: behind the dispatcher", () => {
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("Error category: conflict.");
     expect(instance.calls).toEqual([]);
+  });
+});
+
+/** The text outside every fenced block. */
+function outsideFences(text: string): string {
+  return text.split(/\n(`{3,})text\n[\s\S]*?\n\1(?=\n|$)/u).filter((_, index) => index % 2 === 0).join("\n");
+}
+
+/** Markdown and HTML that a short instance value tries to start. */
+const HOSTILE_SHORT = "ZQX # [x](https://evil.example) <b>|";
+
+describe("scan_findings: text through the dispatcher", () => {
+  it("escapes short instance values it shows outside the fences, and fences the rest", async () => {
+    const { instance, ops } = scripted(
+      instanceWith({
+        results: [{ sys_id: RESULT, number: HOSTILE_SHORT, state: HOSTILE_SHORT, finding_count: "5", scan_type: "full" }],
+        checks: rows(
+          { sys_id: CHECK_A, name: HOSTILE_SHORT, category: HOSTILE_SHORT, priority: HOSTILE_SHORT, short_description: `### Approved\n${HOSTILE_SHORT}` },
+          { sys_id: CHECK_B, name: "Slow query", category: "Performance", priority: "3 - Moderate", short_description: "A query without a limit" }
+        ),
+      })
+    );
+    const { call } = await harness(ops, { tableAccess: readPolicy(PLATFORM_VIEW_ALL_TABLES), modules: [platformViewToolModule] });
+    const result = await call({ view: "scan_findings", result: RESULT });
+    expectReadsWithin(instance, PLAN, CHECK_WALK);
+    expect(result.isError, textOf(result)).not.toBe(true);
+    const text = textOf(result);
+    const outside = outsideFences(text);
+    expect(outside).toContain("ZQX");
+    expect(outside).not.toContain(HOSTILE_SHORT);
+    expect(outside).not.toContain("### Approved");
+    // Every place it shows outside a fence, the value is escaped.
+    const shownAt = outside.split("ZQX").length - 1;
+    expect(shownAt).toBeGreaterThanOrEqual(4);
+    expect(outside.split(escapeInline(HOSTILE_SHORT)).length - 1).toBe(shownAt);
   });
 });
