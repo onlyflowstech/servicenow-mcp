@@ -527,12 +527,13 @@ field-policy switch.
 `sn_history` reads one record's audit rows, journal entries and flow runs.
 Approve it on these terms:
 
-- `sys_audit` and `sys_journal_field` are granted by name only. Bind them, and
-  `sys_db_object` and `sys_dictionary`, to `sn_history` alone
-  (`servicenow-mcp-setup grant --read ... --tools sn_history`), so `sn_query`
-  and `sn_get` cannot read every record's history. Values are shown only when
-  the profile may read `sys_db_object` and `sys_dictionary`; a `"*"` grant
-  covers both.
+- `sys_audit` and `sys_journal_field` are granted by name only. Bind them to
+  `sn_history` (`servicenow-mcp-setup grant --read ... --tools sn_history`), so
+  `sn_query` and `sn_get` cannot read every record's history. Values are shown
+  only when the profile may read `sys_db_object` and `sys_dictionary`. A named
+  allowlist grants those to `sn_history` too; a `"*"` grant already covers
+  them, and on such a profile grant only the two named-only tables, since
+  naming a table binds it to the listed tools.
 - Instance field ACLs on a record do not apply to its `sys_audit` rows: a
   field the integration user cannot read on the record can still appear, with
   its old and new values, in the audit history. The server's own field policy

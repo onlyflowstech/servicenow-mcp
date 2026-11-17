@@ -88,8 +88,10 @@ does not apply to them, and without the types a payload is withheld or not
 scanned.
 
 The payload shown is capped at 32,768 characters by default. A larger
-`max_response_bytes` shows up to half of it, at most 204,800 characters. The readable text repeats the payload
-only when both fit; otherwise the payload stays in the structured result and
+`max_response_bytes` shows up to 204,800 characters. Either way the payload
+takes at most half of `max_response_bytes` in the result, measured in bytes, so
+text with many multi-byte characters is cut sooner. The readable text repeats
+the payload only when both fit; otherwise the payload stays in the structured result and
 the text says where it is.
 
 ## The evaluator
@@ -119,5 +121,8 @@ message; it never quotes script text. `min_severity` (`info`, `low`, `medium`,
 ## Text
 
 Names, descriptions, states and payload text come from the instance and are
-untrusted. The readable text shows them only inside untrusted-content blocks;
-counts, statuses and the fixed hints are outside them.
+untrusted. Longer text (descriptions, file and target names, payloads) is
+shown only inside untrusted-content blocks. Short values such as check names,
+categories, priorities, states and versions appear as escaped table cells or
+inline text, bounded in length. Counts, statuses and the fixed hints are
+outside the blocks.

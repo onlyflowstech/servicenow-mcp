@@ -91,7 +91,7 @@ function renderAddProfilePrompt(
     "- Default tools are sn_query, sn_get, sn_aggregate, sn_schema, sn_codesearch for a read grant, plus sn_create and sn_update for a write grant. Add --tools to narrow further.",
     "- sn_delete, sn_batch, sn_atf, sn_atf_run, and sn_atf_author are never granted implicitly; name them with --tools only if I ask.",
     "- To view Flow Designer flows with sn_flow_view, add --flows only if I ask: it grants read on the 15 flow tables to sn_flow_view alone.",
-    "- To read a record's history with sn_history, only if I ask: grant read on the record's table, sys_audit, sys_journal_field, sys_flow_context, sys_db_object and sys_dictionary with --tools sn_history, so only sn_history reads them.",
+    "- To read a record's history with sn_history, only if I ask: grant read on the record's table, sys_audit, sys_journal_field, sys_flow_context, sys_db_object and sys_dictionary with --tools sn_history, so these tables are bound to sn_history. On a profile whose read grant is *, grant only sys_audit,sys_journal_field --tools sn_history: * already covers the others, and naming them binds them to the listed tools.",
     "- If a table extends another (change_request and task, for example), add --related \"<table>=<parent>\".",
     "- Add --dry-run first to show me the resulting rules before writing them.",
     "",

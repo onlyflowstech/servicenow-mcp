@@ -872,6 +872,9 @@ describe("setup grant", () => {
       await expect(grant(["--help"])).rejects.toMatchObject({
         help: expect.stringContaining("sys_db_object,sys_dictionary --tools sn_history"),
       });
+      await expect(grant(["--help"])).rejects.toMatchObject({
+        help: expect.stringContaining("On a profile whose read grant is *, grant only"),
+      });
       const tables = ["incident", "sys_audit", "sys_journal_field", "sys_flow_context", "sys_db_object", "sys_dictionary"];
       await grant(["--read", tables.join(","), "--tools", "sn_history"]);
       const policy = persistedPolicy();

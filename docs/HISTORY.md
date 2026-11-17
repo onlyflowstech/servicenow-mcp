@@ -61,6 +61,10 @@ narrower `since`/`until`, or leave that source out of `sources`. The limit is
 the client's size cap on one response from the instance, which
 `max_response_bytes` does not change.
 
+A page always holds at least one event, so a `max_response_bytes` too small
+for one (about 1,300 bytes or less, more when the page carries warnings) is
+refused as too large, with a message to raise `max_response_bytes`.
+
 ## Grants
 
 - **The record's table**, with `sys_id` and `sys_class_name` readable under
@@ -73,8 +77,8 @@ the client's size cap on one response from the instance, which
   allowlist must grant both to `sn_history`; `"*"` covers them. Without them
   every entry is returned without its value, with a warning.
 
-Bind these tables to `sn_history` alone, so `sn_query` and `sn_get` do not
-read every record's audit rows and notes:
+**On a profile with a named allowlist**, grant the six tables with
+`--tools sn_history`:
 
 ```sh
 servicenow-mcp-setup grant --profile pdi \
@@ -82,8 +86,21 @@ servicenow-mcp-setup grant --profile pdi \
   --tools sn_history
 ```
 
-`--tools` adds `sn_history` to tables that already have other tools, such as
-`incident`.
+A table the grant creates is bound to `sn_history` alone, so `sn_query` and
+`sn_get` do not read every record's audit rows and notes. A table the profile
+already names keeps its tools, and `sn_history` is added to them.
+
+**On a profile whose read grant is `"*"`**, grant only the two named-only
+tables:
+
+```sh
+servicenow-mcp-setup grant --profile pdi --read sys_audit,sys_journal_field --tools sn_history
+```
+
+`"*"` already covers the record's table, `sys_flow_context`, `sys_db_object`
+and `sys_dictionary` for every tool. Naming one of them would bind it to the
+listed tools only, so the other tools, such as `sn_query`, `sn_schema` and
+`sn_platform_view`, would lose it.
 
 ## What is shown
 
