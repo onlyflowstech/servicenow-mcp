@@ -176,7 +176,21 @@ const wrappedRecordSchema = z
  * which is exactly why the hint is not carried inside the record namespace.
  */
 export const ENVELOPE_HINT_KEY = "$hint";
-const wrappedResultSchema = z.object({ result: dynamicJsonRootSchema }).strict();
+/**
+ * A grouped sn_aggregate page: the groups, whether another page exists, the
+ * number of groups when every one was read, and a warning when the list was
+ * cut at the tool's cap (`truncated`).
+ */
+const aggregateResultSchema = z
+  .object({
+    result: dynamicJsonRootSchema,
+    has_more: z.boolean().optional(),
+    next_offset: nonNegativeInteger.optional(),
+    total_groups: nonNegativeInteger.optional(),
+    truncated: z.boolean().optional(),
+    warnings: z.array(z.string()).optional(),
+  })
+  .strict();
 const schemaResultSchema = z.object({ fields: dynamicArraySchema }).strict();
 const healthResultSchema = z.object({ health: dynamicRecordSchema }).strict();
 const naturalLanguageResultSchema = z
@@ -323,7 +337,7 @@ const productionDataSchemas = Object.freeze({
   sn_incident_add_work_note: incidentJournalResultSchema,
   sn_delete: deleteResultSchema,
   sn_batch: batchResultSchema,
-  sn_aggregate: wrappedResultSchema,
+  sn_aggregate: aggregateResultSchema,
   sn_schema: schemaResultSchema,
   sn_health: healthResultSchema,
   sn_attach: attachmentResultEnvelopeSchema,
@@ -541,7 +555,8 @@ function normalizeToolData(
         : { record: hinted.record, hint: hinted.hint };
     }
     case "sn_aggregate":
-      return { result: data };
+      // A grouped page is already the result's shape; anything else is rows.
+      return Array.isArray(data) ? { result: data } : data;
     case "sn_schema":
       return { fields: data };
     case "sn_health":
@@ -1018,8 +1033,11 @@ export function envelopeCompatibilityResult(
       droppedForSize ||
       (explicitHasMore === undefined && returned >= limit));
   let nextOffset: number | undefined;
+  // sn_aggregate marks `truncated` when its group list was cut at the cap:
+  // groups no offset reaches, not rows lost to size, so nothing to retry.
+  const groupsCapped = name === "sn_aggregate" && legacyTruncated;
   let recovery: "adjust_request_and_retry_same_offset" | undefined =
-    legacyTruncated ? "adjust_request_and_retry_same_offset" : undefined;
+    legacyTruncated && !groupsCapped ? "adjust_request_and_retry_same_offset" : undefined;
   if (hasMore) {
     if (droppedForSize && returned > 0) {
       // The rows returned are a prefix of the window, so the first row not
@@ -1053,7 +1071,7 @@ export function envelopeCompatibilityResult(
     legacyTruncated || droppedByRecordLimit > 0
       ? {
           truncated: true,
-          reason: legacyTruncated ? "byte_limit" : "record_limit",
+          reason: legacyTruncated && !groupsCapped ? "byte_limit" : "record_limit",
           ...(droppedRecords > 0 ? { dropped_records: droppedRecords } : {}),
         }
       : { truncated: false };
@@ -1325,6 +1343,8 @@ const OFFSET_PAGED_TOOLS: ReadonlySet<string> = new Set([
   "sn_discover",
   "sn_attach",
   "sn_atf",
+  // A grouped page's `offset` is a group offset into the ordered group list.
+  "sn_aggregate",
   // Every view's `results` page starts at `offset`.
   "sn_platform_view",
 ]);

@@ -749,9 +749,31 @@ in this section is needed to use this server.
 
 | Tool | Description |
 |------|-------------|
-| `sn_aggregate` | COUNT, AVG, MIN, MAX, SUM with grouping |
+| `sn_aggregate` | COUNT, AVG, MIN, MAX, SUM with grouping; see [Grouped results](#sn_aggregate-grouped-results) |
 | `sn_schema` | Table field definitions, types, references |
 | `sn_health` | Instance version, cluster nodes, stuck jobs, key stats |
+
+#### sn_aggregate grouped results
+
+ServiceNow's Stats API does not page grouped results: it ignores
+`sysparm_limit` and `sysparm_offset` and returns every group. With
+`group_by`, `sn_aggregate` therefore makes one request, orders the groups
+itself and pages them with `offset` and `limit`, so `offset` is a true group
+offset and every page differs. The order is the groups' own values, the same on
+every call.
+
+- **Paging.** `metadata.pagination` (and `has_more` and `next_offset` in the
+  data) say whether another page exists and where it starts; a page cut to fit
+  the response size continues at the first group not returned. Without
+  `group_by` the result is one row and is not paged.
+- **Total.** `total_groups` is the number of groups when every group was read.
+- **Cap.** One call reads at most 5,000 groups (a group is about 100 to 150
+  bytes, so that fits the 1 MiB upstream response limit). When more exist,
+  only the first 5,000 in order can be paged: `total_groups` is left out,
+  `truncated` is true, `metadata.truncation` says `record_limit`, and
+  `warnings` says to group by a field with fewer distinct values. If the
+  group list is too large to read in one response at all, the call fails with
+  the same advice; `display_value: "false"` makes each group smaller.
 
 ### CMDB & Operations
 
@@ -1198,9 +1220,8 @@ means the request must change (fewer `fields`, a lower `limit`, or a higher
 `max_response_bytes`; `sn_get` reads one row). The `hint` says which.
 
 This holds for `sn_query`, `sn_syslog`, `sn_schema`, `sn_relationships`,
-`sn_codesearch`, `sn_discover`, `sn_attach` (list) and `sn_atf`, whose `offset`
-is a row offset into the rows they return. Any other collection result that is cut to size
-(for example `sn_aggregate`) reports `has_more: true` with no `next_offset`.
+`sn_codesearch`, `sn_discover`, `sn_attach` (list), `sn_atf` and `sn_aggregate` (grouped), whose `offset`
+is a row offset into the rows they return. Any other collection result that is cut to size reports `has_more: true` with no `next_offset`.
 A page that lost no rows to size is unchanged: `has_more` and `next_offset`
 come from the row after the page, and `next_offset` is `offset + limit`.
 

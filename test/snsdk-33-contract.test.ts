@@ -648,7 +648,7 @@ describe("SNSDK-33 bounded collection inputs", () => {
     expect(structured.data.result).toEqual([{ stats: { count: "161" } }]);
   });
 
-  it("uses stable upstream aggregate ordering with a sentinel group", async () => {
+  it("pages the group list itself, with a sentinel group, in a stable order", async () => {
     const get = vi.fn(async () => ({
       result: [
         {
@@ -676,7 +676,6 @@ describe("SNSDK-33 bounded collection inputs", () => {
       type: "COUNT",
       group_by: "priority",
       limit: 2,
-      offset: 3,
     });
     const legacy = await aggregateHandler(
       args,
@@ -687,8 +686,7 @@ describe("SNSDK-33 bounded collection inputs", () => {
     expect(get).toHaveBeenCalledWith("/api/now/stats/incident", {
       sysparm_count: "true",
       sysparm_group_by: "priority",
-      sysparm_limit: "3",
-      sysparm_offset: "3",
+      sysparm_limit: "5001",
       sysparm_order_by: "priority",
     });
 
@@ -702,10 +700,10 @@ describe("SNSDK-33 bounded collection inputs", () => {
     );
     expect(structured.data.result).toHaveLength(2);
     expect(structured.metadata.pagination).toMatchObject({
-      offset: 3,
+      offset: 0,
       returned: 2,
       has_more: true,
-      next_offset: 5,
+      next_offset: 2,
       order_by: ["priority"],
     });
   });

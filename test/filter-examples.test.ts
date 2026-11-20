@@ -113,7 +113,7 @@ describe("tools/list size ledger", () => {
     const total = Object.values(sizes).reduce((sum, size) => sum + size, 0);
     expect({ total, ...sizes }).toMatchInlineSnapshot(`
       {
-        "sn_aggregate": 3795,
+        "sn_aggregate": 4055,
         "sn_atf": 4320,
         "sn_atf_author": 5922,
         "sn_atf_readiness": 3560,
@@ -139,7 +139,7 @@ describe("tools/list size ledger", () => {
         "sn_schema": 3586,
         "sn_syslog": 4582,
         "sn_update": 3661,
-        "total": 141778,
+        "total": 142038,
       }
     `);
   });
@@ -159,7 +159,7 @@ describe("tools/list size ledger", () => {
     expect({ modelVisible, outputSchemas }).toMatchInlineSnapshot(`
       {
         "modelVisible": 44411,
-        "outputSchemas": 92428,
+        "outputSchemas": 92688,
       }
     `);
   });

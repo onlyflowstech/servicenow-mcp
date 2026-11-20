@@ -11,10 +11,19 @@ import {
   preparedReadableFields,
   resolveReadableFields,
 } from "../field-policy.js";
+import { isServiceNowResponseTooLarge } from "../response-too-large.js";
 import { ok, err } from "../utils.js";
 
 const MAX_AGGREGATE_OFFSET = 10_000;
 const MAX_AGGREGATE_PAGE = 1_000;
+/**
+ * The most groups one call reads. The Stats API does not page grouped results
+ * (it ignores sysparm_limit and sysparm_offset), so a grouped call reads the
+ * group list in one request, orders it here and pages it here. A group is
+ * about 100 to 150 bytes, so this many fit the 1 MiB upstream response limit
+ * with room to spare; a list longer than this is reported as truncated.
+ */
+export const MAX_AGGREGATE_GROUPS = 5_000;
 
 function canonicalAggregateKey(value: unknown, depth = 0): string {
   if (depth > 8) return "<depth-limit>";
@@ -49,6 +58,13 @@ function normalizeAggregateGroups(filtered: unknown): unknown[] {
     return [filtered];
   }
   return [];
+}
+
+/** Total order on groups: code-unit order of each group's canonical form, built once. */
+function sortGroupsDeterministically(groups: unknown[]): unknown[] {
+  const keyed = groups.map((group) => ({ group, key: canonicalAggregateKey(group) }));
+  keyed.sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
+  return keyed.map((entry) => entry.group);
 }
 
 export const definition = {
@@ -126,10 +142,11 @@ export async function handler(
       resolveReadableFields(args.table, { fields: selectedFields.join(",") });
 
     const params: Record<string, string> = {
-      // Fetch one sentinel group so the shared envelope can determine whether
-      // another page exists without guessing from a full page.
-      sysparm_limit: String(groupByField ? args.limit + 1 : 1),
-      sysparm_offset: String(groupByField ? args.offset : 0),
+      // Grouped: ask for one group more than the cap, so a longer list is
+      // noticed, and send no offset: the server's paging of groups is not
+      // relied on (it may ignore both). Ungrouped: one aggregate row.
+      sysparm_limit: String(groupByField ? MAX_AGGREGATE_GROUPS + 1 : 1),
+      ...(groupByField ? {} : { sysparm_offset: "0" }),
     };
 
     if (aggType === "COUNT") {
@@ -140,21 +157,51 @@ export async function handler(
 
     if (groupByField) {
       params.sysparm_group_by = groupByField;
-      // ServiceNow's Aggregate API supports ordering grouped results by a
-      // group field. This makes offset pagination stable at the source.
       params.sysparm_order_by = groupByField;
     }
     if (args.display_value) {
       params.sysparm_display_value = args.display_value;
     }
 
-    const resp = await client.get(`/api/now/stats/${args.table}`, params);
-    const filtered = filterAggregateResult(resp.result, readableFields);
+    let resp: { result?: unknown } | null;
+    try {
+      resp = await client.get(`/api/now/stats/${args.table}`, params);
+    } catch (error) {
+      if (groupByField && isServiceNowResponseTooLarge(error)) {
+        return err(
+          `The group list for ${args.table} grouped by ${groupByField} is too large to read in one response. ` +
+            "Group by a field with fewer distinct values, or set display_value to false."
+        );
+      }
+      throw error;
+    }
+    const filtered = filterAggregateResult(resp?.result, readableFields);
     const groups = normalizeAggregateGroups(filtered);
-    groups.sort((left, right) =>
-      canonicalAggregateKey(left).localeCompare(canonicalAggregateKey(right))
-    );
-    return ok(groups.slice(0, args.limit + 1));
+    if (!groupByField) {
+      return ok(sortGroupsDeterministically(groups).slice(0, args.limit + 1));
+    }
+
+    // Order the whole list, keep what the cap allows, then page it here.
+    const ordered = sortGroupsDeterministically(groups);
+    const capped = ordered.length > MAX_AGGREGATE_GROUPS;
+    const known = capped ? ordered.slice(0, MAX_AGGREGATE_GROUPS) : ordered;
+    // One group past the page stays in the result: it only says another page
+    // exists, and the envelope removes it.
+    const page = known.slice(args.offset, args.offset + args.limit + 1);
+    return ok({
+      result: page,
+      has_more: page.length > args.limit,
+      // The group total is known only when every group was read.
+      ...(capped ? {} : { total_groups: known.length }),
+      ...(capped
+        ? {
+            truncated: true,
+            warnings: [
+              `More than ${MAX_AGGREGATE_GROUPS} groups exist; only the first ${MAX_AGGREGATE_GROUPS} in order can be paged and no total is given. Group by a field with fewer distinct values to see them all.`,
+            ],
+          }
+        : {}),
+    });
   } catch (error) {
     throw error;
   }
