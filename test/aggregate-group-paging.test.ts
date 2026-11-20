@@ -274,6 +274,66 @@ describe("sn_aggregate grouped page cut for size", () => {
   });
 });
 
+describe("sn_aggregate grouped text", () => {
+  it("names the group total after the paging line on a normal page", async () => {
+    const { text } = await call(ignoringServer(groupList(23)), { limit: 10 });
+    expect(text).toBe(
+      'Success for profile "p": collection result with 10 records. More records are available at offset 10. Total groups: 23.'
+    );
+  });
+
+  it("names the total on a last page and on an empty page past the end", async () => {
+    expect((await call(ignoringServer(groupList(23)), { limit: 10, offset: 20 })).text).toBe(
+      'Success for profile "p": collection result with 3 records. Total groups: 23.'
+    );
+    expect((await call(ignoringServer(groupList(7)), { limit: 5, offset: 50 })).text).toContain("Total groups: 7.");
+  });
+
+  it("says the list was capped, and how to narrow it, on a capped list", async () => {
+    const { text } = await call(ignoringServer(groupList(MAX_AGGREGATE_GROUPS + 40)), { limit: 10 });
+    expect(text).toContain("More records are available at offset 10.");
+    expect(text).toContain("truncated by record_limit");
+    expect(text).toContain(`More than ${MAX_AGGREGATE_GROUPS} groups exist`);
+    expect(text).toContain("Group by a field with fewer distinct values");
+    expect(text).not.toContain("Total groups");
+  });
+
+  it("keeps the continuation, the total and the cut reason when a page is cut for size", async () => {
+    const { text, envelope } = await call(ignoringServer(groupList(1_200, "x".repeat(300))), { limit: 1_000 });
+    const kept = envelope.data.result.length;
+    expect(text).toContain(`More records are available at offset ${kept}.`);
+    expect(text).toContain("truncated by byte_limit");
+    expect(text).toContain("Total groups: 1200.");
+  });
+
+  it("keeps the cap visible, in the data and the text, when a capped list is also cut for size", async () => {
+    const { text, envelope } = await call(ignoringServer(groupList(MAX_AGGREGATE_GROUPS + 40, "x".repeat(300))), {
+      limit: 1_000,
+    });
+    const kept = envelope.data.result.length;
+    expect(kept).toBeLessThan(1_000);
+    expect(envelope.metadata.truncation.reason).toBe("byte_limit");
+    expect(envelope.data.truncated).toBe(true);
+    expect(envelope.data.warnings).toHaveLength(1);
+    expect(text).toContain(`More records are available at offset ${kept}.`);
+    expect(text).toContain(`More than ${MAX_AGGREGATE_GROUPS} groups exist`);
+  });
+
+  it("leaves the text of an ungrouped result as the summary", async () => {
+    const get = vi.fn(async () => ({ result: { stats: { count: "42" } } }));
+    const args = schema.parse({ table: "incident", type: "COUNT" });
+    const legacy = await handler(args, { get } as never, {} as never, {} as never);
+    const result = finalizeEnvelopeResult(
+      enrichSuccessfulResult(envelopeCompatibilityResult("sn_aggregate", args, legacy), "p"),
+      "sn_aggregate"
+    );
+    expect(result!.content[0]).toEqual({
+      type: "text",
+      text: 'Success for profile "p": collection result with 1 record.',
+    });
+  });
+});
+
 describe("sn_aggregate grouped errors and the other paths", () => {
   it("answers an upstream response over the byte limit with how to narrow it", async () => {
     const get = vi.fn(async () => {

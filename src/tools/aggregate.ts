@@ -11,6 +11,7 @@ import {
   preparedReadableFields,
   resolveReadableFields,
 } from "../field-policy.js";
+import type { EnvelopeTextRenderer } from "./result-envelope.js";
 import { isServiceNowResponseTooLarge } from "../response-too-large.js";
 import { ok, err } from "../utils.js";
 
@@ -66,6 +67,24 @@ function sortGroupsDeterministically(groups: unknown[]): unknown[] {
   keyed.sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
   return keyed.map((entry) => entry.group);
 }
+
+/**
+ * The text of a grouped page: the dispatcher's summary (with the paging line
+ * and any truncation reason), then the group total when every group was read,
+ * and the tool's cap warning when the list was cut at the cap. The warning is
+ * the tool's own fixed wording, never ServiceNow data. It stays in the text
+ * when the page was also cut for size, which then names `byte_limit` in the
+ * metadata.
+ */
+export const aggregateTextRenderer: EnvelopeTextRenderer = (envelope, context) => {
+  const data = envelope.data as { total_groups?: unknown; warnings?: unknown } | null;
+  const parts = [context.summary];
+  if (typeof data?.total_groups === "number") parts.push(`Total groups: ${data.total_groups}.`);
+  if (Array.isArray(data?.warnings)) {
+    for (const warning of data.warnings) if (typeof warning === "string") parts.push(warning);
+  }
+  return parts.join(" ");
+};
 
 export const definition = {
   name: "sn_aggregate",
@@ -143,7 +162,9 @@ export async function handler(
 
     const params: Record<string, string> = {
       // Grouped: ask for one group more than the cap, so a longer list is
-      // noticed, and send no offset: the server's paging of groups is not
+      // noticed (an instance that honours the limit then sends up to that
+      // many groups even for a small page: a deliberate trade for one
+      // request and one stable order), and send no offset: the server's paging of groups is not
       // relied on (it may ignore both). Ungrouped: one aggregate row.
       sysparm_limit: String(groupByField ? MAX_AGGREGATE_GROUPS + 1 : 1),
       ...(groupByField ? {} : { sysparm_offset: "0" }),

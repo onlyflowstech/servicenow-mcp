@@ -230,6 +230,7 @@ export const serviceNowToolModules = Object.freeze([
   platformViewToolModule,
 ] as const);
 
+registerEnvelopeTextRenderer("sn_aggregate", aggregate.aggregateTextRenderer);
 registerEnvelopeTextRenderer("sn_history", historyTextRenderer);
 registerEnvelopeTextRenderer("sn_relationships", relationshipsTextRenderer);
 registerEnvelopeTextRenderer("sn_platform_view", platformViewTextRenderer);

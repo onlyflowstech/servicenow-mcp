@@ -773,7 +773,11 @@ every call.
   `truncated` is true, `metadata.truncation` says `record_limit`, and
   `warnings` says to group by a field with fewer distinct values. If the
   group list is too large to read in one response at all, the call fails with
-  the same advice; `display_value: "false"` makes each group smaller.
+  the same advice; `display_value: "false"` makes each group smaller. The
+  request always asks for up to 5,001 groups, even for a small `limit`: an
+  instance that does honour `sysparm_limit` then sends more groups than a small
+  page needs, a deliberate trade for one request and a stable order. The text
+  of a result gives the group total, or the cap warning, after the paging line.
 
 ### CMDB & Operations
 
@@ -1220,8 +1224,10 @@ means the request must change (fewer `fields`, a lower `limit`, or a higher
 `max_response_bytes`; `sn_get` reads one row). The `hint` says which.
 
 This holds for `sn_query`, `sn_syslog`, `sn_schema`, `sn_relationships`,
-`sn_codesearch`, `sn_discover`, `sn_attach` (list), `sn_atf` and `sn_aggregate` (grouped), whose `offset`
-is a row offset into the rows they return. Any other collection result that is cut to size reports `has_more: true` with no `next_offset`.
+`sn_codesearch`, `sn_discover`, `sn_attach` (list), `sn_atf` and `sn_aggregate`
+(grouped), whose `offset` is a row offset into the rows they return. Any other
+collection result that is cut to size reports `has_more: true` with no
+`next_offset`.
 A page that lost no rows to size is unchanged: `has_more` and `next_offset`
 come from the row after the page, and `next_offset` is `offset + limit`.
 
