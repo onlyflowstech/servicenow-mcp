@@ -385,7 +385,7 @@ export const productionToolOutputSchemas = Object.freeze({
  * reported as too large for the caller's `max_response_bytes`, which the caller
  * can raise: their whole result is sized to that argument.
  */
-const CALLER_SIZED_TOOLS: ReadonlySet<string> = new Set(["sn_history", "sn_platform_view"]);
+const CALLER_SIZED_TOOLS: ReadonlySet<string> = new Set(["sn_history", "sn_platform_view", "sn_relationships"]);
 
 export function isCallerSizedTool(name: string): boolean {
   return CALLER_SIZED_TOOLS.has(name);
@@ -672,7 +672,7 @@ function byteLimit(
     return ATTACHMENT_RESULT_BYTE_LIMIT;
   }
   if (
-    (name === "sn_query" || name === "sn_get") &&
+    (name === "sn_query" || name === "sn_get" || name === "sn_relationships") &&
     typeof args.max_response_bytes === "number" &&
     Number.isSafeInteger(args.max_response_bytes)
   ) {

@@ -804,7 +804,7 @@ not fully read.
 | CIs read (the start CI aside) | 1,000 |
 | Relationship rows read (a row read from each end counts twice) | 2,000, in pages of 500 |
 | Upstream response bytes | The client allows 1 MiB of JSON per call. The walk keeps its own estimate and stops short of it (640 KiB for relationship rows, 180 KiB for CI reads). |
-| Output | `limit` up to 1,000 CIs; the response follows the shared byte limit, and rows that do not fit are dropped from the end with `next_offset` |
+| Output | `limit` up to 1,000 CIs; `max_response_bytes` (default 100,000, 1,000 to 1,000,000, as for `sn_query`) bounds the whole response. Rows that do not fit are dropped from the end, with `next_offset` to continue; a budget too small for any result is refused, saying to raise it |
 
 Relationships between two CIs that are both at the depth limit are not read.
 
@@ -827,9 +827,10 @@ child. The map covers the page of CIs the call lists, so `limit` and `offset`
 page it, and the same field policy applies to every CI attribute in it. The
 diagram draws the nearest 149 CIs at most (150 nodes, 300 edges, 20,000
 characters) and collapses the rest into one node, saying how many in
-`diagram.omitted_nodes`; the map as a whole stays within about 48,000 bytes,
-and `meta.map_omitted_cis` says how many listed CIs it had to leave out.
-Diagram edges carry no relationship types, which are in `edges`.
+`diagram.omitted_nodes`; the map takes at most 48% of `max_response_bytes` (about 48,000 bytes by
+default), and `meta.map_omitted_cis` says how many listed CIs it had to leave
+out. The shared `sn_flow_view` diagram grammar has no edge labels, so diagram
+edges carry no relationship types; they are in `edges`.
 
 #### Tailing the system log
 

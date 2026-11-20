@@ -208,7 +208,7 @@ describe("high-level tool discovery", () => {
     sn_platform_view: ["action", "application", "batch_root", "category", "change", "check", "disposition", "groups", "include_children", "include_muted", "kind", "limit", "max_response_bytes", "max_updates", "min_severity", "name_contains", "offset", "payload", "priority", "problems", "profile", "remote_update_set", "result", "source_table", "state", "type", "update_set", "updated_since", "upgrade", "view"],
     sn_profile: ["profile"],
     sn_query: ["display_value", "fields", "force_recache", "limit", "max_response_bytes", "offset", "orderby", "profile", "query", "response_format", "structured_query", "table"],
-    sn_relationships: ["ci_name", "class", "depth", "direction", "impact", "limit", "map", "offset", "profile", "sys_id", "type"],
+    sn_relationships: ["ci_name", "class", "depth", "direction", "impact", "limit", "map", "max_response_bytes", "offset", "profile", "sys_id", "type"],
     sn_schema: ["fields_only", "force_recache", "limit", "offset", "profile", "table"],
     sn_syslog: ["after_cursor", "fields", "level", "limit", "message", "offset", "profile", "since", "source", "tail"],
     sn_update: ["fields", "profile", "sys_id", "table"],

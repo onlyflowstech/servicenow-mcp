@@ -1,11 +1,13 @@
 import { z } from "zod";
-import { createAmbiguousCiNameError, createToolError } from "../tool-error.js";
+import { createAmbiguousCiNameError, createStartCiRequiredError, createToolError } from "../tool-error.js";
 import { isServiceNowRequestCancellation, isServiceNowResponseTooLarge, type ServiceNowOperations } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
 import {
   ok,
-  err,
+  MAX_RESPONSE_BYTES_DEFAULT,
+  MAX_RESPONSE_BYTES_MAX,
+  MAX_RESPONSE_BYTES_MIN,
   buildTableParams,
   escapeQueryValue,
   formatError,
@@ -31,7 +33,7 @@ import {
 export const definition = {
   name: "sn_relationships",
   description:
-    "Traverse CMDB CI relationships breadth first: each CI once, at its shortest depth. Upstream, downstream or both, to a depth. Lists only CIs the profile can read. A cap that stops the walk sets meta.traversal_truncated and warns, naming the CIs not fully read. Use for impact analysis and dependency mapping.",
+    "Traverse CMDB CI relationships breadth first: each CI once, at its shortest depth, upstream, downstream or both. Lists only CIs the profile can read. A limit that stops the walk sets meta.traversal_truncated and warns, naming the CIs not fully read. For impact analysis and dependency mapping.",
   annotations: {
     title: "Traverse CI relationships",
     readOnlyHint: true,
@@ -51,7 +53,15 @@ export const schema = z.object({
   type: z.string().optional().describe("Filter by relationship type name (substring match)"),
   class: z.string().optional().describe("Filter displayed CIs by class name (substring match)"),
   impact: z.boolean().optional().default(false).describe("Impact analysis mode -- walks upstream only"),
-  map: z.boolean().optional().default(false).describe("Also return nodes, edges (with types) and a Mermaid diagram of the CIs listed"),
+  max_response_bytes: z
+    .number()
+    .int()
+    .min(MAX_RESPONSE_BYTES_MIN)
+    .max(MAX_RESPONSE_BYTES_MAX)
+    .optional()
+    .default(MAX_RESPONSE_BYTES_DEFAULT)
+    .describe("Byte budget (default 100000, min 1000, max 1000000); list and map are cut to fit"),
+  map: z.boolean().optional().default(false).describe("Also return nodes, edges (with types) and a Mermaid diagram"),
 });
 
 /**
@@ -71,7 +81,7 @@ export interface TraversalLimits {
   readonly namedInWarning: number;
   readonly relationshipBytes: number;
   readonly ciBytes: number;
-  readonly mapBytes: number;
+  readonly mapShare: number;
 }
 
 export const TRAVERSAL_LIMITS: TraversalLimits = Object.freeze({
@@ -104,8 +114,8 @@ export const TRAVERSAL_LIMITS: TraversalLimits = Object.freeze({
    */
   relationshipBytes: 640 * 1024,
   ciBytes: 180 * 1024,
-  /** Serialized bytes of the map (nodes, edges and diagram) in one response. */
-  mapBytes: 48_000,
+  /** Share of `max_response_bytes` the map (nodes, edges and diagram) may take; the list gets the rest. */
+  mapShare: 0.48,
 });
 
 type Direction = "upstream" | "downstream";
@@ -261,7 +271,7 @@ export async function traverseRelationships(
   limits: TraversalLimits
 ) {
   if (!args.ci_name && !args.sys_id) {
-    return err("Either ci_name or sys_id is required");
+    throw createStartCiRequiredError();
   }
 
   const maxDepth = Math.min(Math.max(args.depth ?? config.relDepth, 1), 5);
@@ -721,7 +731,7 @@ export async function traverseRelationships(
       [...edges.values()]
         .sort((a, b) => a.rank - b.rank || ((a.sys_id ?? "") < (b.sys_id ?? "") ? -1 : (a.sys_id ?? "") > (b.sys_id ?? "") ? 1 : 0))
         .map(({ rank: _rank, ...edge }) => edge),
-      limits.mapBytes
+      Math.floor(args.max_response_bytes * limits.mapShare)
     );
     data.nodes = map.nodes;
     data.edges = map.edges;

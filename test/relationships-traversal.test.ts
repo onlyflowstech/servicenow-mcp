@@ -667,7 +667,7 @@ describe("map output", () => {
     }
     const { data } = await run(instance, { sys_id: id("R"), depth: 1, map: true, limit: 400 });
     const mapBytes = Buffer.byteLength(JSON.stringify({ nodes: data!.nodes, edges: data!.edges, diagram: data!.diagram }));
-    expect(mapBytes).toBeLessThanOrEqual(TRAVERSAL_LIMITS.mapBytes);
+    expect(mapBytes).toBeLessThanOrEqual(Math.floor(100_000 * TRAVERSAL_LIMITS.mapShare));
     expect(data!.meta.map_omitted_cis).toBeGreaterThan(0);
     expect(data!.nodes.length + data!.meta.map_omitted_cis).toBe(401);
     expect(data!.warnings.join(" ")).toContain("fit the response budget");
@@ -704,5 +704,77 @@ describe("the response", () => {
     expect(relationshipsTextRenderer({ data: without.data, metadata: { limits: { max_bytes: 100_000 } } } as never, { summary: "summary" })).toBe("");
     const tight = relationshipsTextRenderer({ data: withMap.data, metadata: { limits: { max_bytes: 1_500 } } } as never, { summary: "summary" });
     expect(tight).toBe("");
+  });
+});
+
+describe("max_response_bytes", () => {
+  function listing(count: number): FakeInstance {
+    const instance = new FakeInstance();
+    instance.ci("R");
+    for (let index = 0; index < count; index += 1) {
+      instance.ci(`n${index}`, `server-${index}.example.com`);
+      instance.rel(`a${index.toString(16).padStart(3, "0")}`, "R", `n${index}`);
+    }
+    return instance;
+  }
+
+  async function finalized(args: Record<string, unknown>, count = 400) {
+    const parsed = schema.parse({ sys_id: id("R"), depth: 1, limit: 400, ...args });
+    const handled = await handler(parsed, listing(count).client, settings);
+    const enveloped = envelopeCompatibilityResult("sn_relationships", parsed, handled);
+    const result = finalizeEnvelopeResult(
+      { ...enveloped, structuredContent: { profile: "p", ...(enveloped.structuredContent as object) } },
+      "sn_relationships"
+    );
+    return { parsed, result };
+  }
+
+  const sizeOf = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+
+  it("defaults to 100,000 and accepts 1,000 to 1,000,000", () => {
+    expect(schema.parse({ sys_id: id("R") }).max_response_bytes).toBe(100_000);
+    expect(schema.parse({ sys_id: id("R"), max_response_bytes: 1_000 }).max_response_bytes).toBe(1_000);
+    expect(schema.parse({ sys_id: id("R"), max_response_bytes: 1_000_000 }).max_response_bytes).toBe(1_000_000);
+    expect(() => schema.parse({ sys_id: id("R"), max_response_bytes: 999 })).toThrow();
+    expect(() => schema.parse({ sys_id: id("R"), max_response_bytes: 1_000_001 })).toThrow();
+  });
+
+  it("cuts the list and the map to a small budget, and offers the rest by next_offset", async () => {
+    const { result } = await finalized({ map: true, max_response_bytes: 8_000 });
+    expect(result).toBeDefined();
+    expect(sizeOf(result)).toBeLessThanOrEqual(8_000);
+    const structured = result!.structuredContent as { data: Output; metadata: Record<string, Row> };
+    const kept = structured.data.relationships.length;
+    expect(kept).toBeGreaterThan(0);
+    expect(kept).toBeLessThan(400);
+    expect(structured.metadata.limits.max_bytes).toBe(8_000);
+    expect(structured.metadata.pagination).toMatchObject({ has_more: true, next_offset: kept });
+    expect(sizeOf({ nodes: structured.data.nodes, edges: structured.data.edges, diagram: structured.data.diagram })).toBeLessThanOrEqual(3_840);
+    expect(structured.data.meta.map_omitted_cis).toBeGreaterThan(0);
+  });
+
+  it("returns the whole page at the default budget and more of the map at the maximum", async () => {
+    const atDefault = await finalized({ map: true }, 100);
+    const defaultData = (atDefault.result!.structuredContent as { data: Output }).data;
+    expect(sizeOf(atDefault.result)).toBeLessThanOrEqual(100_000);
+    expect(defaultData.relationships).toHaveLength(100);
+    expect(defaultData.nodes).toHaveLength(101);
+    const atMaximum = await finalized({ map: true, max_response_bytes: 1_000_000, limit: 1000 }, 1_000);
+    const maxData = (atMaximum.result!.structuredContent as { data: Output }).data;
+    expect(sizeOf(atMaximum.result)).toBeLessThanOrEqual(1_000_000);
+    expect(maxData.relationships).toHaveLength(1_000);
+    expect(maxData.nodes.length).toBeGreaterThan(101);
+    expect(maxData.diagram.omitted_nodes).toBeGreaterThan(0);
+  });
+
+  it("sizes the list to the budget without a map too", async () => {
+    const { result } = await finalized({ max_response_bytes: 5_000 });
+    expect(sizeOf(result)).toBeLessThanOrEqual(5_000);
+    expect((result!.structuredContent as { data: { relationships: unknown[] } }).data.relationships.length).toBeLessThan(400);
+  });
+
+  it("is reported as too small, with the remedy, when nothing fits", async () => {
+    const { result } = await finalized({ map: true, max_response_bytes: 1_000 });
+    expect(result).toBeUndefined();
   });
 });

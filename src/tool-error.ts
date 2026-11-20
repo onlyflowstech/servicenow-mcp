@@ -43,7 +43,8 @@ export type ToolErrorReason =
   | "filter_fields_too_large"
   | "invalid_cursor"
   | "max_response_bytes_too_small"
-  | "ambiguous_ci_name";
+  | "ambiguous_ci_name"
+  | "start_ci_required";
 
 export interface ToolErrorDescriptor {
   readonly category: ToolErrorCategory;
@@ -325,6 +326,16 @@ export function createAmbiguousCiNameError(
     message:
       `ci_name "${subject}" matches more than one CI. Retry with sys_id set to one of: ` +
       `${listed.join("; ")}${more ? "; more CIs share this name" : ""}.`,
+    retry: "retry_after_correction",
+  });
+}
+
+/** Issue the trusted error for a traversal given neither `ci_name` nor `sys_id`. */
+export function createStartCiRequiredError(): Error {
+  return issue({
+    category: "conflict",
+    reason: "start_ci_required",
+    message: "Either ci_name or sys_id is required to name the CI to start from.",
     retry: "retry_after_correction",
   });
 }

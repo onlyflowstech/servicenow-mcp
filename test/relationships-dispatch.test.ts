@@ -92,4 +92,25 @@ describe("sn_relationships through the dispatcher", () => {
     expect(text(result)).toContain("was not found");
     expect(text(result)).not.toContain("failed unexpectedly");
   });
+
+  it("tells the caller a start CI is required", async () => {
+    const { result } = await call([], { depth: 1 });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("Either ci_name or sys_id is required");
+    expect(text(result)).not.toContain("failed unexpectedly");
+  });
+
+  it("says when max_response_bytes is too small for any result, and what to do", async () => {
+    const { result } = await call([root, rels, cis], { sys_id: ROOT, depth: 1, map: true, max_response_bytes: 1000 });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("does not fit max_response_bytes");
+  });
+
+  it("honours max_response_bytes at the default and a larger budget", async () => {
+    for (const max_response_bytes of [100_000, 1_000_000]) {
+      const { result } = await call([root, rels, cis], { sys_id: ROOT, depth: 1, max_response_bytes });
+      expect(result.isError).toBeFalsy();
+      expect((result.structuredContent as { metadata: { limits: { max_bytes: number } } }).metadata.limits.max_bytes).toBe(max_response_bytes);
+    }
+  });
 });

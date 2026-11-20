@@ -9291,9 +9291,16 @@
           "description": "Impact analysis mode -- walks upstream only",
           "type": "boolean"
         },
+        "max_response_bytes": {
+          "default": 100000,
+          "description": "Byte budget (default 100000, min 1000, max 1000000); list and map are cut to fit",
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 1000000
+        },
         "map": {
           "default": false,
-          "description": "Also return nodes, edges (with types) and a Mermaid diagram of the CIs listed",
+          "description": "Also return nodes, edges (with types) and a Mermaid diagram",
           "type": "boolean"
         },
         "profile": {
