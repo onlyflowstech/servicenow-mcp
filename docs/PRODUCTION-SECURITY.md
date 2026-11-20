@@ -592,6 +592,12 @@ Name them only for the profiles and tables that need them.
   can't be read is covered only by the names that apply to every table
   (`running_process_command` and `running_process_key_parameters`), not by its
   chain.
+- A database view that joins one of these tables, or a table with record payload
+  columns, has those columns under the view's prefix for that table
+  (`rp_command` for a table joined as `rp`). The same rules apply, and the view
+  is opened only by its own entry. A view whose joined tables can't be read is
+  refused like any table with unreadable field types; with the `not_required`
+  setting it is covered by name only.
 - `sn_history` leaves out the audit rows of these columns even where the
   profile opened them, and refuses them in `fields`.
 - Dotted names (`ref_cmdb_running_process.command`, `parent.command`) are never

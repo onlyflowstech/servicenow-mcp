@@ -77,6 +77,18 @@ export interface ResolvedTableTypes {
    * hidden types, so a field it does not list is not hidden.
    */
   readonly allTypes?: ReadonlyMap<string, string>;
+  /**
+   * For a database view: each joined table's column prefix and extension
+   * chain (the table first), as the loader read them. A view's column
+   * `<prefix>_<field>` is that table's `field`. Absent for a table.
+   */
+  readonly viewSources?: readonly ViewColumnSource[];
+}
+
+/** One table a database view joins: its column prefix and extension chain. */
+export interface ViewColumnSource {
+  readonly prefix: string;
+  readonly hierarchy: readonly string[];
 }
 
 export type FieldTypes =
@@ -610,16 +622,18 @@ function resolveTable(
   if (sources === undefined || sources.length === 0) return undefined;
   const hidden = new Map<string, string>();
   const hierarchy = [table];
+  const viewSources: ViewColumnSource[] = [];
   for (const source of sources) {
     const sourceChain = chains.get(source.table);
     if (!isKnownChain(sourceChain)) return undefined;
     hierarchy.push(...sourceChain.filter((entry) => !hierarchy.includes(entry)));
+    viewSources.push(Object.freeze({ prefix: source.prefix, hierarchy: Object.freeze([...sourceChain]) }));
     for (const [element, type] of inheritedHidden(sourceChain, dictionary)) {
       const column = `${source.prefix}_${element}`;
       if (FIELD_NAME.test(column)) hidden.set(column, type);
     }
   }
-  return resolvedTable(hierarchy, hidden);
+  return resolvedTable(hierarchy, hidden, undefined, viewSources);
 }
 
 function inheritedHidden(
@@ -638,13 +652,15 @@ function inheritedHidden(
 function resolvedTable(
   hierarchy: readonly string[],
   hidden: ReadonlyMap<string, string>,
-  allTypes?: ReadonlyMap<string, string>
+  allTypes?: ReadonlyMap<string, string>,
+  viewSources?: readonly ViewColumnSource[]
 ): ResolvedTableTypes {
   return Object.freeze({
     hierarchy: Object.freeze([...hierarchy]),
     hidden,
     hiddenNames: new Set(hidden.keys()) as ReadonlySet<string>,
     ...(allTypes === undefined ? {} : { allTypes }),
+    ...(viewSources === undefined ? {} : { viewSources: Object.freeze([...viewSources]) }),
   });
 }
 
@@ -1124,6 +1140,12 @@ export interface HiddenFieldScope {
    * then knows no ancestor for it.
    */
   readonly hierarchies?: ReadonlyMap<string, readonly string[]>;
+  /**
+   * Each resolved database view's joined tables, with their column prefixes
+   * and chains. A view has no entry in `hierarchies`: its columns are its
+   * sources' columns under a prefix, not its own.
+   */
+  readonly views?: ReadonlyMap<string, readonly ViewColumnSource[]>;
 }
 
 const HIDDEN_FIELD_SCOPE = new AsyncLocalStorage<HiddenFieldScope>();
@@ -1135,6 +1157,7 @@ export function runWithHiddenFieldScope<T>(scope: HiddenFieldScope, callback: ()
       tables: scope.tables,
       unresolved: scope.unresolved,
       ...(scope.hierarchies === undefined ? {} : { hierarchies: scope.hierarchies }),
+      ...(scope.views === undefined ? {} : { views: scope.views }),
     }),
     callback
   );
@@ -1158,6 +1181,7 @@ export function hiddenFieldScope(
 ): { readonly scope?: HiddenFieldScope; readonly degraded: boolean } {
   const resolved = new Map<string, ReadonlySet<string>>();
   const hierarchies = new Map<string, readonly string[]>();
+  const views = new Map<string, readonly ViewColumnSource[]>();
   let missing = types.state !== "available";
   for (const candidate of tables) {
     const table = normalizeName(candidate);
@@ -1170,8 +1194,9 @@ export function hiddenFieldScope(
     }
     resolved.set(table, hidden);
     if (types.state === "available") {
-      const hierarchy = types.tables.get(table)?.hierarchy;
-      if (hierarchy !== undefined) hierarchies.set(table, hierarchy);
+      const entry = types.tables.get(table);
+      if (entry?.viewSources !== undefined) views.set(table, entry.viewSources);
+      else if (entry !== undefined) hierarchies.set(table, entry.hierarchy);
     }
   }
   if (missing && !namesOnly) return { degraded: false };
@@ -1180,6 +1205,7 @@ export function hiddenFieldScope(
       tables: resolved,
       unresolved: namesOnly ? "names_only" : "deny",
       hierarchies,
+      views,
     }),
     degraded: missing,
   };

@@ -22,6 +22,7 @@ import {
   rowValueRule,
   withoutFields,
   type RowValueRule,
+  type ViewColumnSource,
 } from "./hidden-values.js";
 import { NAMED_ONLY_TABLES } from "./table-policy.js";
 
@@ -367,7 +368,10 @@ function tableClosedColumns(table: string): ReadonlySet<string> | undefined {
  */
 function closedColumns(table: string): ReadonlySet<string> {
   const own = tableClosedColumns(table);
-  const hierarchy = currentHiddenFieldScope()?.hierarchies?.get(table);
+  const scope = currentHiddenFieldScope();
+  const view = scope?.views?.get(table);
+  if (view !== undefined) return viewClosedColumns(scope!.views!, table, view, own);
+  const hierarchy = scope?.hierarchies?.get(table);
   if (hierarchy === undefined || hierarchy.length < 2) {
     return own === undefined ? COMMAND_LINE_ANY_TABLE_COLUMNS : unionOf([own, COMMAND_LINE_ANY_TABLE_COLUMNS]);
   }
@@ -379,6 +383,44 @@ function closedColumns(table: string): ReadonlySet<string> {
   }
   return unionOf(sets);
 }
+
+/**
+ * A database view's closed columns: each joined table's closed columns (its
+ * chain's, and the ones guarded everywhere) under the view's column prefix for
+ * that table, plus the view's own. Built once per view for the call's resolved
+ * views, so the returned set is the same object for every check in the call.
+ */
+function viewClosedColumns(
+  views: ReadonlyMap<string, readonly ViewColumnSource[]>,
+  table: string,
+  sources: readonly ViewColumnSource[],
+  own: ReadonlySet<string> | undefined
+): ReadonlySet<string> {
+  let byView = VIEW_CLOSED_COLUMNS.get(views);
+  if (byView === undefined) VIEW_CLOSED_COLUMNS.set(views, (byView = new Map()));
+  const known = byView.get(table);
+  if (known !== undefined) return known;
+  const names = new Set<string>(COMMAND_LINE_ANY_TABLE_COLUMNS);
+  for (const column of own ?? []) names.add(column);
+  for (const source of sources) {
+    const sets = [COMMAND_LINE_ANY_TABLE_COLUMNS];
+    for (const name of source.hierarchy) {
+      const columns = tableClosedColumns(name);
+      if (columns !== undefined) sets.push(columns);
+    }
+    for (const columns of sets) {
+      for (const column of columns) {
+        const prefixed = `${source.prefix}_${column}`;
+        if (FIELD_NAME.test(prefixed)) names.add(prefixed);
+      }
+    }
+  }
+  const closed = Object.freeze(names) as ReadonlySet<string>;
+  byView.set(table, closed);
+  return closed;
+}
+
+const VIEW_CLOSED_COLUMNS = new WeakMap<object, Map<string, ReadonlySet<string>>>();
 
 const CLOSED_COLUMN_SET_IDS = new WeakMap<ReadonlySet<string>, number>();
 const CLOSED_COLUMN_UNIONS = new Map<string, ReadonlySet<string>>();

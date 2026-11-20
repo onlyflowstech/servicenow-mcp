@@ -47,7 +47,7 @@ import type { ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy } from "../src/table-policy.js";
 import { registerServiceNowTools } from "../src/tools/index.js";
-import { noHiddenFieldTypes } from "./fixtures/field-types.js";
+import { fieldTypeAnswer, noHiddenFieldTypes, type FieldTypeFixture } from "./fixtures/field-types.js";
 
 const TABLE = "cmdb_running_process";
 const COLUMNS = ["command", "parameters", "key_parameters"] as const;
@@ -680,8 +680,11 @@ const chainedFieldTypes: FieldTypeLoader = async (_client, tables) =>
 
 async function connect(
   fieldPolicy?: FieldPolicyConfigurationInput,
-  fieldTypeLoader: FieldTypeLoader = noHiddenFieldTypes
+  fieldTypeLoader: FieldTypeLoader | FieldTypeFixture = noHiddenFieldTypes
 ) {
+  // A fixture makes the dispatcher run its real type lookup against the fake
+  // instance (chains, database views); a loader replaces the lookup.
+  const fixture = typeof fieldTypeLoader === "function" ? undefined : fieldTypeLoader;
   const records: ToolAuditRecord[] = [];
   // `/api/now/(table|stats)/<table>[/<sys_id>]`.
   const tableOf = (path: string) => /^\/api\/now\/(?:table|stats)\/([a-z0-9_]+)/u.exec(path)?.[1] ?? "";
@@ -695,8 +698,17 @@ async function connect(
       : { result: [rowFor(table)] };
   };
   const serviceNowClient = {
-    get: vi.fn(async (path: string) => answer(path)),
-    getWithMeta: vi.fn(async (path: string) => ({ data: answer(path), status: 200, headers: new Headers() })),
+    get: vi.fn(async (path: string, params?: Record<string, string>) =>
+      (fixture === undefined ? undefined : fieldTypeAnswer(path, params, fixture)?.data) ?? answer(path)
+    ),
+    getWithMeta: vi.fn(
+      async (path: string, params?: Record<string, string>) =>
+        (fixture === undefined ? undefined : fieldTypeAnswer(path, params, fixture)) ?? {
+          data: answer(path),
+          status: 200,
+          headers: new Headers(),
+        }
+    ),
     post: vi.fn(async (path: string) => ({ result: rowFor(tableOf(path)) })),
     patch: vi.fn(async (path: string) => ({ result: rowFor(tableOf(path)) })),
     put: vi.fn(async (path: string) => ({ result: rowFor(tableOf(path)) })),
@@ -728,7 +740,7 @@ async function connect(
         ...(fieldPolicy === undefined ? {} : { fieldPolicy }),
       }),
     },
-    fieldTypeLoader,
+    ...(fixture === undefined ? { fieldTypeLoader: fieldTypeLoader as FieldTypeLoader } : {}),
     auditSink: {
       write: (record) => records.push(record),
       writePreContext: () => {},
@@ -763,7 +775,13 @@ function call(connected: Connected, name: string, args: Record<string, unknown>)
  */
 async function expectRefused(connected: Connected, name: string, args: Record<string, unknown>) {
   const client = connected.serviceNowClient as unknown as Record<string, ReturnType<typeof vi.fn>>;
-  const requests = () => ["get", "getWithMeta", "post", "patch", "put"].reduce((n, m) => n + client[m]!.mock.calls.length, 0);
+  // The type lookup (dictionary, chains, views) is the dispatcher's own, before the tool.
+  const lookup = /^\/api\/now\/table\/(sys_dictionary|sys_db_object|sys_db_view_table)$/u;
+  const requests = () =>
+    ["get", "getWithMeta", "post", "patch", "put"].reduce(
+      (n, m) => n + client[m]!.mock.calls.filter(([path]) => !lookup.test(String(path))).length,
+      0
+    );
   const before = requests();
   const result = await call(connected, name, args);
   const label = `${name} ${JSON.stringify(args)}`;
@@ -777,7 +795,7 @@ async function expectRefused(connected: Connected, name: string, args: Record<st
 async function expectServedWithout(connected: Connected, name: string, args: Record<string, unknown>) {
   const result = await call(connected, name, args);
   const label = `${name} ${JSON.stringify(args)}`;
-  expect(result.isError, label).toBeFalsy();
+  expect(result.isError, label + " " + JSON.stringify(result).slice(0, 400)).toBeFalsy();
   expect(JSON.stringify(result), label).not.toContain(MARKER);
 }
 
@@ -981,5 +999,108 @@ describe("the other read tools", () => {
     const result = await call(connected, "sn_relationships", { ci_name: "example-process" });
     expect(JSON.stringify(result)).not.toContain(MARKER);
     expect(requestsOf(connected)).not.toMatch(/command|parameters/u);
+  });
+});
+
+describe("database views over guarded tables", () => {
+  const VIEW = "u_example_process_view";
+  const SOURCES = [
+    { table: TABLE, prefix: "rp" },
+    { table: "cmdb_ci_appl_tomcat", prefix: "app" },
+    { table: "sys_update_xml", prefix: "ux" },
+  ];
+  const fixture = (views: FieldTypeFixture["views"] = { [VIEW]: SOURCES }): FieldTypeFixture => ({
+    // The dictionary read must return a row, or the types count as unreadable.
+    dictionary: [{ name: "sys_user", element: "user_password", internal_type: "password" }],
+    parents: { cmdb_ci_appl_tomcat: ["cmdb_ci_appl", "cmdb_ci"] },
+    absent: [VIEW],
+    views,
+  });
+  const CLOSED = [
+    "rp_command",
+    "rp_parameters",
+    "rp_key_parameters",
+    "app_running_process_command",
+    "app_running_process_key_parameters",
+    "rp_running_process_command",
+    "ux_payload",
+    "ux_payload_diff",
+    "running_process_command",
+  ];
+  const viewScope = {
+    tables: new Map([[VIEW, new Set<string>()]]),
+    unresolved: "deny" as const,
+    views: new Map([
+      [
+        VIEW,
+        [
+          { prefix: "rp", hierarchy: [TABLE] },
+          { prefix: "app", hierarchy: ["cmdb_ci_appl_tomcat", "cmdb_ci_appl", "cmdb_ci"] },
+          { prefix: "ux", hierarchy: ["sys_update_xml", "sys_metadata"] },
+        ],
+      ],
+    ]),
+  };
+
+  it("closes each joined table's columns under its prefix, and leaves the others alone", () => {
+    runWithHiddenFieldScope(viewScope, () => {
+      for (const column of CLOSED) {
+        expect(reason(() => resolveReadableFields(VIEW, { fields: column })), column).toBe("explicit_read_required");
+        expect(reason(() => resolveReadableFields(VIEW, { fields: column, purpose: "query" })), column).toBe(
+          "explicit_read_required"
+        );
+        expect(reason(() => validateWritableFields(VIEW, { [column]: "x" })), column).toBe("explicit_field_required");
+        expect(queryDeniedFields(VIEW).has(column), column).toBe(true);
+      }
+      for (const column of ["rp_name", "rp_pid", "app_name", "app_install_directory", "ux_name", "command", "payload", "app_command"]) {
+        expect(resolveReadableFields(VIEW, { fields: column }), column).toEqual([column]);
+      }
+      const row = Object.fromEntries([...CLOSED, "rp_name"].map((name) => [name, MARKER]));
+      expect(JSON.stringify(filterReadableRecord(row, ["*"]))).not.toContain(MARKER.repeat(2));
+      expect(filterReadableRecord(row, ["*"])).toEqual({ rp_name: MARKER });
+    });
+  });
+
+  it("is opened by the view's own entry only", () => {
+    withFieldPolicy({ fieldPolicy: { [VIEW]: { readable: ["sys_id", "rp_command", "ux_payload"] } } }, () => {
+      runWithHiddenFieldScope(viewScope, () => {
+        expect(resolveReadableFields(VIEW, { fields: "rp_command,ux_payload" })).toEqual(["rp_command", "ux_payload"]);
+        expect(reason(() => resolveReadableFields(VIEW, { fields: "rp_parameters" }))).toBe("explicit_read_required");
+        expect(reason(() => resolveReadableFields(VIEW, { fields: "ux_payload_diff" }))).toBe("explicit_read_required");
+      });
+    });
+    withFieldPolicy({ fieldPolicy: { [TABLE]: { readable: ["sys_id", "command"] }, "*": { readable: "*" } } }, () => {
+      runWithHiddenFieldScope(viewScope, () => {
+        expect(reason(() => resolveReadableFields(VIEW, { fields: "rp_command" }))).toBe("explicit_read_required");
+      });
+    });
+  });
+
+  it("through the dispatcher: refused, left out of every projection, and ordinary view columns still read", async () => {
+    const connected = await connect(undefined, fixture());
+    for (const column of ["rp_command", "rp_key_parameters", "app_running_process_command", "ux_payload"]) {
+      // Refused for the column, not because the field types could not be read.
+      const named = await call(connected, "sn_query", { table: VIEW, fields: `sys_id,${column}` });
+      expect(JSON.stringify(named)).toMatch(/holds (process command lines|record payloads)/u);
+      await expectRefused(connected, "sn_query", { table: VIEW, fields: `sys_id,${column}` });
+      await expectRefused(connected, "sn_query", { table: VIEW, structured_query: TEXT_FILTER(column) });
+      await expectRefused(connected, "sn_aggregate", { table: VIEW, type: "COUNT", group_by: column });
+      await expectRefused(connected, "sn_get", { table: VIEW, sys_id: SYS_ID, fields: column });
+    }
+    await expectServedWithout(connected, "sn_query", { table: VIEW, fields: "all" });
+    await expectServedWithout(connected, "sn_query", { table: VIEW });
+    await expectServedWithout(connected, "sn_query", { table: VIEW, response_format: "detailed" });
+    const ordinary = await call(connected, "sn_query", { table: VIEW, fields: "sys_id,rp_name,app_install_directory" });
+    expect(ordinary.isError).toBeFalsy();
+  });
+
+  it("is refused outright when a joined table cannot be resolved, with no column name to go by", async () => {
+    const connected = await connect(undefined, { ...fixture(), hiddenRows: [TABLE] });
+    connected.records.length = 0;
+    const result = await call(connected, "sn_query", { table: VIEW, fields: "sys_id,rp_name" });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toContain("field types could not be read");
+    expect(JSON.stringify(result)).not.toContain(MARKER);
+    expect(connected.records.at(-1)).toMatchObject({ outcome: "policy_rejected" });
   });
 });
