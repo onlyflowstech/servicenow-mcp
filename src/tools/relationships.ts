@@ -375,7 +375,7 @@ export async function traverseRelationships(
   let rowsRead = 0;
   let relBytes = 0;
   let ciBytes = 0;
-  let ciCount = 0;
+  let ciRequested = 0;
   let stop: { cap: Cap; depth: number; unread: string[]; detail?: string } | undefined;
   let ciStop: { cap: Cap; depth: number; count: number } | undefined;
   let invalidIdentifier = false;
@@ -386,147 +386,158 @@ export async function traverseRelationships(
     !args.type || type.toLowerCase().includes(args.type.toLowerCase());
 
   /** How many rows the next relationship page may ask for, or the cap that forbids one. */
-  function nextPage(): { limit: number } | { cap: Cap } {
+  function nextPage(wanted: number): { limit: number } | { cap: Cap } {
     if (requests + 1 > limits.maxRequests - limits.ciReadReserve) return { cap: "requests" };
     const rowsLeft = limits.maxRelationshipRows - rowsRead;
     if (rowsLeft < 1) return { cap: "relationship_rows" };
     const perRow = rowsRead > 0 ? Math.max(relBytes / rowsRead, 100) : 250;
     const byBytes = Math.floor((limits.relationshipBytes - relBytes) / (perRow * 1.25));
     if (byBytes < 10) return { cap: "response_bytes" };
-    return { limit: Math.min(limits.relationshipPage, rowsLeft, byBytes) };
+    // Ask for about twice the CIs still needed, so a short page is rare.
+    const asked = Math.min(limits.relationshipPage, Math.max(wanted * 2, 100));
+    return { limit: Math.min(asked, rowsLeft, byBytes) };
   }
+
+  /** The type filter goes in the query too; `escapeQueryValue` keeps the value one literal. */
+  const typeCondition = args.type ? `^type.nameLIKE${escapeQueryValue(args.type)}` : "";
 
   let frontier: string[] = [rootId];
   for (let depth = 1; depth <= maxDepth && frontier.length > 0; depth += 1) {
-    // Relationship rows of every CI of the frontier, direction in the query.
-    const levelRows: RelRow[] = [];
+    // A level is read only as far as the page asked for needs: the CIs are
+    // found in the order of the frontier's chunks, then of the relationship
+    // rows, so what one call reads is a prefix of what a longer one reads.
+    const inFrontier = new Set(frontier);
     const chunked = chunks(frontier, limits.relationshipChunk);
-    let incomplete = false;
-    for (let chunkIndex = 0; chunkIndex < chunked.length && !incomplete; chunkIndex += 1) {
-      const ids = chunked[chunkIndex]!.join(",");
+    const cursor = { chunk: 0, offset: 0 };
+    const found = new Map<string, Found>();
+    const pending: Found[] = [];
+    let pendingStart = 0;
+    const levelEdges: Array<{ key: string; row: RelRow }> = [];
+    const readOrder: Found[] = [];
+    let levelShown = 0;
+    let rowsDone = false;
+    let levelReadStopped: Cap | undefined;
+
+    const needed = (): number => wantedShown + 1 - (shownCount + levelShown);
+
+    async function fetchPage(wanted: number): Promise<void> {
+      const page = nextPage(wanted);
+      if ("cap" in page) {
+        stop = { cap: page.cap, depth, unread: frontier.slice(cursor.chunk * limits.relationshipChunk) };
+        rowsDone = true;
+        return;
+      }
+      const ids = chunked[cursor.chunk]!.join(",");
       const condition =
         wantDown && wantUp ? `parentIN${ids}^ORchildIN${ids}` : wantDown ? `parentIN${ids}` : `childIN${ids}`;
-      for (let offset = 0; ; ) {
-        const page = nextPage();
-        if ("cap" in page) {
-          stop = { cap: page.cap, depth, unread: frontier.slice(chunkIndex * limits.relationshipChunk) };
-          incomplete = true;
-          break;
+      let response: unknown;
+      try {
+        response = await request(
+          "/api/now/table/cmdb_rel_ci",
+          buildTableParams({
+            query: `${condition}${typeCondition}^ORDERBYsys_id`,
+            // The ends come back as bare sys_ids, and the type's own name by
+            // a dot-walk of `type`: no display value of a CI is ever asked for.
+            fields: [...relFields, "type.name"].join(","),
+            limit: page.limit,
+            offset: cursor.offset,
+            displayValue: "false",
+            noCount: true,
+          })
+        );
+      } catch (error) {
+        if (isServiceNowRequestCancellation(error)) throw error;
+        const unread = frontier.slice(cursor.chunk * limits.relationshipChunk);
+        if (isServiceNowResponseTooLarge(error)) {
+          stop = { cap: "response_bytes", depth, unread };
+        } else {
+          // A failed hop truncates the walk -- report, don't hide
+          warnings.push(`cmdb_rel_ci (traversal at depth ${depth}): ${formatError(error)}`);
+          stop = { cap: "error", depth, unread };
         }
-        let response: unknown;
+        rowsDone = true;
+        return;
+      }
+      relBytes += serializedBytes(response);
+      const raw = rowsOf(response);
+      const filtered = filterReadableRecord(raw, relSelection);
+      const rows = Array.isArray(filtered) ? filtered : [];
+      const received = raw.length;
+      rowsRead += received;
+      for (const [position, entry] of rows.entries()) {
+        const row = recordOf(entry);
+        if (!row) continue;
+        // Rows keep their order and count, so the raw row at the same place carries the type's name.
+        const typeName = rows.length === raw.length ? recordOf(raw[position])?.["type.name"] : undefined;
+        let parent: string;
+        let child: string;
         try {
-          response = await request(
-            "/api/now/table/cmdb_rel_ci",
-            buildTableParams({
-              query: `${condition}^ORDERBYsys_id`,
-              // The ends come back as bare sys_ids, and the type's own name by
-              // a dot-walk of `type`: no display value of a CI is ever asked for.
-              fields: [...relFields, "type.name"].join(","),
-              limit: page.limit,
-              offset,
-              displayValue: "false",
-              noCount: true,
-            })
-          );
-        } catch (error) {
-          if (isServiceNowRequestCancellation(error)) throw error;
-          if (isServiceNowResponseTooLarge(error)) {
-            stop = { cap: "response_bytes", depth, unread: frontier.slice(chunkIndex * limits.relationshipChunk) };
-          } else {
-            // A failed hop truncates the walk -- report, don't hide
-            warnings.push(`cmdb_rel_ci (traversal at depth ${depth}): ${formatError(error)}`);
-            stop = { cap: "error", depth, unread: frontier.slice(chunkIndex * limits.relationshipChunk) };
-          }
-          incomplete = true;
-          break;
-        }
-        relBytes += serializedBytes(response);
-        const raw = rowsOf(response);
-        const filtered = filterReadableRecord(raw, relSelection);
-        const rows = Array.isArray(filtered) ? filtered : [];
-        const received = raw.length;
-        rowsRead += received;
-        for (const [position, entry] of rows.entries()) {
-          const row = recordOf(entry);
-          if (!row) continue;
-          // Rows keep their order and count, so the raw row at the same place carries the type's name.
-          const typeName = rows.length === raw.length ? recordOf(raw[position])?.["type.name"] : undefined;
-          let parent: string;
-          let child: string;
-          try {
-            parent = normalizeServiceNowSysId(extractValue(row.parent));
-            child = normalizeServiceNowSysId(extractValue(row.child));
-          } catch {
-            invalidIdentifier = true;
-            continue;
-          }
-          levelRows.push({
-            id: relationshipId(row.sys_id),
-            parent,
-            child,
-            type: (typeof typeName === "string" && typeName !== "" ? typeName : extractDisplay(row.type)) || RELATED_TO,
-          });
-        }
-        if (received < page.limit) break;
-        offset += received;
-      }
-    }
-
-    // Each CI is listed once, at the depth and by the relationship that first
-    // reached it; the rows are read in sys_id order, whatever the chunking.
-    const inFrontier = new Set(frontier);
-    levelRows.sort((a, b) => ((a.id ?? "") < (b.id ?? "") ? -1 : (a.id ?? "") > (b.id ?? "") ? 1 : 0));
-    const found = new Map<string, Found>();
-    const levelEdges: Array<{ key: string; row: RelRow }> = [];
-    for (const row of levelRows) {
-      if (row.parent === row.child) continue;
-      if (!matchesType(row.type)) continue;
-      const reached: Array<{ other: string; direction: Direction; via: string }> = [];
-      if (wantDown && inFrontier.has(row.parent)) {
-        reached.push({ other: row.child, direction: "downstream", via: row.parent });
-      }
-      if (wantUp && inFrontier.has(row.child)) {
-        reached.push({ other: row.parent, direction: "upstream", via: row.child });
-      }
-      if (reached.length === 0) continue;
-      levelEdges.push({ key: row.id ?? `${row.parent}>${row.child}>${row.type}`, row });
-      for (const entry of reached) {
-        if (known.has(entry.other) || unreadable.has(entry.other) || notRead.has(entry.other) || found.has(entry.other)) {
+          parent = normalizeServiceNowSysId(extractValue(row.parent));
+          child = normalizeServiceNowSysId(extractValue(row.child));
+        } catch {
+          invalidIdentifier = true;
           continue;
         }
-        found.set(entry.other, { sys_id: entry.other, type: row.type, direction: entry.direction, via: entry.via });
+        const rel: RelRow = {
+          id: relationshipId(row.sys_id),
+          parent,
+          child,
+          type: (typeof typeName === "string" && typeName !== "" ? typeName : extractDisplay(row.type)) || RELATED_TO,
+        };
+        if (rel.parent === rel.child || !matchesType(rel.type)) continue;
+        const reached: Array<{ other: string; direction: Direction; via: string }> = [];
+        if (wantDown && inFrontier.has(rel.parent)) {
+          reached.push({ other: rel.child, direction: "downstream", via: rel.parent });
+        }
+        if (wantUp && inFrontier.has(rel.child)) {
+          reached.push({ other: rel.parent, direction: "upstream", via: rel.child });
+        }
+        if (reached.length === 0) continue;
+        levelEdges.push({ key: rel.id ?? `${rel.parent}>${rel.child}>${rel.type}`, row: rel });
+        for (const entry of reached) {
+          if (known.has(entry.other) || unreadable.has(entry.other) || notRead.has(entry.other) || found.has(entry.other)) {
+            continue;
+          }
+          const fresh: Found = { sys_id: entry.other, type: rel.type, direction: entry.direction, via: entry.via };
+          found.set(entry.other, fresh);
+          pending.push(fresh);
+        }
+      }
+      if (received < page.limit) {
+        cursor.chunk += 1;
+        cursor.offset = 0;
+        if (cursor.chunk >= chunked.length) rowsDone = true;
+      } else {
+        cursor.offset += received;
       }
     }
 
-    // Read the CIs found, from cmdb_ci, under the profile's field policy.
-    // Relationship rows are not domain separated, so nothing shown about a CI
-    // comes from them: a CI this read does not return is not shown, and is not
-    // walked through.
-    const fresh = [...found.values()];
-    const readNow = fresh.slice(0, Math.max(limits.maxCis - ciCount, 0));
-    let levelReadStopped: Cap | undefined = readNow.length < fresh.length ? "cis" : undefined;
-    const readOrder: Found[] = [];
-    for (const group of chunks(readNow, limits.ciChunk)) {
-      if (requests + 1 > limits.maxRequests) {
-        levelReadStopped = "requests";
-      } else if (ciBytes >= limits.ciBytes) {
-        levelReadStopped = "response_bytes";
-      }
-      if (levelReadStopped === "requests" || levelReadStopped === "response_bytes") {
-        for (const entry of group) {
-          notRead.add(entry.sys_id);
-          skippedVia.add(entry.via);
-        }
-        continue;
-      }
+    while (needed() > 0) {
+      const waiting = (): number => pending.length - pendingStart;
+      // Read relationship rows until they name the CIs still needed.
+      while (!rowsDone && waiting() < needed()) await fetchPage(needed() - waiting());
+      if (waiting() === 0) break;
+      // Read the CIs, from cmdb_ci, under the profile's field policy.
+      // Relationship rows are not domain separated, so nothing shown about a
+      // CI comes from them: a CI this read does not return is not shown, and
+      // is not walked through.
+      const size = Math.min(limits.ciChunk, args.class ? waiting() : Math.min(waiting(), needed()));
+      const group = pending.slice(pendingStart, pendingStart + size);
+      if (limits.maxCis - ciRequested < 1) levelReadStopped = "cis";
+      else if (requests + 1 > limits.maxRequests) levelReadStopped = "requests";
+      else if (ciBytes >= limits.ciBytes) levelReadStopped = "response_bytes";
+      if (levelReadStopped !== undefined) break;
+      const take = group.slice(0, limits.maxCis - ciRequested);
+      pendingStart += take.length;
+      ciRequested += take.length;
       let response: unknown;
       try {
         response = await request(
           "/api/now/table/cmdb_ci",
           buildTableParams({
-            query: `sys_idIN${group.map((entry) => entry.sys_id).join(",")}`,
+            query: `sys_idIN${take.map((entry) => entry.sys_id).join(",")}`,
             fields: ciFields,
-            limit: group.length,
+            limit: take.length,
             displayValue: "true",
             noCount: true,
           })
@@ -539,11 +550,11 @@ export async function traverseRelationships(
           warnings.push(`cmdb_ci (reading CIs at depth ${depth}): ${formatError(error)}`);
           levelReadStopped = "error";
         }
-        for (const entry of group) {
+        for (const entry of take) {
           notRead.add(entry.sys_id);
           skippedVia.add(entry.via);
         }
-        continue;
+        break;
       }
       ciBytes += serializedBytes(response);
       const returned = new Map<string, Record<string, unknown>>();
@@ -556,26 +567,29 @@ export async function traverseRelationships(
           // A row without a usable sys_id cannot be matched to a relationship.
         }
       }
-      for (const entry of group) {
+      for (const entry of take) {
         const row = returned.get(entry.sys_id);
         if (!row) {
           unreadable.add(entry.sys_id);
           continue;
         }
-        known.set(entry.sys_id, viewOf(row));
+        const view = viewOf(row);
+        known.set(entry.sys_id, view);
         readOrder.push(entry);
-        ciCount += 1;
+        if (matchesClass(view)) levelShown += 1;
       }
     }
-    for (const entry of fresh.slice(readNow.length)) {
-      notRead.add(entry.sys_id);
-      skippedVia.add(entry.via);
-    }
-    if (levelReadStopped !== undefined && ciStop === undefined) {
+    // CIs found that a cap kept from being read, when the page still needed them.
+    if (levelReadStopped !== undefined) {
+      const missed = pending.slice(pendingStart).filter((entry) => !notRead.has(entry.sys_id));
+      for (const entry of missed) {
+        notRead.add(entry.sys_id);
+        skippedVia.add(entry.via);
+      }
       ciStop = {
         cap: levelReadStopped,
         depth,
-        count: fresh.filter((entry) => notRead.has(entry.sys_id)).length,
+        count: [...notRead].filter((id) => found.has(id)).length,
       };
     }
 
@@ -608,8 +622,8 @@ export async function traverseRelationships(
         direction: entry.direction,
         via: entry.via,
       });
-      if (matchesClass(view)) shownCount += 1;
     }
+    shownCount += levelShown;
 
     if (stop !== undefined || ciStop !== undefined) break;
     // The page asked for is full, with one more CI known to exist: deeper

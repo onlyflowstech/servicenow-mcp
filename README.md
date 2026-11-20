@@ -775,16 +775,21 @@ to `depth` (1 to 5, default `SN_REL_DEPTH` or 3).
   distance from the start, with the `type` and `direction` of the relationship
   that first reached it and `via`, the sys_id of the CI it was reached from.
   The start CI is never listed. Rows come nearest first; within a depth, in
-  the order of the relationship rows that reached them.
+  the order of the frontier's chunks of 50 CIs, then of the relationship rows
+  (by `sys_id`), so a longer call lists the same CIs first.
 - **Direction is in the query.** `downstream` reads relationships where the CI
   is the parent, `upstream` where it is the child, `both` either. `impact: true`
   is `upstream` only.
 - **Filters.** `type` is a substring of the relationship type; relationships of
-  other types are skipped, so nothing is walked through them. `class` limits
-  which CIs are listed, not which are walked through.
-- **Paging.** `limit` and `offset` page the list. `meta.total` is the number of
-  CIs found; when `has_more` is true the walk stopped once the page was full,
-  so `total` is a lower bound.
+  other types are skipped, so nothing is walked through them; the filter is
+  also sent in the query (`type.nameLIKE`) and checked on the rows. `class`
+  limits which CIs are listed, not which are walked through.
+- **Paging.** `limit` and `offset` page the list. The walk reads only as much as
+  the page needs: it stops once the page and one more CI are known, which is
+  what makes `has_more` true, and it asks for no more relationship rows and
+  CIs than that takes. `meta.total` is the number of CIs found, so a lower
+  bound while `has_more` is true. `traversal_truncated` is set only when a limit
+  stopped the walk before the page was full or the depth was reached.
 - **Relationship types.** Each relationship row is read with its ends as bare
   sys_ids and its type's name (a dot-walk of `type`); no display value of a CI
   is requested from `cmdb_rel_ci`.
@@ -823,7 +828,7 @@ under field policy, the call is refused. See
 **Map.** `map: true` adds `nodes` (the start CI and the CIs listed), `edges`
 (each relationship once, by its row's `sys_id`, with `parent`, `child` and
 `type`) and `diagram`, a Mermaid `flowchart TD` with arrows from parent to
-child. The map covers the page of CIs the call lists, so `limit` and `offset`
+child. The map covers the page of CIs the call lists (nothing more is read for it), so `limit` and `offset`
 page it, and the same field policy applies to every CI attribute in it. The
 diagram draws the nearest 149 CIs at most (150 nodes, 300 edges, 20,000
 characters) and collapses the rest into one node, saying how many in

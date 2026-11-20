@@ -279,6 +279,37 @@ describe("breadth-first traversal", () => {
     ]);
   });
 
+  it("puts the type filter in the query as well, as one literal value", async () => {
+    const instance = new FakeInstance();
+    instance.ci("R");
+    instance.ci("A");
+    instance.rel("01", "R", "A", "Cluster of::Cluster");
+    const { data } = await run(instance, { sys_id: id("R"), depth: 1, type: "Cluster of" });
+    expect(data!.relationships).toHaveLength(1);
+    expect(relQueries(instance)).toEqual([`parentIN${id("R")}^ORchildIN${id("R")}^type.nameLIKECluster of^ORDERBYsys_id`]);
+    const hostile = new FakeInstance();
+    hostile.ci("R");
+    await run(hostile, { sys_id: id("R"), depth: 1, type: "x^ORDERBYDESCname^ORparent=1" });
+    await run(hostile, { sys_id: id("R"), depth: 1, type: "javascript:gs.getUserID()" });
+    const queries = relQueries(hostile);
+    expect(queries[0]).toBe(`parentIN${id("R")}^ORchildIN${id("R")}^type.nameLIKExORDERBYDESCnameORparent=1^ORDERBYsys_id`);
+    expect(queries[0]!.split("^")).toEqual([`parentIN${id("R")}`, `ORchildIN${id("R")}`, "type.nameLIKExORDERBYDESCnameORparent=1", "ORDERBYsys_id"]);
+    expect(queries[1]).toContain("type.nameLIKEgs.getUserID()");
+    expect(queries[1]).not.toContain("javascript:");
+  });
+
+  it("still checks the type on the rows, as the instance may match more loosely", async () => {
+    const instance = new FakeInstance();
+    instance.ci("R");
+    instance.ci("A");
+    instance.ci("B");
+    instance.rel("01", "R", "A", "Cluster of::Cluster");
+    instance.rel("02", "R", "B", "Contains::Contained by");
+    const { data } = await run(instance, { sys_id: id("R"), depth: 1, type: "cluster" });
+    // the fake ignores the type condition, as a loose instance would
+    expect(data!.relationships.map((row) => row.name)).toEqual(["A"]);
+  });
+
   it("pages the output with limit and offset", async () => {
     const instance = new FakeInstance();
     instance.ci("R");
@@ -288,7 +319,8 @@ describe("breadth-first traversal", () => {
     }
     const first = await run(instance, { sys_id: id("R"), depth: 1, limit: 3 });
     expect(first.data!.relationships).toHaveLength(3);
-    expect(first.data!.meta).toMatchObject({ total: 7, has_more: true, next_offset: 3 });
+    // The walk stops once the page and one more CI are known, so `total` is a lower bound.
+    expect(first.data!.meta).toMatchObject({ total: 4, has_more: true, next_offset: 3, traversal_truncated: false });
     const last = await run(instance, { sys_id: id("R"), depth: 1, limit: 3, offset: 6 });
     expect(last.data!.relationships).toHaveLength(1);
     expect(last.data!.meta.has_more).toBe(false);
@@ -345,12 +377,14 @@ describe("fan-out beyond one page", () => {
   });
 
   it("truncates with a warning that names the hub when the row cap stops the paging", async () => {
-    const instance = hub(2_100);
-    const { data } = await run(instance, { sys_id: id("hub"), depth: 2, direction: "downstream", limit: 1000 });
+    const instance = hub(1_100);
+    const limits = { ...TRAVERSAL_LIMITS, maxRelationshipRows: 300 };
+    const { data } = await run(instance, { sys_id: id("hub"), depth: 2, direction: "downstream", limit: 1000 }, limits);
     expect(data!.meta.traversal_truncated).toBe(true);
-    expect(data!.meta.truncated_by).toMatchObject({ cap: "relationship_rows", max: 2000, depth: 1, unread_cis: 1 });
+    expect(data!.meta.truncated_by).toMatchObject({ cap: "relationship_rows", max: 300, depth: 1, unread_cis: 1 });
     expect(data!.warnings[0]).toContain("the-hub");
-    expect(data!.warnings[0]).toContain("2000-relationship-row limit");
+    expect(data!.warnings[0]).toContain("300-relationship-row limit");
+    expect(data!.relationships).toHaveLength(300);
     expect(data!.meta.traversal_requests).toBe(instance.calls.length);
   });
 
@@ -403,10 +437,66 @@ describe("fan-out beyond one page", () => {
     expect(rowsRead).toBeLessThan(300);
   });
 
+  it("reads no more of a hub than the default page needs, and says there is more", async () => {
+    const instance = hub(1_200);
+    const { data } = await run(instance, { sys_id: id("hub"), depth: 1 });
+    expect(data!.relationships).toHaveLength(100);
+    expect(data!.meta).toMatchObject({ has_more: true, next_offset: 100, traversal_truncated: false });
+    expect(data!.meta).not.toHaveProperty("truncated_by");
+    expect(data!.warnings).toBeUndefined();
+    // the start CI, one page of relationships, then the CIs: 100 and the one that proves there is more
+    expect(instance.calls.map((call) => call.path)).toEqual([
+      expect.stringContaining("cmdb_ci/"),
+      "/api/now/table/cmdb_rel_ci",
+      "/api/now/table/cmdb_ci",
+      "/api/now/table/cmdb_ci",
+    ]);
+    expect(data!.meta.traversal_requests).toBe(4);
+  });
+
+  it("lists the same CIs in the same order whatever the page, so paging loses none", async () => {
+    const instance = hub(450);
+    const pages: string[] = [];
+    for (const offset of [0, 100, 200, 300, 400]) {
+      const { data } = await run(instance, { sys_id: id("hub"), depth: 1, direction: "downstream", offset });
+      pages.push(...data!.relationships.map((row) => String(row.sys_id)));
+    }
+    const whole = await run(instance, { sys_id: id("hub"), depth: 1, direction: "downstream", limit: 1000 });
+    expect(pages).toEqual(whole.data!.relationships.map((row) => String(row.sys_id)));
+    expect(new Set(pages).size).toBe(450);
+  });
+
+  it("keeps paging relationship rows when CIs it needs turn out unreadable", async () => {
+    const instance = new FakeInstance();
+    instance.ci("R");
+    for (let index = 0; index < 300; index += 1) {
+      instance.ci(`c${index}`, `c ${index}`, "Linux Server", index % 2 === 0);
+      instance.rel(`a${index.toString(16).padStart(3, "0")}`, "R", `c${index}`);
+    }
+    const { data } = await run(instance, { sys_id: id("R"), depth: 1, direction: "downstream", limit: 20 });
+    expect(data!.relationships).toHaveLength(20);
+    expect(data!.meta).toMatchObject({ has_more: true, traversal_truncated: false });
+    expect(data!.meta.unreadable_relationships).toBeGreaterThan(0);
+  });
+
+  it("fills a page that a class filter thins out, reading no more than it needs", async () => {
+    const instance = new FakeInstance();
+    instance.ci("R");
+    for (let index = 0; index < 600; index += 1) {
+      instance.ci(`c${index}`, `c ${index}`, index % 10 === 0 ? "Application" : "Linux Server");
+      instance.rel(`a${index.toString(16).padStart(3, "0")}`, "R", `c${index}`);
+    }
+    const { data } = await run(instance, { sys_id: id("R"), depth: 1, direction: "downstream", class: "application", limit: 5 });
+    expect(data!.relationships).toHaveLength(5);
+    expect(data!.meta).toMatchObject({ has_more: true, traversal_truncated: false });
+    const read = instance.calls.filter((call) => call.path === "/api/now/table/cmdb_ci" && call.params.sysparm_query?.startsWith("sys_idIN"));
+    expect(read.length).toBeLessThan(6);
+  });
+
   it("caps the CIs it reads and says which CIs they were reached from", async () => {
     const instance = hub(30);
     const limits = { ...TRAVERSAL_LIMITS, maxCis: 12 };
-    const { data } = await run(instance, { sys_id: id("hub"), depth: 2, direction: "downstream" }, limits);
+    const { data } = await run(instance, { sys_id: id("hub"), depth: 2, direction: "downstream", limit: 1000 }, limits);
     expect(data!.relationships).toHaveLength(12);
     expect(data!.meta.truncated_by).toMatchObject({ cap: "cis", max: 12, depth: 1, unread_cis: 18 });
     expect(data!.warnings.join(" ")).toContain("the-hub");

@@ -184,11 +184,12 @@ export function buildRelationshipMap(
   edges: readonly MapEdge[],
   byteBudget: number
 ): RelationshipMap {
-  const all = [start, ...listed].filter(
-    (node, index, nodes) =>
-      SYS_ID.test(node.sys_id) &&
-      nodes.findIndex((other) => other.sys_id === node.sys_id) === index
-  );
+  const seen = new Set<string>();
+  const all = [start, ...listed].filter((node) => {
+    if (!SYS_ID.test(node.sys_id) || seen.has(node.sys_id)) return false;
+    seen.add(node.sys_id);
+    return true;
+  });
   const assemble = (kept: number) => {
     const nodes = all.slice(0, kept);
     const among = edgesAmong(nodes, edges);
