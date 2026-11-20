@@ -42,7 +42,8 @@ export type ToolErrorReason =
   | "unknown_filter_field"
   | "filter_fields_too_large"
   | "invalid_cursor"
-  | "max_response_bytes_too_small";
+  | "max_response_bytes_too_small"
+  | "ambiguous_ci_name";
 
 export interface ToolErrorDescriptor {
   readonly category: ToolErrorCategory;
@@ -262,6 +263,68 @@ export function createInvalidCursorError(problem: "cursor" | "offset" | "window"
           "for a different level, source or message filter. Repeat the original " +
           "filters with the cursor from the last call, or start a new tail with " +
           "tail=true.",
+    retry: "retry_after_correction",
+  });
+}
+
+/** One CI an ambiguous name matched; `name` and `class` only when the profile can read them. */
+export interface AmbiguousCiMatch {
+  readonly sys_id: string;
+  readonly name?: string;
+  readonly class?: string;
+}
+
+const MAX_AMBIGUOUS_MATCHES = 10;
+const AMBIGUOUS_SYS_ID = /^[0-9a-f]{32}$/u;
+const AMBIGUOUS_STRIPPED =
+  /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u200B-\u200F\u2028-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/gu;
+
+/** One line of inert text: no controls, bidi or invisibles, no double quote, bounded. */
+function inertName(value: unknown, max = 80): string {
+  if (typeof value !== "string") return "";
+  const flat = value
+    .slice(0, max * 4)
+    .replace(AMBIGUOUS_STRIPPED, " ")
+    .replace(/"/gu, "'")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const characters = Array.from(flat);
+  return characters.length > max ? `${characters.slice(0, max).join("")}…` : flat;
+}
+
+/**
+ * Issue the trusted error for a CI name that matches more than one CI. It
+ * lists up to the first {@link MAX_AMBIGUOUS_MATCHES} matches the caller was
+ * shown the fields of, each as name, class and sys_id, and says if more CIs
+ * share the name, so one retry can name the CI by sys_id. Names and classes
+ * are instance text read from `cmdb_ci` under the profile's field policy; they
+ * are made inert and bounded here, and a sys_id that is not 32 hex characters
+ * is dropped.
+ */
+export function createAmbiguousCiNameError(
+  name: string,
+  matches: readonly AmbiguousCiMatch[],
+  more: boolean
+): Error {
+  const listed = matches
+    .filter((match) => typeof match.sys_id === "string" && AMBIGUOUS_SYS_ID.test(match.sys_id))
+    .slice(0, MAX_AMBIGUOUS_MATCHES)
+    .map((match) => {
+      const label = inertName(match.name);
+      const cls = inertName(match.class, 60);
+      return [
+        label === "" ? "(no name shown)" : label,
+        ...(cls === "" ? [] : [`class ${cls}`]),
+        `sys_id ${match.sys_id}`,
+      ].join(", ");
+    });
+  const subject = inertName(name);
+  return issue({
+    category: "conflict",
+    reason: "ambiguous_ci_name",
+    message:
+      `ci_name "${subject}" matches more than one CI. Retry with sys_id set to one of: ` +
+      `${listed.join("; ")}${more ? "; more CIs share this name" : ""}.`,
     retry: "retry_after_correction",
   });
 }

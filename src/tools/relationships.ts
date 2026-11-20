@@ -1,18 +1,37 @@
 import { z } from "zod";
-import type { ServiceNowOperations } from "../client.js";
+import { createAmbiguousCiNameError, createToolError } from "../tool-error.js";
+import { isServiceNowRequestCancellation, isServiceNowResponseTooLarge, type ServiceNowOperations } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
-import { ok, err, escapeQueryValue, formatError, withWarnings } from "../utils.js";
+import {
+  ok,
+  err,
+  buildTableParams,
+  escapeQueryValue,
+  formatError,
+  serializedBytes,
+  withWarnings,
+} from "../utils.js";
+import {
+  filterReadableRecord,
+  isFieldPolicyError,
+  resolveReadableFields,
+} from "../field-policy.js";
 import {
   normalizeServiceNowSysId,
   serviceNowSysIdPathSegment,
   serviceNowSysIdSchema,
 } from "../servicenow-identifiers.js";
+import {
+  buildRelationshipMap,
+  type MapEdge,
+  type MapNode,
+} from "./relationships-map.js";
 
 export const definition = {
   name: "sn_relationships",
   description:
-    "Traverse CMDB CI relationships (graph walk). Supports upstream, downstream, or both directions with configurable depth. Use for impact analysis and dependency mapping.",
+    "Traverse CMDB CI relationships breadth first: each CI once, at its shortest depth. Upstream, downstream or both, to a depth. Lists only CIs the profile can read. A cap that stops the walk sets meta.traversal_truncated and warns, naming the CIs not fully read. Use for impact analysis and dependency mapping.",
   annotations: {
     title: "Traverse CI relationships",
     readOnlyHint: true,
@@ -23,7 +42,7 @@ export const definition = {
 };
 
 export const schema = z.object({
-  ci_name: z.string().optional().describe("Name of the CI to start from (resolved via cmdb_ci name field)"),
+  ci_name: z.string().optional().describe("Name of the CI to start from (several matches: pass sys_id instead)"),
   sys_id: serviceNowSysIdSchema.optional().describe("32-hex sys_id of the CI to start from (alternative to ci_name)"),
   depth: z.number().int().min(1).max(5).optional().describe("How many levels deep to traverse (1-5, default from SN_REL_DEPTH or 3)"),
   limit: z.number().int().min(1).max(1000).optional().default(100).describe("Maximum relationships to return (default 100, max 1000)"),
@@ -32,239 +51,689 @@ export const schema = z.object({
   type: z.string().optional().describe("Filter by relationship type name (substring match)"),
   class: z.string().optional().describe("Filter displayed CIs by class name (substring match)"),
   impact: z.boolean().optional().default(false).describe("Impact analysis mode -- walks upstream only"),
+  map: z.boolean().optional().default(false).describe("Also return nodes, edges (with types) and a Mermaid diagram of the CIs listed"),
 });
 
+/**
+ * The bounds of one traversal. Every one is documented in the README, and one
+ * that stops a walk is reported in `meta.truncated_by` and in a warning that
+ * names the CIs whose relationships were not fully read.
+ */
+export interface TraversalLimits {
+  readonly maxRequests: number;
+  readonly ciReadReserve: number;
+  readonly maxCis: number;
+  readonly maxRelationshipRows: number;
+  readonly relationshipPage: number;
+  readonly relationshipChunk: number;
+  readonly ciChunk: number;
+  readonly ambiguousListed: number;
+  readonly namedInWarning: number;
+  readonly relationshipBytes: number;
+  readonly ciBytes: number;
+  readonly mapBytes: number;
+}
+
+export const TRAVERSAL_LIMITS: TraversalLimits = Object.freeze({
+  /**
+   * Upstream requests of one call, root lookup, relationship pages and CI
+   * reads together. A batched walk needs about one request per 50 CIs of a
+   * level: at the other limits' worst case, about 45 in all.
+   */
+  maxRequests: 50,
+  /** Of those, the requests kept back for reading the CIs a level finds. */
+  ciReadReserve: 15,
+  /** Distinct CIs read, the start CI aside. */
+  maxCis: 1_000,
+  /** Relationship rows read, duplicates (a row read from each end) included. */
+  maxRelationshipRows: 2_000,
+  /** Rows per relationship page. */
+  relationshipPage: 500,
+  /** CIs per relationship query (both directions: 2 x 50 sys_ids in the URL). */
+  relationshipChunk: 50,
+  /** CIs per `cmdb_ci` read. */
+  ciChunk: 100,
+  /** Matches an ambiguous `ci_name` error lists. */
+  ambiguousListed: 5,
+  /** CIs named in a warning. */
+  namedInWarning: 5,
+  /**
+   * The client allows 1 MiB of upstream JSON per call, all requests together.
+   * The walk keeps its own estimate of what it has read and stops short of it:
+   * this much for relationship rows, and this much for CI reads.
+   */
+  relationshipBytes: 640 * 1024,
+  ciBytes: 180 * 1024,
+  /** Serialized bytes of the map (nodes, edges and diagram) in one response. */
+  mapBytes: 48_000,
+});
+
+type Direction = "upstream" | "downstream";
+type Cap = "requests" | "relationship_rows" | "response_bytes" | "cis" | "error";
+
+interface ListedCi {
+  readonly sys_id: string;
+  readonly name?: string;
+  readonly class?: string;
+  readonly depth: number;
+  readonly type: string;
+  readonly direction: Direction;
+  readonly via: string;
+}
+
 interface RelNode {
-  name: string;
-  class: string;
+  name?: string;
+  class?: string;
   type: string;
-  direction: string;
+  direction: Direction;
   sys_id: string;
+  via: string;
   depth: number;
+}
+
+interface RelRow {
+  readonly id: string | undefined;
+  readonly parent: string;
+  readonly child: string;
+  readonly type: string;
+}
+
+interface Found {
+  readonly sys_id: string;
+  readonly type: string;
+  readonly direction: Direction;
+  readonly via: string;
+}
+
+interface CiView {
+  readonly name?: string;
+  readonly class?: string;
+}
+
+const RELATED_TO = "Related to";
+const SYS_ID_FIELD = "sys_id";
+
+/** The fields of `table`, of those named, that the profile can read. */
+function readableAmong(table: string, names: readonly string[]): string[] {
+  const readable: string[] = [];
+  for (const name of names) {
+    try {
+      resolveReadableFields(table, { fields: name });
+      readable.push(name);
+    } catch (error) {
+      if (!isFieldPolicyError(error)) throw error;
+    }
+  }
+  return readable;
+}
+
+function extractValue(field: unknown): string {
+  if (!field) return "";
+  if (typeof field === "string") return field;
+  if (typeof field === "object" && field !== null) {
+    const f = field as Record<string, unknown>;
+    if (f.value && typeof f.value === "string") return f.value;
+    if (f.link && typeof f.link === "string") {
+      // Extract sys_id from link URL
+      const parts = (f.link as string).split("/");
+      return parts[parts.length - 1] ?? "";
+    }
+  }
+  return "";
+}
+
+function extractDisplay(field: unknown): string {
+  if (!field) return "";
+  if (typeof field === "string") {
+    // If it's a 32-char hex string, it's a sys_id not a display value
+    if (/^[a-f0-9]{32}$/.test(field)) return "";
+    return field;
+  }
+  if (typeof field === "object" && field !== null) {
+    const f = field as Record<string, unknown>;
+    if (f.display_value && typeof f.display_value === "string") return f.display_value;
+  }
+  return "";
+}
+
+/** The relationship row's sys_id; `display_value=all` returns it as a value object. */
+function relationshipId(field: unknown): string | undefined {
+  const value = extractValue(field);
+  return /^[0-9a-f]{32}$/u.test(value) ? value : undefined;
+}
+
+function rowsOf(response: unknown): unknown[] {
+  const result =
+    typeof response === "object" && response !== null
+      ? (response as { result?: unknown }).result
+      : undefined;
+  return Array.isArray(result) ? result : [];
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function chunks<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    out.push(items.slice(index, index + size));
+  }
+  return out;
+}
+
+/** One line of inert text for an error or a warning. */
+function tidy(value: string, max = 80): string {
+  const flat = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/gu, " ").trim();
+  const characters = Array.from(flat);
+  return characters.length > max ? `${characters.slice(0, max).join("")}…` : flat;
+}
+
+/**
+ * The start CI does not exist, or is not readable. A result the handler marks
+ * as an error reaches the caller only as a generic failure, so this is the
+ * trusted error that says what happened.
+ */
+function ciNotFound(): Error {
+  return createToolError("not_found", "retry_after_correction");
+}
+
+function quantity(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 export async function handler(
   args: z.infer<typeof schema>,
   client: ServiceNowOperations,
   config: ServiceNowToolSettings,
-  _context: ExecutionContext
+  _context?: ExecutionContext
 ) {
-  try {
-    if (!args.ci_name && !args.sys_id) {
-      return err("Either ci_name or sys_id is required");
+  return traverseRelationships(args, client, config, TRAVERSAL_LIMITS);
+}
+
+/** The traversal with its bounds given, for tests that exercise each one. */
+export async function traverseRelationships(
+  args: z.infer<typeof schema>,
+  client: ServiceNowOperations,
+  config: ServiceNowToolSettings,
+  limits: TraversalLimits
+) {
+  if (!args.ci_name && !args.sys_id) {
+    return err("Either ci_name or sys_id is required");
+  }
+
+  const maxDepth = Math.min(Math.max(args.depth ?? config.relDepth, 1), 5);
+  let direction = args.direction;
+  if (args.impact) direction = "upstream";
+  const wantDown = direction !== "upstream";
+  const wantUp = direction !== "downstream";
+
+  // ── Field policy: both ends of a relationship must be readable ──
+  // Refuse before any request, and show only what the profile can read.
+  resolveReadableFields("cmdb_rel_ci", { fields: "parent,child,type" });
+  const relIdReadable = readableAmong("cmdb_rel_ci", [SYS_ID_FIELD]).length > 0;
+  const relFields = [...(relIdReadable ? [SYS_ID_FIELD] : []), "parent", "child", "type"];
+  const relSelection = resolveReadableFields("cmdb_rel_ci", { fields: relFields.join(",") });
+  const ciShown = readableAmong("cmdb_ci", ["name", "sys_class_name"]);
+  const nameShown = ciShown.includes("name");
+  const classShown = ciShown.includes("sys_class_name");
+  if (args.ci_name) resolveReadableFields("cmdb_ci", { fields: "name", purpose: "query" });
+  if (args.class) resolveReadableFields("cmdb_ci", { fields: "sys_class_name", purpose: "query" });
+  const ciSelectedIds = [...(readableAmong("cmdb_ci", [SYS_ID_FIELD]).length > 0 ? [SYS_ID_FIELD] : []), ...ciShown];
+  const ciSelection = ciSelectedIds.length > 0
+    ? resolveReadableFields("cmdb_ci", { fields: ciSelectedIds.join(",") })
+    : undefined;
+  const ciFields = [SYS_ID_FIELD, ...ciShown].join(",");
+
+  // ── Request accounting: every upstream request this call makes ──
+  let requests = 0;
+  const warnings: string[] = [];
+
+  async function request(path: string, params: Record<string, string>): Promise<unknown> {
+    requests += 1;
+    return client.get(path, params);
+  }
+
+  /** What the profile may see of one `cmdb_ci` row. */
+  function viewOf(row: Record<string, unknown>): CiView {
+    const shown = ciSelection === undefined ? undefined : recordOf(filterReadableRecord(row, ciSelection));
+    const name = shown?.name;
+    const cls = shown?.sys_class_name;
+    return {
+      ...(nameShown ? { name: typeof name === "string" && name !== "" ? name : undefined } : {}),
+      ...(classShown ? { class: typeof cls === "string" && cls !== "" ? cls : "unknown" } : {}),
+    } as CiView;
+  }
+
+  // ── Resolve the start CI ──
+  let rootId: string;
+  let rootView: CiView;
+  if (args.sys_id) {
+    const response = await request(`/api/now/table/cmdb_ci/${serviceNowSysIdPathSegment(args.sys_id)}`, {
+      sysparm_fields: ciFields,
+      sysparm_display_value: "true",
+    });
+    const row = recordOf((response as { result?: unknown } | null)?.result);
+    if (!row || (!row.sys_id && !row.name)) throw ciNotFound();
+    rootId = normalizeServiceNowSysId(args.sys_id);
+    rootView = viewOf(row);
+  } else {
+    const response = await request("/api/now/table/cmdb_ci", {
+      sysparm_query: `name=${escapeQueryValue(args.ci_name!)}^ORDERBYsys_id`,
+      sysparm_fields: ciFields,
+      sysparm_display_value: "true",
+      sysparm_limit: String(limits.ambiguousListed + 1),
+    });
+    const matches = rowsOf(response).map(recordOf).filter((row): row is Record<string, unknown> => row !== undefined);
+    if (matches.length === 0) throw ciNotFound();
+    if (matches.length > 1) {
+      throw createAmbiguousCiNameError(
+        args.ci_name!,
+        matches.slice(0, limits.ambiguousListed).map((row) => {
+          const view = viewOf(row);
+          return {
+            sys_id: String(row.sys_id ?? ""),
+            ...(view.name === undefined ? {} : { name: view.name }),
+            ...(view.class === undefined ? {} : { class: view.class }),
+          };
+        }),
+        matches.length > limits.ambiguousListed
+      );
     }
-
-    const maxDepth = Math.min(Math.max(args.depth ?? config.relDepth, 1), 5);
-    let direction = args.direction;
-    if (args.impact) direction = "upstream";
-
-    // ── Resolve root CI ──
-    let rootId: string;
-    let rootName: string;
-    let rootClass: string;
-
-    if (args.sys_id) {
-      const ciResp = await client.get(`/api/now/table/cmdb_ci/${serviceNowSysIdPathSegment(args.sys_id)}`, {
-        sysparm_fields: "sys_id,name,sys_class_name",
-        sysparm_display_value: "true",
-      });
-      if (!ciResp.result?.name) {
-        return err(`CI not found with sys_id: ${args.sys_id}`);
-      }
-      rootId = normalizeServiceNowSysId(args.sys_id);
-      rootName = ciResp.result.name;
-      rootClass = ciResp.result.sys_class_name;
-    } else {
-      const ciResp = await client.get("/api/now/table/cmdb_ci", {
-        sysparm_query: `name=${escapeQueryValue(args.ci_name!)}^ORDERBYsys_id`,
-        sysparm_fields: "sys_id,name,sys_class_name",
-        sysparm_display_value: "true",
-        sysparm_limit: "5",
-      });
-      const results = ciResp.result || [];
-      if (results.length === 0) {
-        return err(`CI not found: ${args.ci_name}`);
-      }
-      rootId = results[0].sys_id;
-      rootName = results[0].name;
-      rootClass = results[0].sys_class_name;
+    const row = matches[0]!;
+    try {
+      rootId = normalizeServiceNowSysId(row.sys_id);
+    } catch {
+      throw ciNotFound();
     }
+    rootView = viewOf(row);
+  }
 
-    // ── Traverse ──
-    const visited = new Set<string>([rootId]);
-    const classCache = new Map<string, string>([[rootId, rootClass]]);
-    const allRels: RelNode[] = [];
-    const warnings: string[] = [];
-    const traversalTarget = args.offset + args.limit + 1;
-    const maxTraversalRequests = 2_001;
-    let traversalRequests = 0;
-    let traversalTruncated = false;
+  // ── Traverse, level by level ──
+  const known = new Map<string, CiView>([[rootId, rootView]]);
+  const unreadable = new Set<string>();
+  const notRead = new Set<string>();
+  const listed: ListedCi[] = [];
+  /** Relationships among readable CIs, by row sys_id, for the map. */
+  const edges = new Map<string, MapEdge & { readonly rank: number }>();
+  const leftOut = new Set<string>();
+  const skippedVia = new Set<string>();
+  const wantedShown = args.offset + args.limit;
+  let shownCount = 0;
+  let rowsRead = 0;
+  let relBytes = 0;
+  let ciBytes = 0;
+  let ciCount = 0;
+  let stop: { cap: Cap; depth: number; unread: string[]; detail?: string } | undefined;
+  let ciStop: { cap: Cap; depth: number; count: number } | undefined;
+  let invalidIdentifier = false;
 
-    async function getClass(id: string): Promise<string> {
-      if (classCache.has(id)) return classCache.get(id)!;
-      try {
-        const safeId = normalizeServiceNowSysId(id);
-        const resp = await client.get(`/api/now/table/cmdb_ci/${serviceNowSysIdPathSegment(safeId)}`, {
-          sysparm_fields: "sys_class_name",
-          sysparm_display_value: "true",
-        });
-        const cls = resp.result?.sys_class_name || "unknown";
-        classCache.set(id, cls);
-        return cls;
-      } catch {
-        classCache.set(id, "unknown");
-        return "unknown";
-      }
-    }
+  const matchesClass = (view: CiView): boolean =>
+    !args.class || (view.class ?? "").toLowerCase().includes(args.class.toLowerCase());
+  const matchesType = (type: string): boolean =>
+    !args.type || type.toLowerCase().includes(args.type.toLowerCase());
 
-    function extractValue(field: unknown): string {
-      if (!field) return "";
-      if (typeof field === "string") return field;
-      if (typeof field === "object" && field !== null) {
-        const f = field as Record<string, unknown>;
-        if (f.value && typeof f.value === "string") return f.value;
-        if (f.link && typeof f.link === "string") {
-          // Extract sys_id from link URL
-          const parts = (f.link as string).split("/");
-          return parts[parts.length - 1];
-        }
-      }
-      return "";
-    }
+  /** How many rows the next relationship page may ask for, or the cap that forbids one. */
+  function nextPage(): { limit: number } | { cap: Cap } {
+    if (requests + 1 > limits.maxRequests - limits.ciReadReserve) return { cap: "requests" };
+    const rowsLeft = limits.maxRelationshipRows - rowsRead;
+    if (rowsLeft < 1) return { cap: "relationship_rows" };
+    const perRow = rowsRead > 0 ? Math.max(relBytes / rowsRead, 100) : 250;
+    const byBytes = Math.floor((limits.relationshipBytes - relBytes) / (perRow * 1.25));
+    if (byBytes < 10) return { cap: "response_bytes" };
+    return { limit: Math.min(limits.relationshipPage, rowsLeft, byBytes) };
+  }
 
-    function extractDisplay(field: unknown): string {
-      if (!field) return "";
-      if (typeof field === "string") {
-        // If it's a 32-char hex string, it's a sys_id not a display value
-        if (/^[a-f0-9]{32}$/.test(field)) return "";
-        return field;
-      }
-      if (typeof field === "object" && field !== null) {
-        const f = field as Record<string, unknown>;
-        if (f.display_value && typeof f.display_value === "string") return f.display_value;
-      }
-      return "";
-    }
-
-    async function traverse(currentId: string, currentDepth: number): Promise<void> {
-      if (currentDepth > maxDepth || allRels.length >= traversalTarget) return;
-      if (traversalRequests >= maxTraversalRequests) {
-        traversalTruncated = true;
-        return;
-      }
-      traversalRequests += 1;
-
-      let relResp;
-      try {
-        const safeId = escapeQueryValue(normalizeServiceNowSysId(currentId));
-        relResp = await client.get("/api/now/table/cmdb_rel_ci", {
-          sysparm_query: `parent=${safeId}^ORchild=${safeId}^ORDERBYsys_id`,
-          sysparm_fields: "parent,child,type",
-          sysparm_display_value: "all",
-          sysparm_limit: "100",
-        });
-      } catch (error) {
-        // A failed hop truncates the walk -- report, don't hide
-        warnings.push(
-          `cmdb_rel_ci (traversal at depth ${currentDepth}): ${formatError(error)}`
-        );
-        return;
-      }
-
-      const records = relResp.result || [];
-      const seen = new Set<string>();
-
-      for (const rec of records) {
-        if (allRels.length >= traversalTarget) {
-          traversalTruncated = true;
+  let frontier: string[] = [rootId];
+  for (let depth = 1; depth <= maxDepth && frontier.length > 0; depth += 1) {
+    // Relationship rows of every CI of the frontier, direction in the query.
+    const levelRows: RelRow[] = [];
+    const chunked = chunks(frontier, limits.relationshipChunk);
+    let incomplete = false;
+    for (let chunkIndex = 0; chunkIndex < chunked.length && !incomplete; chunkIndex += 1) {
+      const ids = chunked[chunkIndex]!.join(",");
+      const condition =
+        wantDown && wantUp ? `parentIN${ids}^ORchildIN${ids}` : wantDown ? `parentIN${ids}` : `childIN${ids}`;
+      for (let offset = 0; ; ) {
+        const page = nextPage();
+        if ("cap" in page) {
+          stop = { cap: page.cap, depth, unread: frontier.slice(chunkIndex * limits.relationshipChunk) };
+          incomplete = true;
           break;
         }
-        let parentId: string;
-        let childId: string;
+        let response: unknown;
         try {
-          parentId = normalizeServiceNowSysId(extractValue(rec.parent));
-          childId = normalizeServiceNowSysId(extractValue(rec.child));
-        } catch {
-          warnings.push("cmdb_rel_ci returned an invalid relationship identifier");
-          continue;
+          response = await request(
+            "/api/now/table/cmdb_rel_ci",
+            buildTableParams({
+              query: `${condition}^ORDERBYsys_id`,
+              // The ends come back as bare sys_ids, and the type's own name by
+              // a dot-walk of `type`: no display value of a CI is ever asked for.
+              fields: [...relFields, "type.name"].join(","),
+              limit: page.limit,
+              offset,
+              displayValue: "false",
+              noCount: true,
+            })
+          );
+        } catch (error) {
+          if (isServiceNowRequestCancellation(error)) throw error;
+          if (isServiceNowResponseTooLarge(error)) {
+            stop = { cap: "response_bytes", depth, unread: frontier.slice(chunkIndex * limits.relationshipChunk) };
+          } else {
+            // A failed hop truncates the walk -- report, don't hide
+            warnings.push(`cmdb_rel_ci (traversal at depth ${depth}): ${formatError(error)}`);
+            stop = { cap: "error", depth, unread: frontier.slice(chunkIndex * limits.relationshipChunk) };
+          }
+          incomplete = true;
+          break;
         }
-        const parentName = extractDisplay(rec.parent);
-        const childName = extractDisplay(rec.child);
-        const typeName = extractDisplay(rec.type) || "Related to";
-
-        let otherId: string;
-        let otherName: string;
-        let relDir: string;
-
-        if (parentId === currentId) {
-          otherId = childId;
-          otherName = childName;
-          relDir = "downstream";
-        } else if (childId === currentId) {
-          otherId = parentId;
-          otherName = parentName;
-          relDir = "upstream";
-        } else {
-          continue;
-        }
-
-        if (otherId === currentId) continue;
-        if (direction !== "both" && relDir !== direction) continue;
-        if (args.type && !typeName.toLowerCase().includes(args.type.toLowerCase())) continue;
-
-        const pairKey = `${otherId}:${relDir}`;
-        if (seen.has(pairKey)) continue;
-        seen.add(pairKey);
-
-        const otherClass = await getClass(otherId);
-
-        // Apply class filter for display only
-        if (!args.class || otherClass.toLowerCase().includes(args.class.toLowerCase())) {
-          allRels.push({
-            name: otherName || otherId,
-            class: otherClass,
-            type: typeName,
-            direction: relDir,
-            sys_id: otherId,
-            depth: currentDepth,
+        relBytes += serializedBytes(response);
+        const raw = rowsOf(response);
+        const filtered = filterReadableRecord(raw, relSelection);
+        const rows = Array.isArray(filtered) ? filtered : [];
+        const received = raw.length;
+        rowsRead += received;
+        for (const [position, entry] of rows.entries()) {
+          const row = recordOf(entry);
+          if (!row) continue;
+          // Rows keep their order and count, so the raw row at the same place carries the type's name.
+          const typeName = rows.length === raw.length ? recordOf(raw[position])?.["type.name"] : undefined;
+          let parent: string;
+          let child: string;
+          try {
+            parent = normalizeServiceNowSysId(extractValue(row.parent));
+            child = normalizeServiceNowSysId(extractValue(row.child));
+          } catch {
+            invalidIdentifier = true;
+            continue;
+          }
+          levelRows.push({
+            id: relationshipId(row.sys_id),
+            parent,
+            child,
+            type: (typeof typeName === "string" && typeName !== "" ? typeName : extractDisplay(row.type)) || RELATED_TO,
           });
         }
+        if (received < page.limit) break;
+        offset += received;
+      }
+    }
 
-        // Recurse
-        if (currentDepth < maxDepth && !visited.has(otherId)) {
-          visited.add(otherId);
-          await traverse(otherId, currentDepth + 1);
+    // Each CI is listed once, at the depth and by the relationship that first
+    // reached it; the rows are read in sys_id order, whatever the chunking.
+    const inFrontier = new Set(frontier);
+    levelRows.sort((a, b) => ((a.id ?? "") < (b.id ?? "") ? -1 : (a.id ?? "") > (b.id ?? "") ? 1 : 0));
+    const found = new Map<string, Found>();
+    const levelEdges: Array<{ key: string; row: RelRow }> = [];
+    for (const row of levelRows) {
+      if (row.parent === row.child) continue;
+      if (!matchesType(row.type)) continue;
+      const reached: Array<{ other: string; direction: Direction; via: string }> = [];
+      if (wantDown && inFrontier.has(row.parent)) {
+        reached.push({ other: row.child, direction: "downstream", via: row.parent });
+      }
+      if (wantUp && inFrontier.has(row.child)) {
+        reached.push({ other: row.parent, direction: "upstream", via: row.child });
+      }
+      if (reached.length === 0) continue;
+      levelEdges.push({ key: row.id ?? `${row.parent}>${row.child}>${row.type}`, row });
+      for (const entry of reached) {
+        if (known.has(entry.other) || unreadable.has(entry.other) || notRead.has(entry.other) || found.has(entry.other)) {
+          continue;
+        }
+        found.set(entry.other, { sys_id: entry.other, type: row.type, direction: entry.direction, via: entry.via });
+      }
+    }
+
+    // Read the CIs found, from cmdb_ci, under the profile's field policy.
+    // Relationship rows are not domain separated, so nothing shown about a CI
+    // comes from them: a CI this read does not return is not shown, and is not
+    // walked through.
+    const fresh = [...found.values()];
+    const readNow = fresh.slice(0, Math.max(limits.maxCis - ciCount, 0));
+    let levelReadStopped: Cap | undefined = readNow.length < fresh.length ? "cis" : undefined;
+    const readOrder: Found[] = [];
+    for (const group of chunks(readNow, limits.ciChunk)) {
+      if (requests + 1 > limits.maxRequests) {
+        levelReadStopped = "requests";
+      } else if (ciBytes >= limits.ciBytes) {
+        levelReadStopped = "response_bytes";
+      }
+      if (levelReadStopped === "requests" || levelReadStopped === "response_bytes") {
+        for (const entry of group) {
+          notRead.add(entry.sys_id);
+          skippedVia.add(entry.via);
+        }
+        continue;
+      }
+      let response: unknown;
+      try {
+        response = await request(
+          "/api/now/table/cmdb_ci",
+          buildTableParams({
+            query: `sys_idIN${group.map((entry) => entry.sys_id).join(",")}`,
+            fields: ciFields,
+            limit: group.length,
+            displayValue: "true",
+            noCount: true,
+          })
+        );
+      } catch (error) {
+        if (isServiceNowRequestCancellation(error)) throw error;
+        if (isServiceNowResponseTooLarge(error)) {
+          levelReadStopped = "response_bytes";
+        } else {
+          warnings.push(`cmdb_ci (reading CIs at depth ${depth}): ${formatError(error)}`);
+          levelReadStopped = "error";
+        }
+        for (const entry of group) {
+          notRead.add(entry.sys_id);
+          skippedVia.add(entry.via);
+        }
+        continue;
+      }
+      ciBytes += serializedBytes(response);
+      const returned = new Map<string, Record<string, unknown>>();
+      for (const entry of rowsOf(response)) {
+        const row = recordOf(entry);
+        if (!row) continue;
+        try {
+          returned.set(normalizeServiceNowSysId(row.sys_id), row);
+        } catch {
+          // A row without a usable sys_id cannot be matched to a relationship.
+        }
+      }
+      for (const entry of group) {
+        const row = returned.get(entry.sys_id);
+        if (!row) {
+          unreadable.add(entry.sys_id);
+          continue;
+        }
+        known.set(entry.sys_id, viewOf(row));
+        readOrder.push(entry);
+        ciCount += 1;
+      }
+    }
+    for (const entry of fresh.slice(readNow.length)) {
+      notRead.add(entry.sys_id);
+      skippedVia.add(entry.via);
+    }
+    if (levelReadStopped !== undefined && ciStop === undefined) {
+      ciStop = {
+        cap: levelReadStopped,
+        depth,
+        count: fresh.filter((entry) => notRead.has(entry.sys_id)).length,
+      };
+    }
+
+    // Relationships among CIs the profile can read; the others are counted.
+    for (const { key, row } of levelEdges) {
+      const ends = [row.parent, row.child];
+      if (ends.some((id) => unreadable.has(id))) {
+        leftOut.add(key);
+      } else if (ends.every((id) => known.has(id))) {
+        if (!edges.has(key)) {
+          edges.set(key, {
+            ...(row.id === undefined || !relIdReadable ? {} : { sys_id: row.id }),
+            parent: row.parent,
+            child: row.child,
+            type: row.type,
+            rank: depth,
+          });
         }
       }
     }
 
-    await traverse(rootId, 1);
+    for (const entry of readOrder) {
+      const view = known.get(entry.sys_id)!;
+      listed.push({
+        sys_id: entry.sys_id,
+        ...(view.name === undefined ? {} : { name: view.name }),
+        ...(view.class === undefined ? {} : { class: view.class }),
+        depth,
+        type: entry.type,
+        direction: entry.direction,
+        via: entry.via,
+      });
+      if (matchesClass(view)) shownCount += 1;
+    }
 
-    const page = allRels.slice(args.offset, args.offset + args.limit);
-
-    return ok(
-      withWarnings(
-        {
-          root: { name: rootName, class: rootClass, sys_id: rootId },
-          relationships: page,
-          meta: {
-            depth: maxDepth,
-            direction,
-            total: allRels.length,
-            offset: args.offset,
-            limit: args.limit,
-            has_more: args.offset + page.length < allRels.length,
-            ...(args.offset + page.length < allRels.length
-              ? { next_offset: args.offset + page.length }
-              : {}),
-            traversal_truncated: traversalTruncated,
-            traversal_requests: traversalRequests,
-          },
-        },
-        warnings
-      )
-    );
-  } catch (error) {
-    throw error;
+    if (stop !== undefined || ciStop !== undefined) break;
+    // The page asked for is full, with one more CI known to exist: deeper
+    // levels would only add CIs after it.
+    if (shownCount > wantedShown) break;
+    frontier = readOrder.map((entry) => entry.sys_id);
   }
+
+  // ── Report ──
+  const labelOf = (id: string): string => tidy(known.get(id)?.name ?? id, 60);
+  const namedList = (ids: readonly string[]): string => {
+    const unique = [...new Set(ids)];
+    const named = unique.slice(0, limits.namedInWarning).map(labelOf);
+    const more = unique.length - named.length;
+    return `${named.join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
+  };
+  const capText: Record<Cap, string> = {
+    requests: `the ${limits.maxRequests}-request limit`,
+    relationship_rows: `the ${limits.maxRelationshipRows}-relationship-row limit`,
+    response_bytes: "the response size limit",
+    cis: `the ${limits.maxCis}-CI limit`,
+    error: "an error",
+  };
+  let truncatedBy: Record<string, unknown> | undefined;
+  if (stop) {
+    truncatedBy = {
+      cap: stop.cap,
+      ...(stop.cap === "requests"
+        ? { max: limits.maxRequests }
+        : stop.cap === "relationship_rows"
+          ? { max: limits.maxRelationshipRows }
+          : {}),
+      depth: stop.depth,
+      unread_cis: stop.unread.length,
+    };
+    warnings.push(
+      `Relationships of ${quantity(stop.unread.length, "CI")} at depth ${stop.depth} were not fully read, ` +
+        `stopped by ${capText[stop.cap]}: ${namedList(stop.unread)}. ` +
+        "Their relationships and the CIs beyond them may be missing; narrow the walk with a lower depth, a type, or a nearer start CI."
+    );
+  } else if (ciStop) {
+    truncatedBy = {
+      cap: ciStop.cap,
+      ...(ciStop.cap === "requests"
+        ? { max: limits.maxRequests }
+        : ciStop.cap === "cis"
+          ? { max: limits.maxCis }
+          : {}),
+      depth: ciStop.depth,
+      unread_cis: ciStop.count,
+    };
+  }
+  if (ciStop && ciStop.count > 0) {
+    warnings.push(
+      `${quantity(ciStop.count, "CI")} found at depth ${ciStop.depth} could not be read, stopped by ${capText[ciStop.cap]}, ` +
+        `so ${ciStop.count === 1 ? "it is" : "they are"} left out, with the CIs beyond. ` +
+        `They are related to: ${namedList([...skippedVia])}.`
+    );
+  }
+  if (leftOut.size > 0) {
+    warnings.push(
+      leftOut.size === 1
+        ? "1 relationship leads to a CI this profile can't read; it is left out."
+        : `${leftOut.size} relationships lead to CIs this profile can't read; they are left out.`
+    );
+  }
+  if (invalidIdentifier) {
+    warnings.push("cmdb_rel_ci returned an invalid relationship identifier");
+  }
+
+  const shown: RelNode[] = listed
+    .filter((entry) => matchesClass({ ...(entry.class === undefined ? {} : { class: entry.class }) }))
+    .map((entry) => ({
+      ...(nameShown ? { name: entry.name ?? entry.sys_id } : {}),
+      ...(entry.class === undefined ? {} : { class: entry.class }),
+      type: entry.type,
+      direction: entry.direction,
+      sys_id: entry.sys_id,
+      via: entry.via,
+      depth: entry.depth,
+    }));
+  const page = shown.slice(args.offset, args.offset + args.limit);
+  const hasMore = args.offset + page.length < shown.length;
+
+  const data: Record<string, unknown> = {
+    root: {
+      ...(rootView.name === undefined ? {} : { name: rootView.name }),
+      ...(rootView.class === undefined ? {} : { class: rootView.class }),
+      sys_id: rootId,
+    },
+    relationships: page,
+    meta: {
+      depth: maxDepth,
+      direction,
+      total: shown.length,
+      offset: args.offset,
+      limit: args.limit,
+      has_more: hasMore,
+      ...(hasMore ? { next_offset: args.offset + page.length } : {}),
+      traversal_truncated: truncatedBy !== undefined,
+      traversal_requests: requests,
+      ...(truncatedBy === undefined ? {} : { truncated_by: truncatedBy }),
+      ...(leftOut.size > 0 ? { unreadable_relationships: leftOut.size } : {}),
+    },
+  };
+
+  if (args.map) {
+    const node = (entry: { sys_id: string; name?: string; class?: string; depth: number }): MapNode => ({
+      sys_id: entry.sys_id,
+      ...(entry.name === undefined ? {} : { name: entry.name }),
+      ...(entry.class === undefined ? {} : { class: entry.class }),
+      depth: entry.depth,
+    });
+    const pageIds = new Set(page.map((entry) => entry.sys_id));
+    const inPage = listed.filter((entry) => pageIds.has(entry.sys_id));
+    const map = buildRelationshipMap(
+      node({ sys_id: rootId, ...(rootView.name === undefined ? {} : { name: rootView.name }), ...(rootView.class === undefined ? {} : { class: rootView.class }), depth: 0 }),
+      inPage.map(node),
+      [...edges.values()]
+        .sort((a, b) => a.rank - b.rank || ((a.sys_id ?? "") < (b.sys_id ?? "") ? -1 : (a.sys_id ?? "") > (b.sys_id ?? "") ? 1 : 0))
+        .map(({ rank: _rank, ...edge }) => edge),
+      limits.mapBytes
+    );
+    data.nodes = map.nodes;
+    data.edges = map.edges;
+    data.diagram = map.diagram;
+    if (map.omitted_nodes > 0) {
+      (data.meta as Record<string, unknown>).map_omitted_cis = map.omitted_nodes;
+      warnings.push(
+        `The map holds the first ${map.nodes.length} of ${map.nodes.length + map.omitted_nodes} CIs to fit the response budget; ` +
+          "lower limit, or page with offset, for the rest."
+      );
+    }
+  }
+
+  return ok(withWarnings(data, warnings));
 }

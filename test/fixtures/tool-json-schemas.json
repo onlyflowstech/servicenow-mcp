@@ -9240,7 +9240,7 @@
       "type": "object",
       "properties": {
         "ci_name": {
-          "description": "Name of the CI to start from (resolved via cmdb_ci name field)",
+          "description": "Name of the CI to start from (several matches: pass sys_id instead)",
           "type": "string"
         },
         "sys_id": {
@@ -9291,6 +9291,11 @@
           "description": "Impact analysis mode -- walks upstream only",
           "type": "boolean"
         },
+        "map": {
+          "default": false,
+          "description": "Also return nodes, edges (with types) and a Mermaid diagram of the CIs listed",
+          "type": "boolean"
+        },
         "profile": {
           "type": "string",
           "minLength": 1,
@@ -9321,6 +9326,21 @@
               "items": {}
             },
             "meta": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "nodes": {
+              "type": "array",
+              "items": {}
+            },
+            "edges": {
+              "type": "array",
+              "items": {}
+            },
+            "diagram": {
               "type": "object",
               "propertyNames": {
                 "type": "string"

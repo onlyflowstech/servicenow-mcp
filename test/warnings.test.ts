@@ -310,7 +310,9 @@ describe("sn_relationships warnings", () => {
     expect(parsed.relationships).toEqual([]);
     expect(parsed.warnings).toEqual([
       `cmdb_rel_ci (traversal at depth 1): ${FORBIDDEN_TEXT}`,
+      expect.stringContaining("Relationships of 1 CI at depth 1 were not fully read, stopped by an error: web-server-01."),
     ]);
+    expect(parsed.meta).toMatchObject({ traversal_truncated: true, traversal_requests: 2 });
   });
 
   it("omits warnings on a clean traversal", async () => {

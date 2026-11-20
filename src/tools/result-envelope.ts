@@ -295,6 +295,10 @@ const relationshipResultSchema = z
     root: dynamicRecordSchema,
     relationships: dynamicArraySchema,
     meta: dynamicRecordSchema,
+    /** With `map`: the listed CIs, their relationships and a Mermaid diagram. */
+    nodes: dynamicArraySchema.optional(),
+    edges: dynamicArraySchema.optional(),
+    diagram: dynamicRecordSchema.optional(),
     warnings: z.array(z.string()).optional(),
   })
   .strict();
@@ -757,7 +761,9 @@ function effectiveOrder(
     case "sn_schema":
       return ["field", "sys_id"];
     case "sn_relationships":
-      return ["depth_first", "relationship_sys_id"];
+      // Breadth first: nearest CIs first; within a depth, in the order of the
+      // relationship rows that reached them.
+      return ["depth", "relationship_sys_id"];
     case "sn_codesearch":
       // One table: its own sys_id order. Several: each table's first match
       // (script includes first), then each table's second, and so on; `round`

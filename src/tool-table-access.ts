@@ -207,6 +207,9 @@ export function resolveToolTableAccess(
       case "sn_attach":
         return attachmentResolution(args);
       case "sn_relationships":
+        // Both ends and the type of every relationship row must be readable
+        // under field policy, or there is nothing to walk.
+        resolveReadableFields("cmdb_rel_ci", { fields: "parent,child,type" });
         return resolution(args, [read("cmdb_ci"), read("cmdb_rel_ci")]);
       case "sn_syslog":
         authorizeReadQuery(encodedQueryAccess, "sn_syslog", "syslog", args);

@@ -4,6 +4,7 @@ import { ServiceNowResponseTooLargeError } from "../src/client.js";
 import {
   BASIC_AUTH_401_HINT,
   MAX_TOOL_ERROR_RETRY_AFTER_SECONDS,
+  createAmbiguousCiNameError,
   createBasicAuthRestrictedError,
   createFilterFieldsTooLargeError,
   createUnknownFilterFieldError,
@@ -299,3 +300,51 @@ describe("a response that passed its byte limit", () => {
   });
 });
 
+
+describe("the ambiguous CI name error", () => {
+  const id = (digit: string) => digit.repeat(32);
+
+  it("lists each match with its name, class and sys_id, and says when more share the name", () => {
+    const error = createAmbiguousCiNameError(
+      "web-01",
+      [
+        { sys_id: id("a"), name: "web-01", class: "Linux Server" },
+        { sys_id: id("b"), name: "web-01" },
+        { sys_id: id("c") },
+      ],
+      true
+    );
+    expect(trustedToolErrorDescriptor(error)).toMatchObject({
+      category: "conflict",
+      reason: "ambiguous_ci_name",
+      retry: "retry_after_correction",
+    });
+    expect(formatToolError(error)).toContain(
+      `ci_name "web-01" matches more than one CI. Retry with sys_id set to one of: ` +
+        `web-01, class Linux Server, sys_id ${id("a")}; web-01, sys_id ${id("b")}; ` +
+        `(no name shown), sys_id ${id("c")}; more CIs share this name.`
+    );
+  });
+
+  it("makes instance text inert and bounded, and drops a match without a real sys_id", () => {
+    const error = createAmbiguousCiNameError(
+      'bad "name"\n\u202E' + "x".repeat(500),
+      [
+        { sys_id: "not-a-sys-id", name: "dropped" },
+        { sys_id: id("d"), name: 'line\nbreak "quoted"', class: "y".repeat(500) },
+      ],
+      false
+    );
+    const text = formatToolError(error);
+    expect(text).not.toMatch(/[\n\u202E]/u);
+    expect(text).not.toContain("dropped");
+    expect(text).toContain("line break 'quoted'");
+    expect(text.length).toBeLessThan(900);
+    expect(text).not.toContain("more CIs share");
+  });
+
+  it("lists at most ten matches", () => {
+    const many = Array.from({ length: 15 }, (_, index) => ({ sys_id: index.toString(16).padStart(32, "0") }));
+    expect(formatToolError(createAmbiguousCiNameError("n", many, false)).match(/sys_id [0-9a-f]{32}/gu)).toHaveLength(10);
+  });
+});

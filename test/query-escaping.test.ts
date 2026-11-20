@@ -135,13 +135,11 @@ describe("encoded-query injection is neutralized", () => {
 
   it("sn_relationships ci_name lookup", async () => {
     const { client, get } = getClient();
-    const result = await relationshipsHandler(
-      relationshipsSchema.parse({ ci_name: INJECTION }),
-      client,
-      config
-    );
+    // no CI found -- lookup stays scoped
+    await expect(
+      relationshipsHandler(relationshipsSchema.parse({ ci_name: INJECTION }), client, config)
+    ).rejects.toThrow("was not found");
     expect(queryOfCall(get)).toBe(`name=${NEUTRALIZED}^ORDERBYsys_id`);
-    expect(result.isError).toBe(true); // no CI found -- lookup stays scoped
   });
 
   it.each([false, true])("sn_atf suite listing handles reference objects: %s", async referenceObject => {
@@ -170,11 +168,13 @@ describe("encoded-query injection is neutralized", () => {
   // interpolated filter value must never opt into evaluation.
   it("sn_relationships ci_name with a javascript: prefix is matched literally", async () => {
     const { client, get } = getClient();
-    await relationshipsHandler(
-      relationshipsSchema.parse({ ci_name: "javascript:gs.getUserID()" }),
-      client,
-      config
-    );
+    await expect(
+      relationshipsHandler(
+        relationshipsSchema.parse({ ci_name: "javascript:gs.getUserID()" }),
+        client,
+        config
+      )
+    ).rejects.toThrow("was not found");
     expect(queryOfCall(get)).toBe("name=gs.getUserID()^ORDERBYsys_id");
   });
 

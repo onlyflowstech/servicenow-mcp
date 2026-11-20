@@ -343,7 +343,7 @@ describe("SNSDK-33 strict production envelopes", () => {
     expect(structured.data.meta.total).toBe(27);
     expect(structured.metadata.record_count).toBe(2);
     expect(structured.metadata.pagination.order_by).toEqual([
-      "depth_first",
+      "depth",
       "relationship_sys_id",
     ]);
   });
