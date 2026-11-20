@@ -72,7 +72,7 @@ interface TableFieldPolicyDefinition {
   /**
    * The `readable` and `writable` lists of the profile's own entry for this
    * table, as written (internal: set by the merge, never by configuration).
-   * Only they can open a record payload column (RECORD_PAYLOAD_COLUMNS).
+   * Only they can open a closed column (RECORD_PAYLOAD_COLUMNS, COMMAND_LINE_COLUMNS).
    */
   readonly ownReadable?: FieldPolicySet;
   readonly ownWritable?: FieldPolicySet;
@@ -110,10 +110,14 @@ interface TableFieldPolicy {
   readonly writable: readonly string[];
   readonly allowAnyReadable: boolean;
   readonly allowAnyWritable: boolean;
-  /** The record payload columns of this table its own entry lists in `readable`. */
-  readonly explicitReadable: readonly string[];
-  /** The record payload columns of this table its own entry lists in `writable`. */
-  readonly explicitWritable: readonly string[];
+  /**
+   * The field names this table's own entry lists in `readable`, none when it
+   * has no entry or the entry's list is a wildcard. Only these can open a
+   * closed column of the table (see {@link explicitReadColumns}).
+   */
+  readonly ownReadable: readonly string[];
+  /** The same for `writable`. */
+  readonly ownWritable: readonly string[];
 }
 
 const FIELD_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
@@ -225,6 +229,74 @@ const RECORD_PAYLOAD_COLUMNS: ReadonlyMap<string, ReadonlySet<string>> = new Map
 );
 
 /**
+ * Process command-line columns: per table, the columns that hold the command
+ * line a process was started with, or its arguments. They follow the same
+ * rules as the record payload columns above: no wildcard covers them, for
+ * reads or writes, and a column is read or written only where the profile's
+ * own entry for that table lists it in `readable` or `writable`. A table that
+ * extends one of these tables has the same columns, wherever its chain is
+ * known (see {@link explicitReadColumns}). One line per table adds a table.
+ */
+const COMMAND_LINE_COLUMNS: ReadonlyMap<string, ReadonlySet<string>> = new Map(
+  (
+    [
+      // Running processes, and what discovery copies from them to the
+      // application CI (inherited by every application class).
+      ["cmdb_running_process", ["command", "parameters", "key_parameters"]],
+      ["cmdb_ci_appl", ["running_process_command", "running_process_key_parameters"]],
+      // Connections, containers and images.
+      ["cmdb_tcp_connection", ["command"]],
+      ["cmdb_tcp_half", ["command"]],
+      ["cmdb_ci_docker_container", ["command"]],
+      ["cmdb_ci_oslv_image", ["command"]],
+      // Application and endpoint classes with their own command-line column.
+      ["cmdb_ci_appl_rabbitmq_cluster", ["command_line"]],
+      ["cmdb_ci_appl_mongo_config_serv", ["command_line"]],
+      ["cmdb_ci_appl_ca_id_man", ["command_line"]],
+      ["cmdb_ci_appl_generic", ["command_line"]],
+      ["cmdb_ci_appl_rabbitmq", ["command_line"]],
+      ["cmdb_ci_appl_ca_ent_man", ["command_line"]],
+      ["cmdb_ci_appl_dot_net", ["command_line"]],
+      ["cmdb_ci_appl_mongos", ["command_line"]],
+      ["cmdb_ci_appl_ca_dir_server", ["command_line"]],
+      ["cmdb_ci_endpoint_mq_mem", ["cmd_line"]],
+      ["cmdb_ci_endpoint_wmb_depend", ["cmd_line"]],
+      ["cmdb_ci_endpoint_storf", ["args"]],
+      ["cmdb_ci_endpoint_xenapp_citrx", ["args"]],
+      ["cmdb_ci_endpoint_app", ["args"]],
+      ["cmdb_ci_appl_citrix_app", ["app_args"]],
+    ] as const
+  ).map(([table, columns]) => [
+    table,
+    Object.freeze(new Set<string>(columns)) as ReadonlySet<string>,
+  ])
+);
+
+/**
+ * Command-line columns guarded by name on every table, whatever its chain:
+ * the names are specific, a custom table can define them outside the
+ * application classes, and the chain is not known when a profile sets
+ * `"fieldTypes": { "dictionary": "not_required" }`.
+ */
+const COMMAND_LINE_ANY_TABLE_COLUMNS: ReadonlySet<string> = Object.freeze(
+  new Set(["running_process_command", "running_process_key_parameters"])
+) as ReadonlySet<string>;
+
+/** The columns guarded by name on every table (for documentation and tests). */
+export const COMMAND_LINE_ANY_TABLE_FIELD_NAMES: readonly string[] = Object.freeze([
+  ...COMMAND_LINE_ANY_TABLE_COLUMNS,
+]);
+
+/** Names that mark a column as a command-line column in a denial message. */
+const COMMAND_LINE_FIELD_NAMES: ReadonlySet<string> = new Set([
+  ...[...COMMAND_LINE_COLUMNS.values()].flatMap((columns) => [...columns]),
+  ...COMMAND_LINE_ANY_TABLE_COLUMNS,
+]);
+const PAYLOAD_FIELD_NAMES: ReadonlySet<string> = new Set(
+  [...RECORD_PAYLOAD_COLUMNS.values()].flatMap((columns) => [...columns])
+);
+
+/**
  * Tables the platform rotates into numbered shards (`ecc_queue0003`,
  * `sys_replication_queue5`), each a separate table that a `"*"` grant reaches
  * by name. A shard is the base name followed by digits only.
@@ -264,13 +336,13 @@ function withoutShardSuffix(table: string): string | undefined {
 }
 
 /**
- * The record payload columns of `table` (a normalized name), or undefined.
- * A rotation shard takes its base table's columns, and a CDC queue takes the
- * CDC columns. Lookups and fixed rules only: nothing is stored per name, so
- * arbitrary names never grow any state.
+ * The closed columns of `table` (a normalized name) by its own name, or
+ * undefined. A rotation shard takes its base table's columns, and a CDC queue
+ * takes the CDC columns. Lookups and fixed rules only: nothing is stored per
+ * name, so arbitrary names never grow any state.
  */
-function recordPayloadColumns(table: string): ReadonlySet<string> | undefined {
-  const exact = RECORD_PAYLOAD_COLUMNS.get(table);
+function tableClosedColumns(table: string): ReadonlySet<string> | undefined {
+  const exact = RECORD_PAYLOAD_COLUMNS.get(table) ?? COMMAND_LINE_COLUMNS.get(table);
   if (exact !== undefined) return exact;
   if (
     table.length > CDC_QUEUE_PREFIX.length &&
@@ -284,13 +356,75 @@ function recordPayloadColumns(table: string): ReadonlySet<string> | undefined {
 }
 
 /**
+ * The columns of `table` that no wildcard covers: the ones guarded by name on
+ * every table, its own (see {@link tableClosedColumns}) and, inside a call,
+ * those of every ancestor that has any. Ancestors come from the extension
+ * chains the dispatcher resolved for the call's tables; a table whose chain
+ * is not known has only its own columns. Returns a shared, frozen set, so
+ * callers may key on it: a static set itself when one applies, else a union
+ * kept per combination (the combinations are fixed by the lists above, never
+ * by input).
+ */
+function closedColumns(table: string): ReadonlySet<string> {
+  const own = tableClosedColumns(table);
+  const hierarchy = currentHiddenFieldScope()?.hierarchies?.get(table);
+  if (hierarchy === undefined || hierarchy.length < 2) {
+    return own === undefined ? COMMAND_LINE_ANY_TABLE_COLUMNS : unionOf([own, COMMAND_LINE_ANY_TABLE_COLUMNS]);
+  }
+  const sets: ReadonlySet<string>[] = [COMMAND_LINE_ANY_TABLE_COLUMNS];
+  if (own !== undefined) sets.push(own);
+  for (let index = 1; index < hierarchy.length; index += 1) {
+    const inherited = tableClosedColumns(hierarchy[index]!);
+    if (inherited !== undefined && !sets.includes(inherited)) sets.push(inherited);
+  }
+  return unionOf(sets);
+}
+
+const CLOSED_COLUMN_SET_IDS = new WeakMap<ReadonlySet<string>, number>();
+const CLOSED_COLUMN_UNIONS = new Map<string, ReadonlySet<string>>();
+
+/** The union of static column sets, one shared frozen set per combination. */
+function unionOf(sets: readonly ReadonlySet<string>[]): ReadonlySet<string> {
+  if (sets.length === 1) return sets[0]!;
+  const ids = sets.map((columns) => {
+    let id = CLOSED_COLUMN_SET_IDS.get(columns);
+    if (id === undefined) CLOSED_COLUMN_SET_IDS.set(columns, (id = nextSetId++));
+    return id;
+  });
+  const key = [...new Set(ids)].sort((left, right) => left - right).join(",");
+  let union = CLOSED_COLUMN_UNIONS.get(key);
+  if (union === undefined) {
+    union = Object.freeze(new Set(sets.flatMap((columns) => [...columns]))) as ReadonlySet<string>;
+    CLOSED_COLUMN_UNIONS.set(key, union);
+  }
+  return union;
+}
+let nextSetId = 1;
+
+/**
+ * The columns of the table `tableCandidate` that a read or write must have
+ * listed by name (see {@link closedColumns}), or undefined for a name that is
+ * not a table.
+ */
+export function explicitReadColumns(tableCandidate: unknown): ReadonlySet<string> | undefined {
+  try {
+    return closedColumns(normalizeTableName(tableCandidate));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Each base table and the columns its own entry must list. A rotation shard
  * (see ROTATION_SHARD_BASE_NAMES) has its base table's columns, and every
  * `cdc_queue_*` table except `cdc_queue_state_*` has the CDC queue columns.
  */
 export const EXPLICIT_READ_FIELD_NAMES: Readonly<Record<string, readonly string[]>> = Object.freeze(
   Object.fromEntries(
-    [...RECORD_PAYLOAD_COLUMNS].map(([table, columns]) => [table, Object.freeze([...columns])])
+    [...RECORD_PAYLOAD_COLUMNS, ...COMMAND_LINE_COLUMNS].map(([table, columns]) => [
+      table,
+      Object.freeze([...columns]),
+    ])
   )
 );
 
@@ -1167,6 +1301,13 @@ export class FieldPolicyError extends Error {
   }
 }
 
+/** What a closed column holds, for its denial message. */
+function closedColumnContent(field: string): string {
+  return COMMAND_LINE_FIELD_NAMES.has(field) && !PAYLOAD_FIELD_NAMES.has(field)
+    ? "process command lines"
+    : "record payloads";
+}
+
 /**
  * Operator-facing explanation for a field-policy denial.
  *
@@ -1208,11 +1349,11 @@ export function fieldPolicyDenialMessage(error: FieldPolicyError): string {
     case "field_types_unavailable":
       return FIELD_TYPES_UNAVAILABLE_MESSAGE;
     case "explicit_field_required":
-      // Only EXPLICIT_WRITE_FIELDS and record payload column names reach this
-      // case; each is a fixed name that passed FIELD_NAME.
+      // Only EXPLICIT_WRITE_FIELDS and closed column names reach this case;
+      // each is a fixed name that passed FIELD_NAME.
       if (table && field && !EXPLICIT_WRITE_FIELDS.has(field)) {
         return (
-          `Write denied by policy: field "${field}" on "${table}" holds record payloads, ` +
+          `Write denied by policy: field "${field}" on "${table}" holds ${closedColumnContent(field)}, ` +
           "so a writable wildcard never covers it. List it explicitly in " +
           `fieldPolicy.${table}.writable to allow this write.`
         );
@@ -1223,12 +1364,12 @@ export function fieldPolicyDenialMessage(error: FieldPolicyError): string {
             `in fieldPolicy.${table}.writable to allow this write.`
         : "Write denied by policy: a field that a writable wildcard never covers must be listed explicitly in the writable set.";
     case "explicit_read_required":
-      // Only record payload column names reach this case, on a fixed table.
+      // Only closed column names reach this case.
       return table && field
-        ? `Read denied by policy: field "${field}" on "${table}" holds record payloads, ` +
+        ? `Read denied by policy: field "${field}" on "${table}" holds ${closedColumnContent(field)}, ` +
             "so a readable wildcard never covers it. List it explicitly in " +
             `fieldPolicy.${table}.readable to allow this read.`
-        : "Read denied by policy: a record payload field must be listed explicitly in its table's readable set.";
+        : "Read denied by policy: a field a readable wildcard never covers must be listed explicitly in its table's readable set.";
     case "unsupported_field_path":
       // The key itself is not echoed: as a whole it did not pass FIELD_NAME.
       return (
@@ -1383,8 +1524,8 @@ export function validateWritableFields(
     if (EXPLICIT_WRITE_FIELDS.has(field) && !policy.writable.includes(field)) {
       throw new FieldPolicyError("explicit_field_required", { table: policy.table, field });
     }
-    // A record payload column is written only where the table's own entry lists it.
-    if (recordPayloadColumns(policy.table)?.has(field) && !policy.explicitWritable.includes(field)) {
+    // A closed column is written only where the table's own entry lists it.
+    if (closedColumns(policy.table).has(field) && !policy.ownWritable.includes(field)) {
       throw new FieldPolicyError("explicit_field_required", { table: policy.table, field });
     }
     if (!fieldSetAllows(policy.writable, policy.allowAnyWritable, field)) {
@@ -1702,36 +1843,39 @@ export function typeHiddenFieldNames(tableCandidate: unknown): ReadonlySet<strin
   return typeHiddenFields(normalizeTableName(tableCandidate));
 }
 
-/** Per policy map, the closed record payload columns of each table it names. */
-const EXPLICIT_READ_DENIED = new WeakMap<TableFieldPolicyMap, Map<string, ReadonlySet<string>>>();
+/** Per policy map, the closed columns of each table it names that its entry partly opens. */
+const EXPLICIT_READ_DENIED = new WeakMap<
+  TableFieldPolicyMap,
+  Map<string, { readonly columns: ReadonlySet<string>; readonly denied: ReadonlySet<string> }>
+>();
 
 /**
- * The record payload columns of `table` that the current policy does not
- * open: every one, unless the profile's own entry for the table lists it in
- * `readable`. With nothing listed the answer is the table's fixed column set,
- * so nothing is stored; a partial opening is cached per policy map and table,
- * and only tables the configuration names can reach that cache.
+ * The closed columns of `table` (see {@link closedColumns}) that the current
+ * policy does not open: every one, unless the profile's own entry for the
+ * table lists it in `readable`. With nothing listed the answer is the table's
+ * column set itself, so nothing is stored; a partial opening is cached per
+ * policy map and table, and only tables the configuration names can reach
+ * that cache.
  */
 function explicitReadDeniedFields(table: string): ReadonlySet<string> {
-  const fields = recordPayloadColumns(table);
-  if (fields === undefined) return EMPTY_FIELDS;
+  const columns = closedColumns(table);
   let policies: TableFieldPolicyMap;
   try {
     policies = currentTableFieldPolicies();
   } catch {
-    return fields;
+    return columns;
   }
   // A table with no entry of its own resolves through "*", which lists none.
-  const listed = policies.get(table)?.explicitReadable ?? NO_FIELDS;
-  if (listed.length === 0) return fields;
+  const listed = policies.get(table)?.ownReadable ?? NO_FIELDS;
+  if (listed.length === 0 || !listed.some((field) => columns.has(field))) return columns;
   let byTable = EXPLICIT_READ_DENIED.get(policies);
   if (!byTable) EXPLICIT_READ_DENIED.set(policies, (byTable = new Map()));
   const cached = byTable.get(table);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined && cached.columns === columns) return cached.denied;
   const denied = Object.freeze(
-    new Set([...fields].filter((field) => !listed.includes(field)))
+    new Set([...columns].filter((field) => !listed.includes(field)))
   ) as ReadonlySet<string>;
-  byTable.set(table, denied);
+  byTable.set(table, { columns, denied });
   return denied;
 }
 
@@ -1935,6 +2079,15 @@ function applyHiddenRules(filtered: unknown, context: SelectionContext): unknown
 
 function hideInRecord(record: unknown, context: SelectionContext): unknown {
   if (typeof record !== "object" || record === null || Array.isArray(record)) return record;
+  // A row with nothing to hide and no row rule is returned as it is: the
+  // response filter has already copied it, and most rows hold no hidden name.
+  if (
+    context.rule === undefined &&
+    context.companions.size === 0 &&
+    !Object.keys(record).some((key) => context.hidden.has(key.trim().toLowerCase()))
+  ) {
+    return record;
+  }
   const output = withoutFields(record as Record<string, unknown>, context.hidden);
   const rule = context.rule;
   if (rule !== undefined && Object.hasOwn(output, rule.valueField) && rowValueHidden(rule, output)) {
@@ -2259,7 +2412,6 @@ function buildFieldPolicyMap(
           }
         }
       }
-      const payloadColumns = recordPayloadColumns(table);
       return [
         table,
         Object.freeze({
@@ -2269,18 +2421,8 @@ function buildFieldPolicyMap(
           writable: writableFields,
           allowAnyReadable: readable === FIELD_POLICY_WILDCARD,
           allowAnyWritable: writable === FIELD_POLICY_WILDCARD,
-          explicitReadable: listedPayloadColumns(
-            payloadColumns,
-            definition.ownReadable,
-            definition.readable,
-            readable
-          ),
-          explicitWritable: listedPayloadColumns(
-            payloadColumns,
-            definition.ownWritable,
-            definition.writable,
-            writable
-          ),
+          ownReadable: ownListedFields(table, definition.ownReadable, definition.readable, readable),
+          ownWritable: ownListedFields(table, definition.ownWritable, definition.writable, writable),
         }),
       ];
     })
@@ -2288,21 +2430,20 @@ function buildFieldPolicyMap(
 }
 
 /**
- * The record payload columns an own-entry list names. The merge passes the own
- * list through as the resolved list, so its normalized form is reused rather
- * than normalized twice. A wildcard own list names nothing.
+ * The field names an own-entry list states. The merge passes the own list
+ * through as the resolved list, so its normalized form is reused rather than
+ * normalized twice. A wildcard own list names nothing, and neither does the
+ * "*" entry, which no table's closed columns resolve through.
  */
-function listedPayloadColumns(
-  columns: ReadonlySet<string> | undefined,
+function ownListedFields(
+  table: string,
   own: FieldPolicySet | undefined,
   resolvedSource: FieldPolicySet | undefined,
   resolved: readonly string[] | "*"
 ): readonly string[] {
-  if (columns === undefined || own === undefined) return NO_FIELDS;
+  if (own === undefined || table === FIELD_POLICY_WILDCARD) return NO_FIELDS;
   const normalized = own === resolvedSource ? resolved : normalizePolicyFieldSet(own);
-  if (normalized === FIELD_POLICY_WILDCARD) return NO_FIELDS;
-  const listed = normalized.filter((field) => columns.has(field));
-  return listed.length === 0 ? NO_FIELDS : Object.freeze(listed);
+  return normalized === FIELD_POLICY_WILDCARD || normalized.length === 0 ? NO_FIELDS : normalized;
 }
 
 /**

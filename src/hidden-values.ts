@@ -1118,6 +1118,12 @@ function normalizeName(candidate: unknown): string | undefined {
 export interface HiddenFieldScope {
   readonly tables: ReadonlyMap<string, ReadonlySet<string>>;
   readonly unresolved: "deny" | "names_only";
+  /**
+   * Each resolved table's extension chain, the table first. A table that did
+   * not resolve (or a scope built without chains) has none, and field policy
+   * then knows no ancestor for it.
+   */
+  readonly hierarchies?: ReadonlyMap<string, readonly string[]>;
 }
 
 const HIDDEN_FIELD_SCOPE = new AsyncLocalStorage<HiddenFieldScope>();
@@ -1125,7 +1131,11 @@ const HIDDEN_FIELD_SCOPE = new AsyncLocalStorage<HiddenFieldScope>();
 /** Run `callback` with `scope` as the call's hidden-typed fields. */
 export function runWithHiddenFieldScope<T>(scope: HiddenFieldScope, callback: () => T): T {
   return HIDDEN_FIELD_SCOPE.run(
-    Object.freeze({ tables: scope.tables, unresolved: scope.unresolved }),
+    Object.freeze({
+      tables: scope.tables,
+      unresolved: scope.unresolved,
+      ...(scope.hierarchies === undefined ? {} : { hierarchies: scope.hierarchies }),
+    }),
     callback
   );
 }
@@ -1147,6 +1157,7 @@ export function hiddenFieldScope(
   namesOnly: boolean
 ): { readonly scope?: HiddenFieldScope; readonly degraded: boolean } {
   const resolved = new Map<string, ReadonlySet<string>>();
+  const hierarchies = new Map<string, readonly string[]>();
   let missing = types.state !== "available";
   for (const candidate of tables) {
     const table = normalizeName(candidate);
@@ -1158,10 +1169,18 @@ export function hiddenFieldScope(
       continue;
     }
     resolved.set(table, hidden);
+    if (types.state === "available") {
+      const hierarchy = types.tables.get(table)?.hierarchy;
+      if (hierarchy !== undefined) hierarchies.set(table, hierarchy);
+    }
   }
   if (missing && !namesOnly) return { degraded: false };
   return {
-    scope: Object.freeze({ tables: resolved, unresolved: namesOnly ? "names_only" : "deny" }),
+    scope: Object.freeze({
+      tables: resolved,
+      unresolved: namesOnly ? "names_only" : "deny",
+      hierarchies,
+    }),
     degraded: missing,
   };
 }

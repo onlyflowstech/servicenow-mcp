@@ -41,8 +41,9 @@
  *     Without types, the platform's journal field names are left out the same
  *     way unless the call reads the journal source;
  * (b) a row whose field the profile may not read on the class (field policy,
- *     a sensitive name, a type the call hides, or a column that carries other
- *     records' content) is dropped (`omitted.unreadable`), unnamed;
+ *     a sensitive name, a type the call hides, or a column that field policy
+ *     keeps closed, such as a record payload or a process command line) is
+ *     dropped (`omitted.unreadable`), unnamed;
  * (c) a value whose field is hidden by type, sits on a credential table or
  *     has an unknown type is withheld (`value_hidden`). This uses the shared
  *     type helper over the dictionary rows of step 2, so an unreadable
@@ -73,9 +74,8 @@ import {
   type ServiceNowOperations,
 } from "../client.js";
 import {
-  EXPLICIT_READ_FIELD_NAMES,
+  explicitReadColumns,
   FieldPolicyError,
-  ROTATION_SHARD_BASE_NAMES,
   isFieldPolicyError,
   resolveReadableFields,
 } from "../field-policy.js";
@@ -227,22 +227,14 @@ function canRead(table: string, fields: readonly string[]): boolean {
 }
 
 /**
- * True for a column that carries other records' content on `table` (a whole
- * record as XML, a diff, a queue payload). History never shows such a column,
- * even where a profile opened it for reading: its audit rows are dropped and
- * it cannot be named in `fields`.
+ * True for a column that field policy keeps closed on `table` (a record
+ * payload or a process command line; see `explicitReadColumns`). History
+ * never shows such a column, even where a profile opened it for reading: its
+ * audit rows are dropped and it cannot be named in `fields`. A table that
+ * extends one with such columns has them too, wherever its chain is known.
  */
 export function isRecordContentColumn(table: string, field: string): boolean {
-  const columns = (name: string): readonly string[] | undefined =>
-    Object.hasOwn(EXPLICIT_READ_FIELD_NAMES, name) ? EXPLICIT_READ_FIELD_NAMES[name] : undefined;
-  if (columns(table)?.includes(field)) return true;
-  const base = table.replace(/\d+$/u, "");
-  if (base !== table && base !== "" && ROTATION_SHARD_BASE_NAMES.includes(base) && columns(base)?.includes(field)) {
-    return true;
-  }
-  return (
-    table.startsWith("cdc_queue_") && !table.startsWith("cdc_queue_state_") && (columns("cdc_queue_ih")?.includes(field) ?? false)
-  );
+  return explicitReadColumns(table)?.has(field) === true;
 }
 
 /**

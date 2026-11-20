@@ -569,6 +569,35 @@ and evaluates update sets. Approve it on these terms:
 
 [docs/PLATFORM-VIEW.md](PLATFORM-VIEW.md) has the details.
 
+## Process command-line columns
+
+Some CMDB columns hold the command line a process was started with, or its
+arguments: `command`, `parameters` and `key_parameters` on
+`cmdb_running_process`; `running_process_command` and
+`running_process_key_parameters` on `cmdb_ci_appl` (and so on every application
+class); `command` on `cmdb_tcp_connection`, `cmdb_tcp_half`,
+`cmdb_ci_docker_container` and `cmdb_ci_oslv_image`; `command_line` on nine
+`cmdb_ci_appl_*` classes, `cmd_line` on `cmdb_ci_endpoint_mq_mem` and
+`cmdb_ci_endpoint_wmb_depend`, `args` on `cmdb_ci_endpoint_storf`,
+`cmdb_ci_endpoint_xenapp_citrx` and `cmdb_ci_endpoint_app`, and `app_args` on
+`cmdb_ci_appl_citrix_app` (the README lists every table). A `"*"` field entry,
+`"*"` on the table's own entry and the open default of a profile with no field
+policy never cover them, for reads or writes: a profile reads or writes one
+only where its own entry for that table lists it in `readable` or `writable`.
+Name them only for the profiles and tables that need them.
+
+- A table that extends a listed table has the same columns and is opened only
+  by its own entry. The extension chain comes from `sys_db_object`. On a profile
+  with `"fieldTypes": { "dictionary": "not_required" }`, a table whose parents
+  can't be read is covered only by the names that apply to every table
+  (`running_process_command` and `running_process_key_parameters`), not by its
+  chain.
+- `sn_history` leaves out the audit rows of these columns even where the
+  profile opened them, and refuses them in `fields`.
+- Dotted names (`ref_cmdb_running_process.command`, `parent.command`) are never
+  accepted as a field, filter, order or group field by any read tool.
+- `sn_codesearch` and `sn_nl` do not reach these tables.
+
 ## Tables a `"*"` grant does not cover
 
 `sys_audit`, `sys_journal_field`, `sys_history_line`, `sys_audit_delete`,

@@ -9,6 +9,7 @@ import {
   WRONG_CLASS_HINT,
 } from "../src/tools/history-module.js";
 import { HISTORY_LIMITS } from "../src/tools/history-contracts.js";
+import { fieldTypesFromRows, type FieldTypeLoader } from "../src/hidden-values.js";
 import { isTailCursor } from "../src/tools/syslog-cursor.js";
 import { auditRow, DICTIONARY, flowRow, incidentFixture, journalRow } from "./history-fixtures.js";
 import { decodeTailCursor } from "../src/tools/syslog-cursor.js";
@@ -432,6 +433,77 @@ describe("columns that carry other records' content", () => {
       expect(result.isError).toBe(true);
       expect(textOf(result)).toContain("denied by policy");
       expect(instance.calls).toEqual([]);
+    }
+  });
+});
+
+describe("process command-line columns", () => {
+  const SUBCLASS = "u_example_process_ext";
+  const MARKER = "PROCESS-COMMAND-MARKER-7e31";
+  const dictionary = (table: string) => [
+    { name: table, element: "", internal_type: "collection", audit: "true" },
+    { name: table, element: "sys_id", internal_type: "GUID", audit: "false" },
+    { name: table, element: "name", internal_type: "string", audit: "false" },
+    { name: table, element: "command", internal_type: "string", audit: "false" },
+    { name: table, element: "parameters", internal_type: "string", audit: "false" },
+  ];
+  const audit = (table: string) => [
+    auditRow(1, "2026-04-01 08:00:00", "command", { tablename: table, documentkey: ids.update, newvalue: MARKER }),
+    auditRow(2, "2026-04-01 08:01:00", "parameters", { tablename: table, documentkey: ids.update, oldvalue: MARKER }),
+    auditRow(3, "2026-04-01 08:02:00", "name", { tablename: table, documentkey: ids.update }),
+  ];
+  const fixtureFor = (table: string, parents: readonly string[]): HistoryFixture => ({
+    records: { [`${table}/${ids.update}`]: "" },
+    parents: { [table]: parents },
+    dictionary: dictionary(table),
+    audit: audit(table),
+    journal: [],
+    flows: [],
+  });
+  const access = (table: string) => namedPolicy([table, "sys_db_object", "sys_dictionary", "sys_audit", "sys_journal_field", "sys_flow_context"]);
+  const chained = (table: string, chain: readonly string[]): FieldTypeLoader => async (_client, tables) =>
+    fieldTypesFromRows([], Object.fromEntries([...tables].map((name) => [name, { tables: name === table ? chain : [name], complete: true }])));
+  const opened = (table: string) => ({ fieldPolicy: { [table]: { readable: ["sys_id", "sys_class_name", "name", "command", "parameters"] } } });
+
+  it("drops their audit rows with no field policy and where the profile opened them", async () => {
+    for (const fieldPolicy of [undefined, opened("cmdb_running_process")]) {
+      const { result } = await run(
+        fixtureFor("cmdb_running_process", ["cmdb_ci"]),
+        { table: "cmdb_running_process", sys_id: ids.update },
+        { tableAccess: access("cmdb_running_process"), ...(fieldPolicy === undefined ? {} : { fieldPolicy }) }
+      );
+      const data = dataOf(result);
+      expect(eventsOf(data).map((event) => event.field)).toEqual(["name"]);
+      expect(JSON.stringify(data)).not.toContain(MARKER);
+      expect(data.omitted).toEqual(expect.objectContaining({ unreadable: 2 }));
+    }
+  });
+
+  it("refuses them in fields", async () => {
+    for (const fieldPolicy of [undefined, opened("cmdb_running_process")]) {
+      for (const field of ["command", "parameters"]) {
+        const { instance, result } = await run(
+          fixtureFor("cmdb_running_process", ["cmdb_ci"]),
+          { table: "cmdb_running_process", sys_id: ids.update, fields: [field] },
+          { tableAccess: access("cmdb_running_process"), ...(fieldPolicy === undefined ? {} : { fieldPolicy }) }
+        );
+        expect(result.isError).toBe(true);
+        expect(textOf(result)).toContain("denied by policy");
+        expect(instance.calls).toEqual([]);
+      }
+    }
+  });
+
+  it("does the same for a table that extends the process table", async () => {
+    const loader = chained(SUBCLASS, [SUBCLASS, "cmdb_running_process", "cmdb_ci"]);
+    for (const fieldPolicy of [undefined, opened(SUBCLASS)]) {
+      const options = { tableAccess: access(SUBCLASS), fieldTypeLoader: loader, ...(fieldPolicy === undefined ? {} : { fieldPolicy }) };
+      const { result } = await run(fixtureFor(SUBCLASS, ["cmdb_running_process", "cmdb_ci"]), { table: SUBCLASS, sys_id: ids.update }, options);
+      const data = dataOf(result);
+      expect(eventsOf(data).map((event) => event.field)).toEqual(["name"]);
+      expect(JSON.stringify(data)).not.toContain(MARKER);
+      const refused = await run(fixtureFor(SUBCLASS, ["cmdb_running_process", "cmdb_ci"]), { table: SUBCLASS, sys_id: ids.update, fields: ["command"] }, options);
+      expect(refused.result.isError).toBe(true);
     }
   });
 });

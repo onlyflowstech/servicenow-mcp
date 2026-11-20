@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Process command-line fields in the CMDB are read only when a profile names them. `command`, `parameters` and `key_parameters` on `cmdb_running_process`, the application CI's `running_process_command` and `running_process_key_parameters`, and the command-line and argument columns of a few other CMDB tables (listed in the README), and the tables that extend them, follow the record payload column rules: no wildcard covers them, and each is read or written only where that table's own field-policy entry lists it in `readable` or `writable`. Until then it is refused by name and as a filter, order, group-by, aggregate or write field, and is left out of default, detailed and `fields=all` reads and write echoes. The refusal names the key to set. `tools/list` is unchanged.
 - Read tools treat a table whose parent tables can't all be read from `sys_db_object` (a parent's row hidden from the integration user, or a chain deeper than 12 tables) the same as a table whose field types can't be read: the call is refused, or hides fields by name only when the profile sets `"fieldTypes": { "dictionary": "not_required" }`.
 
 ## [2.3.0] — 2026-11-17

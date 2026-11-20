@@ -1619,6 +1619,44 @@ echoes. A named read is denied with:
 Read denied by policy: field "payload" on "sys_update_xml" holds record payloads, so a readable wildcard never covers it. List it explicitly in fieldPolicy.sys_update_xml.readable to allow this read.
 ```
 
+**Process command-line columns.** Some CMDB columns hold the command line a
+process was started with, or its arguments. They follow the same rules as the
+record payload columns: no wildcard covers them, not the open default of a
+profile with no field policy, a `"*"` entry, or `"*"` on the table's own entry.
+They are `command`, `parameters` and `key_parameters` on
+`cmdb_running_process`; `running_process_command` and
+`running_process_key_parameters` on `cmdb_ci_appl`; `command` on
+`cmdb_tcp_connection`, `cmdb_tcp_half`, `cmdb_ci_docker_container` and
+`cmdb_ci_oslv_image`; `command_line` on `cmdb_ci_appl_rabbitmq_cluster`,
+`cmdb_ci_appl_mongo_config_serv`, `cmdb_ci_appl_ca_id_man`,
+`cmdb_ci_appl_generic`, `cmdb_ci_appl_rabbitmq`, `cmdb_ci_appl_ca_ent_man`,
+`cmdb_ci_appl_dot_net`, `cmdb_ci_appl_mongos` and `cmdb_ci_appl_ca_dir_server`;
+`cmd_line` on `cmdb_ci_endpoint_mq_mem` and `cmdb_ci_endpoint_wmb_depend`;
+`args` on `cmdb_ci_endpoint_storf`, `cmdb_ci_endpoint_xenapp_citrx` and
+`cmdb_ci_endpoint_app`; and `app_args` on `cmdb_ci_appl_citrix_app`.
+`running_process_command` and `running_process_key_parameters` are also covered
+by name on every table.
+
+Each is read only where it is named in that table's own `readable`, and written
+only where it is named in its own `writable`. Until then it is refused by name
+and as a filter, order, group-by, aggregate or write field, and is left out of
+`fields=all`, detailed and default reads and write echoes. `sn_history` leaves
+their audit rows out even where the profile opened them. A dotted name such as
+`ref_cmdb_running_process.command` or `parent.command` is never accepted as a
+field by any read tool.
+
+A table that extends a listed table has its columns too, and only its own entry
+opens them, not the parent's (so `cmdb_ci_appl` covers every application class,
+and `cmdb_ci_oslv_image` covers `cmdb_ci_docker_image`). The extension chain
+comes from the same `sys_db_object` read as the field types, so a table whose
+parents can't be read is refused, or, on a profile with
+`"fieldTypes": { "dictionary": "not_required" }`, covered by the column names
+that apply to every table only. A named read is denied with:
+
+```text
+Read denied by policy: field "command" on "cmdb_running_process" holds process command lines, so a readable wildcard never covers it. List it explicitly in fieldPolicy.cmdb_running_process.readable to allow this read.
+```
+
 **`readable: []` and `writable: []`.** `readable: []` makes a table
 write-only: writes succeed and return only `sys_id`, reads are denied, and
 `sn_batch` cannot run there. `writable: []` blocks writes. To make a table

@@ -113,7 +113,12 @@ function reason(action: () => unknown): string {
 
 describe("the record payload column list", () => {
   it("is each listed table's own columns", () => {
-    expect(EXPLICIT_READ_FIELD_NAMES).toEqual(TABLE_COLUMNS);
+    // The process command-line columns share the list (see process-command-columns.test.ts).
+    const payloadOnly = Object.fromEntries(
+      Object.entries(EXPLICIT_READ_FIELD_NAMES).filter(([table]) => !table.startsWith("cmdb_"))
+    );
+    expect(payloadOnly).toEqual(TABLE_COLUMNS);
+    expect(EXPLICIT_READ_FIELD_NAMES.cmdb_running_process).toEqual(["command", "parameters", "key_parameters"]);
     expect(Object.isFrozen(EXPLICIT_READ_FIELD_NAMES)).toBe(true);
     expect([...ROTATION_SHARD_BASE_NAMES].sort()).toEqual([...new Set(Object.values(SHARDS))].sort());
   });
