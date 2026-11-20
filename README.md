@@ -757,11 +757,79 @@ in this section is needed to use this server.
 
 | Tool | Description |
 |------|-------------|
-| `sn_relationships` | CMDB CI graph traversal — upstream/downstream/both, configurable depth |
+| `sn_relationships` | CMDB CI graph traversal, breadth first — upstream/downstream/both, configurable depth, optional map with a Mermaid diagram ([CMDB relationship traversal](#cmdb-relationship-traversal)) |
 | `sn_attach` | List attachments, return downloads as inline base64, and upload inline base64 content; never touches a host filesystem path |
 | `sn_syslog` | Query system logs with severity/source/time filters, newest first. `tail: true` starts a tail (the newest entries, oldest first, plus a `cursor`); each later call with `after_cursor` returns only the entries after it, oldest first, plus a new `cursor` ([Tailing the system log](#tailing-the-system-log)) |
 | `sn_codesearch` | Search business rules, script includes, client scripts, etc., with a snippet around each match ([Code search](#code-search)). Part of the default read grant, so a plain read grant on a code table allows it |
 | `sn_discover` | Discover tables, scoped apps, store apps, plugins |
+
+#### CMDB relationship traversal
+
+`sn_relationships` walks `cmdb_rel_ci` outward from one CI, level by level,
+to `depth` (1 to 5, default `SN_REL_DEPTH` or 3).
+
+- **Start.** Pass `sys_id`, or `ci_name`. A name that matches more than one CI
+  is refused with the matches (name, class, `sys_id`; up to 5, and a note when
+  there are more), so the retry names the one you mean. A unique name works.
+- **Shortest depth, each CI once.** Every CI appears once, at its shortest
+  distance from the start, with the `type` and `direction` of the relationship
+  that first reached it and `via`, the sys_id of the CI it was reached from.
+  The start CI is never listed. Rows come nearest first; within a depth, in
+  the order of the relationship rows that reached them.
+- **Direction is in the query.** `downstream` reads relationships where the CI
+  is the parent, `upstream` where it is the child, `both` either. `impact: true`
+  is `upstream` only.
+- **Filters.** `type` is a substring of the relationship type; relationships of
+  other types are skipped, so nothing is walked through them. `class` limits
+  which CIs are listed, not which are walked through.
+- **Paging.** `limit` and `offset` page the list. `meta.total` is the number of
+  CIs found; when `has_more` is true the walk stopped once the page was full,
+  so `total` is a lower bound.
+- **Relationship types.** Each relationship row is read with its ends as bare
+  sys_ids and its type's name (a dot-walk of `type`); no display value of a CI
+  is requested from `cmdb_rel_ci`.
+- **Requests.** Each level reads its CIs in batches (50 CIs per `cmdb_rel_ci`
+  query, 100 per `cmdb_ci` read), paging through a CI with more relationships
+  than a page holds. `meta.traversal_requests` counts every upstream request
+  the call made: the start lookup, relationship pages and CI reads.
+
+Limits on one call. A limit that stops a walk sets `meta.traversal_truncated`,
+names the limit in `meta.truncated_by` (`cap`, its `max`, the `depth`, and
+`unread_cis`), and adds a warning that names the CIs whose relationships were
+not fully read.
+
+| Limit | Value |
+|-------|-------|
+| Upstream requests (start lookup, relationship pages and CI reads together) | 50, of which 15 are kept for reading CIs |
+| CIs read (the start CI aside) | 1,000 |
+| Relationship rows read (a row read from each end counts twice) | 2,000, in pages of 500 |
+| Upstream response bytes | The client allows 1 MiB of JSON per call. The walk keeps its own estimate and stops short of it (640 KiB for relationship rows, 180 KiB for CI reads). |
+| Output | `limit` up to 1,000 CIs; the response follows the shared byte limit, and rows that do not fit are dropped from the end with `next_offset` |
+
+Relationships between two CIs that are both at the depth limit are not read.
+
+**CIs the profile cannot read.** Relationship rows are not domain separated,
+and the display values of their `parent` and `child` are not filtered by the
+CI's own access rules, so nothing shown about a CI comes from them. The tool
+reads each level's new CIs from `cmdb_ci`, where the instance applies the
+profile user's ACLs and domain visibility, and the profile's field policy for
+`cmdb_ci` decides which fields are shown: a `name` or `sys_class_name` the
+profile cannot read is left out. A CI that read does not return is not shown
+and is not walked through; `meta.unreadable_relationships` and a warning give
+only a count. If `parent`, `child` or `type` of `cmdb_rel_ci` is not readable
+under field policy, the call is refused. See
+[Production security](docs/PRODUCTION-SECURITY.md#cmdb-relationships).
+
+**Map.** `map: true` adds `nodes` (the start CI and the CIs listed), `edges`
+(each relationship once, by its row's `sys_id`, with `parent`, `child` and
+`type`) and `diagram`, a Mermaid `flowchart TD` with arrows from parent to
+child. The map covers the page of CIs the call lists, so `limit` and `offset`
+page it, and the same field policy applies to every CI attribute in it. The
+diagram draws the nearest 149 CIs at most (150 nodes, 300 edges, 20,000
+characters) and collapses the rest into one node, saying how many in
+`diagram.omitted_nodes`; the map as a whole stays within about 48,000 bytes,
+and `meta.map_omitted_cis` says how many listed CIs it had to leave out.
+Diagram edges carry no relationship types, which are in `edges`.
 
 #### Tailing the system log
 

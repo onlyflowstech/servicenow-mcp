@@ -497,6 +497,33 @@ type, and `value` is never a filter, order or group field there.
   dictionary type, is not recognised by type. Where a granted table holds such
   values, narrow the field with field policy.
 
+## CMDB relationships
+
+`sn_relationships` reads `cmdb_rel_ci` and `cmdb_ci`. Relationship rows are not
+domain separated, and the display values of a row's `parent` and `child`, or a
+dot-walked `parent.name` or `parent.sys_class_name`, are not guaranteed to be
+filtered by the access rules or the domain of the CI they name. So the tool
+shows nothing about a CI from a relationship row:
+
+- Each level's newly found CIs are read from `cmdb_ci`, in batches of up to 100
+  sys_ids. The instance applies the profile user's ACLs and domain visibility
+  to that read, and the profile's field policy for `cmdb_ci` is applied to
+  every field shown (`name`, `sys_class_name`), through the same projection,
+  redaction and hidden-value checks as `sn_query`. A field the profile cannot
+  read is left out.
+- A CI that read does not return is unreadable to this profile. Its
+  relationships are not shown and the walk does not go through it. The result
+  says only how many relationships were left out; no name, class or other
+  attribute of such a CI is returned.
+- If `parent`, `child` or `type` of `cmdb_rel_ci` is not readable under the
+  profile's field policy, the call is refused before any request.
+- The start CI follows the same rules.
+- The map output (`map: true`) is built from the same reads, so it shows nothing
+  the list does not.
+
+The sys_ids of CIs on the other end of a relationship are visible to anyone who
+can read `cmdb_rel_ci`; they are what the tool uses to ask `cmdb_ci` about them.
+
 ## Flow views
 
 `sn_flow_view` is read-only. It reads 15 tables through the Table API and
