@@ -32,6 +32,7 @@ import { platformViewTextRenderer, platformViewToolModule } from "./platform-vie
 import * as profile from "./profile.js";
 import { queryToolModule } from "./query-module.js";
 import * as relationships from "./relationships.js";
+import { relationshipsTextRenderer } from "./relationships-renderer.js";
 import { schemaToolModule } from "./schema-module.js";
 import * as syslog from "./syslog.js";
 import { updateToolModule } from "./update-module.js";
@@ -230,6 +231,7 @@ export const serviceNowToolModules = Object.freeze([
 ] as const);
 
 registerEnvelopeTextRenderer("sn_history", historyTextRenderer);
+registerEnvelopeTextRenderer("sn_relationships", relationshipsTextRenderer);
 registerEnvelopeTextRenderer("sn_platform_view", platformViewTextRenderer);
 
 const profileInputSchema = withRequiredProfile(profile.schema);
