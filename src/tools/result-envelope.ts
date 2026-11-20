@@ -787,7 +787,13 @@ function effectiveOrder(
     case "sn_discover":
       return args.type === "apps" ? ["source", "sys_id"] : ["sys_id"];
     case "sn_aggregate":
-      return typeof args.group_by === "string" ? [args.group_by] : ["aggregate"];
+      // The tool's own order: the group values in code-unit order, the
+      // display value first when one is requested for every entry.
+      return typeof args.group_by !== "string"
+        ? ["aggregate"]
+        : args.display_value === "all"
+          ? [`${args.group_by}.display_value`, `${args.group_by}.value`]
+          : [args.group_by];
     case "sn_atf":
       return args.action === "run-suite"
         ? ["-sys_created_on", "-sys_id"]
@@ -1116,7 +1122,27 @@ function isMutableEnvelope(candidate: unknown): candidate is MutableEnvelope {
   );
 }
 
-function renderEnvelopeText(envelope: MutableEnvelope): string {
+/**
+ * What a grouped sn_aggregate page adds to its summary: the group total when
+ * every group was read, and the tool's own warnings when groups are missing
+ * from the list. Fixed tool wording and a number, never ServiceNow data. It is
+ * part of the summary, not of a renderer's text, so the fit counts it and a
+ * page cut for size still carries it.
+ */
+function aggregateNote(data: unknown): string {
+  const total = numericObjectField(data, "total_groups");
+  const warnings = nestedObjectField(data, "warnings");
+  return [
+    ...(total === undefined ? [] : [`Total groups: ${total}.`]),
+    ...(Array.isArray(warnings)
+      ? warnings.filter((warning): warning is string => typeof warning === "string")
+      : []),
+  ]
+    .map((part) => ` ${part}`)
+    .join("");
+}
+
+function renderEnvelopeText(envelope: MutableEnvelope, tool?: string): string {
   const pagination = envelope.metadata.pagination;
   const noRowFit = pagination.mode === "offset" && pagination.returned === 0;
   const continuation =
@@ -1144,7 +1170,8 @@ function renderEnvelopeText(envelope: MutableEnvelope): string {
     `record${envelope.metadata.record_count === 1 ? "" : "s"}.` +
     continuation +
     recovery +
-    truncated
+    truncated +
+    (tool === "sn_aggregate" ? aggregateNote(envelope.data) : "")
   );
 }
 
@@ -1152,13 +1179,14 @@ function resultBytes(result: CallToolResult): number {
   return Buffer.byteLength(JSON.stringify(result), "utf8");
 }
 
-function candidateResult(
+function candidateResultFor(
+  tool: string | undefined,
   base: CallToolResult,
   envelope: MutableEnvelope
 ): CallToolResult {
   return {
     ...base,
-    content: [{ type: "text", text: renderEnvelopeText(envelope) }],
+    content: [{ type: "text", text: renderEnvelopeText(envelope, tool) }],
     structuredContent: envelope,
   };
 }
@@ -1363,6 +1391,8 @@ function finalizeSummaryResult(
   byteCap: number = MAX_RESPONSE_BYTES_MAX
 ): CallToolResult | undefined {
   const offsetPaged = tool === undefined || OFFSET_PAGED_TOOLS.has(tool);
+  const candidateResult = (base: CallToolResult, envelope: MutableEnvelope): CallToolResult =>
+    candidateResultFor(tool, base, envelope);
   if (!isMutableEnvelope(result.structuredContent)) return result;
   const sourceEnvelope = JSON.parse(
     JSON.stringify(result.structuredContent)

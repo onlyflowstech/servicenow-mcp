@@ -759,21 +759,28 @@ ServiceNow's Stats API does not page grouped results: it ignores
 `sysparm_limit` and `sysparm_offset` and returns every group. With
 `group_by`, `sn_aggregate` therefore makes one request, orders the groups
 itself and pages them with `offset` and `limit`, so `offset` is a true group
-offset and every page differs. The order is the groups' own values, the same on
-every call.
+offset and every page differs. The order is the tool's own: the groups'
+values in code-unit order (the display value first with `display_value: "all"`),
+the same on every call.
 
 - **Paging.** `metadata.pagination` (and `has_more` and `next_offset` in the
   data) say whether another page exists and where it starts; a page cut to fit
   the response size continues at the first group not returned. Without
   `group_by` the result is one row and is not paged.
-- **Total.** `total_groups` is the number of groups when every group was read.
+- **Total.** `total_groups` is the number of groups when every group was read
+  and kept. A list with groups missing (cut at the cap, or left out by response
+  limits or field policy) has no total.
 - **Cap.** One call reads at most 5,000 groups (a group is about 100 to 150
   bytes, so that fits the 1 MiB upstream response limit). When more exist,
-  only the first 5,000 in order can be paged: `total_groups` is left out,
-  `truncated` is true, `metadata.truncation` says `record_limit`, and
-  `warnings` says to group by a field with fewer distinct values. If the
+  only the first 5,000 in the instance's order by the group field can be paged
+  (the same 5,000 whether or not the instance honours `sysparm_limit`):
+  `total_groups` is left out, `truncated` is true, `metadata.truncation` says
+  `record_limit`, and `warnings` says to group by a field with fewer distinct
+  values. If the
   group list is too large to read in one response at all, the call fails with
-  the same advice; `display_value: "false"` makes each group smaller. The
+  the usual too-large error (lowering `limit` does not help, since the whole
+  list is read): group by a field with fewer distinct values, or use
+  `display_value: "false"`, which makes each group smaller. The
   request always asks for up to 5,001 groups, even for a small `limit`: an
   instance that does honour `sysparm_limit` then sends more groups than a small
   page needs, a deliberate trade for one request and a stable order. The text

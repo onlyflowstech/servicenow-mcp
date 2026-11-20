@@ -11,8 +11,6 @@ import {
   preparedReadableFields,
   resolveReadableFields,
 } from "../field-policy.js";
-import type { EnvelopeTextRenderer } from "./result-envelope.js";
-import { isServiceNowResponseTooLarge } from "../response-too-large.js";
 import { ok, err } from "../utils.js";
 
 const MAX_AGGREGATE_OFFSET = 10_000;
@@ -61,30 +59,18 @@ function normalizeAggregateGroups(filtered: unknown): unknown[] {
   return [];
 }
 
+function isWholeGroup(group: unknown): boolean {
+  if (typeof group !== "object" || group === null) return false;
+  const { groupby_fields: fields, stats } = group as Record<string, unknown>;
+  return Array.isArray(fields) && typeof stats === "object" && stats !== null;
+}
+
 /** Total order on groups: code-unit order of each group's canonical form, built once. */
 function sortGroupsDeterministically(groups: unknown[]): unknown[] {
   const keyed = groups.map((group) => ({ group, key: canonicalAggregateKey(group) }));
   keyed.sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
   return keyed.map((entry) => entry.group);
 }
-
-/**
- * The text of a grouped page: the dispatcher's summary (with the paging line
- * and any truncation reason), then the group total when every group was read,
- * and the tool's cap warning when the list was cut at the cap. The warning is
- * the tool's own fixed wording, never ServiceNow data. It stays in the text
- * when the page was also cut for size, which then names `byte_limit` in the
- * metadata.
- */
-export const aggregateTextRenderer: EnvelopeTextRenderer = (envelope, context) => {
-  const data = envelope.data as { total_groups?: unknown; warnings?: unknown } | null;
-  const parts = [context.summary];
-  if (typeof data?.total_groups === "number") parts.push(`Total groups: ${data.total_groups}.`);
-  if (Array.isArray(data?.warnings)) {
-    for (const warning of data.warnings) if (typeof warning === "string") parts.push(warning);
-  }
-  return parts.join(" ");
-};
 
 export const definition = {
   name: "sn_aggregate",
@@ -184,44 +170,50 @@ export async function handler(
       params.sysparm_display_value = args.display_value;
     }
 
-    let resp: { result?: unknown } | null;
-    try {
-      resp = await client.get(`/api/now/stats/${args.table}`, params);
-    } catch (error) {
-      if (groupByField && isServiceNowResponseTooLarge(error)) {
-        return err(
-          `The group list for ${args.table} grouped by ${groupByField} is too large to read in one response. ` +
-            "Group by a field with fewer distinct values, or set display_value to false."
-        );
-      }
-      throw error;
-    }
-    const filtered = filterAggregateResult(resp?.result, readableFields);
-    const groups = normalizeAggregateGroups(filtered);
+    // A response over the byte limit propagates as the trusted too-large
+    // error: only that path gives the caller a category and what to change.
+    const resp: { result?: unknown } | null = await client.get(`/api/now/stats/${args.table}`, params);
     if (!groupByField) {
-      return ok(sortGroupsDeterministically(groups).slice(0, args.limit + 1));
+      const single = normalizeAggregateGroups(filterAggregateResult(resp?.result, readableFields));
+      return ok(sortGroupsDeterministically(single).slice(0, args.limit + 1));
     }
 
-    // Order the whole list, keep what the cap allows, then page it here.
-    const ordered = sortGroupsDeterministically(groups);
-    const capped = ordered.length > MAX_AGGREGATE_GROUPS;
-    const known = capped ? ordered.slice(0, MAX_AGGREGATE_GROUPS) : ordered;
+    // The raw list is counted and cut before the field filter, which has
+    // limits of its own: only its first MAX_AGGREGATE_GROUPS groups, in the
+    // instance's order, are ever filtered, whether or not the instance
+    // honoured the limit. A longer raw list is capped; so is a list the filter
+    // gave back with fewer groups than it was given, since the total of a
+    // list with groups missing would be false.
+    const raw = Array.isArray(resp?.result) ? (resp!.result as unknown[]) : undefined;
+    const overCap = raw !== undefined && raw.length > MAX_AGGREGATE_GROUPS;
+    const source = raw === undefined ? resp?.result : raw.slice(0, MAX_AGGREGATE_GROUPS);
+    const groups = normalizeAggregateGroups(filterAggregateResult(source, readableFields));
+    // A group the filter cut short (its stats or group fields gone) is left
+    // out too, never shown as if it were whole.
+    const whole = groups.filter(isWholeGroup);
+    const lost = raw !== undefined && whole.length !== (source as unknown[]).length;
+
+    const known = sortGroupsDeterministically(whole);
     // One group past the page stays in the result: it only says another page
     // exists, and the envelope removes it.
     const page = known.slice(args.offset, args.offset + args.limit + 1);
+    const warnings = [
+      ...(overCap
+        ? [
+            `More than ${MAX_AGGREGATE_GROUPS} groups exist; only the first ${MAX_AGGREGATE_GROUPS} in the instance's order by the group field can be paged, and no total is given. Group by a field with fewer distinct values to see them all.`,
+          ]
+        : []),
+      ...(lost
+        ? [
+            "Some groups were left out of this list by response limits or field policy, so no total is given. Group by a field with fewer distinct values to see them all.",
+          ]
+        : []),
+    ];
     return ok({
       result: page,
       has_more: page.length > args.limit,
-      // The group total is known only when every group was read.
-      ...(capped ? {} : { total_groups: known.length }),
-      ...(capped
-        ? {
-            truncated: true,
-            warnings: [
-              `More than ${MAX_AGGREGATE_GROUPS} groups exist; only the first ${MAX_AGGREGATE_GROUPS} in order can be paged and no total is given. Group by a field with fewer distinct values to see them all.`,
-            ],
-          }
-        : {}),
+      // The group total is known only when every group was read and kept.
+      ...(warnings.length === 0 ? { total_groups: known.length } : { truncated: true, warnings }),
     });
   } catch (error) {
     throw error;

@@ -51,7 +51,7 @@ registerEnvelopeTextRenderer("sn_nl", () => "x".repeat(DEFAULT_RESULT_BYTE_LIMIT
 registerEnvelopeTextRenderer("sn_profile", () => {
   throw new Error("renderer failure");
 });
-registerEnvelopeTextRenderer("sn_get", () => 42 as unknown as string);
+registerEnvelopeTextRenderer("sn_aggregate", () => 42 as unknown as string);
 registerEnvelopeTextRenderer("sn_schema", () => "   ");
 registerEnvelopeTextRenderer("sn_discover", (envelope) => {
   (envelope.data as { results: unknown[] }).results.push("mutated");
@@ -205,7 +205,7 @@ describe("envelope text renderer registry", () => {
 
   it.each([
     ["throws", "sn_profile" as const, { name: PROFILE, instance: "https://x.service-now.com", auth_type: "basic" }],
-    ["returns a non-string", "sn_get" as const, { number: "INC0010054" }],
+    ["returns a non-string", "sn_aggregate" as const, { stats: { count: "3" } }],
     ["returns blank text", "sn_schema" as const, [{ field: "number" }]],
   ])("falls back to the summary when the renderer %s", (_label, tool, data) => {
     const { withTool, withoutTool } = withAndWithoutTool(tool, {}, data);

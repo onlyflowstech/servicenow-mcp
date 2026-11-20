@@ -12,7 +12,7 @@ import {
   envelopeCompatibilityResult,
   finalizeEnvelopeResult,
 } from "../src/tools/result-envelope.js";
-import { closeHarnesses, harness } from "./structured-filter-harness.js";
+import { callError, closeHarnesses, harness } from "./structured-filter-harness.js";
 
 afterEach(closeHarnesses);
 
@@ -177,6 +177,14 @@ describe("sn_aggregate grouped paging", () => {
     expect(envelope.metadata.pagination.has_more).toBe(false);
   });
 
+  it("names the real order: the group field, and its display value first when every entry carries one", async () => {
+    const order = async (input: Record<string, unknown>) =>
+      (await call(ignoringServer(groupList(3)), input)).envelope.metadata.pagination as unknown as { order_by: string[] };
+    expect((await order({})).order_by).toEqual(["priority"]);
+    expect((await order({ display_value: "true" })).order_by).toEqual(["priority"]);
+    expect((await order({ display_value: "all" })).order_by).toEqual(["priority.display_value", "priority.value"]);
+  });
+
   it("orders groups the same however the server ordered them", async () => {
     const rows = groupList(30);
     const shuffled = [...rows.slice(10), ...rows.slice(0, 10)].reverse();
@@ -204,15 +212,28 @@ describe("sn_aggregate grouped paging at the group cap", () => {
     expect(text).toContain("truncated by record_limit");
   });
 
-  it("serves the same capped groups to a server that honours the limit", async () => {
-    // It would answer cap + 1 groups, the most this call asks for.
-    const rows = groupList(over);
-    const honouring = honouringServer(rows);
-    const ignoring = ignoringServer(rows);
-    const a = await call(ignoring, { limit: 10, offset: MAX_AGGREGATE_GROUPS - 10 });
-    const b = await call(honouring, { limit: 10, offset: MAX_AGGREGATE_GROUPS - 10 });
-    expect(values(b.envelope)).toEqual(values(a.envelope));
-    expect(b.envelope.data.truncated).toBe(true);
+  it("offers the same first groups in the instance's order, whether or not the instance honours the limit", async () => {
+    // The instance's order is not the tool's: upper case sorts before lower
+    // case here, and the instance puts them side by side.
+    const rows = Array.from({ length: over }, (_, index) => ({
+      groupby_fields: [{ field: "priority", value: `${index % 2 === 0 ? "A" : "b"}${String(index).padStart(5, "0")}` }],
+      stats: { count: "1" },
+    }));
+    const firstInInstanceOrder = rows.slice(0, MAX_AGGREGATE_GROUPS).map((row) => row.groupby_fields[0]!.value);
+    const walk = async (get: ReturnType<typeof vi.fn>) => {
+      const seen: string[] = [];
+      for (let offset = 0; offset < MAX_AGGREGATE_GROUPS; offset += 1_000) {
+        const { envelope } = await call(get, { limit: 1_000, offset });
+        expect(envelope.data.truncated).toBe(true);
+        expect(envelope.data.total_groups).toBeUndefined();
+        seen.push(...values(envelope));
+      }
+      return seen;
+    };
+    const fromIgnoring = await walk(vi.fn(async () => ({ result: rows })));
+    const fromHonouring = await walk(honouringServer(rows));
+    expect(fromHonouring).toEqual(fromIgnoring);
+    expect([...fromIgnoring].sort()).toEqual([...firstInInstanceOrder].sort());
   });
 
   it("ends the pages at the cap: the last page says no more, and says it was cut", async () => {
@@ -334,16 +355,65 @@ describe("sn_aggregate grouped text", () => {
   });
 });
 
+describe("sn_aggregate grouped lists the field filter would cut", () => {
+  const manyStats = (index: number) => ({
+    groupby_fields: [{ field: "priority", value: key(index) }],
+    stats: {
+      count: "1",
+      sum: { sys_mod_count: "1" },
+      avg: { sys_mod_count: "1" },
+      min: { sys_mod_count: "1" },
+      max: { sys_mod_count: "1" },
+    },
+  });
+
+  it.each([MAX_AGGREGATE_GROUPS + 1, 10_001, 12_000])(
+    "reports %i raw groups as capped, never as an empty complete list",
+    async (count) => {
+      const { envelope, text } = await call(ignoringServer(groupList(count)), { limit: 10 });
+      expect(envelope.data.result).toHaveLength(10);
+      expect(envelope.data.total_groups).toBeUndefined();
+      expect(envelope.data.truncated).toBe(true);
+      expect(envelope.data.warnings).toHaveLength(1);
+      expect(envelope.metadata.truncation).toEqual({ truncated: true, reason: "record_limit" });
+      expect(envelope.metadata.pagination).toMatchObject({ has_more: true, next_offset: 10 });
+      expect(text).toContain("Group by a field with fewer distinct values");
+    }
+  );
+
+  it("filters only the first cap groups of the raw list", async () => {
+    const get = ignoringServer(groupList(12_000));
+    const { envelope } = await call(get, { limit: 100, offset: 4_900 });
+    expect(envelope.data.result).toHaveLength(100);
+    expect(envelope.metadata.pagination.has_more).toBe(false);
+  });
+
+  it("gives no total and a warning when the filter drops groups, and shows no partial group", async () => {
+    const rows = Array.from({ length: MAX_AGGREGATE_GROUPS }, (_, index) => manyStats(index));
+    const get = vi.fn(async () => ({ result: rows }));
+    const { envelope, text } = await call(get, { type: "AVG", field: "sys_mod_count", limit: 100 });
+    expect(envelope.data.result).toHaveLength(100);
+    expect(envelope.data.total_groups).toBeUndefined();
+    expect(envelope.data.truncated).toBe(true);
+    expect(envelope.data.warnings![0]).toMatch(/left out/u);
+    expect(envelope.metadata.truncation.truncated).toBe(true);
+    expect(text).toContain("left out");
+    for (const row of envelope.data.result) {
+      expect(row.stats).toBeTypeOf("object");
+      expect(row.stats).not.toBeNull();
+    }
+  });
+});
+
 describe("sn_aggregate grouped errors and the other paths", () => {
-  it("answers an upstream response over the byte limit with how to narrow it", async () => {
+  it("lets an upstream response over the byte limit propagate, for the dispatcher to classify", async () => {
     const get = vi.fn(async () => {
       throw new ServiceNowResponseTooLargeError("cumulative upstream response exceeds configured byte limit");
     });
     const args = schema.parse({ table: "incident", type: "COUNT", group_by: "priority" });
-    const result = await handler(args, { get } as never, {} as never, {} as never);
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toMatch(/too large/u);
-    expect(result.content[0]!.text).toMatch(/fewer distinct values/u);
+    await expect(handler(args, { get } as never, {} as never, {} as never)).rejects.toBeInstanceOf(
+      ServiceNowResponseTooLargeError
+    );
     expect(get).toHaveBeenCalledTimes(1);
   });
 
@@ -427,6 +497,43 @@ describe("sn_aggregate grouped paging through the registered server", () => {
     expect(cut.envelope.metadata.pagination.has_more).toBe(true);
     expect(cut.envelope.metadata.pagination.next_offset).toBe(cut.envelope.data.result.length);
     expect(cut.text).toContain(`at offset ${cut.envelope.data.result.length}.`);
+  });
+
+  it("reports a raw list over 10,000 groups as capped, not as an empty list", async () => {
+    const { envelope, text } = await page(groupList(10_001), { limit: 5 });
+    expect(envelope.data.result).toHaveLength(5);
+    expect(envelope.data.total_groups).toBeUndefined();
+    expect(envelope.data.truncated).toBe(true);
+    expect(envelope.metadata.truncation).toEqual({ truncated: true, reason: "record_limit" });
+    expect(text).toContain("Group by a field with fewer distinct values");
+  });
+
+  it("gives no total when the filter drops groups", async () => {
+    const wide = Array.from({ length: MAX_AGGREGATE_GROUPS }, (_, index) => ({
+      groupby_fields: [{ field: "priority", value: key(index) }],
+      stats: {
+        count: "1",
+        sum: { sys_mod_count: "1" },
+        avg: { sys_mod_count: "1" },
+        min: { sys_mod_count: "1" },
+        max: { sys_mod_count: "1" },
+      },
+    }));
+    const { envelope } = await page(wide, { type: "AVG", field: "sys_mod_count", limit: 10 });
+    expect(envelope.data.total_groups).toBeUndefined();
+    expect(envelope.data.truncated).toBe(true);
+    expect(envelope.data.warnings![0]).toMatch(/left out/u);
+  });
+
+  it("answers a group list too large to read with the too-large error, not an internal one", async () => {
+    const connected = await harness([], { tableAccess });
+    connected.get.mockImplementation((async () => {
+      throw new ServiceNowResponseTooLargeError("cumulative upstream response exceeds configured byte limit");
+    }) as never);
+    const text = await callError(connected, "sn_aggregate", { table: "incident", type: "COUNT", group_by: "priority" });
+    expect(text).toContain("too_large");
+    expect(text).not.toContain("internal");
+    expect(text).toMatch(/Lower limit, request fewer fields, or narrow the query/u);
   });
 
   it("refuses an unreadable group_by field without a request", async () => {
