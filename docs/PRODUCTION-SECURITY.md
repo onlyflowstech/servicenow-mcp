@@ -587,17 +587,20 @@ only where its own entry for that table lists it in `readable` or `writable`.
 Name them only for the profiles and tables that need them.
 
 - A table that extends a listed table has the same columns and is opened only
-  by its own entry. The extension chain comes from `sys_db_object`. On a profile
-  with `"fieldTypes": { "dictionary": "not_required" }`, a table whose parents
-  can't be read is covered only by the names that apply to every table
-  (`running_process_command` and `running_process_key_parameters`), not by its
-  chain.
-- A database view that joins one of these tables, or a table with record payload
-  columns, has those columns under the view's prefix for that table
-  (`rp_command` for a table joined as `rp`). The same rules apply, and the view
-  is opened only by its own entry. A view whose joined tables can't be read is
-  refused like any table with unreadable field types; with the `not_required`
-  setting it is covered by name only.
+  by its own entry. A database view that joins one of these tables, or a table
+  with record payload columns, has those columns under the view's prefix for
+  that table (`rp_command` for a table joined as `rp`), and is opened only by
+  its own entry. The chains and the views' joined tables come from
+  `sys_db_object` and `sys_db_view_table`; a table or view they can't be read
+  for is refused like any table with unreadable field types.
+- On a profile with `"fieldTypes": { "dictionary": "not_required" }` only exact
+  names apply: the listed tables, the out-of-the-box subclass
+  `cmdb_ci_docker_image`, the out-of-the-box views `related_servers`,
+  `classified_apps`, `application_on_servers` and `samp_lrb_to_instances_view`
+  (with their prefixed columns, listed in the README), and
+  `running_process_command` and `running_process_key_parameters` on any table.
+  A custom subclass or custom view is covered through its chain or joined
+  tables, so under `not_required` only by those two names.
 - `sn_history` leaves out the audit rows of these columns even where the
   profile opened them, and refuses them in `fields`.
 - Dotted names (`ref_cmdb_running_process.command`, `parent.command`) are never

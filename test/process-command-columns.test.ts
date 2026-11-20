@@ -74,7 +74,14 @@ const GUARDED: Readonly<Record<string, readonly string[]>> = {
   cmdb_ci_endpoint_xenapp_citrx: ["args"],
   cmdb_ci_endpoint_app: ["args"],
   cmdb_ci_appl_citrix_app: ["app_args"],
+  cmdb_ci_docker_image: ["command"],
+  related_servers: ["rp_command", "rp_parameters", "rp_key_parameters"],
+  classified_apps: ["p_command", "p_parameters", "p_key_parameters", "a_running_process_command", "a_running_process_key_parameters"],
+  application_on_servers: ["appl_running_process_command", "appl_running_process_key_parameters"],
+  samp_lrb_to_instances_view: ["appl_running_process_command", "appl_running_process_key_parameters"],
 };
+/** The out-of-the-box database views in the list, and the subclass listed by name. */
+const LISTED_VIEWS = ["related_servers", "classified_apps", "application_on_servers", "samp_lrb_to_instances_view"] as const;
 /** Columns guarded by name on every table. */
 const EVERYWHERE = ["running_process_command", "running_process_key_parameters"] as const;
 const PAIRS = Object.entries(GUARDED).flatMap(([table, columns]) => columns.map((column) => [table, column] as const));
@@ -253,7 +260,7 @@ describe("tables that extend a guarded table", () => {
   const CASES: ReadonlyArray<readonly [string, readonly string[], readonly string[]]> = [
     ["cmdb_ci_appl_tomcat", ["cmdb_ci_appl_tomcat", "cmdb_ci_appl", "cmdb_ci"], ["running_process_command", "running_process_key_parameters"]],
     ["u_example_app_ext", ["u_example_app_ext", "cmdb_ci_appl_generic", "cmdb_ci_appl", "cmdb_ci"], ["command_line", "running_process_command"]],
-    ["cmdb_ci_docker_image", ["cmdb_ci_docker_image", "cmdb_ci_oslv_image", "cmdb_ci"], ["command"]],
+    ["u_example_image_ext", ["u_example_image_ext", "cmdb_ci_docker_image", "cmdb_ci_oslv_image", "cmdb_ci"], ["command"]],
     ["u_example_connection", ["u_example_connection", "cmdb_tcp_connection"], ["command"]],
   ];
   it.each(CASES)("%s has the columns of its chain, and only its own entry opens them", (table, chain, columns) => {
@@ -597,6 +604,94 @@ describe("a table that extends cmdb_running_process", () => {
   });
 });
 
+describe("when the call has no extension chain (names-only fallback)", () => {
+  const CUSTOM_IMAGE = "u_example_image_ext";
+  const CUSTOM_VIEW = "u_example_process_view";
+  const namesOnly = <T>(tables: readonly string[], action: () => T): T => {
+    const incomplete = fieldTypesFromRows(
+      [],
+      Object.fromEntries(tables.map((table) => [table, { tables: [table], complete: false }]))
+    );
+    const { scope } = hiddenFieldScope(incomplete, tables, true);
+    expect(scope?.hierarchies?.size ?? 0).toBe(0);
+    expect(scope?.views?.size ?? 0).toBe(0);
+    return runWithHiddenFieldScope(scope!, action);
+  };
+
+  it("keeps every listed table, subclass and view closed by its exact name", () => {
+    const tables = Object.keys(GUARDED);
+    namesOnly(tables, () => {
+      for (const [table, columns] of Object.entries(GUARDED)) {
+        for (const column of columns) {
+          expect(reason(() => resolveReadableFields(table, { fields: column })), `${table}.${column}`).toBe("explicit_read_required");
+          expect(reason(() => resolveReadableFields(table, { fields: column, purpose: "query" })), `${table}.${column}`).toBe(
+            "explicit_read_required"
+          );
+          expect(reason(() => validateWritableFields(table, { [column]: "x" })), `${table}.${column}`).toBe("explicit_field_required");
+        }
+        expect(JSON.stringify(filterReadableRecord(rowFor(table), ["*"]))).not.toContain(MARKER);
+      }
+    });
+  });
+
+  it.each(LISTED_VIEWS)("%s: only its own entry opens a column", (view) => {
+    const column = GUARDED[view]![0]!;
+    withFieldPolicy({ fieldPolicy: { [view]: { readable: ["sys_id", column] } } }, () => {
+      namesOnly([view], () => {
+        expect(resolveReadableFields(view, { fields: column })).toEqual([column]);
+        for (const other of GUARDED[view]!.slice(1)) {
+          expect(reason(() => resolveReadableFields(view, { fields: other }))).toBe("explicit_read_required");
+        }
+      });
+    });
+  });
+
+  it("leaves an unknown custom subclass and an unknown custom view open, except for the names guarded everywhere", () => {
+    namesOnly([CUSTOM_IMAGE, CUSTOM_VIEW], () => {
+      expect(resolveReadableFields(CUSTOM_IMAGE, { fields: "command" })).toEqual(["command"]);
+      expect(resolveReadableFields(CUSTOM_VIEW, { fields: "rp_command" })).toEqual(["rp_command"]);
+      for (const column of EVERYWHERE) {
+        expect(reason(() => resolveReadableFields(CUSTOM_IMAGE, { fields: column }))).toBe("explicit_read_required");
+        expect(reason(() => resolveReadableFields(CUSTOM_VIEW, { fields: column }))).toBe("explicit_read_required");
+      }
+    });
+    // With the chain known, the same tables are closed.
+    inChainScope([CUSTOM_IMAGE], () => undefined);
+    const types = fieldTypesFromRows([], {
+      [CUSTOM_IMAGE]: { tables: [CUSTOM_IMAGE, "cmdb_ci_docker_image", "cmdb_ci_oslv_image", "cmdb_ci"], complete: true },
+    });
+    const { scope } = hiddenFieldScope(types, [CUSTOM_IMAGE], false);
+    runWithHiddenFieldScope(scope!, () => {
+      expect(reason(() => resolveReadableFields(CUSTOM_IMAGE, { fields: "command" }))).toBe("explicit_read_required");
+    });
+  });
+
+  it("through the dispatcher on a profile that does not require field types", async () => {
+    const unreadable: FieldTypeLoader = async () => ({ state: "unavailable" });
+    const connected = await connect(undefined, unreadable, "not_required");
+    for (const [table, columns] of [
+      ["cmdb_ci_docker_image", ["command"]],
+      ["related_servers", ["rp_command", "rp_parameters", "rp_key_parameters"]],
+      ["classified_apps", ["p_command", "a_running_process_command"]],
+      ["application_on_servers", ["appl_running_process_key_parameters"]],
+      ["samp_lrb_to_instances_view", ["appl_running_process_command"]],
+    ] as const) {
+      for (const column of columns) {
+        const named = await call(connected, "sn_query", { table, fields: `sys_id,${column}` });
+        expect(JSON.stringify(named), `${table}.${column}`).toMatch(/holds process command lines/u);
+        await expectRefused(connected, "sn_query", { table, fields: `sys_id,${column}` });
+        await expectRefused(connected, "sn_query", { table, structured_query: TEXT_FILTER(column) });
+        await expectRefused(connected, "sn_aggregate", { table, type: "COUNT", group_by: column });
+      }
+      await expectServedWithout(connected, "sn_query", { table, fields: "all" });
+    }
+    // An unknown custom subclass is covered only by the names guarded everywhere.
+    const custom = await call(connected, "sn_query", { table: "u_example_image_ext", fields: "sys_id,command" });
+    expect(custom.isError).toBeFalsy();
+    await expectRefused(connected, "sn_query", { table: "u_example_image_ext", fields: "running_process_command" });
+  });
+});
+
 describe("raw encoded queries", () => {
   const rule = (fields: readonly string[]) => ({
     rules: [
@@ -680,7 +775,8 @@ const chainedFieldTypes: FieldTypeLoader = async (_client, tables) =>
 
 async function connect(
   fieldPolicy?: FieldPolicyConfigurationInput,
-  fieldTypeLoader: FieldTypeLoader | FieldTypeFixture = noHiddenFieldTypes
+  fieldTypeLoader: FieldTypeLoader | FieldTypeFixture = noHiddenFieldTypes,
+  dictionary?: "not_required"
 ) {
   // A fixture makes the dispatcher run its real type lookup against the fake
   // instance (chains, database views); a loader replaces the lookup.
@@ -738,6 +834,7 @@ async function connect(
         revision: "process-command",
         tableAccess,
         ...(fieldPolicy === undefined ? {} : { fieldPolicy }),
+        ...(dictionary === undefined ? {} : { fieldTypes: { dictionary } }),
       }),
     },
     ...(fixture === undefined ? { fieldTypeLoader: fieldTypeLoader as FieldTypeLoader } : {}),
@@ -890,7 +987,7 @@ describe.each([
     await expectServedWithout(connected, "sn_create", { table, fields: { name: "created" } });
   });
 
-  it("refuses them in sn_history fields and shows no audit row for them", async () => {
+  it("refuses them in sn_history fields (the audit rows are covered in history-module.test.ts)", async () => {
     const connected = await connect(undefined, loader);
     for (const column of columns) {
       await expectRefused(connected, "sn_history", { table, sys_id: SYS_ID, fields: [column] });

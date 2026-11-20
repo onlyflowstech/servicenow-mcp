@@ -1647,16 +1647,24 @@ field by any read tool.
 
 A table that extends a listed table has its columns too, and only its own entry
 opens them, not the parent's (so `cmdb_ci_appl` covers every application class,
-and `cmdb_ci_oslv_image` covers `cmdb_ci_docker_image`). The extension chain
-comes from the same `sys_db_object` read as the field types, so a table whose
-parents can't be read is refused, or, on a profile with
-`"fieldTypes": { "dictionary": "not_required" }`, covered by the column names
-that apply to every table only. A database view that joins a listed table (or
-a table with payload columns) has those columns under the view's prefix for that
-table (`rp_command` for a table joined as `rp`), under the same rules; a view
-whose joined tables can't be read is refused like any table with unreadable
-field types, or covered by name only with the `not_required` setting. A named
-read is denied with:
+and `cmdb_ci_oslv_image` covers `cmdb_ci_docker_image`). A database view that
+joins a listed table (or a table with payload columns) has those columns under
+the view's prefix for that table (`rp_command` for a table joined as `rp`),
+under the same rules. Both come from the same `sys_db_object` and
+`sys_db_view_table` reads as the field types, so a table or view whose chain or
+joined tables can't be read is refused.
+
+On a profile with `"fieldTypes": { "dictionary": "not_required" }`, such a table
+or view is not refused, and only exact names apply: the tables in the list
+above, the out-of-the-box subclass `cmdb_ci_docker_image`, the out-of-the-box
+views `related_servers` (`rp_command`, `rp_parameters`, `rp_key_parameters`),
+`classified_apps` (`p_command`, `p_parameters`, `p_key_parameters`,
+`a_running_process_command`, `a_running_process_key_parameters`),
+`application_on_servers` and `samp_lrb_to_instances_view` (both
+`appl_running_process_command` and `appl_running_process_key_parameters`), and
+the two names that apply to every table. A custom subclass or custom view is
+covered through its chain or joined tables only, so under `not_required` it is
+covered by the names that apply to every table. A named read is denied with:
 
 ```text
 Read denied by policy: field "command" on "cmdb_running_process" holds process command lines, so a readable wildcard never covers it. List it explicitly in fieldPolicy.cmdb_running_process.readable to allow this read.

@@ -250,6 +250,9 @@ const COMMAND_LINE_COLUMNS: ReadonlyMap<string, ReadonlySet<string>> = new Map(
       ["cmdb_tcp_half", ["command"]],
       ["cmdb_ci_docker_container", ["command"]],
       ["cmdb_ci_oslv_image", ["command"]],
+      // The out-of-the-box table that extends one of the above, listed by name
+      // so it is guarded when its chain is not known (see closedColumns).
+      ["cmdb_ci_docker_image", ["command"]],
       // Application and endpoint classes with their own command-line column.
       ["cmdb_ci_appl_rabbitmq_cluster", ["command_line"]],
       ["cmdb_ci_appl_mongo_config_serv", ["command_line"]],
@@ -266,6 +269,22 @@ const COMMAND_LINE_COLUMNS: ReadonlyMap<string, ReadonlySet<string>> = new Map(
       ["cmdb_ci_endpoint_xenapp_citrx", ["args"]],
       ["cmdb_ci_endpoint_app", ["args"]],
       ["cmdb_ci_appl_citrix_app", ["app_args"]],
+      // The out-of-the-box database views that join the tables above: each
+      // joined table's columns under its prefix. Listed by name so they are
+      // guarded when the view's joined tables are not known (see closedColumns).
+      ["related_servers", ["rp_command", "rp_parameters", "rp_key_parameters"]],
+      [
+        "classified_apps",
+        [
+          "p_command",
+          "p_parameters",
+          "p_key_parameters",
+          "a_running_process_command",
+          "a_running_process_key_parameters",
+        ],
+      ],
+      ["application_on_servers", ["appl_running_process_command", "appl_running_process_key_parameters"]],
+      ["samp_lrb_to_instances_view", ["appl_running_process_command", "appl_running_process_key_parameters"]],
     ] as const
   ).map(([table, columns]) => [
     table,
@@ -1345,7 +1364,11 @@ export class FieldPolicyError extends Error {
 
 /** What a closed column holds, for its denial message. */
 function closedColumnContent(field: string): string {
-  return COMMAND_LINE_FIELD_NAMES.has(field) && !PAYLOAD_FIELD_NAMES.has(field)
+  // A database view's column is the joined table's column under a prefix
+  // (`rp_command`), so a name also matches by its ending.
+  const named = (names: ReadonlySet<string>) =>
+    names.has(field) || [...names].some((name) => field.endsWith(`_${name}`));
+  return named(COMMAND_LINE_FIELD_NAMES) && !named(PAYLOAD_FIELD_NAMES)
     ? "process command lines"
     : "record payloads";
 }
