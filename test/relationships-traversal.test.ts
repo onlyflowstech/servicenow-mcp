@@ -413,6 +413,14 @@ describe("fan-out beyond one page", () => {
     expect(data!.warnings[0]).toContain(`: ${id("hub")}.`);
   });
 
+  it("names a CI by its sys_id when its name has nothing left once made inert", async () => {
+    const instance = hub(1_100, "\u200B\u202E\u2060");
+    const limits = { ...TRAVERSAL_LIMITS, maxRelationshipRows: 300 };
+    const { data } = await run(instance, { sys_id: id("hub"), depth: 1, direction: "downstream", limit: 1000 }, limits);
+    expect(data!.warnings[0]).toContain(`: ${id("hub")}.`);
+    expect(data!.warnings[0]).not.toContain('""');
+  });
+
   it("names the CIs of a chunk a request cap leaves unread", async () => {
     const instance = new FakeInstance();
     instance.ci("R", "root-ci");

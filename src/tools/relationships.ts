@@ -648,8 +648,8 @@ export async function traverseRelationships(
   // ── Report ──
   // A CI is named by its policy-filtered name, made inert and in quotes, or by its sys_id.
   const labelOf = (id: string): string => {
-    const name = known.get(id)?.name;
-    return name === undefined ? id : `"${quotedInertText(name, 60)}"`;
+    const name = quotedInertText(known.get(id)?.name, 60);
+    return name === "" ? id : `"${name}"`;
   };
   const namedList = (ids: readonly string[]): string => {
     const unique = [...new Set(ids)];

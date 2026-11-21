@@ -5,8 +5,8 @@ import { encodeMermaidLabel } from "../src/tools/flow-view-mermaid.js";
 
 /** Characters that render as nothing or reorder text, written as escapes so the file stays readable. */
 const TAGS = String.fromCodePoint(0xe0041, 0xe0042, 0xe007f);
-const BIDI = "‮⁦‏؜";
-const ZERO_WIDTH = "​‌‍⁠﻿­";
+const BIDI = "\u202E\u2066\u200F\u061C";
+const ZERO_WIDTH = "\u200B\u200C\u200D\u2060\uFEFF\u00AD";
 const CONTROLS = "\u0000\u0007\u001B\u007F\u009F";
 
 describe("inertText", () => {
@@ -15,7 +15,7 @@ describe("inertText", () => {
   });
 
   it("turns line breaks, tabs, LS and PS into one space, collapses runs and trims", () => {
-    expect(inertText("  a\r\nb\tc d e   f  ")).toBe("a b c d e f");
+    expect(inertText("  a\r\nb\tc\u2028d\u2029e   f  ")).toBe("a b c d e f");
   });
 
   it("removes unpaired surrogates and keeps well-formed pairs", () => {
