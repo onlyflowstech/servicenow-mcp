@@ -821,8 +821,9 @@ profile user's ACLs and domain visibility, and the profile's field policy for
 `cmdb_ci` decides which fields are shown: a `name` or `sys_class_name` the
 profile cannot read is left out. A CI that read does not return is not shown
 and is not walked through; `meta.unreadable_relationships` and a warning give
-only a count. If `parent`, `child` or `type` of `cmdb_rel_ci` is not readable
-under field policy, the call is refused. See
+only a count. If `parent`, `child` or `type` of `cmdb_rel_ci`, or `sys_id` of
+`cmdb_ci`, is not readable under field policy, the call is refused. `ci_name`
+and `type` may be up to 255 characters and `class` up to 80. See
 [Production security](docs/PRODUCTION-SECURITY.md#cmdb-relationships).
 
 **Map.** `map: true` adds `nodes` (the start CI and the CIs listed), `edges`

@@ -515,14 +515,34 @@ shows nothing about a CI from a relationship row:
   relationships are not shown and the walk does not go through it. The result
   says only how many relationships were left out; no name, class or other
   attribute of such a CI is returned.
-- If `parent`, `child` or `type` of `cmdb_rel_ci` is not readable under the
-  profile's field policy, the call is refused before any request.
+- If `parent`, `child` or `type` of `cmdb_rel_ci`, or `sys_id` of `cmdb_ci`, is
+  not readable under the profile's field policy, the call is refused before
+  any request.
 - The start CI follows the same rules.
 - The map output (`map: true`) is built from the same reads, so it shows nothing
   the list does not.
 
 The sys_ids of CIs on the other end of a relationship are visible to anyone who
 can read `cmdb_rel_ci`; they are what the tool uses to ask `cmdb_ci` about them.
+
+This holds inside `sn_relationships` only. `sn_query`, `sn_get` and
+`sn_aggregate` on `cmdb_rel_ci` return the display values of `parent` and
+`child`, which are not filtered by the access rules or the domain of the CI
+they name. Where which CIs a user may see differs by user or domain:
+
+- Bind `cmdb_rel_ci` to `sn_relationships`
+  (`servicenow-mcp-setup grant --read cmdb_rel_ci --tools sn_relationships`),
+  so the generic read tools cannot read it. On a `"*"` profile, naming the
+  table binds it to the listed tools. Keep `cmdb_ci` readable by
+  `sn_relationships` too: a CI is shown only if the tool can read it.
+- The relationship type's name is read by a dot-walk of `type` (`type.name`,
+  from `cmdb_rel_type`), on the same request. It needs no grant on
+  `cmdb_rel_type` and is not subject to a field policy for it; it is
+  relationship metadata, not CI data.
+- An integration user that bypasses instance ACLs, or domain separation, can
+  read every CI, so the read of `cmdb_ci` filters nothing for it. The rule
+  narrows what a user with less access sees; it does not replace that user's
+  own limits.
 
 ## Flow views
 
