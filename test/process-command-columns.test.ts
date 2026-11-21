@@ -656,7 +656,6 @@ describe("when the call has no extension chain (names-only fallback)", () => {
       }
     });
     // With the chain known, the same tables are closed.
-    inChainScope([CUSTOM_IMAGE], () => undefined);
     const types = fieldTypesFromRows([], {
       [CUSTOM_IMAGE]: { tables: [CUSTOM_IMAGE, "cmdb_ci_docker_image", "cmdb_ci_oslv_image", "cmdb_ci"], complete: true },
     });

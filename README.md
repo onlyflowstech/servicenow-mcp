@@ -1655,16 +1655,18 @@ under the same rules. Both come from the same `sys_db_object` and
 joined tables can't be read is refused.
 
 On a profile with `"fieldTypes": { "dictionary": "not_required" }`, such a table
-or view is not refused, and only exact names apply: the tables in the list
-above, the out-of-the-box subclass `cmdb_ci_docker_image`, the out-of-the-box
+or view is not refused. Where its chain or joined tables can be read, it is
+guarded as above. Where they can't, only exact names apply: the tables in the
+list above, the out-of-the-box subclass `cmdb_ci_docker_image`, the out-of-the-box
 views `related_servers` (`rp_command`, `rp_parameters`, `rp_key_parameters`),
 `classified_apps` (`p_command`, `p_parameters`, `p_key_parameters`,
 `a_running_process_command`, `a_running_process_key_parameters`),
 `application_on_servers` and `samp_lrb_to_instances_view` (both
 `appl_running_process_command` and `appl_running_process_key_parameters`), and
 the two names that apply to every table. A custom subclass or custom view is
-covered through its chain or joined tables only, so under `not_required` it is
-covered by the names that apply to every table. A named read is denied with:
+covered through its chain or joined tables, so where those can't be read under
+`not_required` it is covered by the names that apply to every table only. A
+named read is denied with:
 
 ```text
 Read denied by policy: field "command" on "cmdb_running_process" holds process command lines, so a readable wildcard never covers it. List it explicitly in fieldPolicy.cmdb_running_process.readable to allow this read.
