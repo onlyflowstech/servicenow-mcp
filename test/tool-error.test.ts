@@ -360,7 +360,6 @@ describe("the ambiguous CI name error", () => {
     );
     expect(text).toContain(`ci_name "web-01" matches more than one CI`);
     expect(text).toContain(`web-01, class Linux Server, sys_id ${id("a")}`);
-    // eslint-disable-next-line no-control-regex
     expect(text).not.toMatch(/[\u{E0000}-\u{E007F}\u202A-\u202E\u200B-\u200F\u2060-\u2064\uFEFF\u00AD]/u);
   });
 });
