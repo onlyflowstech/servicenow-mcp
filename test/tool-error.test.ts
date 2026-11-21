@@ -347,4 +347,20 @@ describe("the ambiguous CI name error", () => {
     const many = Array.from({ length: 15 }, (_, index) => ({ sys_id: index.toString(16).padStart(32, "0") }));
     expect(formatToolError(createAmbiguousCiNameError("n", many, false)).match(/sys_id [0-9a-f]{32}/gu)).toHaveLength(10);
   });
+
+  it("removes tag, bidi and zero-width characters from a name and a class label", () => {
+    const tags = String.fromCodePoint(0xe0049, 0xe0067, 0xe006e, 0xe007f);
+    const hidden = `${tags}\u202E\u200B\u2060\uFEFF\u00AD`;
+    const text = formatToolError(
+      createAmbiguousCiNameError(
+        `web${hidden}-01`,
+        [{ sys_id: id("a"), name: `web${hidden}-01`, class: `Linux${hidden} Server` }],
+        false
+      )
+    );
+    expect(text).toContain(`ci_name "web-01" matches more than one CI`);
+    expect(text).toContain(`web-01, class Linux Server, sys_id ${id("a")}`);
+    // eslint-disable-next-line no-control-regex
+    expect(text).not.toMatch(/[\u{E0000}-\u{E007F}\u202A-\u202E\u200B-\u200F\u2060-\u2064\uFEFF\u00AD]/u);
+  });
 });

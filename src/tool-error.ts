@@ -1,13 +1,17 @@
 /**
  * Trusted, caller-safe error contract shared by ServiceNow and MCP boundaries.
  *
- * Raw exception messages are never part of this contract. Error provenance is
+ * Raw exception messages are never part of this contract. The one place
+ * instance text enters an error is `createAmbiguousCiNameError`, which lists
+ * CI names and classes after `inertText` (inert-text.ts) has cleaned them.
+ * Error provenance is
  * held in a module-private WeakMap, so an arbitrary object that happens to
  * expose fields such as `status` or `category` cannot forge a public category.
  *
  * @module tool-error
  */
 
+import { quotedInertText } from "./inert-text.js";
 import { isIssuedResponseTooLargeError } from "./response-too-large.js";
 
 /** Exact stable categories exposed to MCP callers. */
@@ -44,7 +48,8 @@ export type ToolErrorReason =
   | "invalid_cursor"
   | "max_response_bytes_too_small"
   | "ambiguous_ci_name"
-  | "start_ci_required";
+  | "start_ci_required"
+  | "argument_too_long";
 
 export interface ToolErrorDescriptor {
   readonly category: ToolErrorCategory;
@@ -277,21 +282,6 @@ export interface AmbiguousCiMatch {
 
 const MAX_AMBIGUOUS_MATCHES = 10;
 const AMBIGUOUS_SYS_ID = /^[0-9a-f]{32}$/u;
-const AMBIGUOUS_STRIPPED =
-  /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u200B-\u200F\u2028-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/gu;
-
-/** One line of inert text: no controls, bidi or invisibles, no double quote, bounded. */
-function inertName(value: unknown, max = 80): string {
-  if (typeof value !== "string") return "";
-  const flat = value
-    .slice(0, max * 4)
-    .replace(AMBIGUOUS_STRIPPED, " ")
-    .replace(/"/gu, "'")
-    .replace(/\s+/gu, " ")
-    .trim();
-  const characters = Array.from(flat);
-  return characters.length > max ? `${characters.slice(0, max).join("")}…` : flat;
-}
 
 /**
  * Issue the trusted error for a CI name that matches more than one CI. It
@@ -311,21 +301,32 @@ export function createAmbiguousCiNameError(
     .filter((match) => typeof match.sys_id === "string" && AMBIGUOUS_SYS_ID.test(match.sys_id))
     .slice(0, MAX_AMBIGUOUS_MATCHES)
     .map((match) => {
-      const label = inertName(match.name);
-      const cls = inertName(match.class, 60);
+      const label = quotedInertText(match.name);
+      const cls = quotedInertText(match.class, 60);
       return [
         label === "" ? "(no name shown)" : label,
         ...(cls === "" ? [] : [`class ${cls}`]),
         `sys_id ${match.sys_id}`,
       ].join(", ");
     });
-  const subject = inertName(name);
+  const subject = quotedInertText(name);
   return issue({
     category: "conflict",
     reason: "ambiguous_ci_name",
     message:
       `ci_name "${subject}" matches more than one CI. Retry with sys_id set to one of: ` +
       `${listed.join("; ")}${more ? "; more CIs share this name" : ""}.`,
+    retry: "retry_after_correction",
+  });
+}
+
+/** Issue the trusted error for an argument over its length bound; only a fixed argument name is echoed, never the value. */
+export function createArgumentTooLongError(argument: "ci_name" | "type" | "class", max: number): Error {
+  const name = argument === "ci_name" || argument === "type" || argument === "class" ? argument : "An argument";
+  return issue({
+    category: "conflict",
+    reason: "argument_too_long",
+    message: `The ${name} argument is longer than ${Number.isSafeInteger(max) ? max : 0} characters. Shorten it and try again.`,
     retry: "retry_after_correction",
   });
 }
@@ -351,7 +352,8 @@ function issue(candidate: ToolErrorDescriptor): Error {
 /**
  * Issue a trusted structural error. Only fixed module-owned text is attached
  * to the Error; raw upstream/configuration values belong in neither the Error
- * nor its public descriptor.
+ * nor its public descriptor (the one exception, a CI name made inert, is
+ * issued by `createAmbiguousCiNameError`).
  */
 export function createToolError(
   category: ToolErrorCategory,

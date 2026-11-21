@@ -23,7 +23,7 @@ import {
   TRAVERSAL_LIMITS,
   type TraversalLimits,
 } from "../src/tools/relationships.js";
-import { relationshipsTextRenderer } from "../src/tools/relationships-renderer.js";
+import { relationshipsTextRenderer, renderRelationshipsText } from "../src/tools/relationships-renderer.js";
 import {
   envelopeCompatibilityResult,
   finalizeEnvelopeResult,
@@ -174,6 +174,8 @@ async function run(
     data: result.isError ? undefined : (JSON.parse(text) as Output),
   };
 }
+
+const readableCi = (fields: string[]) => ({ fieldPolicy: { cmdb_ci: { readable: fields } } });
 
 const relQueries = (instance: FakeInstance) =>
   instance.calls.filter((call) => call.path.endsWith("cmdb_rel_ci")).map((call) => call.params.sysparm_query!);
@@ -388,6 +390,29 @@ describe("fan-out beyond one page", () => {
     expect(data!.meta.traversal_requests).toBe(instance.calls.length);
   });
 
+  it("names CIs in warnings by their inert name, in quotes", async () => {
+    const tags = String.fromCodePoint(0xe0049, 0xe0067, 0xe007f);
+    const instance = hub(1_100, `the "hub"\n${tags}\u202E\u200B-x`);
+    const limits = { ...TRAVERSAL_LIMITS, maxRelationshipRows: 300 };
+    const { data } = await run(instance, { sys_id: id("hub"), depth: 1, direction: "downstream", limit: 1000, map: true }, limits);
+    const warning = data!.warnings[0]!;
+    expect(warning).toContain(`: "the 'hub' -x".`);
+    expect(warning).not.toMatch(/[\u{E0000}-\u{E007F}\u202A-\u202E\u200B-\u200F\n]/u);
+    // the rendered bullet carries the same text
+    const text = renderRelationshipsText(data)!;
+    expect(text).toContain("the 'hub' -x");
+    expect(text).not.toMatch(/[\u{E0000}-\u{E007F}\u202A-\u202E\u200B-\u200F]/u);
+  });
+
+  it("names a CI by its sys_id when the profile cannot read its name", async () => {
+    const instance = hub(1_100);
+    const limits = { ...TRAVERSAL_LIMITS, maxRelationshipRows: 300 };
+    const { data } = await runWithFieldPolicyConfiguration(readableCi(["sys_id", "sys_class_name"]), () =>
+      run(instance, { sys_id: id("hub"), depth: 1, direction: "downstream", limit: 1000 }, limits)
+    );
+    expect(data!.warnings[0]).toContain(`: ${id("hub")}.`);
+  });
+
   it("names the CIs of a chunk a request cap leaves unread", async () => {
     const instance = new FakeInstance();
     instance.ci("R", "root-ci");
@@ -500,6 +525,27 @@ describe("fan-out beyond one page", () => {
     expect(data!.relationships).toHaveLength(12);
     expect(data!.meta.truncated_by).toMatchObject({ cap: "cis", max: 12, depth: 1, unread_cis: 18 });
     expect(data!.warnings.join(" ")).toContain("the-hub");
+  });
+});
+
+describe("argument lengths", () => {
+  it.each([
+    ["ci_name", 255],
+    ["type", 255],
+    ["class", 80],
+  ])("accepts %s of %i characters and refuses one more, without a request or an echo", async (field, max) => {
+    const base = field === "ci_name" ? {} : { sys_id: id("R") };
+    const ok = sevenCiGraph();
+    await run(ok, { ...base, [field]: "x".repeat(max), depth: 1 }).catch(() => undefined);
+    expect(ok.calls.length).toBeGreaterThan(0);
+    const refused = sevenCiGraph();
+    const value = "SECRET-VALUE".padEnd(max + 1, "y");
+    const error = await run(refused, { ...base, [field]: value, depth: 1 }).catch((caught: unknown) => caught);
+    expect(trustedToolErrorDescriptor(error)).toMatchObject({ category: "conflict", reason: "argument_too_long" });
+    const text = formatToolError(error);
+    expect(text).toContain(`The ${field} argument is longer than ${max} characters`);
+    expect(text).not.toContain("SECRET-VALUE");
+    expect(refused.calls).toHaveLength(0);
   });
 });
 
@@ -661,6 +707,17 @@ describe("field policy", () => {
       )
     ).rejects.toBeInstanceOf(FieldPolicyError);
     expect(instance.calls).toHaveLength(0);
+  });
+
+  it("refuses the call, before any request, when the sys_id of a CI is not readable", async () => {
+    const instance = sevenCiGraph();
+    await expect(
+      runWithFieldPolicyConfiguration(readableCi(["name", "sys_class_name"]), () => run(instance, { sys_id: id("R") }))
+    ).rejects.toBeInstanceOf(FieldPolicyError);
+    expect(instance.calls).toHaveLength(0);
+    expect(() =>
+      runWithFieldPolicyConfiguration(readableCi(["name"]), () => resolveToolTableAccess("sn_relationships", { sys_id: id("R") }))
+    ).toThrow(FieldPolicyError);
   });
 
   it("refuses at the access plan too, so the dispatcher never reaches the handler", () => {

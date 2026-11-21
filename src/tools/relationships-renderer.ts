@@ -13,6 +13,7 @@
  * @module tools/relationships-renderer
  */
 
+import { inertText } from "../inert-text.js";
 import { envelopeTextFits } from "./envelope-text-fit.js";
 import {
   bulletList,
@@ -49,7 +50,8 @@ export function renderRelationshipsText(
   const root = asRecord(record.root);
   const meta = asRecord(record.meta);
   const diagram = asRecord(record.diagram);
-  const title = typeof root.name === "string" && root.name !== "" ? root.name : String(root.sys_id ?? "CI");
+  const named = inertText(root.name, 200);
+  const title = named !== "" ? named : inertText(root.sys_id, 40) || "CI";
   const blocks: (MarkdownFragment | undefined)[] = [
     headline(text(`Relationships of ${title}`, 200), {
       status: "pass",
@@ -79,7 +81,7 @@ export function renderRelationshipsText(
     notes.push(`More CIs: repeat the call with offset ${String(meta.next_offset ?? "")}.`);
   }
   for (const warning of Array.isArray(record.warnings) ? record.warnings : []) {
-    if (typeof warning === "string") notes.push(warning);
+    if (typeof warning === "string") notes.push(inertText(warning, 600));
   }
   if (notes.length > 0) blocks.push(bulletList(notes));
   return renderMarkdown(...blocks);

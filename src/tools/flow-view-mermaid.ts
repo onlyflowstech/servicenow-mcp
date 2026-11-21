@@ -12,6 +12,7 @@
  * @module tools/flow-view-mermaid
  */
 
+import { LINE_BREAKS_AND_TABS, LONE_SURROGATES, STRIPPED_CHARACTERS } from "../inert-text.js";
 import { FLOW_VIEW_LIMITS, type FlowGraph } from "./flow-view-contracts.js";
 import {
   MAX_MERMAID_EDGES,
@@ -24,17 +25,8 @@ import {
 
 export const MERMAID_MAX_LABEL_CHARS: number = FLOW_VIEW_LIMITS.MERMAID_MAX_LABEL_CHARS;
 
-// E3 step 3: line breaks (CR, LF, NEL, LS, PS) and tab become a space. This
-// runs before step 2's stripping, which would otherwise delete CR/LF/tab as
-// C0 controls and glue the words on either side together.
-const LINE_BREAKS_AND_TABS = /[\r\n\t\u0085\u2028\u2029]/gu;
-// E3 step 2: C0/C1 controls and DEL; bidi controls U+061C, U+200E, U+200F,
-// U+202A-202E, U+2066-2069; invisibles U+00AD, U+200B-200D, U+2060-2064,
-// U+FEFF; tag characters U+E0000-E007F.
-const STRIPPED_CHARACTERS =
-  /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\u{E0000}-\u{E007F}]/gu;
-// With the `u` flag this matches only unpaired surrogates.
-const LONE_SURROGATES = /[\uD800-\uDFFF]/gu;
+// E3 steps 2 and 3: the character sets live in inert-text.ts, which every
+// tool that writes instance text into its own prose shares.
 const WHITESPACE_RUNS = /\s+/gu;
 const LABEL_SAFE_CHARACTER = /^[A-Za-z0-9 ,.:_()/+=?-]$/u;
 // E3 step 5: characters that could become live after Mermaid decodes

@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { createAmbiguousCiNameError, createStartCiRequiredError, createToolError } from "../tool-error.js";
+import { quotedInertText } from "../inert-text.js";
+import {
+  createAmbiguousCiNameError,
+  createArgumentTooLongError,
+  createStartCiRequiredError,
+  createToolError,
+} from "../tool-error.js";
 import { isServiceNowRequestCancellation, isServiceNowResponseTooLarge, type ServiceNowOperations } from "../client.js";
 import type { ExecutionContext } from "../execution-context.js";
 import type { ServiceNowToolSettings } from "./tool-module.js";
@@ -118,6 +124,9 @@ export const TRAVERSAL_LIMITS: TraversalLimits = Object.freeze({
   mapShare: 0.48,
 });
 
+/** Longest `ci_name`, `type` and `class` a call may carry, in characters. */
+export const ARGUMENT_BOUNDS = Object.freeze({ ci_name: 255, type: 255, class: 80 });
+
 type Direction = "upstream" | "downstream";
 type Cap = "requests" | "relationship_rows" | "response_bytes" | "cis" | "error";
 
@@ -234,13 +243,6 @@ function chunks<T>(items: readonly T[], size: number): T[][] {
   return out;
 }
 
-/** One line of inert text for an error or a warning. */
-function tidy(value: string, max = 80): string {
-  const flat = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/gu, " ").trim();
-  const characters = Array.from(flat);
-  return characters.length > max ? `${characters.slice(0, max).join("")}…` : flat;
-}
-
 /**
  * The start CI does not exist, or is not readable. A result the handler marks
  * as an error reaches the caller only as a generic failure, so this is the
@@ -281,8 +283,22 @@ export async function traverseRelationships(
   const wantUp = direction !== "downstream";
 
   // ── Field policy: both ends of a relationship must be readable ──
+  // Lengths are bound here, not in the schema, to keep the tool's description small.
+  if (args.ci_name !== undefined && args.ci_name.length > ARGUMENT_BOUNDS.ci_name) {
+    throw createArgumentTooLongError("ci_name", ARGUMENT_BOUNDS.ci_name);
+  }
+  if (args.type !== undefined && args.type.length > ARGUMENT_BOUNDS.type) {
+    throw createArgumentTooLongError("type", ARGUMENT_BOUNDS.type);
+  }
+  if (args.class !== undefined && args.class.length > ARGUMENT_BOUNDS.class) {
+    throw createArgumentTooLongError("class", ARGUMENT_BOUNDS.class);
+  }
+
   // Refuse before any request, and show only what the profile can read.
+  // Both ends and the type of a relationship, and the sys_id of a CI, are what
+  // a walk is made of: without them there is nothing to walk or to show.
   resolveReadableFields("cmdb_rel_ci", { fields: "parent,child,type" });
+  resolveReadableFields("cmdb_ci", { fields: SYS_ID_FIELD });
   const relIdReadable = readableAmong("cmdb_rel_ci", [SYS_ID_FIELD]).length > 0;
   const relFields = [...(relIdReadable ? [SYS_ID_FIELD] : []), "parent", "child", "type"];
   const relSelection = resolveReadableFields("cmdb_rel_ci", { fields: relFields.join(",") });
@@ -291,11 +307,8 @@ export async function traverseRelationships(
   const classShown = ciShown.includes("sys_class_name");
   if (args.ci_name) resolveReadableFields("cmdb_ci", { fields: "name", purpose: "query" });
   if (args.class) resolveReadableFields("cmdb_ci", { fields: "sys_class_name", purpose: "query" });
-  const ciSelectedIds = [...(readableAmong("cmdb_ci", [SYS_ID_FIELD]).length > 0 ? [SYS_ID_FIELD] : []), ...ciShown];
-  const ciSelection = ciSelectedIds.length > 0
-    ? resolveReadableFields("cmdb_ci", { fields: ciSelectedIds.join(",") })
-    : undefined;
   const ciFields = [SYS_ID_FIELD, ...ciShown].join(",");
+  const ciSelection = resolveReadableFields("cmdb_ci", { fields: ciFields });
 
   // ── Request accounting: every upstream request this call makes ──
   let requests = 0;
@@ -308,7 +321,7 @@ export async function traverseRelationships(
 
   /** What the profile may see of one `cmdb_ci` row. */
   function viewOf(row: Record<string, unknown>): CiView {
-    const shown = ciSelection === undefined ? undefined : recordOf(filterReadableRecord(row, ciSelection));
+    const shown = recordOf(filterReadableRecord(row, ciSelection));
     const name = shown?.name;
     const cls = shown?.sys_class_name;
     return {
@@ -633,7 +646,11 @@ export async function traverseRelationships(
   }
 
   // ── Report ──
-  const labelOf = (id: string): string => tidy(known.get(id)?.name ?? id, 60);
+  // A CI is named by its policy-filtered name, made inert and in quotes, or by its sys_id.
+  const labelOf = (id: string): string => {
+    const name = known.get(id)?.name;
+    return name === undefined ? id : `"${quotedInertText(name, 60)}"`;
+  };
   const namedList = (ids: readonly string[]): string => {
     const unique = [...new Set(ids)];
     const named = unique.slice(0, limits.namedInWarning).map(labelOf);
