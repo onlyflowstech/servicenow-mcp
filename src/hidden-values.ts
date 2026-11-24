@@ -650,7 +650,13 @@ export function classifyReadFailure(error: unknown): FieldTypesReadFailure {
     case "upstream":
       if (descriptor.reason === "instance_hibernating") return transient({});
       if (descriptor.reason !== undefined) return Object.freeze({ kind: "failed" as const, ...(status === undefined ? {} : { status }) });
-      if (status === undefined) return transient({});
+      if (status === undefined) {
+        // No status, no reason: the request got no answer, but only a read its
+        // issuer allows to be sent again is read as a network failure.
+        return descriptor.retry === "retry_if_safe_and_idempotent"
+          ? transient({})
+          : Object.freeze({ kind: "failed" as const });
+      }
       return status >= 500 ? transient({ status }) : Object.freeze({ kind: "failed" as const, status });
     default:
       return Object.freeze({ kind: "failed" as const, ...(status === undefined ? {} : { status }) });
@@ -1350,7 +1356,7 @@ export interface LoadFieldTypesInPlanOptions {
 }
 
 /** A table's parent as the plan-bounded loader read it: its name, `null` for none, or why it is unknown. */
-type PlanParent = string | null | { readonly gap: ChainGap };
+export type PlanParent = string | null | { readonly gap: ChainGap };
 
 /**
  * Field types for `tables`, read only from tables a tool can declare in its
@@ -1543,7 +1549,19 @@ export async function loadFieldTypesInPlan(
   });
 }
 
-function planChainOf(
+const UNKNOWN_PARENT: PlanParent = Object.freeze({ gap: "malformed" as const });
+
+/**
+ * A table's parent as the map holds it. Only a stored `null` means "extends
+ * nothing"; a value that is absent is unknown, never empty.
+ */
+function parentOf(parents: ReadonlyMap<string, PlanParent>, name: string): PlanParent {
+  const parent = parents.get(name);
+  return parent === undefined ? UNKNOWN_PARENT : parent;
+}
+
+/** A requested table's chain from the parents read, or undefined when its row was not read. Exported for tests. */
+export function planChainOf(
   table: string,
   parents: ReadonlyMap<string, PlanParent>,
   unread: ReadonlySet<string>
@@ -1552,7 +1570,7 @@ function planChainOf(
   const tables = [table];
   const incomplete = (gap: ChainGap): PlanTableChain =>
     Object.freeze({ tables: Object.freeze(tables), complete: false, gap });
-  let current: PlanParent = parents.get(table) ?? null;
+  let current: PlanParent = parentOf(parents, table);
   while (current !== null) {
     if (typeof current === "object") return incomplete(current.gap);
     if (tables.includes(current)) return incomplete("malformed");
@@ -1560,7 +1578,7 @@ function planChainOf(
     tables.push(current);
     const ancestor: string = current;
     current = parents.has(ancestor)
-      ? (parents.get(ancestor) ?? null)
+      ? parentOf(parents, ancestor)
       : Object.freeze({ gap: unread.has(ancestor) ? ("too_long" as const) : ("no_row" as const) });
   }
   return Object.freeze({ tables: Object.freeze(tables), complete: true });

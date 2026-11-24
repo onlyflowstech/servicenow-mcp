@@ -158,20 +158,14 @@ describe("the status in a text", () => {
 
 describe("an upstream error with no status and no reason", () => {
   /**
-   * PINS CURRENT BEHAVIOUR for the reviewers (dev report, deviation 7): the
-   * classifier reads a trusted `upstream` error with neither a recorded status
-   * nor a reason as a network failure, whatever its retry advice says, so a
-   * `createToolError("upstream", "do_not_retry")` (the shape of the client's
-   * cross-origin-redirect error on the ATF form path) is retried once and then
-   * worded "could not reach the instance after one retry". No field-types read
-   * issues that error today (the client's GET network errors carry
-   * `retry_if_safe_and_idempotent`), so the behaviour is unreachable in
-   * practice; if it is ever tightened to honour `do_not_retry`, change this
-   * test with it.
+   * Only an error whose issuer allows the request to be sent again is read as
+   * a network failure. One marked `do_not_retry` (the shape of the client's
+   * cross-origin-redirect error on the ATF form path) is a failed read, is not
+   * retried, and is worded as a read that failed.
    */
-  it("is classified as transient, and retried once, even with do_not_retry advice", async () => {
+  it("is a failed read, and is not retried, when its retry advice is do_not_retry", async () => {
     const crossOrigin = createToolError("upstream", "do_not_retry");
-    expect(classifyReadFailure(crossOrigin)).toEqual({ kind: "transient" });
+    expect(classifyReadFailure(crossOrigin)).toEqual({ kind: "failed" });
     let calls = 0;
     const thrown = await retryTransientOnce(
       async () => {
@@ -180,11 +174,15 @@ describe("an upstream error with no status and no reason", () => {
       },
       { pauseMs: 0 }
     ).catch((e: unknown) => e);
-    expect(calls).toBe(2);
-    expect(classifyReadFailure(thrown)).toEqual({ kind: "transient", retried: true });
+    expect(calls).toBe(1);
+    expect(classifyReadFailure(thrown)).toEqual({ kind: "failed" });
     expect(fieldTypesProblemText({ surface: "dispatcher", failure: classifyReadFailure(thrown) })).toBe(
-      "Field types are temporarily unavailable: the sys_dictionary request could not reach the instance after one retry. No values were returned. Retry the call."
+      "Field types could not be read: the sys_dictionary read failed. No values were returned."
     );
+  });
+
+  it("is a network failure when its retry advice allows another try", () => {
+    expect(classifyReadFailure(createToolError("upstream", "retry_if_safe_and_idempotent"))).toMatchObject({ kind: "transient" });
   });
 
   it("is not so for an upstream error that has a reason (a redirect, a hibernating instance)", () => {

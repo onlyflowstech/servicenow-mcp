@@ -19,6 +19,8 @@ import {
   hiddenTypedFields,
   loadFieldTypes,
   loadFieldTypesInPlan,
+  planChainOf,
+  type PlanParent,
 } from "../src/hidden-values.js";
 import { sysDbObjectRow } from "./fixtures/field-types.js";
 import { expectReadsWithin, recordingInstance, type RecordedCall, type RecordingInstance } from "./platform-view-harness.js";
@@ -345,5 +347,31 @@ describe("loadFieldTypesInPlan: a child's row never un-hides its parent's type",
     const read = instance.calls.find((c) => c.path.endsWith("/sys_dictionary"))!;
     expect(read.params.sysparm_query).toBe("internal_typeINpassword,password2,masked,encrypted_text^ORDERBYname^ORDERBYelement");
     expect(read.params.sysparm_fields).toBe(PLAN_FIELD_TYPE_FIELDS.sys_dictionary.join(","));
+  });
+});
+
+describe("planChainOf: an unknown parent is never 'extends nothing'", () => {
+  it("is incomplete, with a gap, when a parent is missing from the map or stored as undefined", () => {
+    const none = new Set<string>();
+    // The requested table's own value is absent.
+    const own = new Map<string, PlanParent>([["u_child", undefined as unknown as PlanParent]]);
+    expect(planChainOf("u_child", own, none)).toMatchObject({ complete: false, gap: "malformed" });
+    // An ancestor's value is absent.
+    const ancestor = new Map<string, PlanParent>([
+      ["u_child", "u_parent"],
+      ["u_parent", undefined as unknown as PlanParent],
+    ]);
+    expect(planChainOf("u_child", ancestor, none)).toMatchObject({ complete: false, gap: "malformed", tables: ["u_child", "u_parent"] });
+    // An ancestor with no entry at all is a row that was not read.
+    expect(planChainOf("u_child", new Map<string, PlanParent>([["u_child", "u_parent"]]), none)).toMatchObject({ complete: false, gap: "no_row" });
+    expect(planChainOf("u_child", new Map<string, PlanParent>([["u_child", "u_parent"]]), new Set(["u_parent"]))).toMatchObject({
+      complete: false,
+      gap: "too_long",
+    });
+    // A stored null is the one value that ends a chain.
+    expect(planChainOf("u_child", new Map<string, PlanParent>([["u_child", "u_parent"], ["u_parent", null]]), none)).toEqual({
+      tables: ["u_child", "u_parent"],
+      complete: true,
+    });
   });
 });
