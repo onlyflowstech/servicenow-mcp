@@ -1,7 +1,7 @@
 {
   "name": "@onlyflows/servicenow-mcp",
   "mcpName": "io.github.onlyflowstech/servicenow-mcp",
-  "version": "2.3.0",
+  "version": "2.4.0-rc.1",
   "description": "Governed stdio ServiceNow MCP server for production: 26 tools with per-profile table and field policy, dry-run bulk changes, activity events, multi-instance profiles, CMDB traversal, ATF testing, read-only Flow Designer flow views, record history and update set, upgrade and scan views.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
