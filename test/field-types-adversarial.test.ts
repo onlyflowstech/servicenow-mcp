@@ -142,17 +142,17 @@ describe("the status in a text", () => {
     }
     const text = fieldTypesProblemText({ surface: "dispatcher", failure: { kind: "refused", status: 100 } });
     expect(text).toContain("(HTTP 100)");
-    expect(fieldTypesProblemText({ surface: "dispatcher", failure: { kind: "transient", status: 599, retried: true } })).toContain("HTTP 599 after one retry");
+    expect(fieldTypesProblemText({ surface: "dispatcher", failure: { kind: "transient", status: 599, retried: true } })).toContain("HTTP 599 after retrying");
   });
 
   it("is carried by the error the retry gives up on, beside the fact that it was retried", async () => {
     const thrown = await retryTransientOnce(
       async () => {
-        throw http(502);
+        throw http(500);
       },
       { pauseMs: 0 }
     ).catch((e: unknown) => e);
-    expect(classifyReadFailure(thrown)).toEqual({ kind: "transient", status: 502, retried: true });
+    expect(classifyReadFailure(thrown)).toEqual({ kind: "transient", status: 500, retried: true });
   });
 });
 
@@ -193,7 +193,7 @@ describe("an upstream error with no status and no reason", () => {
 
 describe("a cancellation is not a cause", () => {
   it("rethrows from loadFieldTypes when the call is cancelled during the retry's pause, with no second read", async () => {
-    const reads = double((path) => (path.endsWith("/sys_dictionary") ? http(503) : undefined));
+    const reads = double((path) => (path.endsWith("/sys_dictionary") ? http(500) : undefined));
     const controller = new AbortController();
     const pending = runWithServiceNowRequestSignal(controller.signal, () => loadFieldTypes(reads.ops, ["u_vault"]));
     await new Promise((resolve) => setTimeout(resolve, 25));

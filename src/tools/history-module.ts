@@ -526,8 +526,8 @@ function typesOf(entry: ClassTypesEntry, recordClass: string): ClassTypes {
  * metadata cache's per-credential memo for an hour (the type-hiding memo's
  * time), as `loadFieldTypes` does: a warm call reads nothing here, and a wide
  * chain never pays for a `sys_dictionary` watermark. Concurrent calls for one
- * class share one read. A read that times out, returns a 5xx or fails on the
- * network is made once more after a short pause; any failure is not kept and
+ * class share one read. A read that times out or returns a 5xx the client does
+ * not retry itself is made once more after a short pause; any failure is not kept and
  * gives the `unavailable` state, with its cause. A full page or a chain that
  * stops short is kept for 30 seconds and gives it too, with its cause. A
  * cancellation rethrows.

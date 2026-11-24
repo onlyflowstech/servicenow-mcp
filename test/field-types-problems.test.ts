@@ -125,7 +125,7 @@ describe("loadFieldTypesInPlan: causes", () => {
   const WORLD_FIXTURE: FieldTypeFixture = { ...FIXTURE, parents: { u_vault_child: ["u_vault"] } };
 
   it("retries a blip on the dictionary once, and the chain levels share one retry", async () => {
-    const dictionary = double(WORLD_FIXTURE, (path, _p, n) => (path.endsWith("/sys_dictionary") && n === 1 ? http(503) : undefined));
+    const dictionary = double(WORLD_FIXTURE, (path, _p, n) => (path.endsWith("/sys_dictionary") && n === 1 ? http(500) : undefined));
     const loaded = await loadFieldTypesInPlan(dictionary.ops, ["u_vault_child"]);
     expect(dictionary.count("/sys_dictionary")).toBe(2);
     expect(loaded.types.state).toBe("available");
@@ -280,9 +280,9 @@ describe("the causes the surfaces report", () => {
     const text = (input: Omit<FieldTypesProblemInput, "surface">) => fieldTypesProblemText({ surface: "dispatcher", optIn: true, ...input });
     expect(text({ failure: { kind: "refused", status: 403 } })).toMatch(/^Field types could not be read: the instance refused the sys_dictionary read \(HTTP 403\)/u);
     expect(text({ failure: { kind: "transient", status: 503, retried: true } })).toBe(
-      "Field types are temporarily unavailable: the sys_dictionary request returned HTTP 503 after one retry. No values were returned. Retry the call."
+      "Field types are temporarily unavailable: the sys_dictionary request returned HTTP 503 after retrying. No values were returned. Retry the call."
     );
-    expect(text({ failure: { kind: "transient", status: 429 } })).not.toContain("after one retry");
+    expect(text({ failure: { kind: "transient", status: 429 } })).not.toContain("after retrying");
     expect(text({ failure: { kind: "incomplete" } })).toContain('Set "fieldTypes": { "dictionary": "not_required" }');
     expect(text({ failure: { kind: "failed", status: 400 } })).toBe(
       "Field types could not be read: the sys_dictionary read failed (HTTP 400). No values were returned."
@@ -307,7 +307,7 @@ describe("the payload view's hints", () => {
     expect(hierarchy).toMatchObject({
       status: "withheld",
       reason: "hierarchy_unknown",
-      hint: "Table hierarchies could not be read: the sys_db_object request returned HTTP 503 after one retry, so the payload is not shown.",
+      hint: "Table hierarchies could not be read: the sys_db_object request returned HTTP 503 after retrying, so the payload is not shown.",
     });
     const types = await preparePayload(
       payload,

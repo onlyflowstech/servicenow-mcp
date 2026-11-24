@@ -37,6 +37,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import {
+  CLIENT_RETRIED_STATUSES,
   currentServiceNowRequestSignal,
   isServiceNowRequestCancellation,
   pauseUnlessServiceNowRequestCancelled,
@@ -108,7 +109,7 @@ export type FieldTypesReadFailure =
   | { readonly kind: "policy"; readonly table: "sys_dictionary" | "sys_db_object" }
   /** The instance refused the read (401, 403), or returned 200 with no readable rows (status 200). */
   | { readonly kind: "refused"; readonly status: number }
-  /** A 5xx or 429, a timeout, or a network failure (no status). `retried`: the read was tried twice. */
+  /** A 5xx or 429, a timeout, or a network failure (no status). `retried`: the read was tried again before it gave up, by the loader or by the client. */
   | {
       readonly kind: "transient";
       readonly status?: number;
@@ -532,8 +533,8 @@ export const FIELD_TYPES_UNAVAILABLE_TTL_MS = 30 * 1000;
 /** A read that returns this many rows may be cut short, so it is unavailable. */
 export const MAX_HIDDEN_DICTIONARY_ROWS = 10_000;
 /**
- * The pause before the one retry of a read that timed out, returned a 5xx or
- * failed on the network. Short: the retry is for a blip, not an outage.
+ * The pause before the one retry of a read that timed out or returned a 5xx
+ * the client does not retry itself. Short: the retry is for a blip, not an outage.
  */
 export const FIELD_TYPES_RETRY_PAUSE_MS = 300;
 /**
@@ -635,7 +636,15 @@ export function classifyReadFailure(error: unknown): FieldTypesReadFailure {
   const descriptor = trustedToolErrorDescriptor(error);
   const status = trustedHttpStatus(error);
   if (descriptor === undefined) return Object.freeze({ kind: "failed" as const });
-  const retried = typeof error === "object" && error !== null && RETRIED_ERRORS.has(error);
+  // Read again before giving up: by the loader (see retryTransientOnce), or by
+  // the client itself, which tries a 502, 503, 504 and a network failure on a
+  // GET three times.
+  const loaderRetried = typeof error === "object" && error !== null && RETRIED_ERRORS.has(error);
+  const clientRetried =
+    descriptor.category === "upstream" &&
+    descriptor.reason === undefined &&
+    (status === undefined ? descriptor.retry === "retry_if_safe_and_idempotent" : status !== 429 && CLIENT_RETRIED_STATUSES.includes(status));
+  const retried = loaderRetried || clientRetried;
   const transient = (extra: { status?: number; timeout?: true }): FieldTypesReadFailure =>
     Object.freeze({ kind: "transient" as const, ...extra, ...(retried ? { retried: true as const } : {}) });
   switch (descriptor.category) {
@@ -664,15 +673,19 @@ export function classifyReadFailure(error: unknown): FieldTypesReadFailure {
 }
 
 /**
- * A read worth one more try: it timed out, returned a 5xx, or failed on the
- * network. Not a 429 (the client already waits for its Retry-After), not a
- * hibernating instance, and nothing a retry cannot change (a refusal, a 4xx).
+ * A read the loader tries once more: it timed out, or returned a 5xx the
+ * client does not already retry (500, 501, 505 and above). The client tries a
+ * 502, 503, 504 and a network failure three times, so a fourth try 300 ms
+ * later is not a blip retry. Never a 429 (the client waits for its
+ * Retry-After), a hibernating instance, or anything a retry cannot change (a
+ * refusal, a 4xx).
  */
 function isRetryableFailure(error: unknown): boolean {
   const failure = classifyReadFailure(error);
   if (failure.kind !== "transient") return false;
-  if (trustedToolErrorDescriptor(error)?.reason === "instance_hibernating") return false;
-  return failure.timeout === true || failure.status === undefined || failure.status >= 500;
+  if (failure.timeout === true) return true;
+  const status = failure.status;
+  return status !== undefined && status >= 500 && !CLIENT_RETRIED_STATUSES.includes(status);
 }
 
 /** One retry shared by several reads of a kind in one lookup. */
@@ -690,10 +703,11 @@ export interface RetryTransientOptions {
 }
 
 /**
- * Run `read`; if it fails the way a blip fails (a timeout, a 5xx, a network
- * error: see {@link isRetryableFailure}), wait a short pause and run it once
- * more. A cancellation, an aborted signal, a 429 and any 4xx are never
- * retried, and a cancellation during the pause rethrows.
+ * Run `read`; if it fails the way a blip fails (a timeout, or a 5xx the client
+ * does not retry itself: see {@link isRetryableFailure}), wait a short pause
+ * and run it once more. A cancellation, an aborted signal, a 429, a 502, 503
+ * or 504, a network failure and any 4xx are never retried here, and a
+ * cancellation during the pause rethrows.
  *
  * The retry sits inside a single-flight read, so concurrent waiters share one
  * retry. Worst case for one read is two attempts of the client's timeout plus
@@ -738,9 +752,10 @@ export async function retryTransientOnce<T>(
  * each read in flight (one per key). `forceRecache` skips the memo.
  *
  * A dictionary read that fails, returns no rows, or returns a full page gives
- * `unavailable`, with the cause ({@link FieldTypesReadFailure}). A timeout, a
- * 5xx or a network error is read once more after a short pause
- * ({@link retryTransientOnce}) and is never remembered; a refusal or a full
+ * `unavailable`, with the cause ({@link FieldTypesReadFailure}). A timeout or
+ * a 5xx the client does not retry itself (the client tries a 502, 503, 504 and
+ * a network failure three times) is read once more after a short pause
+ * ({@link retryTransientOnce}); no such failure is ever remembered; a refusal or a full
  * page is remembered for {@link FIELD_TYPES_UNAVAILABLE_TTL_MS}, with its
  * cause. A table whose chain or view cannot be resolved is left out of
  * `tables`, so its fields are `unknown_type`, and `problems` says why: it does
@@ -1377,8 +1392,8 @@ export type PlanParent = string | null | { readonly gap: ChainGap };
  *   returns a full page gives `unavailable`;
  * - a table whose chain is unknown or incomplete is left out of `types`.
  *
- * A read that times out, returns a 5xx or fails on the network is read once
- * more after a short pause ({@link retryTransientOnce}): once for the
+ * A read that times out or returns a 5xx the client does not retry itself is
+ * read once more after a short pause ({@link retryTransientOnce}): once for the
  * dictionary, and once shared by all the levels of the chain read. The first
  * level also asks for `sys_db_object`'s own row, to tell a table that does not
  * exist from a read that showed nothing. A chain read that fails keeps the
@@ -1785,7 +1800,7 @@ function readClause(failure: FieldTypesReadFailure, read: FieldTypesReadName): s
         ? `the instance returned no ${read} rows to the integration user (HTTP 200)`
         : `the instance refused the ${read} read${statusClause(failure.status)}`;
     case "transient": {
-      const after = failure.retried === true ? " after one retry" : "";
+      const after = failure.retried === true ? " after retrying" : "";
       if (failure.timeout === true) return `the ${read} request timed out${after}`;
       if (failure.status !== undefined && validStatus(failure.status)) {
         return `the ${read} request returned HTTP ${failure.status}${after}`;

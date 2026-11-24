@@ -71,12 +71,12 @@ describe("payload view: the hint names the cause, not the table", () => {
     [
       "a 503 that the retry did not recover",
       failing("table:sys_dictionary", () => http(503)),
-      "Field types could not be read: the sys_dictionary request returned HTTP 503 after one retry, so password-type fields cannot be hidden; the payload is not shown.",
+      "Field types could not be read: the sys_dictionary request returned HTTP 503 after retrying, so password-type fields cannot be hidden; the payload is not shown.",
     ],
     [
       "a timeout that the retry did not recover",
       failing("table:sys_dictionary", timeout),
-      "Field types could not be read: the sys_dictionary request timed out after one retry, so password-type fields cannot be hidden; the payload is not shown.",
+      "Field types could not be read: the sys_dictionary request timed out after retrying, so password-type fields cannot be hidden; the payload is not shown.",
     ],
     [
       "a 400",
@@ -104,12 +104,12 @@ describe("payload view: the hint names the cause, not the table", () => {
     [
       "a 500 that the retry did not recover",
       failing("table:sys_db_object", () => http(500)),
-      "Table hierarchies could not be read: the sys_db_object request returned HTTP 500 after one retry, so the payload is not shown.",
+      "Table hierarchies could not be read: the sys_db_object request returned HTTP 500 after retrying, so the payload is not shown.",
     ],
     [
       "a timeout that the retry did not recover",
       failing("table:sys_db_object", timeout),
-      "Table hierarchies could not be read: the sys_db_object request timed out after one retry, so the payload is not shown.",
+      "Table hierarchies could not be read: the sys_db_object request timed out after retrying, so the payload is not shown.",
     ],
   ];
   for (const [label, fail, hint] of hierarchyCases) {
@@ -128,7 +128,7 @@ describe("payload view: the hint names the cause, not the table", () => {
   it("recovers from one blip on either read: the payload is shown, masked", async () => {
     for (const label of ["table:sys_dictionary", "table:sys_db_object"]) {
       let n = 0;
-      const outcome = await prepare((call) => (callLabel(call) === label && (n += 1) === 1 ? http(503) : undefined));
+      const outcome = await prepare((call) => (callLabel(call) === label && (n += 1) === 1 ? http(500) : undefined));
       expect(outcome.status, label).toBe("shown");
       expect(JSON.stringify(outcome)).not.toContain(FAKE_SECRET);
     }
@@ -192,8 +192,8 @@ describe("evaluate view: the warnings name the cause, not the table", () => {
     call.path.endsWith(`/${table}`) && !call.path.startsWith("/api/now/stats/") ? error() : undefined;
 
   const typeCases: Array<[string, Fail, string]> = [
-    ["a 503 twice", failing2("sys_dictionary", () => http(503)), "Field types could not be read: the sys_dictionary request returned HTTP 503 after one retry; password-typed field checks were not made."],
-    ["a timeout twice", failing2("sys_dictionary", timeout), "Field types could not be read: the sys_dictionary request timed out after one retry; password-typed field checks were not made."],
+    ["a 503 twice", failing2("sys_dictionary", () => http(503)), "Field types could not be read: the sys_dictionary request returned HTTP 503 after retrying; password-typed field checks were not made."],
+    ["a timeout twice", failing2("sys_dictionary", timeout), "Field types could not be read: the sys_dictionary request timed out after retrying; password-typed field checks were not made."],
     ["a 400", failing2("sys_dictionary", () => http(400)), "Field types could not be read: the sys_dictionary read failed (HTTP 400); password-typed field checks were not made."],
     ["a hibernating instance", failing2("sys_dictionary", () => createInstanceHibernatingError()), "Field types could not be read: the sys_dictionary request could not reach the instance; password-typed field checks were not made."],
   ];
@@ -209,7 +209,7 @@ describe("evaluate view: the warnings name the cause, not the table", () => {
 
   const hierarchyCases: Array<[string, Fail, string]> = [
     ["a refusal", failing2("sys_db_object", () => http(403)), "Table hierarchies could not be read: the instance refused the sys_db_object read (HTTP 403); some table checks were not made."],
-    ["a 500 twice", failing2("sys_db_object", () => http(500)), "Table hierarchies could not be read: the sys_db_object request returned HTTP 500 after one retry; some table checks were not made."],
+    ["a 500 twice", failing2("sys_db_object", () => http(500)), "Table hierarchies could not be read: the sys_db_object request returned HTTP 500 after retrying; some table checks were not made."],
   ];
   for (const [label, fail, warning] of hierarchyCases) {
     it(`words ${label} on the chain read as hierarchy_unavailable`, async () => {
@@ -247,8 +247,8 @@ describe("evaluate view: the warnings name the cause, not the table", () => {
     let dictionary = 0;
     let chains = 0;
     const { data, result } = await evaluate((call) => {
-      if (call.path.endsWith("/sys_dictionary") && (dictionary += 1) === 1) return http(503);
-      if (call.path.endsWith("/sys_db_object") && (chains += 1) === 1) return http(503);
+      if (call.path.endsWith("/sys_dictionary") && (dictionary += 1) === 1) return http(500);
+      if (call.path.endsWith("/sys_db_object") && (chains += 1) === 1) return http(500);
       return undefined;
     });
     expect(data.summary.facts.field_types).not.toBe("unavailable");

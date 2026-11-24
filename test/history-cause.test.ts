@@ -16,6 +16,7 @@ import { dataOf, fakeInstance, FULL_TABLES, harness, ids, namedPolicy, tableOfCa
 
 const FULL = namedPolicy(FULL_TABLES);
 const ARGS = { table: "incident", sys_id: ids.incident };
+const http500 = () => recordTrustedHttpStatus(createToolError("upstream", "do_not_retry"), 500);
 const http503 = () => recordTrustedHttpStatus(createToolError("upstream", "do_not_retry"), 503);
 const timeout = () => createToolError("timeout", "retry_if_safe_and_idempotent");
 
@@ -28,7 +29,7 @@ async function session(fixture: HistoryFixture) {
 
 describe("sn_history field types: a blip", () => {
   it("is read once more, and the second answer is used", async () => {
-    const { call, dictionaryReads } = await session(incidentFixture({ dictionaryFaults: [http503()] }));
+    const { call, dictionaryReads } = await session(incidentFixture({ dictionaryFaults: [http500()] }));
     const data = dataOf(await call(ARGS));
     expect(dictionaryReads()).toBe(2);
     expect(data.warnings).toBeUndefined();
@@ -40,7 +41,7 @@ describe("sn_history field types: a blip", () => {
     const first = dataOf(await call(ARGS));
     expect(dictionaryReads()).toBe(2);
     expect(first.warnings).toEqual([
-      "Field types could not be read: the sys_dictionary request timed out after one retry, so no values are shown.",
+      "Field types could not be read: the sys_dictionary request timed out after retrying, so no values are shown.",
     ]);
     expect(JSON.stringify(first.events)).not.toMatch(/"(?:old|new)"/u);
     // Not kept: the next call reads again, and the instance has recovered.
@@ -52,7 +53,7 @@ describe("sn_history field types: a blip", () => {
   it("names the status of a 5xx that failed twice", async () => {
     const { call } = await session(incidentFixture({ dictionaryFaults: [http503(), http503()] }));
     expect(dataOf(await call(ARGS)).warnings).toEqual([
-      "Field types could not be read: the sys_dictionary request returned HTTP 503 after one retry, so no values are shown.",
+      "Field types could not be read: the sys_dictionary request returned HTTP 503 after retrying, so no values are shown.",
     ]);
   });
 

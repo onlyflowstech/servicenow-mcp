@@ -253,22 +253,22 @@ describe("a refusal says why, and is not a policy denial", () => {
     {
       label: "a 500 that the retry did not recover",
       options: { dictionary: [http(500)] },
-      text: "Field types are temporarily unavailable: the sys_dictionary request returned HTTP 500 after one retry. No values were returned. Retry the call.",
+      text: "Field types are temporarily unavailable: the sys_dictionary request returned HTTP 500 after retrying. No values were returned. Retry the call.",
     },
     {
       label: "a 503 that the retry did not recover",
       options: { dictionary: [http(503)] },
-      text: "the sys_dictionary request returned HTTP 503 after one retry. No values were returned. Retry the call.",
+      text: "the sys_dictionary request returned HTTP 503 after retrying. No values were returned. Retry the call.",
     },
     {
       label: "a timeout that the retry did not recover",
       options: { dictionary: [timeout()] },
-      text: "Field types are temporarily unavailable: the sys_dictionary request timed out after one retry. No values were returned. Retry the call.",
+      text: "Field types are temporarily unavailable: the sys_dictionary request timed out after retrying. No values were returned. Retry the call.",
     },
     {
       label: "a network failure that the retry did not recover",
       options: { dictionary: [network()] },
-      text: "the sys_dictionary request could not reach the instance after one retry. No values were returned. Retry the call.",
+      text: "the sys_dictionary request could not reach the instance after retrying. No values were returned. Retry the call.",
     },
     {
       label: "a 429 (not retried here)",
@@ -288,7 +288,7 @@ describe("a refusal says why, and is not a policy denial", () => {
     {
       label: "a 503 on sys_db_object that the retry did not recover",
       options: { chains: [http(503)] },
-      text: "Field types are temporarily unavailable: the sys_db_object request returned HTTP 503 after one retry. No values were returned. Retry the call.",
+      text: "Field types are temporarily unavailable: the sys_db_object request returned HTTP 503 after retrying. No values were returned. Retry the call.",
     },
   ];
 
@@ -334,14 +334,24 @@ describe("a refusal says why, and is not a policy denial", () => {
 });
 
 describe("one retry of a blip", () => {
-  it("recovers a timeout, a 500, a 503 and a network failure on the dictionary, with one extra read", async () => {
-    for (const failure of [timeout(), http(500), http(503), network()]) {
+  it("recovers a timeout and a 500 on the dictionary, with one extra read", async () => {
+    for (const failure of [timeout(), http(500), http(501), http(505)]) {
       const h = await harness({ dictionary: [failure, "ok"] });
       const result = await h.call("sn_query", QUERY);
       expect(result.isError, result.text).toBe(false);
       expect(h.count("sys_dictionary")).toBe(2);
       expect(h.count("sys_db_object")).toBe(1);
       expect(result.text).not.toContain(SECRET);
+    }
+  });
+
+  it("leaves a 502, 503, 504 and a network failure to the client: no extra read here, and the text says they were retried", async () => {
+    for (const failure of [http(502), http(503), http(504), network()]) {
+      const h = await harness({ dictionary: [failure, "ok"] });
+      const result = await h.call("sn_query", QUERY);
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("after retrying");
+      expect(h.count("sys_dictionary")).toBe(1);
     }
   });
 
@@ -357,7 +367,7 @@ describe("one retry of a blip", () => {
     const twice = await harness({ dictionary: [http(500)] });
     await twice.call("sn_query", QUERY);
     expect(twice.count("sys_dictionary")).toBe(2);
-    for (const failure of [http(429), http(400), http(401), http(403)]) {
+    for (const failure of [http(429), http(400), http(401), http(403), http(502), http(503), http(504), network()]) {
       const h = await harness({ dictionary: [failure] });
       await h.call("sn_query", QUERY);
       expect(h.count("sys_dictionary")).toBe(1);
@@ -367,7 +377,7 @@ describe("one retry of a blip", () => {
 
 describe("what is remembered", () => {
   it("does not remember a blip: the next call reads again, and succeeds when the instance is back", async () => {
-    const h = await harness({ dictionary: [http(503), http(503), "ok"] });
+    const h = await harness({ dictionary: [http(500), http(500), "ok"] });
     const first = await h.call("sn_query", QUERY);
     expect(first.isError).toBe(true);
     expect(h.count("sys_dictionary")).toBe(2);
@@ -463,7 +473,7 @@ describe("metadata.timing.field_types_ms", () => {
 
   it("covers the whole lookup, retry included, and not the tool's own read", async () => {
     // Each lookup read takes 30 ms; the dictionary's retry makes it two in a row.
-    const h = await harness({ dictionary: [http(503), "ok"], lookupDelayMs: 30 });
+    const h = await harness({ dictionary: [http(500), "ok"], lookupDelayMs: 30 });
     const timing = timingOf(await h.call("sn_query", QUERY));
     expect(h.count("sys_dictionary")).toBe(2);
     expect(timing.field_types_ms).toBeGreaterThanOrEqual(55);

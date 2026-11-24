@@ -68,8 +68,9 @@ describe("sn_history: every dictionary cause is worded, and none is a policy den
     { label: "an HTML page", fault: createHtmlResponseError, warning: "the sys_dictionary read failed, so no values are shown.", reads: 1 },
     { label: "a redirect", fault: createRedirectedError, warning: "the sys_dictionary read failed, so no values are shown.", reads: 1 },
     { label: "a hibernating instance (not retried)", fault: () => createInstanceHibernatingError(), warning: "the sys_dictionary request could not reach the instance, so no values are shown.", reads: 1 },
-    { label: "a network failure, twice", fault: network, warning: "the sys_dictionary request could not reach the instance after one retry, so no values are shown.", reads: 2 },
-    { label: "a 500, twice", fault: () => status(500), warning: "the sys_dictionary request returned HTTP 500 after one retry, so no values are shown.", reads: 2 },
+    { label: "a network failure (the client already retried it)", fault: network, warning: "the sys_dictionary request could not reach the instance after retrying, so no values are shown.", reads: 1 },
+    { label: "a 503 (the client already retried it)", fault: () => status(503), warning: "the sys_dictionary request returned HTTP 503 after retrying, so no values are shown.", reads: 1 },
+    { label: "a 500, twice", fault: () => status(500), warning: "the sys_dictionary request returned HTTP 500 after retrying, so no values are shown.", reads: 2 },
   ];
   for (const { label, fault, warning, reads } of cases) {
     it(`for ${label}: the warning, one retry only when a retry helps, and no value`, async () => {
@@ -93,7 +94,7 @@ describe("sn_history: every dictionary cause is worded, and none is a policy den
 
 describe("sn_history: the class's chain read", () => {
   it("is read once more after a blip, and the second answer is used", async () => {
-    const { call, reads } = await session(incidentFixture({ chainFaults: [status(503)] }));
+    const { call, reads } = await session(incidentFixture({ chainFaults: [status(500)] }));
     const data = dataOf(await call(ARGS));
     expect(reads("sys_db_object")).toBe(2);
     expect(data.warnings).toBeUndefined();
@@ -106,7 +107,7 @@ describe("sn_history: the class's chain read", () => {
     expect(reads("sys_db_object")).toBe(2);
     expect(reads("sys_dictionary")).toBe(0);
     expect(first.warnings).toEqual([
-      "Field types could not be read: the sys_db_object request timed out after one retry, so no values are shown.",
+      "Field types could not be read: the sys_db_object request timed out after retrying, so no values are shown.",
     ]);
     expectNoValues(first);
     const second = dataOf(await call(ARGS));

@@ -59,9 +59,12 @@ describe("classifyReadFailure", () => {
     expect(classifyReadFailure(createToolError("timeout", "retry_if_safe_and_idempotent"))).toEqual({ kind: "transient", timeout: true });
     expect(classifyReadFailure(http(429, "rate_limit"))).toEqual({ kind: "transient", status: 429 });
     expect(classifyReadFailure(http(500))).toEqual({ kind: "transient", status: 500 });
-    expect(classifyReadFailure(http(503))).toEqual({ kind: "transient", status: 503 });
-    // No status and no reason: the request never got an answer.
-    expect(classifyReadFailure(createToolError("upstream", "retry_if_safe_and_idempotent"))).toEqual({ kind: "transient" });
+    // The client already tried a 502, 503, 504 and a network failure three times: said so.
+    for (const status of [502, 503, 504]) {
+      expect(classifyReadFailure(http(status))).toEqual({ kind: "transient", status, retried: true });
+    }
+    // No status and no reason: the request never got an answer (a GET the client tried three times).
+    expect(classifyReadFailure(createToolError("upstream", "retry_if_safe_and_idempotent"))).toEqual({ kind: "transient", retried: true });
     expect(classifyReadFailure(createInstanceHibernatingError("x.service-now.com"))).toEqual({ kind: "transient" });
   });
 
@@ -109,24 +112,27 @@ describe("retryTransientOnce", () => {
     expect(h.calls()).toBe(1);
   });
 
-  it("retries a timeout, a 5xx and a network failure once, and returns the retry's answer", async () => {
-    for (const first of [
-      createToolError("timeout", "retry_if_safe_and_idempotent"),
-      http(500),
-      http(503),
-      createToolError("upstream", "retry_if_safe_and_idempotent"),
-    ]) {
+  it("retries a timeout and a 5xx the client does not retry once, and returns the retry's answer", async () => {
+    for (const first of [createToolError("timeout", "retry_if_safe_and_idempotent"), http(500), http(501), http(505), http(599)]) {
       const h = reads(first, "ok");
       expect(await retryTransientOnce(h.read, { pauseMs })).toBe("answer");
       expect(h.calls()).toBe(2);
     }
   });
 
-  it("gives up after one retry, throws the second failure, and has it classified as retried", async () => {
-    const h = reads(http(503), http(502));
+  it("leaves a 502, 503, 504 and a network failure to the client, which already tried them three times", async () => {
+    for (const failure of [http(502), http(503), http(504), createToolError("upstream", "retry_if_safe_and_idempotent")]) {
+      const h = reads(failure, "ok");
+      await expect(retryTransientOnce(h.read, { pauseMs })).rejects.toBe(failure);
+      expect(h.calls()).toBe(1);
+    }
+  });
+
+  it("gives up after retrying, throws the second failure, and has it classified as retried", async () => {
+    const h = reads(http(500), http(501));
     const error = await retryTransientOnce(h.read, { pauseMs }).catch((thrown: unknown) => thrown);
     expect(h.calls()).toBe(2);
-    expect(classifyReadFailure(error)).toEqual({ kind: "transient", status: 502, retried: true });
+    expect(classifyReadFailure(error)).toEqual({ kind: "transient", status: 501, retried: true });
   });
 
   it("never retries a 429, a 4xx, a refusal, a hibernating instance or an unissued error", async () => {

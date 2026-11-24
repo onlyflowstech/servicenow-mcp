@@ -117,6 +117,8 @@ const DEFAULT_BASE_RETRY_DELAY_MS = 500;
 export const DEFAULT_MAX_CONCURRENT_REQUESTS = 4;
 const MAX_CONFIGURED_CONCURRENT_REQUESTS = 32;
 const RETRYABLE_STATUSES = [429, 502, 503, 504];
+/** Statuses the client itself tries again (twice, with backoff) before it gives up. */
+export const CLIENT_RETRIED_STATUSES: readonly number[] = Object.freeze([...RETRYABLE_STATUSES]);
 interface ServiceNowRequestScope {
   readonly signal: AbortSignal;
   readonly upstreamJsonBytes: CumulativeResponseByteBudget;

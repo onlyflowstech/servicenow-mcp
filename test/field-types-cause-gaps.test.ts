@@ -298,7 +298,7 @@ describe("other classes of failure, on the dispatcher", () => {
     {
       label: "a 599",
       failure: http(599),
-      text: "the sys_dictionary request returned HTTP 599 after one retry. No values were returned. Retry the call.",
+      text: "the sys_dictionary request returned HTTP 599 after retrying. No values were returned. Retry the call.",
     },
     {
       label: "an error nothing here issued",
@@ -334,8 +334,8 @@ describe("the sys_db_object retry", () => {
     }
   });
 
-  it("makes one extra read of sys_db_object for a timeout, a 500 or a network failure, and uses the answer", async () => {
-    for (const failure of [timeout(), http(500), createToolError("upstream", "retry_if_safe_and_idempotent")]) {
+  it("makes one extra read of sys_db_object for a timeout or a 500, and uses the answer", async () => {
+    for (const failure of [timeout(), http(500)]) {
       const h = await harness({ chains: [failure, "ok"] });
       const result = await h.call("sn_query", QUERY);
       expect(result.isError, result.text).toBe(false);
@@ -376,7 +376,7 @@ describe("the sys_db_object retry", () => {
 
 describe("what is remembered, beyond the dictionary", () => {
   it("does not remember a blip on sys_db_object: the next call reads it again", async () => {
-    const h = await harness({ chains: [http(503), http(503), "ok"] });
+    const h = await harness({ chains: [http(500), http(500), "ok"] });
     expect((await h.call("sn_query", QUERY)).isError).toBe(true);
     expect(h.count("sys_db_object")).toBe(2);
     const second = await h.call("sn_query", QUERY);
