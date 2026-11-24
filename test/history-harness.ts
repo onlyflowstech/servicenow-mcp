@@ -65,6 +65,8 @@ export interface HistoryFixture {
   readonly dictionary?: readonly Row[] | Failure;
   /** Errors thrown by the first dictionary reads, one per read in order; after them it answers. */
   readonly dictionaryFaults?: readonly Error[];
+  /** Errors thrown by the first sys_db_object (class chain) reads, one per read in order; after them it answers. */
+  readonly chainFaults?: readonly Error[];
   readonly audit?: readonly Row[] | Failure;
   readonly journal?: readonly Row[] | Failure;
   readonly flows?: readonly Row[] | Failure;
@@ -97,6 +99,7 @@ const SOURCE_TABLES = {
 export function fakeInstance(fixture: HistoryFixture): FakeInstance {
   const calls: RecordedCall[] = [];
   let dictionaryReads = 0;
+  let chainReads = 0;
   const answer = (path: string, params: Record<string, string> = {}): unknown => {
     const single = /^\/api\/now\/table\/([a-z][a-z0-9_]*)\/([0-9a-f]{32})$/u.exec(path);
     if (single !== null) {
@@ -109,6 +112,9 @@ export function fakeInstance(fixture: HistoryFixture): FakeInstance {
     const table = /^\/api\/now\/table\/([a-z][a-z0-9_]*)$/u.exec(path)?.[1];
     const query = params.sysparm_query ?? "";
     if (table === "sys_db_object") {
+      const chainFault = fixture.chainFaults?.[chainReads];
+      chainReads += 1;
+      if (chainFault !== undefined) throw chainFault;
       const root = /^name=([a-z0-9_]+)$/u.exec(query)?.[1];
       if (root === undefined || (fixture.hiddenRows ?? []).includes(root)) return { result: [] };
       const row: Row = sysDbObjectRow(root, fixture.parents?.[root] ?? [], params.sysparm_fields ?? "name", fixture.hiddenRows);
