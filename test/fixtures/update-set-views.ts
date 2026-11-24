@@ -38,6 +38,8 @@ export interface World {
 
 export const STANDARD_TABLES: Record<string, string | null> = {
   sys_metadata: null,
+  // The anchor row the first chain read also asks for: the read could see rows.
+  sys_db_object: null,
   sys_script_include: "sys_metadata",
   sys_script: "sys_metadata",
   sys_ui_section: "sys_metadata",

@@ -17,6 +17,7 @@ vi.mock("../src/client.js", async (original) => ({
 
 import { loadFieldTypes, hiddenTypedFields, type FieldTypes } from "../src/hidden-values.js";
 import { createCachedServiceNowOperations } from "../src/metadata-cache.js";
+import { createToolError, recordTrustedHttpStatus } from "../src/tool-error.js";
 import { fieldTypeAnswer, type FieldTypeFixture } from "./fixtures/field-types.js";
 
 const FIXTURE: FieldTypeFixture = {
@@ -41,7 +42,10 @@ function instance(dictionary: () => Behaviour, delayMs = 20) {
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         if (path.endsWith("/sys_dictionary")) {
           const behaviour = dictionary();
-          if (behaviour === "fail") throw Object.assign(new Error("Forbidden"), { status: 403 });
+          // As the client issues a 403: a trusted authorization error with its status.
+          if (behaviour === "fail") {
+            throw recordTrustedHttpStatus(createToolError("authorization", "retry_after_correction"), 403);
+          }
           if (behaviour === "cancel") throw Object.assign(new Error("cancelled"), { name: "TestCancellation" });
         }
         return fieldTypeAnswer(path, params, FIXTURE) ?? { data: { result: [] }, status: 200, headers: new Headers() };

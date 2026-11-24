@@ -26,7 +26,7 @@ import { CallMetrics } from "../call-metrics.js";
 import { createCachedServiceNowOperations } from "../metadata-cache.js";
 import {
   FIELD_TYPES_UNAVAILABLE,
-  FIELD_TYPES_UNAVAILABLE_MESSAGE,
+  fieldTypesRefusal,
   hiddenFieldScope as hiddenFieldScopeFor,
   loadFieldTypes,
   runWithHiddenFieldScope,
@@ -723,15 +723,26 @@ function registerStandardTool(
           context.effectivePolicy.fieldTypes.dictionary === "not_required"
         );
         if (resolved.scope === undefined) {
+          const refusal = fieldTypesRefusal(types, tables);
           auditInvocation(
             contextDependencies,
-            // A field-access refusal: fixed by a grant to the integration user
-            // or the profile's fieldTypes opt-out, never by a table rule.
-            { outcome: "policy_rejected", reason: "field_access_denied", profile: binding },
+            // Only a cause of this server's own policy is a policy rejection.
+            // Anything else (a table that does not exist, an instance that
+            // refused or failed a read, a chain that cannot be confirmed) is
+            // not one, and is fixed by a grant to the integration user, a
+            // retry, or the profile's fieldTypes opt-out.
+            refusal.policy
+              ? { outcome: "policy_rejected", reason: "field_access_denied", profile: binding }
+              : {
+                  outcome: "handler_error",
+                  reason: "field_types_unavailable",
+                  profile: binding,
+                  error: refusal.auditError,
+                },
             tool.definition.name,
             request.metadata
           );
-          return err(`${FIELD_TYPES_UNAVAILABLE_MESSAGE} Correlation ID: ${context.correlationId}.`);
+          return err(`${refusal.message} Correlation ID: ${context.correlationId}.`);
         }
         if (resolved.degraded) {
           logger.write({

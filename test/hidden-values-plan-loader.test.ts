@@ -47,6 +47,8 @@ function chainOf(tables: Record<string, string | null>, name: string): string[] 
 const WORLD: World = {
   tables: {
     sys_metadata: null,
+    // The anchor row the first chain read also asks for: the read could see rows.
+    sys_db_object: null,
     sys_user: null,
     u_vendor: null,
     u_vendor_child: "u_vendor",
@@ -134,7 +136,7 @@ describe("loadFieldTypesInPlan: reads stay in the plan", () => {
     }
     // Levels: the three tables, then their parents, then the grandchild's root.
     expect(instance.calls.filter((c) => c.path.endsWith("/sys_db_object")).map((c) => c.params.sysparm_query)).toEqual([
-      "nameINssh_credentials,u_vendor_grandchild,sys_user,u_db_view",
+      "nameINssh_credentials,u_vendor_grandchild,sys_user,u_db_view,sys_db_object",
       "nameINdiscovery_credentials,u_vendor_child",
       "nameINu_vendor",
     ]);
@@ -157,7 +159,7 @@ describe("loadFieldTypesInPlan: reads stay in the plan", () => {
     const loaded = await loadFieldTypesInPlan(ops, ["sys_script_include", "sys_metadata"]);
     expectReadsWithin(instance, PLAN, PLAN_FIELD_TYPE_DOT_WALKS);
     const chainReads = instance.calls.filter((c) => c.path.endsWith("/sys_db_object"));
-    expect(chainReads.map((c) => c.params.sysparm_query)).toEqual(["nameINsys_script_include"]);
+    expect(chainReads.map((c) => c.params.sysparm_query)).toEqual(["nameINsys_script_include,sys_db_object"]);
     expect(loaded.chains.get("sys_metadata")).toEqual({ tables: ["sys_metadata"], complete: true });
   });
 
@@ -191,7 +193,7 @@ describe("loadFieldTypesInPlan: reads stay in the plan", () => {
     const { instance, ops } = fake(WORLD);
     await loadFieldTypesInPlan(ops, ["sys_user", "x,y", "javascript:gs.userID", "SYS_USER", ""]);
     expectReadsWithin(instance, PLAN, PLAN_FIELD_TYPE_DOT_WALKS);
-    expect(instance.calls.find((c) => c.path.endsWith("/sys_db_object"))!.params.sysparm_query).toBe("nameINsys_user");
+    expect(instance.calls.find((c) => c.path.endsWith("/sys_db_object"))!.params.sysparm_query).toBe("nameINsys_user,sys_db_object");
   });
 });
 
@@ -263,7 +265,10 @@ describe("loadFieldTypesInPlan: unresolved tables", () => {
     expectReadsWithin(instance, PLAN, PLAN_FIELD_TYPE_DOT_WALKS);
     expect(loaded.hierarchyRead).toBe(false);
     expect(loaded.chains.get("sys_user")).toEqual({ tables: ["sys_user"], complete: true });
-    expect(loaded.chains.get("u_vendor_child")).toEqual({ tables: ["u_vendor_child", "u_vendor"], complete: false });
+    expect(loaded.chains.get("u_vendor_child")).toEqual({ tables: ["u_vendor_child", "u_vendor"], complete: false, gap: "no_row" });
+    // A read that failed says so, not a table that is missing.
+    expect(loaded.chainsFailure).toEqual({ kind: "failed" });
+    expect(loaded.missing).toBeUndefined();
     expect(hiddenTypedFields(loaded.types, "sys_user")).toEqual(new Set(["user_password"]));
     expect(hiddenTypedFields(loaded.types, "u_vendor_child")).toBeUndefined();
   });
@@ -305,8 +310,8 @@ describe("loadFieldTypesInPlan: unresolved tables", () => {
     });
     const loaded = await loadFieldTypesInPlan(ops, ["u_odd", "u_loop_a"]);
     expectReadsWithin(instance, PLAN, PLAN_FIELD_TYPE_DOT_WALKS);
-    expect(loaded.chains.get("u_odd")).toEqual({ tables: ["u_odd"], complete: false });
-    expect(loaded.chains.get("u_loop_a")).toEqual({ tables: ["u_loop_a", "u_loop_b"], complete: false });
+    expect(loaded.chains.get("u_odd")).toEqual({ tables: ["u_odd"], complete: false, gap: "malformed" });
+    expect(loaded.chains.get("u_loop_a")).toEqual({ tables: ["u_loop_a", "u_loop_b"], complete: false, gap: "malformed" });
     expect(hiddenTypedFields(loaded.types, "u_odd")).toBeUndefined();
     expect(hiddenTypedFields(loaded.types, "u_loop_a")).toBeUndefined();
   });

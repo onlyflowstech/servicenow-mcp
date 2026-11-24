@@ -800,7 +800,9 @@ function validateToolDisposition(
         reason === "request_deadline_exceeded") &&
       resolved) ||
     (outcome === "handler_error" &&
-      (reason === "handler_threw" || reason === "handler_returned_error") &&
+      (reason === "handler_threw" ||
+        reason === "handler_returned_error" ||
+        reason === "field_types_unavailable") &&
       resolved);
   if (!valid) throw new TypeError("tool audit disposition is invalid");
 }

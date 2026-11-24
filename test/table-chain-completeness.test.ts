@@ -51,25 +51,51 @@ describe("tableChainFromRow", () => {
   });
 
   it("is incomplete for a reference whose name did not come back", () => {
-    expect(tableChainFromRow(row(["u_parent"], ["u_parent"]), "u_child", 3)).toEqual({ tables: ["u_child"], complete: false });
-    expect(tableChainFromRow({ name: "u_child", super_class: LINK, "super_class.name": "" }, "u_child", 2).complete).toBe(false);
+    expect(tableChainFromRow(row(["u_parent"], ["u_parent"]), "u_child", 3)).toEqual({
+      tables: ["u_child"],
+      complete: false,
+      gap: "parent_unreadable",
+    });
+    const unnamed = tableChainFromRow({ name: "u_child", super_class: LINK, "super_class.name": "" }, "u_child", 2);
+    expect(unnamed.complete).toBe(false);
+    expect(unnamed.gap).toBe("parent_unreadable");
   });
 
   it("is incomplete for an absent field, never empty", () => {
-    expect(tableChainFromRow({ name: "u_child", "super_class.name": "" }, "u_child", 2).complete).toBe(false);
-    expect(tableChainFromRow({ name: "u_child", super_class: "" }, "u_child", 2).complete).toBe(false);
-    expect(tableChainFromRow({ name: "u_child", super_class: null, "super_class.name": "" }, "u_child", 2).complete).toBe(false);
-    expect(tableChainFromRow({ name: "u_child" }, "u_child", 1).complete).toBe(false);
+    for (const [candidate, maxTables] of [
+      [{ name: "u_child", "super_class.name": "" }, 2],
+      [{ name: "u_child", super_class: "" }, 2],
+      [{ name: "u_child", super_class: null, "super_class.name": "" }, 2],
+      [{ name: "u_child" }, 1],
+    ] as const) {
+      const chain = tableChainFromRow(candidate, "u_child", maxTables);
+      expect(chain.complete).toBe(false);
+      expect(chain.gap).toBe("malformed");
+    }
   });
 
   it("is incomplete for a name with no reference, a parent that is not a table name, or a loop", () => {
-    expect(tableChainFromRow({ name: "u_child", super_class: "", "super_class.name": "u_parent" }, "u_child", 2).complete).toBe(false);
-    expect(tableChainFromRow({ name: "u_child", super_class: LINK, "super_class.name": "Parent Table" }, "u_child", 2).complete).toBe(false);
-    expect(tableChainFromRow(row(["u_parent", "u_child"]), "u_child", 3)).toEqual({ tables: ["u_child", "u_parent"], complete: false });
+    for (const candidate of [
+      { name: "u_child", super_class: "", "super_class.name": "u_parent" },
+      { name: "u_child", super_class: LINK, "super_class.name": "Parent Table" },
+    ]) {
+      const chain = tableChainFromRow(candidate, "u_child", 2);
+      expect(chain.complete).toBe(false);
+      expect(chain.gap).toBe("malformed");
+    }
+    expect(tableChainFromRow(row(["u_parent", "u_child"]), "u_child", 3)).toEqual({
+      tables: ["u_child", "u_parent"],
+      complete: false,
+      gap: "malformed",
+    });
   });
 
   it("is incomplete when the chain goes on past the tables read, and complete when it ends on the last", () => {
-    expect(tableChainFromRow(row(["u_parent", "u_root"]), "u_child", 2)).toEqual({ tables: ["u_child", "u_parent"], complete: false });
+    expect(tableChainFromRow(row(["u_parent", "u_root"]), "u_child", 2)).toEqual({
+      tables: ["u_child", "u_parent"],
+      complete: false,
+      gap: "too_long",
+    });
     const exact = sysDbObjectRow("u_child", ["u_parent"], tableChainFields(2).join(","));
     expect(tableChainFromRow(exact, "u_child", 2)).toEqual({ tables: ["u_child", "u_parent"], complete: true });
   });
@@ -107,11 +133,15 @@ describe("resolveTableChain", () => {
     expect(await resolveTableChain(operations(["u_fake_oauth"]).ops, "u_fake_oauth", 12, false)).toEqual({
       tables: ["u_fake_oauth"],
       complete: false,
+      gap: "no_row",
     });
-    expect((await resolveTableChain(operations(["oauth_entity"]).ops, "u_fake_oauth", 12, false)).complete).toBe(false);
+    const hiddenParent = await resolveTableChain(operations(["oauth_entity"]).ops, "u_fake_oauth", 12, false);
+    expect(hiddenParent.complete).toBe(false);
+    expect(hiddenParent.gap).toBe("parent_unreadable");
     const deep = await resolveTableChain(operations().ops, "u_deep", 12, false);
     expect(deep.tables).toHaveLength(12);
     expect(deep.complete).toBe(false);
+    expect(deep.gap).toBe("too_long");
     expect((await resolveTableChain(operations().ops, "u_deep", 13, false)).complete).toBe(true);
   });
 

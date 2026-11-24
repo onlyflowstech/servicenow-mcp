@@ -87,7 +87,8 @@ export async function resolveTableHierarchy(
  * Resolve `table`'s chain, as {@link resolveTableHierarchy}, and whether it is
  * complete ({@link TableChain}). No row, a parent reference whose name did not
  * come back, a field absent from the row, a parent that is not a table name,
- * a loop, or a chain longer than `maxDepth` tables is incomplete. A failed
+ * a loop, or a chain longer than `maxDepth` tables is incomplete, and `gap`
+ * says which. A failed
  * read throws; a `table` that is not a table name is rejected before any
  * request.
  */
@@ -99,7 +100,7 @@ export async function resolveTableChain(
 ): Promise<TableChain> {
   const root = normalizeTableName(table);
   if (root === undefined) throw new TypeError("table hierarchy requires a valid table name");
-  if (maxDepth < 1) return Object.freeze({ tables: Object.freeze([root]), complete: false });
+  if (maxDepth < 1) return Object.freeze({ tables: Object.freeze([root]), complete: false, gap: "too_long" as const });
   const response = await client.get<{ result?: unknown[] }>(
     "/api/now/table/sys_db_object",
     {
@@ -119,7 +120,7 @@ export async function resolveTableChain(
     Array.isArray(row) ||
     normalizeTableName((row as Record<string, unknown>).name) !== root
   ) {
-    return Object.freeze({ tables: Object.freeze([root]), complete: false });
+    return Object.freeze({ tables: Object.freeze([root]), complete: false, gap: "no_row" as const });
   }
   return tableChainFromRow(row as Record<string, unknown>, root, maxDepth);
 }

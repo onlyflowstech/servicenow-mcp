@@ -146,7 +146,8 @@ export type ToolAuditReason =
   | "request_cancelled"
   | "request_deadline_exceeded"
   | "handler_threw"
-  | "handler_returned_error";
+  | "handler_returned_error"
+  | "field_types_unavailable";
 
 const TOOL_AUDIT_RECORD_BRAND: unique symbol = Symbol("ToolAuditRecord");
 const PRE_CONTEXT_AUDIT_RECORD_BRAND: unique symbol = Symbol("PreContextAuditRecord");
@@ -218,7 +219,7 @@ export type ToolAuditRecord =
     })
   | (ResolvedToolAuditRecord & ToolAuditErrorFields & {
       readonly outcome: "handler_error";
-      readonly reason: "handler_threw" | "handler_returned_error";
+      readonly reason: "handler_threw" | "handler_returned_error" | "field_types_unavailable";
     });
 
 /**
@@ -457,7 +458,7 @@ export type ToolAuditDisposition =
     }
   | {
       readonly outcome: "handler_error";
-      readonly reason: "handler_threw" | "handler_returned_error";
+      readonly reason: "handler_threw" | "handler_returned_error" | "field_types_unavailable";
       readonly profile: ResolvedProfileBinding;
       readonly error?: unknown;
     };
@@ -580,7 +581,13 @@ export function createAuditRecord(input: CreateToolAuditRecordInput): ToolAuditR
         instance: profile.instance,
       });
     case "handler_error":
-      if (reason !== "handler_threw" && reason !== "handler_returned_error") break;
+      if (
+        reason !== "handler_threw" &&
+        reason !== "handler_returned_error" &&
+        reason !== "field_types_unavailable"
+      ) {
+        break;
+      }
       return brandToolAuditRecord({
         ...common,
         outcome,
@@ -800,7 +807,9 @@ function validateAuditInvariant(
         reason === "request_deadline_exceeded") &&
       hasProfile) ||
     (outcome === "handler_error" &&
-      (reason === "handler_threw" || reason === "handler_returned_error") &&
+      (reason === "handler_threw" ||
+        reason === "handler_returned_error" ||
+        reason === "field_types_unavailable") &&
       hasProfile);
   if (!valid) {
     throw new TypeError("audit outcome, reason, and profile are inconsistent");

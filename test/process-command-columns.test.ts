@@ -1195,8 +1195,11 @@ describe("database views over guarded tables", () => {
     connected.records.length = 0;
     const result = await call(connected, "sn_query", { table: VIEW, fields: "sys_id,rp_name" });
     expect(result.isError).toBe(true);
-    expect(JSON.stringify(result)).toContain("field types could not be read");
+    expect(JSON.stringify(result)).toContain("no sys_db_object row of");
+    expect(JSON.stringify(result)).toContain("No values were returned.");
+    expect(JSON.stringify(result)).not.toContain("Access denied by policy");
     expect(JSON.stringify(result)).not.toContain(MARKER);
-    expect(connected.records.at(-1)).toMatchObject({ outcome: "policy_rejected" });
+    // The instance would not show a joined table's row: not a decision of this server's policy.
+    expect(connected.records.at(-1)).toMatchObject({ outcome: "handler_error", reason: "field_types_unavailable" });
   });
 });

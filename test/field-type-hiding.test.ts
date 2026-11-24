@@ -31,7 +31,6 @@ import {
 } from "../src/field-policy.js";
 import {
   classifyField,
-  FIELD_TYPES_UNAVAILABLE_MESSAGE,
   fieldTypesOptOutWarning,
   fieldTypesFromRows,
   hiddenTypedFields,
@@ -47,6 +46,7 @@ import { buildPolicyCard, renderPolicyCard } from "../src/policy-card.js";
 import { ProfileManager } from "../src/profile-manager.js";
 import { createMcpServer } from "../src/server.js";
 import { createTableAccessPolicy } from "../src/table-policy.js";
+import { createToolError, recordTrustedHttpStatus } from "../src/tool-error.js";
 import { createEncodedQueryAccessPolicy } from "../src/encoded-query-policy.js";
 import { createAtfExecutionPolicy } from "../src/atf-policy.js";
 import { prepareSteps } from "../src/tools/atf-step-catalog.js";
@@ -167,7 +167,8 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   const getWithMeta = vi.fn(async (path: string, params: Record<string, string> = {}) => {
     reads.push({ path, params });
     if (fixture === "unavailable" && /sys_dictionary|sys_db_object|sys_db_view_table/u.test(path)) {
-      throw Object.assign(new Error("Forbidden"), { status: 403 });
+      // As the client issues a 403: a trusted error with its status recorded.
+      throw recordTrustedHttpStatus(createToolError("authorization", "retry_after_correction"), 403);
     }
     const typed = fixture === "unavailable" ? undefined : fieldTypeAnswer(path, params, fixture);
     if (typed && options.lookupDelayMs !== undefined) {
@@ -491,8 +492,19 @@ describe("sys_properties", () => {
   });
 });
 
+const OPT_OUT = 'set "fieldTypes": { "dictionary": "not_required" } on this profile to hide fields by name only.';
+/** The refusal when the instance refuses the sys_dictionary read with a 403. */
+const REFUSED_403 =
+  "Field types could not be read: the instance refused the sys_dictionary read (HTTP 403), so password-type " +
+  "fields can't be told apart and no values are returned. Grant the integration user read access to " +
+  `sys_dictionary and sys_db_object, or ${OPT_OUT}`;
+const parentChainText = (clause: string, remedy: string) =>
+  `Field types for "u_vault_child" could not be confirmed: ${clause}. No values were returned. ${remedy}`;
+const GRANT_CHAIN = `Grant the integration user read access to sys_db_object, or ${OPT_OUT}`;
+const OPT_OUT_ALONE = `Set ${OPT_OUT.slice(4)}`;
+
 describe("unavailable field types", () => {
-  it("refuses every field-policy tool with the fixed message and reads no record", async () => {
+  it("refuses every field-policy tool with the refusal's cause and reads no record", async () => {
     const h = await harness({ fieldTypes: "unavailable" });
     for (const [tool, args] of [
       ["sn_query", { table: "incident", fields: "number" }],
@@ -503,17 +515,23 @@ describe("unavailable field types", () => {
     ] as const) {
       const result = await h.call(tool, args);
       expect(result.isError, tool).toBe(true);
-      expect(result.text).toContain(FIELD_TYPES_UNAVAILABLE_MESSAGE);
+      expect(result.text).toContain(REFUSED_403);
+      // The instance refused a read: not a decision of this server's policy.
+      expect(result.text).not.toContain("Access denied by policy");
     }
-    expect(FIELD_TYPES_UNAVAILABLE_MESSAGE).toContain("sys_dictionary");
     expect(tableReads(h, "incident")).toHaveLength(0);
     expect(h.writes).toHaveLength(0);
   });
 
-  it("refuses a table whose chain cannot be resolved", async () => {
+  it("refuses a table that does not exist, and says so", async () => {
     const h = await harness({ rows: () => [] });
     const result = await h.call("sn_query", { table: "u_ghost", fields: "name" });
-    expect(result.text).toContain(FIELD_TYPES_UNAVAILABLE_MESSAGE);
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(
+      'Table "u_ghost" does not exist on this instance: sys_db_object has no row for it. Check the table name.'
+    );
+    expect(result.text).not.toContain("Access denied by policy");
+    expect(tableReads(h, "u_ghost")).toHaveLength(0);
   });
 
   it("falls back to name-only hiding under the opt-out, and warns", async () => {
@@ -546,6 +564,24 @@ describe("a child table whose parent link cannot be read", () => {
     "a parent name with no reference": { ...FIXTURE, withoutParentLinks: ["u_vault_child"] },
     "a chain longer than 12 tables": { ...FIXTURE, parents: { u_vault_child: [...levels, "u_vault"] } },
   };
+  /** What each case is refused with: a missing row is a table that does not exist; the rest name the gap. */
+  const refusals: Record<string, string> = {
+    "no sys_db_object row":
+      'Table "u_vault_child" does not exist on this instance: sys_db_object has no row for it. Check the table name.',
+    "an empty parent link": parentChainText(
+      'the sys_db_object row of "u_vault_child" does not name a valid parent',
+      OPT_OUT_ALONE
+    ),
+    "a parent reference with no name": parentChainText(
+      'the parent table of "u_vault_child" could not be read (the instance did not return its name to the integration user)',
+      GRANT_CHAIN
+    ),
+    "a parent name with no reference": parentChainText(
+      'the sys_db_object row of "u_vault_child" does not name a valid parent',
+      OPT_OUT_ALONE
+    ),
+    "a chain longer than 12 tables": parentChainText("its table hierarchy is more than 12 tables deep", OPT_OUT_ALONE),
+  };
   const reads = [
     ["sn_query", { table: "u_vault_child", fields: "name,key" }],
     ["sn_query", { table: "u_vault_child", fields: "all" }],
@@ -571,7 +607,8 @@ describe("a child table whose parent link cannot be read", () => {
       for (const [tool, args] of reads) {
         const result = await h.call(tool, args);
         expect(result.isError, `${tool} ${JSON.stringify(args)}`).toBe(true);
-        expect(result.text).toContain(FIELD_TYPES_UNAVAILABLE_MESSAGE);
+        expect(result.text).toContain(refusals[label]!);
+        expect(result.text).not.toContain("Access denied by policy");
         expectNoSecret(result.text);
       }
       expect(tableReads(h, "u_vault_child")).toHaveLength(0);
@@ -593,7 +630,9 @@ describe("a child table whose parent link cannot be read", () => {
       vi.useRealTimers();
     });
     const chainReads = (h: Harness) =>
-      h.reads.filter((read) => read.path === "/api/now/table/sys_db_object" && read.params.sysparm_query === "nameINu_vault_child");
+      h.reads.filter(
+        (read) => read.path === "/api/now/table/sys_db_object" && read.params.sysparm_query === "nameINu_vault_child,sys_db_object"
+      );
 
     it("reads an incomplete chain once within the window, refusing every call, and again after it", async () => {
       vi.useFakeTimers({ toFake: ["Date"] });
@@ -601,14 +640,18 @@ describe("a child table whose parent link cannot be read", () => {
       const h = await harness({ fieldTypes: cases["a parent reference with no name"]! });
       for (let call = 0; call < 3; call += 1) {
         const result = await h.call("sn_query", { table: "u_vault_child", fields: "name,key" });
-        expect(result.text).toContain(FIELD_TYPES_UNAVAILABLE_MESSAGE);
+        expect(result.text).toContain(refusals["a parent reference with no name"]!);
       }
       expect(chainReads(h)).toHaveLength(1);
       vi.setSystemTime(new Date("2026-11-16T12:00:29Z"));
-      expect((await h.call("sn_get", { table: "u_vault_child", sys_id: SYS_ID })).text).toContain(FIELD_TYPES_UNAVAILABLE_MESSAGE);
+      expect((await h.call("sn_get", { table: "u_vault_child", sys_id: SYS_ID })).text).toContain(
+        refusals["a parent reference with no name"]!
+      );
       expect(chainReads(h)).toHaveLength(1);
       vi.setSystemTime(new Date("2026-11-16T12:00:31Z"));
-      expect((await h.call("sn_query", { table: "u_vault_child", fields: "name" })).text).toContain(FIELD_TYPES_UNAVAILABLE_MESSAGE);
+      expect((await h.call("sn_query", { table: "u_vault_child", fields: "name" })).text).toContain(
+        refusals["a parent reference with no name"]!
+      );
       expect(chainReads(h)).toHaveLength(2);
       expect(tableReads(h, "u_vault_child")).toHaveLength(0);
     });
@@ -617,7 +660,7 @@ describe("a child table whose parent link cannot be read", () => {
       const h = await harness({ fieldTypes: cases["a parent reference with no name"]! });
       await h.call("sn_query", { table: "u_vault_child", fields: "name" });
       const forced = await h.call("sn_query", { table: "u_vault_child", fields: "name", force_recache: true });
-      expect(forced.text).toContain(FIELD_TYPES_UNAVAILABLE_MESSAGE);
+      expect(forced.text).toContain(refusals["a parent reference with no name"]!);
       expect(chainReads(h)).toHaveLength(2);
     });
   });

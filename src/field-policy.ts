@@ -17,7 +17,7 @@ import { types as nodeUtilTypes } from "node:util";
 
 import {
   currentHiddenFieldScope,
-  FIELD_TYPES_UNAVAILABLE_MESSAGE,
+  fieldTypesPlanDenialText,
   rowValueHidden,
   rowValueRule,
   withoutFields,
@@ -1412,7 +1412,9 @@ export function fieldPolicyDenialMessage(error: FieldPolicyError): string {
       // the caller a field's type, which is what the type rule keeps back.
       return "Access denied by policy: a requested field is denied by name as sensitive and cannot be granted by configuration.";
     case "field_types_unavailable":
-      return FIELD_TYPES_UNAVAILABLE_MESSAGE;
+      // A table outside the call's resolved plan: this server's own plan
+      // decided it, not an instance read (those refusals are the dispatcher's).
+      return fieldTypesPlanDenialText(table);
     case "explicit_field_required":
       // Only EXPLICIT_WRITE_FIELDS and closed column names reach this case;
       // each is a fixed name that passed FIELD_NAME.
