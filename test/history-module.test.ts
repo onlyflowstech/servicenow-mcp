@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  CHAIN_UNCONFIRMED_WARNING,
   TOO_LARGE_WARNING,
-  DICTIONARY_UNAVAILABLE_WARNING,
   MAX_HISTORY_DICTIONARY_ROWS,
   STUCK_PAGE_HINT,
   WRONG_CLASS_HINT,
@@ -187,7 +185,10 @@ describe("values by type and table (the shared helper)", () => {
     const { result } = await run(incidentFixture({ dictionary: "forbidden" }), { table: "incident", sys_id: ids.incident });
     const data = dataOf(result);
     expect(data.audit_enabled).toBeNull();
-    expect(data.warnings).toEqual([DICTIONARY_UNAVAILABLE_WARNING]);
+    // The instance refused the read: said so, with its status, and not as a policy denial.
+    expect(data.warnings).toEqual([
+      "Field types could not be read: the instance refused the sys_dictionary read (HTTP 403), so no values are shown.",
+    ]);
     for (const event of eventsOf(data)) {
       expect(event).not.toHaveProperty("old");
       expect(event).not.toHaveProperty("new");
@@ -201,7 +202,10 @@ describe("values by type and table (the shared helper)", () => {
     const tableAccess = namedPolicy(["incident", "sys_audit", "sys_journal_field", "sys_flow_context"]);
     const { instance, result } = await run(incidentFixture(), { table: "incident", sys_id: ids.incident }, { tableAccess });
     const data = dataOf(result);
-    expect(data.warnings).toEqual([DICTIONARY_UNAVAILABLE_WARNING]);
+    // This server's own plan did not read it: the one cause worded as the profile's.
+    expect(data.warnings).toEqual([
+      "This profile does not grant read on sys_db_object and sys_dictionary (name, element, internal_type), so no values are shown.",
+    ]);
     expect(JSON.stringify(eventsOf(data))).not.toMatch(/"(?:old|new)"/u);
     expect(instance.calls.map(tableOfCall)).not.toContain("sys_dictionary");
     expectReadsWithin(instance.calls, planFor({ table: "incident", sys_id: ids.incident }, tableAccess));
@@ -212,7 +216,9 @@ describe("values by type and table (the shared helper)", () => {
       name: "incident", element: `u_f${n}`, internal_type: "string", audit: "false",
     }));
     const { result } = await run(incidentFixture({ dictionary: [...DICTIONARY, ...many] }), { table: "incident", sys_id: ids.incident });
-    expect(dataOf(result).warnings).toEqual([DICTIONARY_UNAVAILABLE_WARNING]);
+    expect(dataOf(result).warnings).toEqual([
+      "Field types could not be read: sys_dictionary has more password-type fields than one read returns, so no values are shown.",
+    ]);
   });
 
   it("withholds every value on a credential table", async () => {
@@ -670,6 +676,16 @@ describe("an extension chain that cannot be read in full", () => {
     "a parent reference with no name": { parents: { u_fake_client: ["oauth_entity"] }, hiddenRows: ["oauth_entity"] },
     "a chain longer than 12 tables": { parents: { u_fake_client: [...levels, "oauth_entity"] } },
   };
+  const warnings: Record<string, string> = {
+    "no sys_db_object row":
+      "Field types could not be read: the instance returned no sys_db_object rows to the integration user (HTTP 200), so no values are shown.",
+    "an empty parent link":
+      'Field types could not be confirmed: the sys_db_object row of "u_fake_client" does not name a valid parent, so no values are shown.',
+    "a parent reference with no name":
+      'Field types could not be confirmed: the parent table of "u_fake_client" could not be read (the instance did not return its name to the integration user), so no values are shown.',
+    "a chain longer than 12 tables":
+      "Field types could not be confirmed: the table hierarchy is more than 12 tables deep, so no values are shown.",
+  };
   for (const [label, chain] of Object.entries(cases)) {
     it(`withholds values, with a warning, for ${label}`, async () => {
       const ownSysId = { name: "u_fake_client", element: "sys_id", internal_type: "GUID", audit: "false" };
@@ -678,7 +694,8 @@ describe("an extension chain that cannot be read in full", () => {
       expect(eventsOf(data)).toEqual([
         { time: "2026-03-01 08:00:00", source: "audit", field: "u_label", user: "fake.user.one", value_hidden: true },
       ]);
-      expect(data.warnings).toEqual([CHAIN_UNCONFIRMED_WARNING]);
+      expect(data.warnings).toEqual([warnings[label]]);
+      expect(data.warnings![0]!.length).toBeLessThanOrEqual(300);
       expect(JSON.stringify(data)).not.toContain("fake-label-value");
     });
   }

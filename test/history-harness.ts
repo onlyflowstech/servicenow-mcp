@@ -63,6 +63,8 @@ export interface HistoryFixture {
   readonly withoutParentLinks?: readonly string[];
   /** Dictionary rows: `{name, element, internal_type, audit?}`; an empty element is the collection row. */
   readonly dictionary?: readonly Row[] | Failure;
+  /** Errors thrown by the first dictionary reads, one per read in order; after them it answers. */
+  readonly dictionaryFaults?: readonly Error[];
   readonly audit?: readonly Row[] | Failure;
   readonly journal?: readonly Row[] | Failure;
   readonly flows?: readonly Row[] | Failure;
@@ -94,6 +96,7 @@ const SOURCE_TABLES = {
 /** The fake instance. Writes are recorded and refused. */
 export function fakeInstance(fixture: HistoryFixture): FakeInstance {
   const calls: RecordedCall[] = [];
+  let dictionaryReads = 0;
   const answer = (path: string, params: Record<string, string> = {}): unknown => {
     const single = /^\/api\/now\/table\/([a-z][a-z0-9_]*)\/([0-9a-f]{32})$/u.exec(path);
     if (single !== null) {
@@ -116,6 +119,9 @@ export function fakeInstance(fixture: HistoryFixture): FakeInstance {
     }
     if (table === "sys_dictionary") {
       if (fixture.dictionary === "forbidden") throw createToolError("authorization", "retry_after_correction");
+      const fault = fixture.dictionaryFaults?.[dictionaryReads];
+      dictionaryReads += 1;
+      if (fault !== undefined) throw fault;
       const names = /^nameIN([a-z0-9_,]+)\^/u.exec(query)?.[1]?.split(",");
       if (names === undefined) return { result: [] };
       return { result: project((fixture.dictionary as Row[] | undefined ?? []).filter((row) => names.includes(row.name!)), params) };

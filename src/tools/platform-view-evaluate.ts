@@ -70,7 +70,15 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import { isServiceNowRequestCancellation, isServiceNowResponseTooLarge, type ServiceNowOperations } from "../client.js";
 import { isCredentialTable, isCredentialTableHierarchy } from "../credential-tables.js";
-import { PLAN_FIELD_TYPE_FIELDS, hiddenTypedFields, loadFieldTypesInPlan, type PlanFieldTypes } from "../hidden-values.js";
+import {
+  PLAN_FIELD_TYPE_FIELDS,
+  fieldTypesProblemText,
+  hiddenTypedFields,
+  loadFieldTypesInPlan,
+  planHierarchyProblem,
+  planTypesProblem,
+  type PlanFieldTypes,
+} from "../hidden-values.js";
 import { uncachedOperations } from "../metadata-cache.js";
 import { createToolError } from "../tool-error.js";
 import { escapeQueryValue } from "../utils.js";
@@ -176,7 +184,12 @@ export const EVALUATE_AMBIGUOUS_HINT = "More than one update set has this name. 
 export const EVALUATE_METADATA_ONLY =
   "Field policy hides payload: payload rules did not run, only metadata rules.";
 
-/** Fixed warnings; nothing in them comes from the instance. */
+/**
+ * Fixed warnings; nothing in them comes from the instance. The two about
+ * field types and hierarchies are the sentences used when the loader names no
+ * cause; with one, the sentence names it from the fixed cause vocabulary
+ * (`hidden-values.ts`): never a table, never text from the instance.
+ */
 export const EVALUATE_WARNINGS = Object.freeze({
   scope_budget: "The upstream scope budget ran out before every row was read; the rows left were not evaluated.",
   max_updates: "max_updates was reached before every row was read; the rows left were not evaluated.",
@@ -854,6 +867,7 @@ async function readContext(
   access: PlatformViewFieldAccess,
   updates: readonly EvaluateUpdate[],
   warnings: Set<EvaluateWarning>,
+  details: Map<EvaluateWarning, string>,
   extra?: { readonly run: () => Promise<void>; readonly noScope: () => void }
 ): Promise<ContextRead> {
   const { tables: all, budgetHit } = await collectCandidateTables(updates, reader.hooks);
@@ -889,8 +903,17 @@ async function readContext(
   const { chains, types: fieldTypes } = loaded;
   if (noScope || !loaded.hierarchyRead || tables.some((tableName) => chains.get(tableName)?.complete !== true)) {
     warnings.add("hierarchy_unavailable");
+    // The cause, when the loader read one (not when no scope was left to read in).
+    const cause = noScope ? undefined : planHierarchyProblem(loaded, tables);
+    if (cause !== undefined) {
+      details.set("hierarchy_unavailable", fieldTypesProblemText({ surface: "evaluate", about: "hierarchy", ...cause }));
+    }
   }
-  if (fieldTypes.state === "unavailable" && tables.length > 0) warnings.add("field_types_unavailable");
+  if (fieldTypes.state === "unavailable" && tables.length > 0) {
+    warnings.add("field_types_unavailable");
+    const cause = noScope ? undefined : planTypesProblem(loaded);
+    if (cause !== undefined) details.set("field_types_unavailable", fieldTypesProblemText({ surface: "evaluate", ...cause }));
+  }
 
   const context: EvaluateContext = {
     isCredentialTable(tableName) {
@@ -1176,6 +1199,8 @@ export function createEvaluateHandler(defaults: EvaluateHandlerOptions = {}): Fi
       hooks: defaults.hooks ?? {},
     };
     const warnings = new Set<EvaluateWarning>();
+    /** A warning's sentence when it names a cause, in place of its fixed one. */
+    const warningDetails = new Map<EvaluateWarning, string>();
     const groups = args.groups === undefined || args.groups.length === 0 ? undefined : args.groups;
     const factsWanted = groups === undefined || groups.includes("bp");
 
@@ -1237,7 +1262,7 @@ export function createEvaluateHandler(defaults: EvaluateHandlerOptions = {}): Fi
               noScope: () => warnings.add("baseline_unavailable"),
             }
           : undefined;
-      const steps: Promise<unknown>[] = [readContext(reader, access, rows.updates, warnings, baseline)];
+      const steps: Promise<unknown>[] = [readContext(reader, access, rows.updates, warnings, warningDetails, baseline)];
       if (factsWanted && rows.updates.length > 0) {
         if (scope.source === "remote") steps.push(readProblems(reader, access, scope, facts, warnings));
         else steps.push(readCollisions(reader, access, scope, rows.updates, facts, warnings));
@@ -1295,7 +1320,7 @@ export function createEvaluateHandler(defaults: EvaluateHandlerOptions = {}): Fi
       }));
       const warningList = [
         ...(payloadAccess === "denied" ? [EVALUATE_METADATA_ONLY] : []),
-        ...[...warnings].map((key) => EVALUATE_WARNINGS[key]),
+        ...[...warnings].map((key) => warningDetails.get(key) ?? EVALUATE_WARNINGS[key]),
       ];
       return viewResult(args, {
         view: "evaluate",

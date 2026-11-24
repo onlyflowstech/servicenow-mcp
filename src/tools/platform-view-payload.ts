@@ -41,7 +41,13 @@
 
 import { isCredentialTable, isCredentialTableHierarchy } from "../credential-tables.js";
 import { isSensitiveFieldName } from "../field-policy.js";
-import { hiddenTypedFields, type PlanFieldTypes } from "../hidden-values.js";
+import {
+  fieldTypesProblemText,
+  hiddenTypedFields,
+  planHierarchyProblem,
+  planTypesProblem,
+  type PlanFieldTypes,
+} from "../hidden-values.js";
 import { maskSecrets } from "../update-set-eval/secret-patterns.js";
 import {
   XML_READER_MAX_BYTES,
@@ -137,9 +143,11 @@ function jsonBytes(text: string): number {
 
 export function payloadRefusal(
   status: "refused" | "withheld" | "not_readable",
-  reason: PayloadReason
+  reason: PayloadReason,
+  /** A hint worded for the cause; the reason's fixed sentence when none is known. */
+  hint?: string
 ): PayloadOutcome {
-  return Object.freeze({ status, reason, hint: PAYLOAD_HINTS[reason] });
+  return Object.freeze({ status, reason, hint: hint ?? PAYLOAD_HINTS[reason] });
 }
 
 const TABLE_NAME = /^[a-z][a-z0-9_]{0,79}$/u;
@@ -217,12 +225,28 @@ export async function preparePayload(
   const hidden = new Map<string, ReadonlySet<string>>();
   for (const table of written) {
     const chain = loaded.chains.get(table);
-    if (chain === undefined || !chain.complete) return payloadRefusal("withheld", "hierarchy_unknown");
+    if (chain === undefined || !chain.complete) {
+      // The cause comes from what the loader read, never from the payload: the
+      // tables it writes are untrusted text, so the hint names none.
+      const cause = planHierarchyProblem(loaded, written);
+      return payloadRefusal(
+        "withheld",
+        "hierarchy_unknown",
+        cause === undefined ? undefined : fieldTypesProblemText({ surface: "payload", about: "hierarchy", ...cause })
+      );
+    }
     if (isCredentialTableHierarchy(chain.tables)) return payloadRefusal("refused", "credential_table");
   }
   for (const table of written) {
     const fields = hiddenTypedFields(loaded.types, table);
-    if (fields === undefined) return payloadRefusal("withheld", "field_types_unavailable");
+    if (fields === undefined) {
+      const cause = planTypesProblem(loaded);
+      return payloadRefusal(
+        "withheld",
+        "field_types_unavailable",
+        cause === undefined ? undefined : fieldTypesProblemText({ surface: "payload", ...cause })
+      );
+    }
     hidden.set(table, fields);
   }
 

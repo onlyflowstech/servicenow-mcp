@@ -238,10 +238,13 @@ describe("payload view: unexpected layouts", () => {
 });
 
 describe("payload view: refused and withheld", () => {
-  const refused = (outcome: PayloadOutcome, status: string, reason: keyof typeof PAYLOAD_HINTS) => {
-    expect(outcome).toEqual({ status, reason, hint: PAYLOAD_HINTS[reason] });
+  const refused = (outcome: PayloadOutcome, status: string, reason: keyof typeof PAYLOAD_HINTS, hint = PAYLOAD_HINTS[reason]) => {
+    expect(outcome).toEqual({ status, reason, hint });
     expect(JSON.stringify(outcome)).not.toContain(FAKE_SECRET);
+    // The tables come from the payload: no hint names one.
+    expect(hint).not.toMatch(/u_[a-z_]+|sys_script_include/u);
   };
+  const NOT_FOUND_HINT = "Table hierarchies could not be read: a table has no row in sys_db_object, so the payload is not shown.";
 
   it("refuses a credential table by name, before any type read", async () => {
     for (const table of ["sys_properties", "discovery_credentials", "sys_auth_profile_basic", "sys_rest_message"]) {
@@ -262,15 +265,16 @@ describe("payload view: refused and withheld", () => {
   });
 
   it("withholds a payload whose table has no known hierarchy, or whose field types could not be read", async () => {
-    refused((await prepare(payloadOf("u_unknown", { u_value: FAKE_SECRET }), ["u_unknown"])).outcome, "withheld", "hierarchy_unknown");
+    refused((await prepare(payloadOf("u_unknown", { u_value: FAKE_SECRET }), ["u_unknown"])).outcome, "withheld", "hierarchy_unknown", NOT_FOUND_HINT);
     // Every child of the root is a record of its own: one that is not a known table withholds the payload.
     const wrapped = `<record_update table="sys_script_include"><u_wrapper><u_vendor_child><u_api_key_value>${FAKE_SECRET}</u_api_key_value></u_vendor_child></u_wrapper></record_update>`;
-    refused((await prepare(wrapped, ["sys_script_include"])).outcome, "withheld", "hierarchy_unknown");
+    refused((await prepare(wrapped, ["sys_script_include"])).outcome, "withheld", "hierarchy_unknown", NOT_FOUND_HINT);
     const noTypes = world({ dictionary: [] });
     refused(
       (await prepare(payloadOf("sys_script_include", { script: "x" }), ["sys_script_include"], noTypes)).outcome,
       "withheld",
-      "field_types_unavailable"
+      "field_types_unavailable",
+      "Field types could not be read: the instance returned no sys_dictionary rows to the integration user (HTTP 200), so password-type fields cannot be hidden; the payload is not shown."
     );
   });
 
@@ -306,11 +310,20 @@ describe("payload view: refused and withheld", () => {
       expect(out.text).not.toContain(FAKE_SECRET);
     });
 
+    const hints: Record<string, string> = {
+      "no sys_db_object row": NOT_FOUND_HINT,
+      "an empty parent link":
+        "Table hierarchies could not be read in full: the sys_db_object row of a table does not name a valid parent, so the payload is not shown.",
+      "a parent reference with no name":
+        "Table hierarchies could not be read in full: the parent table of a table could not be read (the instance did not return its name to the integration user), so the payload is not shown.",
+      "a chain longer than 12 tables":
+        "Table hierarchies could not be read in full: the table hierarchy is more than 12 tables deep, so the payload is not shown.",
+    };
     for (const [label, build] of Object.entries(cases)) {
       it(`withholds the credential child and the typed child for ${label}`, async () => {
         for (const { child, parent, fields } of children) {
           const { outcome } = await prepare(payloadOf(child, fields), [child], build(child, parent));
-          refused(outcome, "withheld", "hierarchy_unknown");
+          refused(outcome, "withheld", "hierarchy_unknown", hints[label]);
         }
       });
     }

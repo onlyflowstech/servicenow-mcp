@@ -469,11 +469,18 @@ describe("evaluate: hidden-typed values and credential tables", () => {
     expect(empty.data.summary.facts.field_types).toBe("unavailable");
     expect(empty.data.summary.coverage).toMatchObject({ partial: true });
     expect(empty.data.summary.coverage.checks_unavailable).toBeGreaterThan(0);
-    expect(empty.data.warnings).toContain(EVALUATE_WARNINGS.field_types_unavailable);
+    // Names the cause, from the fixed vocabulary.
+    expect(empty.data.warnings).toContain(
+      "Field types could not be read: the instance returned no sys_dictionary rows to the integration user (HTTP 200); password-typed field checks were not made."
+    );
+    expect(empty.data.warnings).not.toContain(EVALUATE_WARNINGS.field_types_unavailable);
     const failed = await run(model({ rows }), { update_set: SET_ID }, {
       script: { fail: (call) => (callLabel(call) === "table:sys_dictionary" ? createToolError("authorization", "retry_after_correction") : undefined) },
     });
     expect(failed.data.summary.facts.field_types).toBe("unavailable");
+    expect(failed.data.warnings).toContain(
+      "Field types could not be read: the instance refused the sys_dictionary read (HTTP 403); password-typed field checks were not made."
+    );
     expect(failed.data.summary.coverage.partial).toBe(true);
     expect(JSON.stringify(failed.result)).not.toContain(SECRET);
   });
