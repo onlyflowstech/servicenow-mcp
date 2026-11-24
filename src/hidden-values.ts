@@ -537,12 +537,6 @@ export const MAX_HIDDEN_DICTIONARY_ROWS = 10_000;
  * the client does not retry itself. Short: the retry is for a blip, not an outage.
  */
 export const FIELD_TYPES_RETRY_PAUSE_MS = 300;
-/**
- * Order of the instance-wide hidden-type read. The result is parsed into a map
- * and a full page is refused, so the order carries no meaning; it is kept
- * only as the read has always been made.
- */
-const HIDDEN_DICTIONARY_ORDER_BY = "^ORDERBYname^ORDERBYelement";
 const MAX_HIERARCHY_DEPTH = 12;
 const MAX_VIEW_SOURCE_ROWS = 1_000;
 const MAX_DOT_WALK_HOPS = 8;
@@ -823,16 +817,20 @@ export async function loadFieldTypes(
       ? Promise.resolve(new Map<string, ChainState>())
       : sharedChains(reader, memo, pending, chainRetry),
   ]);
+  // What the chain read found is kept whether or not the dictionary was read:
+  // a refused dictionary must not cost a discarded sys_db_object read on every
+  // call. Only a complete chain and an incomplete one are kept, never a failed
+  // read, and only for the tables asked for.
+  for (const [table, chain] of read) {
+    chains.set(table, chain);
+    rememberChain(table, chain);
+  }
   if (!(dictionary instanceof Map)) {
     return fieldTypesUnavailable((dictionary as { unavailable: FieldTypesReadFailure | undefined }).unavailable);
   }
   let viewFailure: FieldTypesReadFailure | undefined;
   const brokenViews = new Set<string>();
   if (pending.length > 0) {
-    for (const [table, chain] of read) {
-      chains.set(table, chain);
-      rememberChain(table, chain);
-    }
     const absent = pending.filter((table) => hasNoRow(read.get(table)));
     if (absent.length > 0) {
       const found = await viewSources(reader, absent);
@@ -1109,7 +1107,7 @@ async function readDictionary(client: ServiceNowOperations, memo: Memo): Promise
   try {
     const response = await retryTransientOnce(() =>
       client.getWithMeta<{ result?: unknown }>("/api/now/table/sys_dictionary", {
-        sysparm_query: `internal_typeIN${HIDDEN_FIELD_TYPES.join(",")}${HIDDEN_DICTIONARY_ORDER_BY}`,
+        sysparm_query: `internal_typeIN${HIDDEN_FIELD_TYPES.join(",")}`,
         sysparm_fields: "name,element,internal_type",
         sysparm_limit: String(MAX_HIDDEN_DICTIONARY_ROWS),
         sysparm_display_value: "false",
@@ -1488,7 +1486,7 @@ export async function loadFieldTypesInPlan(
     const response = await retryTransientOnce(
       () =>
         client.getWithMeta<{ result?: unknown }>("/api/now/table/sys_dictionary", {
-          sysparm_query: `internal_typeIN${HIDDEN_FIELD_TYPES.join(",")}${HIDDEN_DICTIONARY_ORDER_BY}`,
+          sysparm_query: `internal_typeIN${HIDDEN_FIELD_TYPES.join(",")}`,
           sysparm_fields: PLAN_FIELD_TYPE_FIELDS.sys_dictionary.join(","),
           sysparm_limit: String(MAX_HIDDEN_DICTIONARY_ROWS),
           sysparm_display_value: "false",

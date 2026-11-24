@@ -891,7 +891,7 @@ describe("evaluate: type hiding at parity with the shared loader", () => {
   it("asks the dictionary for hidden types only, and the fixture honours that filter by default", async () => {
     const { instance } = await run(model({ rows: [xmlRow(update("u_vendor_child", { u_name: "x", u_api_password: "fake-not-a-secret" }))] }));
     const dictionaryRead = instance.calls.find((c) => c.path.endsWith("/sys_dictionary"))!;
-    expect(dictionaryRead.params.sysparm_query).toBe("internal_typeINpassword,password2,masked,encrypted_text^ORDERBYname^ORDERBYelement");
+    expect(dictionaryRead.params.sysparm_query).toBe("internal_typeINpassword,password2,masked,encrypted_text");
   });
 });
 

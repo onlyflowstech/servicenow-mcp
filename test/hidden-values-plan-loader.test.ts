@@ -345,7 +345,7 @@ describe("loadFieldTypesInPlan: a child's row never un-hides its parent's type",
     await loadFieldTypesInPlan(ops, ["sys_user"]);
     expectReadsWithin(instance, PLAN, PLAN_FIELD_TYPE_DOT_WALKS);
     const read = instance.calls.find((c) => c.path.endsWith("/sys_dictionary"))!;
-    expect(read.params.sysparm_query).toBe("internal_typeINpassword,password2,masked,encrypted_text^ORDERBYname^ORDERBYelement");
+    expect(read.params.sysparm_query).toBe("internal_typeINpassword,password2,masked,encrypted_text");
     expect(read.params.sysparm_fields).toBe(PLAN_FIELD_TYPE_FIELDS.sys_dictionary.join(","));
   });
 });

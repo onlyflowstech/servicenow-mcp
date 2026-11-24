@@ -121,6 +121,61 @@ describe("loadFieldTypes: why a table is unresolved", () => {
   });
 });
 
+describe("loadFieldTypes: chains are kept while the dictionary is unavailable", () => {
+  const cached = (ops: ServiceNowOperations) =>
+    createCachedServiceNowOperations(ops as never, `kept-${Math.random()}`, { ttlMs: 60_000, smallReadBytes: 0 });
+
+  it("reads sys_db_object once across calls while a refusal of the dictionary is remembered, and still returns the cause", async () => {
+    const { ops, count } = double(FIXTURE, (path) => (path.endsWith("/sys_dictionary") ? http(403) : undefined));
+    const scoped = cached(ops);
+    for (let call = 0; call < 3; call += 1) {
+      expect(await loadFieldTypes(scoped, ["u_vault"])).toMatchObject({ state: "unavailable", cause: { kind: "refused", status: 403 } });
+    }
+    expect(count("/sys_dictionary")).toBe(1);
+    expect(count("/sys_db_object")).toBe(1);
+  });
+
+  it("keeps an incomplete chain, with where it stopped, and returns nothing resolved", async () => {
+    const { ops, count } = double({ ...FIXTURE, hiddenRows: ["u_vault"] }, (path) => (path.endsWith("/sys_dictionary") ? http(403) : undefined));
+    const scoped = cached(ops);
+    const first = await loadFieldTypes(scoped, ["u_vault_child"]);
+    expect(first.state).toBe("unavailable");
+    expect(first.problems).toBeUndefined();
+    await loadFieldTypes(scoped, ["u_vault_child"]);
+    expect(count("/sys_db_object")).toBe(1);
+    // Once the dictionary reads, the kept verdict is what the table's problem says.
+    const { ops: later } = double({ ...FIXTURE, hiddenRows: ["u_vault"] });
+    const withDictionary = await loadFieldTypes(createCachedServiceNowOperations(later as never, "unused", { ttlMs: 60_000, smallReadBytes: 0 }), ["u_vault_child"]);
+    expect(withDictionary.problems?.get("u_vault_child")).toEqual({ kind: "chain", at: "u_vault_child", gap: "parent_unreadable" });
+  });
+
+  it("never keeps a failed chain read: it is read again, and kept once it answers", async () => {
+    // The first call's read and its one retry both fail.
+    const { ops, count } = double(FIXTURE, (path, _p, n) => {
+      if (path.endsWith("/sys_dictionary")) return http(403);
+      return path.endsWith("/sys_db_object") && n <= 2 ? http(500) : undefined;
+    });
+    const scoped = cached(ops);
+    await loadFieldTypes(scoped, ["u_vault"]);
+    expect(count("/sys_db_object")).toBe(2);
+    await loadFieldTypes(scoped, ["u_vault"]);
+    expect(count("/sys_db_object")).toBe(3);
+    await loadFieldTypes(scoped, ["u_vault"]);
+    expect(count("/sys_db_object")).toBe(3);
+  });
+
+  it("never keeps a table that is not there, or the anchor's own chain", async () => {
+    const { ops, count } = double(FIXTURE, (path) => (path.endsWith("/sys_dictionary") ? http(403) : undefined));
+    const scoped = cached(ops);
+    await loadFieldTypes(scoped, ["u_ghost"]);
+    await loadFieldTypes(scoped, ["u_ghost"]);
+    expect(count("/sys_db_object")).toBe(2);
+    // The anchor was asked for beside u_ghost but is not remembered: asking for it reads again.
+    await loadFieldTypes(scoped, ["sys_db_object"]);
+    expect(count("/sys_db_object")).toBe(3);
+  });
+});
+
 describe("loadFieldTypesInPlan: causes", () => {
   const WORLD_FIXTURE: FieldTypeFixture = { ...FIXTURE, parents: { u_vault_child: ["u_vault"] } };
 
