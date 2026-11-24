@@ -370,6 +370,32 @@ export function createToolError(
   return Object.freeze(error);
 }
 
+/**
+ * The HTTP status of an upstream response, kept beside (never inside) an
+ * issued error. A separate map, so no descriptor, message or public text
+ * changes: only the field-types texts read it, and only as an integer.
+ */
+const TOOL_ERROR_HTTP_STATUS = new WeakMap<object, number>();
+
+/**
+ * Record the integer HTTP status (100-599) of the response `error` was issued
+ * for. Any other value is ignored.
+ */
+export function recordTrustedHttpStatus<E extends Error>(error: E, status: number): E {
+  if (Number.isInteger(status) && status >= 100 && status <= 599 && trustedToolErrorDescriptor(error) !== undefined) {
+    TOOL_ERROR_HTTP_STATUS.set(error, status);
+  }
+  return error;
+}
+
+/** The HTTP status recorded for an error this module issued, if any. */
+export function trustedHttpStatus(candidate: unknown): number | undefined {
+  if ((typeof candidate !== "object" && typeof candidate !== "function") || candidate === null) {
+    return undefined;
+  }
+  return TOOL_ERROR_HTTP_STATUS.get(candidate);
+}
+
 /** Return trusted metadata only for errors issued by this module. */
 export function trustedToolErrorDescriptor(
   candidate: unknown

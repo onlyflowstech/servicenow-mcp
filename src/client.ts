@@ -32,6 +32,7 @@ import {
   createBasicAuthRestrictedError,
   BASIC_AUTH_401_HINT,
   createToolError,
+  recordTrustedHttpStatus,
   type ToolErrorCategory,
   type ToolErrorRetry,
 } from "./tool-error.js";
@@ -563,7 +564,7 @@ export class ServiceNowClient {
   ): ServiceNowError {
     const classification = classifyHttpFailure(status, method);
     if (status === 401 && this.#auth.kind === "basic") {
-      return createBasicAuthRestrictedError();
+      return recordTrustedHttpStatus(createBasicAuthRestrictedError(), status);
     }
     const retryAfterSeconds =
       classification.retry === "retry_later"
@@ -571,10 +572,9 @@ export class ServiceNowClient {
             parseRetryAfterMs(headers.get("retry-after"))
           )
         : undefined;
-    return createToolError(
-      classification.category,
-      classification.retry,
-      retryAfterSeconds
+    return recordTrustedHttpStatus(
+      createToolError(classification.category, classification.retry, retryAfterSeconds),
+      status
     );
   }
 
@@ -784,6 +784,34 @@ export function isServiceNowRequestCancellation(error: unknown): boolean {
 
 function currentRequestSignal(): AbortSignal | undefined {
   return REQUEST_SCOPE.getStore()?.signal;
+}
+
+/** The running call's cancellation signal, or undefined outside a call. */
+export function currentServiceNowRequestSignal(): AbortSignal | undefined {
+  return currentRequestSignal();
+}
+
+/**
+ * Wait `ms`, as a pause between two attempts of one read. It ends at once with
+ * the request-cancellation error when `signal` (default: the running call's)
+ * aborts, and never starts when it already has.
+ */
+export function pauseUnlessServiceNowRequestCancelled(
+  ms: number,
+  signal: AbortSignal | undefined = currentRequestSignal()
+): Promise<void> {
+  if (signal?.aborted) return Promise.reject(requestCancellationError());
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(requestCancellationError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, Math.max(0, ms));
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function currentUpstreamByteBudget(): CumulativeResponseByteBudget | undefined {
