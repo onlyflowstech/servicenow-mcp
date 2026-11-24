@@ -441,6 +441,9 @@ const POLICY_WHY: ClassTypesWhy = Object.freeze({
   failure: Object.freeze({ kind: "policy" as const, table: "sys_dictionary" as const }),
 });
 
+/** The types of a call whose profile does not read them: one value, shared. */
+const POLICY_TYPES: ClassTypes = unavailableTypes(POLICY_WHY);
+
 /** The warning for a class whose types are not known, worded from its cause. */
 export function classTypesWarning(why: ClassTypesWhy | undefined): string {
   return fieldTypesProblemText({ surface: "history", ...(why ?? {}) });
@@ -544,7 +547,7 @@ async function readClassTypes(
   plan: HistoryPlan,
   signal: AbortSignal | undefined
 ): Promise<ClassTypes> {
-  if (!plan.dictionary) return unavailableTypes(POLICY_WHY);
+  if (!plan.dictionary) return POLICY_TYPES;
   const memo = derivedMetadataMemo(services);
   const memoKey = `${CLASS_TYPES_MEMO_PREFIX}${plan.auditFlag ? "audit" : "plain"}:${recordClass}`;
   const known = memo?.get(memoKey);
@@ -959,7 +962,7 @@ async function handleHistory(
   );
   const typesRead = needsTypes
     ? readClassTypes(services.serviceNow, recordClass, plan, signal)
-    : Promise.resolve(unavailableTypes(POLICY_WHY));
+    : Promise.resolve(POLICY_TYPES);
   const [classTypes, reads] = await Promise.all([
     typesRead,
     Promise.all(
