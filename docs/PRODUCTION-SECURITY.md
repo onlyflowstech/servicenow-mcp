@@ -484,10 +484,16 @@ type, and `value` is never a filter, order or group field there.
   come from one `sys_dictionary` read per credential, kept for an hour (or the
   profile's metadata-cache TTL, if shorter), and concurrent calls share one
   read; no table grant is needed. While
-  ServiceNow refuses or fails that read, every field-policy tool refuses with a
-  message naming this access. A table whose parent tables can't all be read
-  from `sys_db_object` (or that is more than 12 levels deep) is treated the
-  same way.
+  ServiceNow refuses or fails that read, every field-policy tool refuses, and
+  the refusal names the cause: the instance refused the read (with its HTTP
+  status) or returned no rows, the read timed out or returned a server error
+  (with its status), it may be cut short, or it failed. A read that timed out,
+  returned a 5xx or failed on the network is tried once more after a short
+  pause, and such a failure is not remembered; a refusal is remembered for 30
+  seconds, with its cause. A table that doesn't exist is named as such. A table
+  whose parent tables can't all be read from `sys_db_object` (or that is more
+  than 12 levels deep) is treated the same way, and the refusal says which. "Access denied by policy" is
+  kept for a refusal this server's own policy makes.
 - **`"fieldTypes": { "dictionary": "not_required" }`** on a profile (or
   `SN_FIELD_TYPES_DICTIONARY=not_required` for the environment profile) lets
   those calls run with name-only hiding instead. The server warns at startup

@@ -1173,10 +1173,13 @@ cached just then, or the response is small and not kept), `bypass` (a `force_rec
 call made several cacheable reads with different outcomes, such as an
 `sn_codesearch` with no `table` over the code tables). It is absent when
 the call read no cache-eligible table. `timing` is `{ total_ms, upstream_ms,
-watermark_ms }` in whole milliseconds, measured wall-clock: `total_ms` is the
-whole tool call; `upstream_ms` is the time during which at least one request to
-ServiceNow other than a watermark read was in flight (retry waits included);
-`watermark_ms` is the same for the cache's watermark reads. Overlapping
+watermark_ms, field_types_ms }` in whole milliseconds, measured wall-clock:
+`total_ms` is the whole tool call; `upstream_ms` is the time during which at
+least one request to ServiceNow other than a watermark read was in flight
+(retry waits included); `watermark_ms` is the same for the cache's watermark
+reads; `field_types_ms` is the whole field-type lookup that runs before a
+field-policy tool (the memo check, its reads, and a retry with its pause), 0
+when the call made none, and its reads are not counted in `upstream_ms`. Overlapping
 requests are counted once, not summed, so each figure is at most `total_ms`,
 though the two can overlap each other and add up to more than it. A hit reports
 `upstream_ms: 0` and the watermark round trip it still costs. Callers that
@@ -1186,7 +1189,7 @@ caller's earlier read made with the same credential. Both fields hold only
 numbers and those four words, and appear whether or not the cache is on
 (`timing` always, `cache` only when a cacheable read happened). Only the server
 sets them; a tool cannot supply its own. Each tool's `outputSchema` grows by
-about 320 characters for them.
+about 385 characters for them.
 
 If a table's watermark cannot be used, its reads go straight upstream, without
 a watermark request, for a while: 15 minutes when the cause persists (an
@@ -1492,7 +1495,9 @@ Fields of type `password`, `password2`, `masked` or `encrypted_text` are denied
 the same way, whatever their name, and a `sys_properties` value shows only for
 a known non-secret `type`. The types come from a cached `sys_dictionary` read,
 so the integration user needs read access to `sys_dictionary` and
-`sys_db_object`; without it the tools refuse, unless the profile sets
+`sys_db_object`; without it the tools refuse, naming the cause (the table
+doesn't exist, the instance refused the read, it failed and can be retried, or
+a parent table couldn't be read), unless the profile sets
 `"fieldTypes": { "dictionary": "not_required" }` to hide by name only (see
 [Production security](docs/PRODUCTION-SECURITY.md#password-type-fields)). A
 table whose parent tables can't all be read from `sys_db_object` (or that is
