@@ -97,6 +97,7 @@ const callTimingSchema = z
     total_ms: wholeMilliseconds,
     upstream_ms: wholeMilliseconds,
     watermark_ms: wholeMilliseconds,
+    field_types_ms: wholeMilliseconds,
   })
   .strict();
 

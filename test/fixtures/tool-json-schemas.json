@@ -278,12 +278,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -590,12 +595,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -991,12 +1001,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -1255,12 +1270,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -2174,12 +2194,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -2758,12 +2783,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -3064,12 +3094,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -3777,12 +3812,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -4030,12 +4070,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -4281,12 +4326,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -4525,12 +4575,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -4783,12 +4838,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -6182,12 +6242,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -6472,12 +6537,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -6708,12 +6778,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -7138,12 +7213,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -7383,12 +7463,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -7628,12 +7713,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -7871,12 +7961,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -8261,12 +8356,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -8504,12 +8604,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -9223,12 +9328,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -9544,12 +9654,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -9793,12 +9908,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -10103,12 +10223,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }
@@ -10351,12 +10476,17 @@
                 "watermark_ms": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "field_types_ms": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
                 "total_ms",
                 "upstream_ms",
-                "watermark_ms"
+                "watermark_ms",
+                "field_types_ms"
               ],
               "additionalProperties": false
             }

@@ -146,7 +146,7 @@ describe("metadata.cache", () => {
 });
 
 describe("metadata.timing", () => {
-  const FIELDS = ["total_ms", "upstream_ms", "watermark_ms"];
+  const FIELDS = ["total_ms", "upstream_ms", "watermark_ms", "field_types_ms"];
 
   function expectSane(timing: unknown) {
     const record = timing as Record<string, number>;
@@ -157,6 +157,7 @@ describe("metadata.timing", () => {
     }
     expect(record.upstream_ms).toBeLessThanOrEqual(record.total_ms);
     expect(record.watermark_ms).toBeLessThanOrEqual(record.total_ms);
+    expect(record.field_types_ms).toBeLessThanOrEqual(record.total_ms);
   }
 
   it("is present on every cache outcome and on an uncached read, with sane integers", async () => {
@@ -202,7 +203,7 @@ describe("metadata.timing", () => {
     const { connected } = await cachedServer();
     const metadata = await metadataOf(connected, "sn_query", queryScripts());
     const extra = { cache: metadata.cache, timing: metadata.timing };
-    expect(JSON.stringify(extra)).toMatch(/^\{"cache":"(hit|miss|bypass|mixed)","timing":\{("[a-z_]+":\d+,?){3}\}\}$/);
+    expect(JSON.stringify(extra)).toMatch(/^\{"cache":"(hit|miss|bypass|mixed)","timing":\{("[a-z_]+":\d+,?){4}\}\}$/);
     expect(JSON.stringify(extra)).not.toMatch(/service-now|https?:|\//);
   });
 });
@@ -291,7 +292,7 @@ describe("the byte limit", () => {
       };
       expect(["hit", "miss"], `budget ${budget}`).toContain(content.metadata.cache);
       expect(Object.keys(content.metadata.timing ?? {}).sort(), `budget ${budget}`).toEqual([
-        "total_ms", "upstream_ms", "watermark_ms",
+        "field_types_ms", "total_ms", "upstream_ms", "watermark_ms",
       ]);
       // Over the limit by at most the two fields, and never by more.
       const fieldsBytes = bytes(result) - bytes(withoutFields(result));
@@ -371,7 +372,7 @@ describe("the output schema", () => {
         .properties.metadata.properties;
       expect(metadata.cache, tool.name).toEqual({ type: "string", enum: ["hit", "miss", "bypass", "mixed"] });
       expect(Object.keys((metadata.timing as { properties: object }).properties), tool.name).toEqual([
-        "total_ms", "upstream_ms", "watermark_ms",
+        "total_ms", "upstream_ms", "watermark_ms", "field_types_ms",
       ]);
       // The advertised bound is left out to keep the list small; the type and minimum stay.
       for (const field of Object.values((metadata.timing as { properties: Record<string, unknown> }).properties)) {
@@ -398,12 +399,13 @@ describe("the output schema", () => {
       },
     };
     const withMetadata = (extra: object) => ({ ...base, metadata: { ...base.metadata, ...extra } });
-    expect(validate(withMetadata({ cache: "hit", timing: { total_ms: 1, upstream_ms: 0, watermark_ms: 0 } }))).toBe(true);
+    expect(validate(withMetadata({ cache: "hit", timing: { total_ms: 1, upstream_ms: 0, watermark_ms: 0, field_types_ms: 0 } }))).toBe(true);
     expect(validate(withMetadata({ cache: "stale" }))).toBe(false);
-    expect(validate(withMetadata({ timing: { total_ms: -1, upstream_ms: 0, watermark_ms: 0 } }))).toBe(false);
-    expect(validate(withMetadata({ timing: { total_ms: 1.5, upstream_ms: 0, watermark_ms: 0 } }))).toBe(false);
+    expect(validate(withMetadata({ timing: { total_ms: -1, upstream_ms: 0, watermark_ms: 0, field_types_ms: 0 } }))).toBe(false);
+    expect(validate(withMetadata({ timing: { total_ms: 1.5, upstream_ms: 0, watermark_ms: 0, field_types_ms: 0 } }))).toBe(false);
     expect(validate(withMetadata({ timing: { total_ms: 1, upstream_ms: 0 } }))).toBe(false);
-    expect(validate(withMetadata({ timing: { total_ms: 1, upstream_ms: 0, watermark_ms: 0, host: "x" } }))).toBe(false);
+    expect(validate(withMetadata({ timing: { total_ms: 1, upstream_ms: 0, watermark_ms: 0 } }))).toBe(false);
+    expect(validate(withMetadata({ timing: { total_ms: 1, upstream_ms: 0, watermark_ms: 0, field_types_ms: 0, host: "x" } }))).toBe(false);
   });
 });
 

@@ -26,10 +26,21 @@ export type CacheStatus = CacheOutcome | "mixed";
 /** Which kind of ServiceNow request is being timed. */
 export type RequestLane = "upstream" | "watermark";
 
+/**
+ * The lanes a call's clocks count: the two kinds of request, and the field
+ * types lookup the dispatcher makes before a field-policy tool runs.
+ */
+export type TimedLane = RequestLane | "field_types";
+
 export interface CallTiming {
   readonly total_ms: number;
   readonly upstream_ms: number;
   readonly watermark_ms: number;
+  /**
+   * The whole field types lookup (memo hit, reads, retry and its pause), 0
+   * when the call made none. Its own reads are not in `upstream_ms`.
+   */
+  readonly field_types_ms: number;
 }
 
 export interface CallMetricsSnapshot {
@@ -67,9 +78,10 @@ class BusyClock {
 export class CallMetrics {
   readonly #startedAt = performance.now();
   readonly #outcomes = new Set<CacheOutcome>();
-  readonly #clocks: Readonly<Record<RequestLane, BusyClock>> = {
+  readonly #clocks: Readonly<Record<TimedLane, BusyClock>> = {
     upstream: new BusyClock(),
     watermark: new BusyClock(),
+    field_types: new BusyClock(),
   };
 
   recordCache(outcome: CacheOutcome): void {
@@ -77,7 +89,7 @@ export class CallMetrics {
   }
 
   /** Run one request, counting its time against `lane` whether it settles or throws. */
-  async measure<T>(lane: RequestLane, request: () => Promise<T>): Promise<T> {
+  async measure<T>(lane: TimedLane, request: () => Promise<T>): Promise<T> {
     const leave = this.#clocks[lane].enter();
     try {
       return await request();
@@ -100,6 +112,7 @@ export class CallMetrics {
         total_ms: wholeMs(now - this.#startedAt),
         upstream_ms: wholeMs(this.#clocks.upstream.read(now)),
         watermark_ms: wholeMs(this.#clocks.watermark.read(now)),
+        field_types_ms: wholeMs(this.#clocks.field_types.read(now)),
       },
     };
   }

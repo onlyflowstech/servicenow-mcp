@@ -122,7 +122,7 @@ describe("model-visible size", () => {
     expect(size).toBe(1_281);
     expect(size).toBeLessThanOrEqual(BUDGET);
     // The whole entry, output schema and shared result envelope included.
-    expect(JSON.stringify(tool).length).toBe(5_309);
+    expect(JSON.stringify(tool).length).toBe(5_374);
   });
 });
 

@@ -806,6 +806,7 @@ describe.each(clients)(
                 total_ms: expect.any(Number),
                 upstream_ms: expect.any(Number),
                 watermark_ms: expect.any(Number),
+                field_types_ms: expect.any(Number),
               },
             },
           });
@@ -859,7 +860,7 @@ describe.each(clients)(
             metadata: {
               ...VALID_METADATA,
               cache: "hit",
-              timing: { total_ms: 999_999, upstream_ms: 888_888, watermark_ms: 777_777 },
+              timing: { total_ms: 999_999, upstream_ms: 888_888, watermark_ms: 777_777, field_types_ms: 666_666 },
             },
           },
         }),
@@ -878,7 +879,8 @@ describe.each(clients)(
         expect(timing.total_ms).toBeLessThan(10_000);
         expect(timing.upstream_ms).toBe(0);
         expect(timing.watermark_ms).toBe(0);
-        expect(JSON.stringify(result)).not.toMatch(/999999|888888|777777/);
+        expect(timing.field_types_ms).toBe(0);
+        expect(JSON.stringify(result)).not.toMatch(/999999|888888|777777|666666/);
       } finally {
         await client.close();
         await closeHarness(harness);

@@ -691,16 +691,20 @@ function registerStandardTool(
         const tables = access.requests.map((entry) => entry.table);
         let types: FieldTypes;
         try {
-          types = await runWithServiceNowRequestSignal(
-            context.signal,
-            () =>
-              loader(serviceNow, tables, {
-                forceRecache: authorizedArgs.force_recache === true,
-              }),
-            // Its own metrics: the call's reported cache outcome and upstream
-            // time describe the reads the tool made, not this lookup (whose
-            // wall-clock time is still in the call's total).
-            new CallMetrics()
+          // The whole lookup (memo hit, reads, retry and its pause) is timed
+          // as `field_types_ms`.
+          types = await metrics.measure("field_types", () =>
+            runWithServiceNowRequestSignal(
+              context.signal,
+              () =>
+                loader(serviceNow, tables, {
+                  forceRecache: authorizedArgs.force_recache === true,
+                }),
+              // Its own metrics: the call's reported cache outcome and upstream
+              // time describe the reads the tool made, not this lookup (which
+              // `field_types_ms` reports).
+              new CallMetrics()
+            )
           );
         } catch {
           const cancellation = cancellationResultIfIssued(

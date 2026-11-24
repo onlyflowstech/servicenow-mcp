@@ -113,33 +113,33 @@ describe("tools/list size ledger", () => {
     const total = Object.values(sizes).reduce((sum, size) => sum + size, 0);
     expect({ total, ...sizes }).toMatchInlineSnapshot(`
       {
-        "sn_aggregate": 4055,
-        "sn_atf": 4320,
-        "sn_atf_author": 5922,
-        "sn_atf_readiness": 3560,
-        "sn_atf_results": 13705,
-        "sn_atf_run": 8484,
-        "sn_attach": 4690,
-        "sn_batch": 8328,
-        "sn_codesearch": 3784,
-        "sn_create": 3626,
-        "sn_delete": 3292,
-        "sn_discover": 3473,
-        "sn_flow_view": 15886,
-        "sn_get": 4745,
-        "sn_health": 3127,
-        "sn_history": 5309,
-        "sn_incident_add_comment": 3280,
-        "sn_incident_add_work_note": 3278,
-        "sn_nl": 3588,
-        "sn_platform_view": 5327,
-        "sn_profile": 3299,
-        "sn_query": 10244,
-        "sn_relationships": 4887,
-        "sn_schema": 3586,
-        "sn_syslog": 4582,
-        "sn_update": 3661,
-        "total": 142038,
+        "sn_aggregate": 4120,
+        "sn_atf": 4385,
+        "sn_atf_author": 5987,
+        "sn_atf_readiness": 3625,
+        "sn_atf_results": 13770,
+        "sn_atf_run": 8549,
+        "sn_attach": 4755,
+        "sn_batch": 8393,
+        "sn_codesearch": 3849,
+        "sn_create": 3691,
+        "sn_delete": 3357,
+        "sn_discover": 3538,
+        "sn_flow_view": 15951,
+        "sn_get": 4810,
+        "sn_health": 3192,
+        "sn_history": 5374,
+        "sn_incident_add_comment": 3345,
+        "sn_incident_add_work_note": 3343,
+        "sn_nl": 3653,
+        "sn_platform_view": 5392,
+        "sn_profile": 3364,
+        "sn_query": 10309,
+        "sn_relationships": 4952,
+        "sn_schema": 3651,
+        "sn_syslog": 4647,
+        "sn_update": 3726,
+        "total": 143728,
       }
     `);
   });
@@ -159,15 +159,15 @@ describe("tools/list size ledger", () => {
     expect({ modelVisible, outputSchemas }).toMatchInlineSnapshot(`
       {
         "modelVisible": 44411,
-        "outputSchemas": 92688,
+        "outputSchemas": 94378,
       }
     `);
   });
 
-  it("publishes the filter once: the sn_query entry stays under 10,300 characters", async () => {
+  it("publishes the filter once: the sn_query entry stays under 10,400 characters", async () => {
     const connected = await harness();
     const { tools } = await connected.client.listTools();
     const entry = tools.find((tool) => tool.name === "sn_query");
-    expect(JSON.stringify(entry).length).toBeLessThan(10_300);
+    expect(JSON.stringify(entry).length).toBeLessThan(10_400);
   });
 });
