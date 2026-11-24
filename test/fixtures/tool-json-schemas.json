@@ -4913,7 +4913,7 @@
           "maximum": 300
         },
         "max_response_bytes": {
-          "description": "Byte budget for the whole result (default 100000). Cache and timing metadata (under 100 bytes) are not counted.",
+          "description": "Byte budget for the whole result (default 100000). Cache and timing metadata (under 128 bytes) are not counted.",
           "type": "integer",
           "minimum": 10000,
           "maximum": 1000000
@@ -6329,7 +6329,7 @@
         },
         "max_response_bytes": {
           "default": 100000,
-          "description": "Final response byte budget (default 100000, min 1000, max 1000000). Long field values are shortened without mutating upstream data. Cache and timing metadata (under 100 bytes) are not counted.",
+          "description": "Final response byte budget (default 100000, min 1000, max 1000000). Long field values are shortened without mutating upstream data. Cache and timing metadata (under 128 bytes) are not counted.",
           "type": "integer",
           "minimum": 1000,
           "maximum": 1000000
@@ -8719,7 +8719,7 @@
         },
         "max_response_bytes": {
           "default": 100000,
-          "description": "Byte budget for the serialized response (default 100000, min 1000, max 1000000). When exceeded, whole records are dropped from the tail (the JSON is never mangled) and the response gains truncated: true, has_more: true and a hint with the dropped count and the offset, limit, max_response_bytes, fields or response_format to retry with. Cache and timing metadata (under 100 bytes) are not counted.",
+          "description": "Byte budget for the serialized response (default 100000, min 1000, max 1000000). When exceeded, whole records are dropped from the tail (the JSON is never mangled) and the response gains truncated: true, has_more: true and a hint with the dropped count and the offset, limit, max_response_bytes, fields or response_format to retry with. Cache and timing metadata (under 128 bytes) are not counted.",
           "type": "integer",
           "minimum": 1000,
           "maximum": 1000000

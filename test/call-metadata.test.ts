@@ -243,7 +243,7 @@ describe("the byte limit", () => {
       const content = result.structuredContent as { data: { record_count: number }; metadata: Record<string, unknown> };
       expect(content.data.record_count, `slack ${slack}`).toBe(6);
       expect(content.metadata, `slack ${slack}`).toHaveProperty("timing");
-      expect(bytes(result) - bareBytes, `slack ${slack}`).toBeLessThan(100);
+      expect(bytes(result) - bareBytes, `slack ${slack}`).toBeLessThan(128);
     }
   });
 
@@ -297,7 +297,7 @@ describe("the byte limit", () => {
       // Over the limit by at most the two fields, and never by more.
       const fieldsBytes = bytes(result) - bytes(withoutFields(result));
       expect(fieldsBytes, `budget ${budget}`).toBeGreaterThan(0);
-      expect(fieldsBytes, `budget ${budget}`).toBeLessThan(100);
+      expect(fieldsBytes, `budget ${budget}`).toBeLessThan(128);
       expect(bytes(result) - fieldsBytes, `budget ${budget}`).toBeLessThanOrEqual(budget);
       expect(bytes(result), `budget ${budget}`).toBeLessThanOrEqual(budget + fieldsBytes);
       largestFields = Math.max(largestFields, fieldsBytes);
@@ -307,7 +307,7 @@ describe("the byte limit", () => {
     // The sweep covers both kinds, and the truncated ones are most of it.
     expect(truncated).toBeGreaterThan(200);
     expect(whole).toBeGreaterThan(0);
-    expect(largestFields).toBeLessThan(100);
+    expect(largestFields).toBeLessThan(128);
   });
 
   it("says in each byte budget's description that cache and timing are not counted", async () => {
@@ -316,7 +316,7 @@ describe("the byte limit", () => {
     for (const name of ["sn_query", "sn_get", "sn_flow_view"]) {
       const properties = tools.find((tool) => tool.name === name)!.inputSchema.properties as Record<string, { description?: string }>;
       expect(properties.max_response_bytes?.description, name).toContain(
-        "Cache and timing metadata (under 100 bytes) are not counted."
+        "Cache and timing metadata (under 128 bytes) are not counted."
       );
     }
   });

@@ -955,7 +955,7 @@ export function withoutCallMetadata(result: CallToolResult): CallToolResult {
  * are added after. A successful response therefore carries them always, on the
  * calls where the timing matters most (a truncated one is often fitted to
  * within a few bytes of the limit), and may exceed the limit by their size,
- * under 100 bytes. A result that is not an envelope comes back untouched.
+ * under 128 bytes. A result that is not an envelope comes back untouched.
  */
 export function withCallMetadata(
   handlerResult: CallToolResult,

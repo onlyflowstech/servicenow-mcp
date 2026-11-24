@@ -97,7 +97,7 @@ function compatibleInputSchema() {
         .optional()
         .default(MAX_RESPONSE_BYTES_DEFAULT)
         .describe(
-          "Final response byte budget (default 100000, min 1000, max 1000000). Long field values are shortened without mutating upstream data. Cache and timing metadata (under 100 bytes) are not counted."
+          "Final response byte budget (default 100000, min 1000, max 1000000). Long field values are shortened without mutating upstream data. Cache and timing metadata (under 128 bytes) are not counted."
         ),
       display_value: z
         .enum(["true", "false", "all"])

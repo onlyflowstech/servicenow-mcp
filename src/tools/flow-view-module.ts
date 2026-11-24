@@ -104,7 +104,7 @@ const schema = withRequiredProfile(
         .min(L.MIN_MAX_RESPONSE_BYTES)
         .max(L.MAX_MAX_RESPONSE_BYTES)
         .optional()
-        .describe(`Byte budget for the whole result (default ${L.DEFAULT_MAX_RESPONSE_BYTES}). Cache and timing metadata (under 100 bytes) are not counted.`),
+        .describe(`Byte budget for the whole result (default ${L.DEFAULT_MAX_RESPONSE_BYTES}). Cache and timing metadata (under 128 bytes) are not counted.`),
     })
     .strict()
 );
