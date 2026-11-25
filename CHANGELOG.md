@@ -5,6 +5,53 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] — 2026-11-25
+
+2.4.0 is the first stable release since 2.3.0. It contains everything published
+as 2.4.0-rc.1, listed under that version below, and nothing else. The lists
+below name the main changes; the 2.4.0-rc.1 section gives the details.
+
+> **Read this before upgrading.** Some calls that worked before are refused
+> until the profile is set up for them:
+>
+> - Process command-line columns in the CMDB are readable only when a profile's
+>   field policy names them, also in database views that join those tables
+>   (under the view's prefix, such as `rp_command`), and so are record payload
+>   columns in such views. The refusal names the key to set.
+> - A table whose parent tables can't all be read from `sys_db_object` is
+>   refused like a table whose field types can't be read, unless the profile
+>   sets `"fieldTypes": { "dictionary": "not_required" }`.
+> - `sn_relationships` is refused when field policy hides `parent`, `child` or
+>   `type` on `cmdb_rel_ci` or `sys_id` on `cmdb_ci`, lists only CIs the profile
+>   can read, and refuses a `ci_name` that matches more than one CI (name the CI
+>   by `sys_id`).
+
+### Added
+
+- **`sn_history` shows one record's history.** (2.4.0-rc.1)
+- **`sn_platform_view` reads update sets, their changes and batches, retrieved
+  update sets, skipped upgrade files and Instance Scan findings, and evaluates
+  an update set's changes.** (2.4.0-rc.1)
+- **`sn_relationships` can return a map of the CIs it lists.** (2.4.0-rc.1)
+- **The policy card shows the update, upgrade-log and Instance Scan tables as
+  their own class, `platform`.** (2.4.0-rc.1)
+
+### Changed
+
+- **Process command-line columns in the CMDB are read only when a profile names
+  them.** (2.4.0-rc.1)
+- **A table whose parent tables can't all be read is treated like a table whose
+  field types can't be read.** (2.4.0-rc.1)
+
+### Fixed
+
+- **Read tools say why field types could not be read, instead of answering
+  "Access denied by policy", and retry a read that timed out or returned a
+  server error.** (2.4.0-rc.1)
+- **`sn_aggregate` pages grouped results correctly.** (2.4.0-rc.1)
+- **`sn_relationships` walks breadth first and lists every CI within the depth
+  once, at its shortest depth.** (2.4.0-rc.1)
+
 ## [2.4.0-rc.1] — 2026-11-24
 
 Release candidate for 2.4.0, published to the `next` dist-tag. It contains the
